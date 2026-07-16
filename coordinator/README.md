@@ -36,6 +36,8 @@ clearly flagged in `/api/state` and on the dashboard). Install it for the real s
 | `WITNESS_DIR` | `./witnesses` | per-range witness files: `witness_<lo>-<hi>.json` |
 | `HAZYNC_HOST` | — | path to the prover `host` binary (for real verification) |
 | `VERIFY_MODE` | `real` if `HAZYNC_HOST` set, else `mock` | `mock` stubs the STARK check for testing |
+| `CLAIM_TTL` | `1800` | auto-release a claim after this many seconds without a heartbeat |
+| `CLAIM_MAX` | `86400` | hard cap: release a claim after this long regardless of heartbeats |
 
 ## Contributor CLI
 
@@ -53,10 +55,17 @@ block in the range and folds them with the existing `prove-range` / `fold-range`
 
 ## API
 
-- `GET /api/state` — progress, board, leaderboard, recent (the dashboard polls this)
-- `POST /api/claim` `{range, pubkey, handle}` — reserve a range
+- `GET /api/state` — progress, board (with per-claim `elapsed`/`beat`/`stale`), leaderboard, recent
+- `POST /api/claim` `{range, pubkey, handle}` — **lock** a range to you; rejected if held by someone else
+- `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<range>` — serve a range's witness (if present)
+
+**Claim-lock + auto-release:** a claim locks the range to one contributor. The prover heartbeats while
+working; if heartbeats stop for `CLAIM_TTL` (or the claim exceeds `CLAIM_MAX`), the coordinator
+**auto-releases** it back to the pool (lazy reaping on each state/claim, so a dead claim frees up within
+a poll interval). This is the "cut them off if progress isn't moving" — dead claims return in minutes,
+not days.
 
 `/api/submit` verifies the **ed25519 signature over the receipt bytes**, then verifies the proof on
 **CPU** with `host verify-any` (real STARK verification, no genesis assertion, `VERIFY_MODE=real`),

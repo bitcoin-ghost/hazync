@@ -98,7 +98,7 @@
     // board
     var b=d.board.map(function(r){
       if(r.status==='verified')return '<div class="range"><span class="pill verified">verified</span><span class="rid">'+r.id+'</span><span class="rby"><span class="sig">◈</span> '+(r.handle||'—')+'</span></div>';
-      if(r.status==='claimed')return '<div class="range"><span class="pill claimed">proving</span><span class="rid">'+r.id+'</span><span class="rby">'+(r.handle||'claimed')+'</span></div>';
+      if(r.status==='claimed'){var el=r.elapsed?' · '+Math.floor(r.elapsed/60)+'m':'';return '<div class="range"><span class="pill claimed">'+(r.stale?'quiet':'proving')+'</span><span class="rid">'+r.id+'</span><span class="rby">'+(r.handle||'claimed')+el+'</span></div>';}
       return '<div class="range avail" tabindex="0" data-r="'+r.id+'"><span class="pill open">open</span><span class="rid">'+r.id+'</span><span class="rby">claim this range →</span></div>';
     }).join('');
     $('board').innerHTML=b||'<div class="empty">no ranges yet</div>';

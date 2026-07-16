@@ -32,6 +32,8 @@ HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
+CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
+CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -53,7 +55,7 @@ def init_db():
         id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER,
         status TEXT DEFAULT 'open',            -- open | claimed | verified
         assignee TEXT, handle TEXT,
-        receipt_sha TEXT, claimed_at REAL, verified_at REAL);
+        receipt_sha TEXT, claimed_at REAL, verified_at REAL, last_beat REAL);
       CREATE TABLE IF NOT EXISTS contributors(
         pubkey TEXT PRIMARY KEY, handle TEXT, blocks INTEGER DEFAULT 0, first_seen REAL);
       CREATE TABLE IF NOT EXISTS submissions(
@@ -73,6 +75,20 @@ def init_db():
             rows.append((f"{lo}-{hi}", lo, hi))
         c.executemany("INSERT INTO ranges(id,lo,hi) VALUES(?,?,?)", rows)
         print(f"[seed] created {SEED} ranges of {RANGE_SIZE} blocks (0..{SEED*RANGE_SIZE-1})")
+    try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
+    except Exception: pass
+    c.commit(); c.close()
+
+def reap():
+    """Free stale claims: no heartbeat for CLAIM_TTL, or held longer than CLAIM_MAX. Lazy — called on
+    each state()/claim(), so an abandoned claim returns to the pool within a poll interval."""
+    now = time.time()
+    c = db()
+    c.execute("UPDATE ranges SET status='open', assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL "
+              "WHERE status='claimed' AND ("
+              " (last_beat IS NOT NULL AND ?-last_beat > ?) OR"
+              " (claimed_at IS NOT NULL AND ?-claimed_at > ?) )",
+              (now, CLAIM_TTL, now, CLAIM_MAX))
     c.commit(); c.close()
 
 def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
@@ -142,14 +158,20 @@ def frontier_hi():
     return hi
 
 def state():
+    reap()
+    now = time.time()
     c = db()
     proven = c.execute("SELECT COALESCE(SUM(hi-lo+1),0) FROM vranges").fetchone()[0]
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
     # board window: all verified + claimed, then a few open around the frontier
     board = []
     for r in c.execute("SELECT * FROM ranges ORDER BY lo LIMIT 18"):
-        board.append({"id": r["id"], "lo": r["lo"], "hi": r["hi"], "status": r["status"],
-                      "handle": r["handle"]})
+        b = {"id": r["id"], "lo": r["lo"], "hi": r["hi"], "status": r["status"], "handle": r["handle"]}
+        if r["status"] == "claimed":
+            b["elapsed"] = int(now - (r["claimed_at"] or now))          # seconds since claimed
+            b["beat"] = int(now - (r["last_beat"] or r["claimed_at"] or now))  # seconds since last heartbeat
+            b["stale"] = b["beat"] > CLAIM_TTL // 2                     # heartbeat going quiet
+        board.append(b)
     leaders = [dict(id=x["pubkey"][:10], handle=x["handle"], blocks=x["blocks"])
                for x in c.execute("SELECT * FROM contributors ORDER BY blocks DESC LIMIT 8")]
     recent = [dict(range=s["range_id"], handle=s["handle"], verified=bool(s["verified"]),
@@ -168,21 +190,44 @@ def state():
 def claim(body):
     rid, pk, handle = body.get("range"), body.get("pubkey", ""), body.get("handle", "anon")
     if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    reap()
+    now = time.time()
     with _lock:
         c = db()
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if not r: c.close(); return 404, {"error": "no such range"}
         if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
+        if r["status"] == "claimed" and r["assignee"] != pk:
+            # locked to someone else and still alive (reap() already freed stale ones)
+            since = int((now - (r["last_beat"] or r["claimed_at"] or now)) / 60)
+            c.close()
+            return 409, {"error": f"locked — being proved by {r['handle']} ({since}m active)"}
         c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
-                  (pk, handle, time.time()))
+                  (pk, handle, now))
         c.execute("UPDATE contributors SET handle=? WHERE pubkey=?", (handle, pk))
-        c.execute("UPDATE ranges SET status='claimed', assignee=?, handle=?, claimed_at=? WHERE id=?",
-                  (pk, handle, time.time(), rid))
+        c.execute("UPDATE ranges SET status='claimed', assignee=?, handle=?, claimed_at=?, last_beat=? WHERE id=?",
+                  (pk, handle, now, now, rid))
         c.commit(); c.close()
     wit = os.path.join(WITNESS, f"witness_{rid}.json")
     return 200, {"ok": True, "range": rid,
                  "witness": f"/api/witness/{rid}" if os.path.exists(wit) else None,
-                 "cmd": f"hazync prove {rid}"}
+                 "cmd": f"hazync prove {rid}", "heartbeat_ttl": CLAIM_TTL}
+
+def heartbeat(body):
+    rid, pk = body.get("range"), body.get("pubkey", "")
+    if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    reap()
+    with _lock:
+        c = db()
+        r = c.execute("SELECT status, assignee FROM ranges WHERE id=?", (rid,)).fetchone()
+        if not r: c.close(); return 404, {"error": "no such range"}
+        if r["status"] != "claimed" or r["assignee"] != pk:
+            st = r["status"] if r else None
+            c.close()
+            return 409, {"ok": False, "error": "you no longer hold this claim (expired or reassigned)", "status": st}
+        c.execute("UPDATE ranges SET last_beat=? WHERE id=?", (time.time(), rid))
+        c.commit(); c.close()
+    return 200, {"ok": True, "heartbeat_ttl": CLAIM_TTL}
 
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
@@ -250,7 +295,8 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         p = urlparse(self.path).path
-        if p == "/api/claim":  code, obj = claim(self._body());  return self._send(code, obj)
+        if p == "/api/claim":     code, obj = claim(self._body());     return self._send(code, obj)
+        if p == "/api/heartbeat": code, obj = heartbeat(self._body()); return self._send(code, obj)
         if p == "/api/submit": code, obj = submit(self._body()); return self._send(code, obj)
         return self._send(404, {"error": "not found"})
 

@@ -14,7 +14,7 @@ Config (env):
   WITNESS_DIR where per-block witnesses live   (default ~/.hazync/witnesses)
 Identity + receipts live under ~/.hazync/.
 """
-import os, sys, json, base64, subprocess, urllib.request, pathlib
+import os, sys, json, base64, subprocess, urllib.request, pathlib, threading
 
 HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
@@ -57,21 +57,35 @@ def cmd_claim(args):
     rng = args[0]; _, pub, handle = identity()
     print(post("/api/claim", {"range": rng, "pubkey": pub, "handle": handle}))
 
+def _heartbeat(rng, pub, stop):
+    # keep the claim alive while proving — ping the coordinator every 30s
+    while not stop.wait(30):
+        try: post("/api/heartbeat", {"range": rng, "pubkey": pub})
+        except Exception: pass
+
 def cmd_prove(args):
     rng = args[0]
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
+    _, pub, _ = identity()
     lo, hi = [int(x) for x in rng.split("-")]
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
-    # Prove each block in the range and fold into one range receipt. Uses the existing prover commands.
     env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
-    print(f"proving range {rng} on your GPU (this is the expensive step)…")
-    # prove-range emits range_<n>.bin per block; fold-range merges adjacent ranges pairwise.
-    parts = []
-    for h in range(lo, hi + 1):
-        subprocess.run([HOSTBIN, "prove-range", str(h)], env=env, check=True)
-        parts.append(f"range_{h}.bin")
+    stop = threading.Event()
+    threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
+    try:
+        print(f"proving range {rng} on your GPU (this is the expensive step; heartbeating the claim)…")
+        parts = []
+        for h in range(lo, hi + 1):
+            subprocess.run([HOSTBIN, "prove-range", str(h)], env=env, check=True)
+            parts.append(f"range_{h}.bin")
+        _fold_and_save(parts, out)
+        print("receipt:", out)
+    finally:
+        stop.set()
+
+def _fold_and_save(parts, out):
     while len(parts) > 1:
         nxt = []
         for i in range(0, len(parts), 2):
@@ -80,7 +94,6 @@ def cmd_prove(args):
             else: nxt.append(parts[i])
         parts = nxt
     os.replace(parts[0], out)
-    print("receipt:", out)
 
 def cmd_submit(args):
     rng = args[0]; sk, pub, handle = identity()

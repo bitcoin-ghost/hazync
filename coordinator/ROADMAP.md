@@ -17,14 +17,15 @@ The coordinator must **not** fold (folding is a proving step — GPU work). Inst
 - Show TWO numbers on the dashboard: **verified blocks** (any, out of order) and **genesis frontier**
   (contiguous from 0). A lone far-out block is "verified but not yet chained" — not stalled.
 
-## 2. Claim-lock + heartbeat + auto-release (liveness / no duplication)
-- Claiming **locks** a block to one contributor; others can't take it.
-- The CLI sends a **heartbeat** (~every 30s) while proving → `POST /api/progress`.
-- **Auto-release on heartbeat timeout** (~30–60 min no ping) — this is "cut them off if progress isn't
-  moving." Plus a generous hard cap (a few hours / 7-day backstop). 7 days *per block* is far too long
-  as the primary timeout — a block proves in minutes; dead claims must free up fast.
-- Dashboard shows status + assignee + elapsed (+ coarse ETA at best — RISC0 proving gives no clean %,
-  so heartbeat/elapsed is the honest signal, not a precise percentage).
+## 2. Claim-lock + heartbeat + auto-release (liveness / no duplication)  ✅ DONE
+- Claiming **locks** a block to one contributor; a claim by anyone else is rejected (409 "locked").
+- The CLI sends a **heartbeat** every 30s while proving → `POST /api/heartbeat` (background thread).
+- **Auto-release** (`reap`, lazy on each state/claim): no heartbeat for `CLAIM_TTL` (default 1800s) or
+  held past `CLAIM_MAX` (default 24h) → the range returns to the pool. Dead claims free up in minutes.
+- Dashboard shows assignee + elapsed + a `quiet` flag when heartbeats go stale (no precise % — RISC0
+  proving gives no clean progress signal, so heartbeat/elapsed is the honest one).
+- Tested: A claims → B rejected (locked); A heartbeats → stays; no heartbeat past TTL → auto-released;
+  B reclaims → A's stale heartbeat rejected.
 
 ## 3. Pick-any-block + witness serving (rolling window)
 - Let a contributor pick any open block/range.
