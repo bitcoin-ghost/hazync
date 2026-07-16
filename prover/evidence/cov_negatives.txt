@@ -1,0 +1,14 @@
+# COV-1/COV-2 negative tests (reproduce: prover/test_cov_negatives.sh)
+
+=== COV-2: merkle mutation (CVE-2012-2459) ===
+Honest [A,B,C] and malleated [A,B,C,C] (last tx duplicated) share the SAME merkle root, but Core's
+ComputeMerkleRoot flags the malleated list mutated=1, and merkle_ok requires mutated==0 -> rejected.
+normal  [A,B,C]   : merkle cacd895c5e82f37a37b6f4923c214ca6089e5f7b075b9fca7e11e782a0f3f5e6  mutated=0  (merkle_ok: true)
+mutated [A,B,C,C] : merkle cacd895c5e82f37a37b6f4923c214ca6089e5f7b075b9fca7e11e782a0f3f5e6  mutated=1  (merkle_ok: false)
+SAME root (CVE collision): true  -> the malleated block is REJECTED on merkle_ok (mutated=1)
+
+=== COV-1: time-too-old (block timestamp must exceed MTP of the previous 11 blocks) ===
+--- control (no knob): VALID ---
+>>> BLOCK 170 VALID (execute 0s, 2312616 cycles) — all consensus flags true.
+--- attack (HAZYNC_COV1_BADTIME=1 makes MTP(prev)==this block's time): rejected on time_ok ---
+CHECK-FULL FAILED: guest asserted a consensus flag false (see message above): Guest panicked: chain step: block_valid=true prevhash_ok=true carry_ok=true retarget_ok=true time_ok=false

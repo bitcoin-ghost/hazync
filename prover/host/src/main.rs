@@ -360,12 +360,17 @@ fn build_full() -> (ChainState, BlockWitness) {
     }
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
 
-    let anchor = ChainState {
+    let mut anchor = ChainState {
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
         prev_nbits: bits, prev_time: time.saturating_sub(600), epoch_start: time.saturating_sub(600 * 1000),
         recent_times: (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect(), self_id: METHOD_ID,
     };
+    // COV-1 negative-test hook (test-only, inert unless HAZYNC_COV1_BADTIME set): make the previous 11
+    // blocks' median-time-past equal THIS block's timestamp, so `time_ok = block_time > prev_mtp` is
+    // false — the "time-too-old" rejection. create_mtp stays median(recent_times) so host↔guest remain
+    // consistent; only time_ok fails. NEVER set in production.
+    if std::env::var("HAZYNC_COV1_BADTIME").is_ok() { anchor.recent_times = vec![time; 11]; }
 
     // Build the witness: per tx a shared full-prevouts blob; per input a BlockInput (tx_first on input 0).
     let root_prev = wire_stump(&forest);
@@ -433,6 +438,28 @@ fn prove_full() {
 // numbers supplied via env vars. Lets us drive the time-based branch (which no tested block exercises)
 // with real mainnet MTP data. Return codes: 1 valid, -40 immature coinbase, -41 height-lock unmet,
 // -42 time-lock unmet.
+// COV-2 negative test: demonstrate the merkle mutation (CVE-2012-2459) check. An honest 3-tx list
+// [A,B,C] and a malleated 4-tx list [A,B,C,C] (last tx duplicated) produce the SAME merkle root — the
+// classic malleability — but the real Core ComputeMerkleRoot flags the second as `mutated`. Our
+// `merkle_ok` requires `mutated == 0`, so the malleated block is rejected.
+fn test_merkle_cmd() {
+    let run = |txids: &[[u8; 32]]| -> ([u8; 32], u8) {
+        let flat: Vec<u8> = txids.iter().flatten().copied().collect();
+        let mut b = ExecutorEnv::builder();
+        b.write(&9u32).unwrap();
+        b.write(&flat).unwrap();
+        let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec");
+        s.journal.decode().unwrap()
+    };
+    let (a, bb, c) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
+    let (root_n, mut_n) = run(&[a, bb, c]);      // honest 3-tx block
+    let (root_m, mut_m) = run(&[a, bb, c, c]);   // malleated: last tx duplicated (CVE-2012-2459)
+    println!("normal  [A,B,C]   : merkle {}  mutated={}  (merkle_ok: {})", hex(&root_n), mut_n, mut_n == 0);
+    println!("mutated [A,B,C,C] : merkle {}  mutated={}  (merkle_ok: {})", hex(&root_m), mut_m, mut_m == 0);
+    println!("SAME root (CVE collision): {}  -> the malleated block is REJECTED on merkle_ok (mutated=1)",
+        root_n == root_m);
+}
+
 fn test_locks_cmd() {
     let ev = |k: &str, d: u32| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
     let seq = ev("HAZYNC_LOCK_SEQ", 0);
@@ -1078,6 +1105,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "test-locks") {
         test_locks_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "test-merkle") {
+        test_merkle_cmd();
         return;
     }
     if args.iter().any(|a| a == "check-full") {

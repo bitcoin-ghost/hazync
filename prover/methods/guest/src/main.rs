@@ -879,6 +879,7 @@ fn main() {
         6 => prove_range(),
         7 => fold_range(),
         8 => test_locks(),
+        9 => test_merkle(),
         _ => legacy(),
     }
 }
@@ -899,4 +900,16 @@ fn test_locks() {
             coin_height, coin_is_coinbase, coin_mtp, spend_height, spend_mtp)
     };
     env::commit(&rc);
+}
+
+// Mode 9: isolated exerciser for the merkle-root computation incl. the CVE-2012-2459 mutation flag
+// (COV-2). Reads a flat list of n*32-byte txids; commits (root, mutated) exactly as the real Core
+// ComputeMerkleRoot reports them — so a duplicate-txid malleation is caught (mutated==1).
+fn test_merkle() {
+    let flat: Vec<u8> = env::read();
+    let n = (flat.len() / 32) as u32;
+    let mut root = [0u8; 32];
+    let mut mutated = 0u8;
+    unsafe { merkle_root(flat.as_ptr(), n, root.as_mut_ptr(), &mut mutated) };
+    env::commit(&(root, mutated));
 }

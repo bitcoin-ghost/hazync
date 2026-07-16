@@ -25,8 +25,8 @@ full trust base and the two portability shims.
 | SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
 | BIP68-time | Block-proving path now commits real `MTP(coinHeight−1)` | **soundness** | **fixed** (validated; check also proven on a real mainnet tx) |
-| COV-1 | `time-too-old`: block timestamp must exceed MTP(prev 11) — was unchecked | **soundness** | **fixed** (asserted in chain_step/aggregate/prove_range; 550-block regression clean) |
-| COV-2 | Merkle CVE-2012-2459 mutation flag was discarded (`nullptr`) | **soundness** | **fixed** (capture Core's `mutated` and reject) |
+| COV-1 | `time-too-old`: block timestamp must exceed MTP(prev 11) — was unchecked | **soundness** | **fixed + negative-tested** (asserted in chain_step/aggregate/prove_range) |
+| COV-2 | Merkle CVE-2012-2459 mutation flag was discarded (`nullptr`) | **soundness** | **fixed + negative-tested** (capture Core's `mutated` and reject) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -105,8 +105,14 @@ real consensus rules Core checks, both now fixed (see the COV rows above):
 Deliberately **not** enforced (documented trust boundaries, not gaps): the 2-hour future-time limit
 (node-local wall-clock, unprovable); standardness/policy (not consensus). "Only the coinbase is a
 coinbase" is covered by Core's `CheckTransaction` (null-prevout rejection for non-coinbase inputs).
-The COV fixes were validated for no-regression (check-ibd 550 + 741000 + demo all still VALID);
-adversarial negative tests (a backdated block, a mutated tree) are a follow-up.
+The COV fixes were validated for no-regression (check-ibd 550 + 741000 + demo all still VALID) **and by
+adversarial negative tests** (`prover/test_cov_negatives.sh`, evidence `prover/evidence/cov_negatives.txt`):
+- COV-2: an honest `[A,B,C]` tx list and a malleated `[A,B,C,C]` (last tx duplicated) produce the
+  *identical* merkle root — the CVE-2012-2459 collision — but the malleated one is flagged `mutated=1`
+  and rejected on `merkle_ok`.
+- COV-1: with the previous-11 median-time-past forced to equal the block's own timestamp, `check-full`
+  rejects with `time_ok=false` and every other flag true (isolated to the timestamp check); the same
+  block without the knob is VALID.
 
 ## Open items (the review bounty list)
 
