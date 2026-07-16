@@ -1,0 +1,6 @@
+coordinator.db
+*.db
+witnesses/
+receipts/
+__pycache__/
+*.bin

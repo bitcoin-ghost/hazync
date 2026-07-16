@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""
+hazync — Proof Party contributor CLI.
+
+  hazync id                 # create/show your signing identity (ed25519)
+  hazync claim <range>      # reserve a range (e.g. 45000-45999) with the coordinator
+  hazync prove <range>      # prove the range on your GPU  -> a receipt .bin
+  hazync submit <range>     # sign the receipt with your key and submit it for verification
+  hazync run <range>        # claim + prove + submit, end to end
+
+Config (env):
+  COORD_URL   coordinator base URL            (default http://localhost:8899)
+  HAZYNC_HOST path to the prover `host` binary (for `prove`)
+  WITNESS_DIR where per-block witnesses live   (default ~/.hazync/witnesses)
+Identity + receipts live under ~/.hazync/.
+"""
+import os, sys, json, base64, subprocess, urllib.request, pathlib
+
+HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
+KEY     = HOME / "key.hex"
+HANDLE  = HOME / "handle"
+RCPTDIR = HOME / "receipts"
+COORD   = os.environ.get("COORD_URL", "http://localhost:8899").rstrip("/")
+HOSTBIN = os.environ.get("HAZYNC_HOST", "")
+WITNESS = os.environ.get("WITNESS_DIR", str(HOME / "witnesses"))
+
+def _ed():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    return Ed25519PrivateKey, serialization
+
+def identity():
+    HOME.mkdir(parents=True, exist_ok=True); RCPTDIR.mkdir(exist_ok=True)
+    Ed25519PrivateKey, ser = _ed()
+    if KEY.exists():
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(KEY.read_text().strip()))
+    else:
+        sk = Ed25519PrivateKey.generate()
+        KEY.write_text(sk.private_bytes(ser.Encoding.Raw, ser.PrivateFormat.Raw, ser.NoEncryption()).hex())
+        KEY.chmod(0o600)
+    pub = sk.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw).hex()
+    handle = HANDLE.read_text().strip() if HANDLE.exists() else ("ghost:" + pub[:6])
+    return sk, pub, handle
+
+def post(path, body):
+    r = urllib.request.urlopen(urllib.request.Request(COORD + path, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}))
+    return json.load(r)
+
+def cmd_id(args):
+    _, pub, handle = identity()
+    if args: HANDLE.write_text(args[0]); handle = args[0]
+    print("handle :", handle); print("pubkey :", pub); print("coord  :", COORD)
+    print("(set a handle:  hazync id <name>)")
+
+def cmd_claim(args):
+    rng = args[0]; _, pub, handle = identity()
+    print(post("/api/claim", {"range": rng, "pubkey": pub, "handle": handle}))
+
+def cmd_prove(args):
+    rng = args[0]
+    if not HOSTBIN or not os.path.exists(HOSTBIN):
+        sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
+    lo, hi = [int(x) for x in rng.split("-")]
+    RCPTDIR.mkdir(parents=True, exist_ok=True)
+    out = RCPTDIR / f"{rng}.bin"
+    # Prove each block in the range and fold into one range receipt. Uses the existing prover commands.
+    env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
+    print(f"proving range {rng} on your GPU (this is the expensive step)…")
+    # prove-range emits range_<n>.bin per block; fold-range merges adjacent ranges pairwise.
+    parts = []
+    for h in range(lo, hi + 1):
+        subprocess.run([HOSTBIN, "prove-range", str(h)], env=env, check=True)
+        parts.append(f"range_{h}.bin")
+    while len(parts) > 1:
+        nxt = []
+        for i in range(0, len(parts), 2):
+            if i + 1 < len(parts):
+                m = f"fold_{i}.bin"; subprocess.run([HOSTBIN, "fold-range", parts[i], parts[i+1], m], check=True); nxt.append(m)
+            else: nxt.append(parts[i])
+        parts = nxt
+    os.replace(parts[0], out)
+    print("receipt:", out)
+
+def cmd_submit(args):
+    rng = args[0]; sk, pub, handle = identity()
+    f = RCPTDIR / f"{rng}.bin"
+    if not f.exists(): sys.exit(f"no receipt at {f} — run `hazync prove {rng}` first")
+    receipt = f.read_bytes()
+    sig = sk.sign(receipt).hex()
+    res = post("/api/submit", {"range": rng, "pubkey": pub, "handle": handle,
+                               "sig": sig, "receipt": base64.b64encode(receipt).decode()})
+    print(res); sys.exit(0 if res.get("ok") else 1)
+
+def cmd_run(args):
+    cmd_claim(args); cmd_prove(args); cmd_submit(args)
+
+def main():
+    if len(sys.argv) < 2: print(__doc__); sys.exit(1)
+    c = sys.argv[1]; a = sys.argv[2:]
+    fn = {"id": cmd_id, "claim": cmd_claim, "prove": cmd_prove, "submit": cmd_submit, "run": cmd_run}.get(c)
+    if not fn: print(__doc__); sys.exit(1)
+    fn(a)
+
+if __name__ == "__main__":
+    main()
