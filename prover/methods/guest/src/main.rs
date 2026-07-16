@@ -272,7 +272,10 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let gather = |raw: &[u8], is_cb: u32, sink: &mut Vec<[u8; 32]>| -> [u8; 32] {
         let mut buf = vec![0u8; (raw.len() / 8 + 1) * 32];
         let mut txid = [0u8; 32];
-        let n = unsafe { tx_out_leaves(raw.as_ptr(), raw.len() as u32, w.height, is_cb, block_time, buf.as_mut_ptr(), txid.as_mut_ptr()) };
+        // Created-output creation-MTP = `mtp` (the block's median-time-past, MTP(h-1)) — the real BIP68
+        // value Core commits, not the raw block timestamp. Each mode passes the right mtp (chain_step/
+        // aggregate/prove_range: median(prev.recent_times); block_proof standalone: block_time).
+        let n = unsafe { tx_out_leaves(raw.as_ptr(), raw.len() as u32, w.height, is_cb, mtp, buf.as_mut_ptr(), txid.as_mut_ptr()) };
         for i in 0..n as usize {
             let mut l = [0u8; 32];
             l.copy_from_slice(&buf[i * 32..i * 32 + 32]);

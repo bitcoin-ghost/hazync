@@ -101,7 +101,7 @@ struct Spend { raw: Vec<u8>, prev_value: u64, prev_spk: Vec<u8>, flags: u32, coi
 
 /// Build a block witness against (and advancing) the running accumulator `forest`.
 fn build_block(
-    forest: &mut Forest, header: Vec<u8>, height: u32, coinbase_hex: &str, spends: &[Spend],
+    forest: &mut Forest, header: Vec<u8>, height: u32, coinbase_hex: &str, spends: &[Spend], create_mtp: u32,
 ) -> BlockWitness {
     let coinbase: Transaction = deserialize(&hx(coinbase_hex)).unwrap();
     let cb_txid = coinbase.compute_txid().to_byte_array();
@@ -127,13 +127,12 @@ fn build_block(
         forest.delete(pos);
     }
 
-    // Insert created coins: coinbase outputs (coinbase=true), then each spend's outputs. Their
-    // creation-MTP proxy = this block's timestamp (only used if later spent under a time-based lock).
-    let blk_time = u32::from_le_bytes(header[68..72].try_into().unwrap());
+    // Insert created coins: coinbase outputs then each spend's outputs. Creation-MTP = `create_mtp`
+    // (= MTP(height-1), the same value the guest's median(prev.recent_times) commits).
     let mut new_outputs = Vec::new();
     for v in 0..coinbase.output.len() {
         if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
-        let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, blk_time);
+        let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, create_mtp);
         forest.add(l);
         new_outputs.push(l);
     }
@@ -142,7 +141,7 @@ fn build_block(
         let txid = tx.compute_txid().to_byte_array();
         for v in 0..tx.output.len() {
             if !out_spendable(tx.output[v].script_pubkey.as_bytes()) { continue; }
-            let l = out_leaf_of(&tx, &txid, v, height, false, blk_time);
+            let l = out_leaf_of(&tx, &txid, v, height, false, create_mtp);
             forest.add(l);
             new_outputs.push(l);
         }
@@ -208,7 +207,7 @@ fn spend_170() -> Spend {
 fn prove_block() {
     use std::time::Instant;
     let (mut forest, anchor) = seed_and_anchor();
-    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()]);
+    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&anchor.recent_times));
 
     println!("=== PROVING block 170 chain_step (real STARK receipt) ===");
     let mut b = ExecutorEnv::builder();
@@ -254,13 +253,16 @@ fn prove_step(prev_journal: Vec<u8>, prev_receipt: Option<risc0_zkvm::Receipt>, 
 fn prove_chain() {
     use std::time::Instant;
     let (mut forest, anchor) = seed_and_anchor();
-    let w170 = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()]);
+    let mut recent = anchor.recent_times.clone();
+    let w170 = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&recent));
+    advance_recent(&mut recent, 1_231_731_025); // block 170 time
     let cb171: Transaction = deserialize(&hx(CB171)).unwrap();
     let hdr171 = build_header(HASH170, &cb171.compute_txid().to_byte_array(), 1_231_731_401, 0x1d00ffff, 653_436_935);
-    let w171 = build_block(&mut forest, hdr171, 171, CB171, &[]);
+    let w171 = build_block(&mut forest, hdr171, 171, CB171, &[], median_u32(&recent));
+    advance_recent(&mut recent, 1_231_731_401); // block 171 time
     let cb172: Transaction = deserialize(&hx(CB172)).unwrap();
     let hdr172 = build_header(HASH171, &cb172.compute_txid().to_byte_array(), 1_231_731_853, 0x1d00ffff, 1_565_279_797);
-    let w172 = build_block(&mut forest, hdr172, 172, CB172, &[]);
+    let w172 = build_block(&mut forest, hdr172, 172, CB172, &[], median_u32(&recent));
 
     println!("=== PROVING recursive chain 170 → 171 → 172 (env::verify composition) ===");
     let t = Instant::now();
@@ -282,7 +284,7 @@ fn prove_chain() {
 fn prove_snark() {
     use std::time::Instant;
     let (mut forest, anchor) = seed_and_anchor();
-    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()]);
+    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&anchor.recent_times));
     let mut b = ExecutorEnv::builder();
     b.write(&2u32).unwrap();
     b.write(&state_journal_bytes(&anchor)).unwrap();
@@ -399,9 +401,12 @@ fn build_full() -> (ChainState, BlockWitness) {
             forest.delete(pos);
         }
     }
+    // Created-output creation-MTP = median(anchor.recent_times) — the same MTP(height-1) the guest
+    // computes (median of prev.recent_times) and now commits on created outputs. Consistent host↔guest.
+    let cmtp = median_u32(&anchor.recent_times);
     let mut new_outputs: Vec<[u8; 32]> = Vec::new();
-    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, time); forest.add(l); new_outputs.push(l); }
-    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, time); forest.add(l); new_outputs.push(l); } }
+    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); forest.add(l); new_outputs.push(l); }
+    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
     let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next };
     (anchor, w)
@@ -529,7 +534,34 @@ fn read_block_json(dir: &str, h: u32) -> serde_json::Value {
 // block's external spends + created outputs. (No in-block-spend handling: the guest deletes external
 // inputs then adds outputs — a spent coin created in the same block would fail the position lookup
 // below with a clear panic. Absent in the early chain this targets.)
-fn build_block_carried(forest: &mut Forest, j: &serde_json::Value) -> BlockWitness {
+// Advance the median-time-past window with this block and append `block_mtp[height] = MTP(height)`
+// (median of the ≤11 most recent block timestamps, Core's `GetMedianTimePast`). Assumes blocks are fed
+// in order from the genesis anchor (block_mtp is indexed by absolute height).
+fn median_u32(v: &[u32]) -> u32 { let mut s = v.to_vec(); s.sort_unstable(); s[s.len() / 2] }
+
+// Advance a median-time-past window by one block (mirrors the guest's chain_step recent_times update),
+// so a demo driver can compute each block's create_mtp = median of the window through the prev block.
+fn advance_recent(recent: &mut Vec<u32>, block_time: u32) {
+    recent.push(block_time);
+    if recent.len() > 11 { let n = recent.len() - 11; recent.drain(0..n); }
+}
+
+fn push_mtp(j: &serde_json::Value, win: &mut Vec<u32>, block_mtp: &mut Vec<u32>) {
+    // block_mtp[h] = MTP(h-1): median of the window through the PREVIOUS block, matching Core's BIP68
+    // creation time GetMedianTimePast(coinHeight-1) and the guest's median(prev.recent_times).
+    block_mtp.push(median_u32(win));
+    let bt = j["time"].as_u64().unwrap() as u32;
+    win.push(bt);
+    if win.len() > 11 { let n = win.len() - 11; win.drain(0..n); }
+}
+
+// `block_mtp[h]` = GetMedianTimePast() of the block at height h (the host derives it from the chain it
+// has already processed — same value an archive node holds for free). Used as the coin's creation-MTP
+// on BOTH sides: committed when an output is created here, and looked up by the coin's committed height
+// when it is spent. This is the real BIP68-time value (Core's median-time-past), replacing the earlier
+// raw-block-timestamp proxy, and it stays consistent so the accumulator leaf matches across the coin's
+// life.
+fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[u32]) -> BlockWitness {
     let height = j["height"].as_u64().unwrap() as u32;
     let bits = j["bits"].as_u64().unwrap() as u32;
     let time = j["time"].as_u64().unwrap() as u32;
@@ -561,7 +593,10 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value) -> BlockWitne
             });
             let h = p["coin_height"].as_u64().map(|x| x as u32).unwrap_or(0);
             let cb = p["coin_is_coinbase"].as_u64().map(|x| x != 0).unwrap_or(false);
-            let mtp = p["coin_mtp"].as_u64().map(|x| x as u32).unwrap_or(0);
+            // Real BIP68-time value: the median-time-past of the coin's CREATION block, derived by the
+            // host (not the JSON's raw block timestamp). Matches what was committed when the coin was
+            // created (below), so the leaf is found in the accumulator.
+            let mtp = block_mtp.get(h as usize).copied().unwrap_or(0);
             meta.push((h, cb, mtp));
         }
         let txid = t.compute_txid().to_byte_array();
@@ -610,12 +645,15 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value) -> BlockWitne
 
     // Created coins: coinbase outputs then each tx's outputs, in canonical order — skipping unspendable
     // outputs (H3) and coins spent within this same block (H1). Must match the guest's surviving set.
+    // This block's creation-MTP (committed on every output leaf); a later block spending these coins
+    // looks up the identical value by height, so the leaves match.
+    let self_mtp = block_mtp.get(height as usize).copied().unwrap_or(time);
     let mut new_outputs = Vec::new();
     let add_out = |tx: &Transaction, txid: &[u8; 32], is_cb: bool, forest: &mut Forest, no: &mut Vec<Hash>| {
         for v in 0..tx.output.len() {
             if !out_spendable(tx.output[v].script_pubkey.as_bytes()) { continue; }
             if spent_in_block.contains(&(*txid, v as u32)) { continue; }
-            let l = out_leaf_of(tx, txid, v, height, is_cb, time);
+            let l = out_leaf_of(tx, txid, v, height, is_cb, self_mtp);
             forest.add(l);
             no.push(l);
         }
@@ -660,9 +698,12 @@ fn check_ibd() {
     let mut state = genesis_anchor();
     let t = Instant::now();
     let mut total_cyc = 0u64;
+    let mut block_mtp: Vec<u32> = vec![GENESIS_TIME]; // index = height; [0] = genesis
+    let mut win: Vec<u32> = vec![GENESIS_TIME];       // rolling ≤11 block times for MTP
     for h in from..=to {
         let j = read_block_json(&dir, h);
-        let w = build_block_carried(&mut forest, &j);
+        push_mtp(&j, &mut win, &mut block_mtp);
+        let w = build_block_carried(&mut forest, &j, &block_mtp);
         let (ns, cyc) = chain_step(&state, &w, if h == from { 1 } else { 0 });
         assert_eq!(ns.height, h, "block {h}: height did not advance");
         state = ns;
@@ -688,9 +729,12 @@ fn prove_ibd() {
     let mut state = genesis_anchor();
     let mut prev_receipt: Option<risc0_zkvm::Receipt> = None;
     let t = Instant::now();
+    let mut block_mtp: Vec<u32> = vec![GENESIS_TIME];
+    let mut win: Vec<u32> = vec![GENESIS_TIME];
     for h in from..=to {
         let j = read_block_json(&dir, h);
-        let w = build_block_carried(&mut forest, &j);
+        push_mtp(&j, &mut win, &mut block_mtp);
+        let w = build_block_carried(&mut forest, &j, &block_mtp);
         let is_base = (h == from) as u32;
         let prev_journal = match &prev_receipt { Some(r) => r.journal.bytes.clone(), None => state_journal_bytes(&state) };
         let st = Instant::now();
@@ -707,7 +751,8 @@ fn prove_ibd() {
     // Test 2: incremental tip proving — each block extends the existing chain proof by one step.
     for h in (to + 1)..=(to + tip_extra) {
         let j = read_block_json(&dir, h);
-        let w = build_block_carried(&mut forest, &j);
+        push_mtp(&j, &mut win, &mut block_mtp);
+        let w = build_block_carried(&mut forest, &j, &block_mtp);
         let prev_journal = prev_receipt.as_ref().unwrap().journal.bytes.clone();
         let st = Instant::now();
         let r = prove_step_succinct(prev_journal, prev_receipt.clone(), &w, 0);
@@ -742,7 +787,7 @@ fn add256_host(a: &mut [u8; 32], b: &[u8; 32]) {
     for i in 0..32 { let s = a[i] as u16 + b[i] as u16 + carry; a[i] = s as u8; carry = s >> 8; }
 }
 
-struct InCtx { roots: Vec<Option<[u8; 32]>>, leaves: u64, nbits: u32, time: u32, epoch_start: u32, recent: Vec<u32> }
+struct InCtx { roots: Vec<Option<[u8; 32]>>, leaves: u64, nbits: u32, time: u32, epoch_start: u32, recent: Vec<u32>, block_mtp: Vec<u32> }
 
 // Cheap bridge pass: fold blocks 1..n (exclusive) advancing the accumulator + difficulty/MTP context,
 // returning the forest + the chain context just BEFORE block n. No proving — pure host replay.
@@ -750,18 +795,18 @@ fn bridge_pass(dir: &str, n: u32) -> (Forest, InCtx) {
     let mut forest = Forest::new();
     let (mut nbits, mut time, mut epoch_start) = (GENESIS_BITS, GENESIS_TIME, GENESIS_TIME);
     let mut recent = vec![GENESIS_TIME];
+    let mut block_mtp: Vec<u32> = vec![GENESIS_TIME];
     for h in 1..n {
         let j = read_block_json(dir, h);
-        let _ = build_block_carried(&mut forest, &j); // advances the forest (spends + outputs)
+        push_mtp(&j, &mut recent, &mut block_mtp); // advances the MTP window + block_mtp[h] BEFORE build
+        let _ = build_block_carried(&mut forest, &j, &block_mtp); // advances the forest (spends + outputs)
         let bt = j["time"].as_u64().unwrap() as u32;
         nbits = j["bits"].as_u64().unwrap() as u32;
         time = bt;
         if h % 2016 == 0 { epoch_start = bt; }
-        recent.push(bt);
-        if recent.len() > 11 { let e = recent.len() - 11; recent.drain(0..e); }
     }
     let s = wire_stump(&forest);
-    (forest, InCtx { roots: s.roots, leaves: s.num_leaves, nbits, time, epoch_start, recent })
+    (forest, InCtx { roots: s.roots, leaves: s.num_leaves, nbits, time, epoch_start, recent, block_mtp })
 }
 
 // `prove-range <n>`: prove block n as a self-contained range [n..n] → range_<n>.bin (parallelisable).
@@ -770,7 +815,10 @@ fn prove_range_cmd(n: u32) {
     let dir = std::env::var("HAZYNC_WITNESS_DIR").expect("set HAZYNC_WITNESS_DIR");
     let (mut forest, ctx) = bridge_pass(&dir, n);
     let jn = read_block_json(&dir, n);
-    let w = build_block_carried(&mut forest, &jn);
+    let mut block_mtp = ctx.block_mtp.clone();
+    let mut win = ctx.recent.clone();
+    push_mtp(&jn, &mut win, &mut block_mtp); // block_mtp[n]
+    let w = build_block_carried(&mut forest, &jn, &block_mtp);
     let in_tip_hash = arr(rev(hx(jn["prev"].as_str().unwrap())));
     let mut b = ExecutorEnv::builder();
     b.write(&6u32).unwrap();
@@ -963,11 +1011,13 @@ fn agg_chunks() {
 // The guest's `assert(prev.self_id == self_id)` (and the unresolvable composition) must reject it.
 fn prove_chain_bad() {
     let (mut forest, anchor) = seed_and_anchor();
-    let w170 = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()]);
+    let mut recent = anchor.recent_times.clone();
+    let w170 = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&recent));
     let r170 = prove_step(state_journal_bytes(&anchor), None, &w170, 1);
+    advance_recent(&mut recent, 1_231_731_025);
     let cb171: Transaction = deserialize(&hx(CB171)).unwrap();
     let hdr171 = build_header(HASH170, &cb171.compute_txid().to_byte_array(), 1_231_731_401, 0x1d00ffff, 653_436_935);
-    let w171 = build_block(&mut forest, hdr171, 171, CB171, &[]);
+    let w171 = build_block(&mut forest, hdr171, 171, CB171, &[], median_u32(&recent));
     let mut bad_id = METHOD_ID;
     bad_id[0] ^= 1; // corrupt the image id
     println!("=== ADVERSARIAL S1: folding block 171 with a WRONG self_id (must be rejected) ===");
@@ -990,7 +1040,7 @@ fn prove_chain_bad() {
 // either a chain_step assertion (execute → Err) or the tip mismatch.
 fn regress() {
     let (mut forest, anchor) = seed_and_anchor();
-    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()]);
+    let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&anchor.recent_times));
     let mut b = ExecutorEnv::builder();
     b.write(&2u32).unwrap();
     b.write(&state_journal_bytes(&anchor)).unwrap();
@@ -1103,6 +1153,7 @@ fn main() {
     ];
 
     let mut state = anchor.clone();
+    let mut recent = anchor.recent_times.clone();
     for (i, (height, hdr0, cb_hex, spends, expect_hash)) in blocks.into_iter().enumerate() {
         // For coinbase-only blocks (empty hdr0), build the header now: merkle = coinbase txid.
         let header = if hdr0.is_empty() {
@@ -1115,7 +1166,10 @@ fn main() {
             build_header(prev, &cb.compute_txid().to_byte_array(), time, 0x1d00ffff, nonce)
         } else { hdr0 };
 
-        let w = build_block(&mut forest, header, height, cb_hex, &spends);
+        let create_mtp = median_u32(&recent);
+        let blk_time = u32::from_le_bytes(header[68..72].try_into().unwrap());
+        let w = build_block(&mut forest, header, height, cb_hex, &spends, create_mtp);
+        advance_recent(&mut recent, blk_time);
         let is_base = if i == 0 { 1 } else { 0 };
         let (next, cycles) = chain_step(&state, &w, is_base);
 

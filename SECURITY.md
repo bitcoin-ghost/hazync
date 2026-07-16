@@ -24,7 +24,7 @@ full trust base and the two portability shims.
 | C1 | No automated regression harness | quality | **fixed** (`check-full` / `regress` execute-mode) |
 | SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
-| BIP68-time | Needs real `coin_mtp` (placeholder 0 = false-accept for that rule) | **soundness** | **open** — closed free by the archive-node bridge |
+| BIP68-time | Block-proving path now commits real `MTP(coinHeight−1)` | **soundness** | **fixed** (validated; check also proven on a real mainnet tx) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -106,22 +106,22 @@ protection). Failed closed in practice.
      other flag true, isolating the rejection to the hardened `delete`'s position check. Without the
      knob the same block is VALID. The knob is inert unless the env var is set. See
      `prover/make_negative_tests.py`.
-2. **BIP68 time-based (soundness)** — the correct value is Core's `GetMedianTimePast(coinHeight−1)`;
-   the block-proving path currently feeds the creating block's raw timestamp (or `0` for pre-metadata
-   fetches like `block_741000.json`), neither of which is the real MTP. A wrong value skews the
-   required-elapsed test, so a premature time-based relative-locked spend could prove valid (Core
-   rejects it). Latent (time-based relative locks are rare and none of the early-history test blocks
-   use one) but real.
-   - **The check is now proven correct on REAL mainnet data.** `prover/test_bip68_real.sh`
+2. **BIP68 time-based (soundness) — FIXED.** The correct value is Core's `GetMedianTimePast(coinHeight−1)`.
+   The block-proving path previously committed the creating block's raw timestamp (or `0`), skewing the
+   required-elapsed test so a premature time-based relative-locked spend could prove valid.
+   - **The check is proven correct on REAL mainnet data.** `prover/test_bip68_real.sh`
      (evidence `prover/evidence/bip68_real_mainnet.txt`) runs the real `check_input_locks` on a real
      mainnet tx — `3fa669af…` in block 958250, a 90-day Taproot CSV lock — with the real
      `coin_mtp = MTP(945408)` and `spend_mtp = MTP(958250)`. The coin is 90.2 days old, mainnet accepted
-     it, and the check returns VALID; a coin ~0.3 days younger is REJECTED (`-42`). Also demonstrated
-     against the `coin_mtp = 0` counterfactual in `prover/test_bip68_locks.sh`.
-   - **Remaining:** thread the real `MTP(coinHeight−1)` into the block-proving path itself (a
-     coordinated host+guest change, since the value is committed in the accumulator leaf and must match
-     on the creation and spend sides). In progress. The archive-node bridge supplies this MTP for free
-     (the median-time-past of the block at `coin.nHeight`).
+     it, and the check returns VALID; a coin ~0.3 days younger is REJECTED (`-42`).
+   - **The proving path now commits the real value.** A coordinated host+guest change: the guest's
+     `validate_block` commits `mtp` (= `median(prev.recent_times)` = `MTP(h−1)`) on created-output
+     leaves, and every host builder derives the same value from the chain it has processed (the
+     `block_mtp` window in the IBD path, mirroring what an archive node holds for free) — so the
+     creation-side and spend-side leaves match. Validated: `check-ibd` genesis→550, `check-full` 741000,
+     and the 170→172 chain demo all remain VALID with **identical** tip hashes (those are header-derived;
+     only the internal leaf MTP is now correct). No fetcher dependency for the IBD path — the host derives
+     the MTP itself.
 3. **External audit** — especially of the accumulator (the one non-Core component) and the recursion
    binding. Wanted.
 
