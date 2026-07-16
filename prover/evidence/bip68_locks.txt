@@ -1,0 +1,14 @@
+# BIP68 relative-locktime test — real mainnet MTP data (block 700000 -> 700100, ~17.5h)
+# Runs the real Core-derived check_input_locks (guest mode 8). Reproduce: prover/test_bip68_locks.sh
+
+=== BIP68 TIME-BASED (real coin_mtp = block 700000 MTP; spend at block 700100; ~17.5 h elapsed) ===
+  C1 lock=512s   satisfied  (expect VALID)       => LOCKS rc=1 (VALID)  [seq=0x00400001 coin_mtp=1631331088 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]
+  C2 lock=28.4h  unmet      (expect REJECT -42)  => LOCKS rc=-42 (REJECT time-lock-unmet)  [seq=0x004000c8 coin_mtp=1631331088 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]
+
+=== THE GAP: identical 388-day time-locked spend at block 700100 ===
+  C3 coin_mtp=0  PLACEHOLDER (gap: wrongly VALID) => LOCKS rc=1 (VALID)  [seq=0x0040ffff coin_mtp=0 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]
+  C4 coin_mtp=REAL  bridge-data (expect REJECT)  => LOCKS rc=-42 (REJECT time-lock-unmet)  [seq=0x0040ffff coin_mtp=1631331088 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]
+
+=== BIP68 HEIGHT-BASED (coin height 700000, spend height 700100) ===
+  C5 lock=200 blk unmet     (expect REJECT -41)  => LOCKS rc=-41 (REJECT height-lock-unmet)  [seq=0x000000c8 coin_mtp=1631331088 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]
+  C6 lock=100 blk satisfied (expect VALID)       => LOCKS rc=1 (VALID)  [seq=0x00000064 coin_mtp=1631331088 spend_mtp=1631394107 coin_h=700000 spend_h=700100 cb=0]

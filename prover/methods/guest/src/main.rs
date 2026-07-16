@@ -866,6 +866,25 @@ fn main() {
         5 => aggregate(),
         6 => prove_range(),
         7 => fold_range(),
+        8 => test_locks(),
         _ => legacy(),
     }
+}
+
+// Mode 8: isolated exerciser for the real Core-derived maturity/BIP68 relative-lock check
+// (`check_input_locks`). Used by the host `test-locks` command to drive the time-based branch with
+// real MTP numbers (no block; the check only reads tx.version + vin[idx].nSequence + the two MTPs).
+fn test_locks() {
+    let tx: Vec<u8> = env::read();
+    let input_idx: u32 = env::read();
+    let coin_height: u32 = env::read();
+    let coin_is_coinbase: u32 = env::read();
+    let coin_mtp: u32 = env::read();
+    let spend_height: u32 = env::read();
+    let spend_mtp: u32 = env::read();
+    let rc = unsafe {
+        check_input_locks(tx.as_ptr(), tx.len() as u32, input_idx,
+            coin_height, coin_is_coinbase, coin_mtp, spend_height, spend_mtp)
+    };
+    env::commit(&rc);
 }

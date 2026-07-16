@@ -24,7 +24,7 @@ full trust base and the two portability shims.
 | C1 | No automated regression harness | quality | **fixed** (`check-full` / `regress` execute-mode) |
 | SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
-| BIP68-time | Needs real `coin_mtp` | completeness | **open** — arrives free with the archive-node bridge |
+| BIP68-time | Needs real `coin_mtp` (placeholder 0 = false-accept for that rule) | **soundness** | **open** — closed free by the archive-node bridge |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -79,7 +79,8 @@ protection). Failed closed in practice.
   `root_next(N−1) == root_prev(N)` from a trusted anchor; operationally the archive-node bridge drives
   the accumulator from the real coin set. Stated plainly so results aren't over-read.
 - **S4 — BIP34 / BIP30.** Both **added and validated on 741000** (`bip34_ok` / `bip30_ok`). BIP68-time
-  remains the one open completeness item (needs real `coin_mtp`, free with the bridge).
+  remains the one open **soundness** item (the placeholder `coin_mtp = 0` is a false-accept for that
+  rule, not conservative — needs real `coin_mtp`, free with the bridge).
 - **C1 — regression harness.** **Added:** `check-full` / `regress` run known blocks + the adversarial
   inflation case in execute mode (seconds, no proving) and assert the flags; standard pre-flight before
   any GPU prove.
@@ -105,7 +106,16 @@ protection). Failed closed in practice.
      other flag true, isolating the rejection to the hardened `delete`'s position check. Without the
      knob the same block is VALID. The knob is inert unless the env var is set. See
      `prover/make_negative_tests.py`.
-2. **BIP68 time-based** — needs real `coin_mtp`; arrives free with the archive-node bridge.
+2. **BIP68 time-based (soundness)** — the placeholder `coin_mtp = 0` makes the required-elapsed test
+   `spend_mtp ≥ (relative seconds ≤ ~388d)`, which any real block MTP satisfies, so a premature
+   time-based relative-locked spend would prove valid (Core rejects it). Latent (time-based relative
+   locks are rare and none of the tested blocks use one) but real. Closed by threading the real
+   creation-MTP, which the archive-node bridge has for free (the MTP of the block at `coin.nHeight`).
+   **Demonstrated** with real mainnet MTP data (`prover/test_bip68_locks.sh`,
+   `prover/evidence/bip68_locks.txt`): the identical 388-day time-locked spend proves VALID under
+   `coin_mtp = 0` but is correctly REJECTED (`-42`) once the real block-700000 creation-MTP is supplied
+   — same tx, same spending block, only the coin's creation-MTP differs. The check itself (guest
+   `check_input_locks`) is therefore correct; it is starved of real data until the bridge lands.
 3. **External audit** — especially of the accumulator (the one non-Core component) and the recursion
    binding. Wanted.
 

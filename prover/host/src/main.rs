@@ -423,6 +423,47 @@ fn prove_full() {
 // consensus path as prove_full (mode 2, is_base=1). Guest asserts block_valid, so a clean execute ==
 // every rule passed (scripts, no-inflation, PoW, retarget, merkle, subsidy, weight, sigops, witness
 // commitment, BIP34, BIP30, and now REAL maturity/BIP68 from the S2 metadata). Cheap pre-flight before
+// Isolated exerciser for the real maturity/BIP68 relative-lock check (guest mode 8). Builds a minimal
+// v2 tx with one input carrying the given nSequence, then runs `check_input_locks` with real MTP
+// numbers supplied via env vars. Lets us drive the time-based branch (which no tested block exercises)
+// with real mainnet MTP data. Return codes: 1 valid, -40 immature coinbase, -41 height-lock unmet,
+// -42 time-lock unmet.
+fn test_locks_cmd() {
+    let ev = |k: &str, d: u32| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let seq = ev("HAZYNC_LOCK_SEQ", 0);
+    let coin_mtp = ev("HAZYNC_LOCK_COINMTP", 0);
+    let spend_mtp = ev("HAZYNC_LOCK_SPENDMTP", 0);
+    let coin_h = ev("HAZYNC_LOCK_COINH", 100);
+    let spend_h = ev("HAZYNC_LOCK_SPENDH", 200);
+    let cb = ev("HAZYNC_LOCK_CB", 0);
+    // minimal legacy v2 tx: 1 input (nSequence=seq), 1 zero output, locktime 0
+    let mut raw: Vec<u8> = Vec::new();
+    raw.extend_from_slice(&2u32.to_le_bytes()); // version 2
+    raw.push(1); // vin count
+    raw.extend_from_slice(&[0u8; 32]); // prev txid
+    raw.extend_from_slice(&0u32.to_le_bytes()); // prev vout
+    raw.push(0); // scriptSig len
+    raw.extend_from_slice(&seq.to_le_bytes()); // nSequence
+    raw.push(1); // vout count
+    raw.extend_from_slice(&0u64.to_le_bytes()); // value
+    raw.push(0); // scriptPubKey len
+    raw.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    let mut b = ExecutorEnv::builder();
+    b.write(&8u32).unwrap();
+    b.write(&raw).unwrap();
+    b.write(&0u32).unwrap(); // input_idx
+    b.write(&coin_h).unwrap();
+    b.write(&cb).unwrap();
+    b.write(&coin_mtp).unwrap();
+    b.write(&spend_h).unwrap();
+    b.write(&spend_mtp).unwrap();
+    let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec");
+    let rc: i32 = s.journal.decode().unwrap();
+    let meaning = match rc { 1 => "VALID", -40 => "REJECT immature-coinbase", -41 => "REJECT height-lock-unmet", -42 => "REJECT time-lock-unmet", _ => "?" };
+    println!("LOCKS rc={} ({})  [seq={:#010x} coin_mtp={} spend_mtp={} coin_h={} spend_h={} cb={}]",
+        rc, meaning, seq, coin_mtp, spend_mtp, coin_h, spend_h, cb);
+}
+
 // committing a multi-GPU prove; a false flag panics here in seconds-to-minutes on CPU, not hours on GPU.
 fn check_full() {
     use std::time::Instant;
@@ -973,6 +1014,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "prove-block") {
         prove_block();
+        return;
+    }
+    if args.iter().any(|a| a == "test-locks") {
+        test_locks_cmd();
         return;
     }
     if args.iter().any(|a| a == "check-full") {

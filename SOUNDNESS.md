@@ -67,17 +67,24 @@ ENFORCED (real Core unless noted):
 - **Coinbase maturity + BIP68 (height)** — CLOSED (S2, 2026-07-15). The fetcher/bridge now sources each
   spent coin's real `coin_height` + `coin_is_coinbase` and threads them into the witness (`build_full`,
   shared by prove-full/seg/chunk/agg). Both checks fire on real blocks; validated on block 741000
-  (`all_ok=true` with real metadata). `coin_mtp` (BIP68-time) left conservative (0) in the harness — the
-  real value arrives with the archive-node bridge; height-based BIP68 + maturity are live now.
+  (`all_ok=true` with real metadata). `coin_mtp` (BIP68-time) is a **placeholder (0)** in the current
+  fetcher harness — and this is a genuine **soundness gap for the BIP68-time rule**, not a conservative
+  one: with `coin_mtp = 0` the required-elapsed test collapses to `spend_mtp ≥ (relative seconds ≤ ~388d)`,
+  which any real block MTP satisfies, so a block that spends a coin *too early* under a time-based
+  relative lock would prove valid even though Core rejects it. Latent (no block tested contains a
+  time-based relative lock, which are rare), but real until the archive-node bridge threads the real
+  creation-MTP (see §6). Height-based BIP68 + maturity + absolute locktime are live now.
 - **BIP34** (coinbase scriptSig encodes height) — CLOSED (S4a). `check_bip34` parses coinbase vin[0]
   scriptSig and compares the pushed height to the block height. Validated on 741000 (`bip34_ok=true`).
 - **BIP30** (no duplicate txid overwriting an unspent output) — CLOSED (S4b). Explicit sorted-txid
   duplicate check in the guest. Validated on 741000 (`bip30_ok=true`).
 
 OPEN (each with fix; none architectural):
-- **BIP68 time-based** needs real `coin_mtp`; **MTP** in standalone runs uses placeholder timestamps.
-  Both are closed for free by the archive-node bridge (real creation-MTP + real `recent_times` per
-  block during IBD). Until then, standalone runs leave BIP68-time conservative.
+- **BIP68 time-based** needs real `coin_mtp` — a **soundness gap** (false-accept) for that rule, not a
+  conservative placeholder: see the §5-ENFORCED note above. **MTP** in standalone runs also uses
+  placeholder timestamps. Both are closed for free by the archive-node bridge (real creation-MTP + real
+  `recent_times` per block during IBD). Until then, a block with a premature time-based relative-locked
+  spend is not caught.
 
 ## 6. What "solid" requires from here (ordered)
 1. ✅ **S1 recursion hardening** — self_id committed + verifier asserts `==METHOD_ID` at every level;
