@@ -34,6 +34,10 @@ STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
+MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
+MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
+RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes per IP per window
+RATE_WINDOW= int(os.environ.get("RATE_WINDOW", "60"))        # rate-limit window (seconds)
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -42,6 +46,31 @@ except Exception:
     HAVE_ED = False
 
 _lock = threading.Lock()
+_rate = {}          # ip -> [timestamps] sliding window, guarded by _rate_lock
+_rate_lock = threading.Lock()
+
+def rate_ok(ip):
+    """Sliding-window per-IP write limiter. True if this write is within budget."""
+    now = time.time()
+    with _rate_lock:
+        q = [t for t in _rate.get(ip, ()) if now - t < RATE_WINDOW]
+        if len(q) >= RATE_MAX:
+            _rate[ip] = q
+            return False
+        q.append(now); _rate[ip] = q
+        return True
+
+def clean_handle(h):
+    """A display handle: printable, trimmed, length-capped — no control chars/newlines in the ledger."""
+    h = "".join(ch for ch in str(h or "anon") if ch.isprintable()).strip()
+    return (h[:MAX_HANDLE] or "anon")
+
+def is_hex(s, nbytes):
+    """True if s is exactly nbytes of lowercase/upper hex (ed25519 pubkey=32, sig=64)."""
+    try:
+        return isinstance(s, str) and len(s) == nbytes * 2 and bytes.fromhex(s) is not None
+    except Exception:
+        return False
 
 def db():
     c = sqlite3.connect(DB)
@@ -256,8 +285,10 @@ def state():
     }
 
 def claim(body):
-    rid, pk, handle = body.get("range"), body.get("pubkey", ""), body.get("handle", "anon")
+    rid, pk, handle = body.get("range"), body.get("pubkey", ""), clean_handle(body.get("handle"))
     if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    if not parse_range(rid): return 400, {"error": "invalid range id"}
     reap()
     now = time.time()
     with _lock:
@@ -288,6 +319,7 @@ def claim(body):
 def heartbeat(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     reap()
     with _lock:
         c = db()
@@ -304,8 +336,12 @@ def heartbeat(body):
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
-    handle = body.get("handle", "anon")
+    handle = clean_handle(body.get("handle"))
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
+    if not parse_range(rid): return 400, {"error": "invalid range id"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
+    if len(receipt_b64) > MAX_BODY: return 413, {"error": "receipt too large"}
     try: receipt = base64.b64decode(receipt_b64)
     except Exception: return 400, {"error": "receipt must be base64"}
     sha = hashlib.sha256(receipt).hexdigest()
@@ -345,8 +381,13 @@ class H(BaseHTTPRequestHandler):
         elif obj is not None: self.wfile.write(json.dumps(obj).encode())
     def do_OPTIONS(self): self._send(204)
     def log_message(self, *a): pass
+    def _client_ip(self):
+        xff = self.headers.get("X-Forwarded-For")
+        return xff.split(",")[0].strip() if xff else self.client_address[0]
     def _body(self):
-        n = int(self.headers.get("Content-Length", 0))
+        try: n = int(self.headers.get("Content-Length", 0))
+        except Exception: n = 0
+        if n > MAX_BODY: self.rfile.read(min(n, MAX_BODY)); return None   # oversized — signal 413
         try: return json.loads(self.rfile.read(n) or b"{}")
         except Exception: return {}
     def do_GET(self):
@@ -370,10 +411,16 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         p = urlparse(self.path).path
-        if p == "/api/claim":     code, obj = claim(self._body());     return self._send(code, obj)
-        if p == "/api/heartbeat": code, obj = heartbeat(self._body()); return self._send(code, obj)
-        if p == "/api/submit": code, obj = submit(self._body()); return self._send(code, obj)
-        return self._send(404, {"error": "not found"})
+        if p not in ("/api/claim", "/api/heartbeat", "/api/submit"):
+            return self._send(404, {"error": "not found"})
+        if not rate_ok(self._client_ip()):
+            return self._send(429, {"error": "rate limit — slow down"})
+        body = self._body()
+        if body is None:
+            return self._send(413, {"error": "request body too large"})
+        fn = {"/api/claim": claim, "/api/heartbeat": heartbeat, "/api/submit": submit}[p]
+        code, obj = fn(body)
+        return self._send(code, obj)
 
 if __name__ == "__main__":
     init_db()

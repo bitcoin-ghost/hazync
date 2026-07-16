@@ -52,14 +52,27 @@ The coordinator must **not** fold (folding is a proving step — GPU work). Inst
 - Tested: `timeline()` maps a genesis-chained run → frontier, an out-of-order verified range → ahead, a
   live claim → in-progress, everything else → open; `frontier==0` renders no green (edge fixed).
 
-## 5. Harden + archive decision (last, before opening it up)
-- Rate limiting, auth-on-claim, input caps.
-- **Archive / witness source:** contributors need witnesses (per-block bridge data). Options:
-  (a) **co-locate** a hazed archive/bridge node on the coordinator box that generates witnesses as it
-      syncs and prunes proven blocks — clean "we host the data" story, but the box becomes an archive
-      node (4–8 vCPU, 16 GB, hundreds of GB disk), not a $20/mo VPS;
-  (b) **separate** archive box (seed/GPU box), coordinator serves a rolling cache / proxies.
-  Lean: rolling window to start; co-locate the full hazed archive when it's worth the disk.
+## 5. Harden + archive decision (last, before opening it up)  ✅ DONE
+- **Hardening (done):**
+  - **Rate limiting** — sliding per-IP window on all writes (`RATE_MAX`/`RATE_WINDOW`, default 120/60s;
+    honours `X-Forwarded-For` behind the reverse proxy). Over budget → `429`.
+  - **Input caps** — `pubkey`/`sig` must be exact-length ed25519 hex (32/64 bytes) when signatures are
+    live; `range` must pass `parse_range` (aligned, correct size, in-bounds) on claim *and* submit;
+    handles are stripped of non-printables and capped (`MAX_HANDLE`, default 48); request bodies over
+    `MAX_BODY` (default 8 MiB) → `413`, and an oversized base64 receipt → `413`.
+  - Tested: valid claim ok; non-hex pubkey → 400; misaligned range → 400; control-char/overlong handle
+    sanitised in the ledger; rate limit trips after the budget; oversized body → 413.
+- **Auth-on-claim — decision:** claims stay **cheap best-effort locks** (guarded by rate-limiting +
+  auto-release), *not* signed. Cryptographic authentication lives at **submit** (ed25519 over the
+  receipt bytes) — that's what gates credit, and a forged proof also fails `verify-any`. Signed claims
+  would add onboarding friction for no security gain (the worst a bogus claim does is hold a range until
+  the heartbeat lapses, minutes later). So: no signed claims.
+- **Archive / witness source — decision:** launch with the **rolling window** (option b). Witnesses are
+  served from the coordinator's `WITNESS_DIR`; the operator seeds a window covering the active frontier
+  + the region contributors are working, and the CLI auto-fetches what it needs (item 3). A block outside
+  the window returns 404 and the CLI says so plainly. **Co-locate** a full hazed archive/bridge node on
+  the coordinator box (option a) later, when the disk cost is worth the clean "we host all the data"
+  story. This keeps the launch coordinator a cheap CPU VPS, exactly as intended.
 
 ## Framing (non-technical, but load-bearing)
 The proofs are a **public good** — public, verifiable, benefit every node runner (fast sync, spam-free
@@ -68,4 +81,8 @@ full nodes). Public copy is "help prove Bitcoin's history, for everyone, with yo
 
 ## Status
 MVP done + tested end-to-end with real CPU proofs (blocks 1..10, genesis-anchored frontier climbing,
-ed25519 signed ledger). Items 1–5 are the pre-Delving work.
+ed25519 signed ledger). **Items 1–5 all done** — verify-and-chain, claim-lock/heartbeat/auto-release,
+pick-any-block + witness serving, genesis→tip timeline UI, hardening + archive decision. The coordinator
+is ready to host on a cheap CPU VPS; remaining before the Delving post is operational, not code: stand up
+the VPS + a witness window, run a few hours of GPU proving to seed real frontier progress, and confirm
+the contributor onboarding UX end-to-end.

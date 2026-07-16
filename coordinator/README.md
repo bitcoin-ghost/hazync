@@ -38,6 +38,10 @@ clearly flagged in `/api/state` and on the dashboard). Install it for the real s
 | `VERIFY_MODE` | `real` if `HAZYNC_HOST` set, else `mock` | `mock` stubs the STARK check for testing |
 | `CLAIM_TTL` | `1800` | auto-release a claim after this many seconds without a heartbeat |
 | `CLAIM_MAX` | `86400` | hard cap: release a claim after this long regardless of heartbeats |
+| `RATE_MAX` | `120` | max writes per IP per window (over → `429`) |
+| `RATE_WINDOW` | `60` | rate-limit window, seconds (honours `X-Forwarded-For`) |
+| `MAX_BODY` | `8388608` | reject POST bodies / receipts larger than this (`413`) |
+| `MAX_HANDLE` | `48` | contributor handle length cap (non-printables stripped) |
 
 ## Contributor CLI
 
@@ -96,8 +100,10 @@ MVP. Single-file, SQLite, single-process, **verify-only (CPU, no GPU)**. Verifie
 proofs: blocks 1..10 were CPU-proved on a laptop (~64–110s each), signed, submitted, verified with
 `verify-any`, and chained into the genesis frontier [1..10]. Out-of-order submission tested (block 3
 before block 2: verified but the frontier held at 1, then jumped to 3 when block 2 filled the gap);
-wrong-range receipts rejected; ed25519 signed ledger enforced. Roadmap items 2–4 are done on top of
-this MVP: **claim-lock + heartbeat auto-release**, **pick-any-block + witness serving** (the CLI
-auto-fetches the witnesses it needs), and the **genesis→tip timeline UI** (frontier / ahead /
-in-progress / open). Remaining before opening it up (see `ROADMAP.md`): item 5 — hardening (rate limits,
-auth-on-claim, input caps) + the archive/witness-source decision.
+wrong-range receipts rejected; ed25519 signed ledger enforced. **All five roadmap items are done** on top
+of this MVP: **verify-and-chain**, **claim-lock + heartbeat auto-release**, **pick-any-block + witness
+serving** (the CLI auto-fetches the witnesses it needs), the **genesis→tip timeline UI** (frontier /
+ahead / in-progress / open), and **hardening** (per-IP rate limits, exact-length ed25519 input caps,
+body/handle caps) with the auth + archive decisions recorded in `ROADMAP.md`. What's left before the
+Delving post is operational, not code: host it on a cheap CPU VPS with a witness window, seed a few hours
+of real GPU proving, and confirm the contributor onboarding end-to-end.
