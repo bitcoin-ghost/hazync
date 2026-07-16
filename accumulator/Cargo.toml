@@ -1,0 +1,15 @@
+[package]
+name = "hazync-utreexo"
+version = "0.1.0"
+edition = "2021"
+
+# Utreexo hash-forest UTXO accumulator for Hazync block proofs.
+# Developed/tested natively here; the Stump verify+update logic is what gets ported into the
+# zkVM guest (same code, SHA routed through the RISC0 accelerator there). The Forest is the
+# host-side "bridge node" oracle that generates inclusion proofs — never runs in-circuit.
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+# property tests use only std

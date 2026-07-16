@@ -1,0 +1,113 @@
+# Hazync — security review & status
+
+**This is an internal self-review, not an external audit.** No third party has audited Hazync yet.
+The findings below were surfaced by our own adversarial passes over the guest/host code; we fix them,
+re-run the regression to identical results, and record them here in the open. **Independent review is
+explicitly invited** — the open items at the bottom are the starting bounty list. If you find a way to
+make an invalid input prove valid, that is the finding that matters most.
+
+The property that makes this worth reviewing: the prover runs **real Bitcoin Core v28 consensus code**
+(unmodified `interpreter.cpp`, `SignatureHash`, `libsecp256k1`) inside a RISC0 zkVM, plus a Utreexo
+accumulator. There is no consensus reimplementation to diverge from Core — see `SOUNDNESS.md` for the
+full trust base and the two portability shims.
+
+## Status at a glance
+
+| ID | Area | Severity | Status |
+|----|------|----------|--------|
+| SEC-1 | Witness-commitment bypass (`has_witness` host-controlled) | med-high | **fixed** (6c63565) |
+| SEC-2 | Accumulator `delete` trusted an unverified position | high-crit location | **fixed** (6c63565) |
+| SEC-3 | Prevouts vector length unchecked (OOB read) | low | **fixed** (6c63565) |
+| S1 | Recursion `self_id` self-reference argument | soundness | **fixed** (committed + verifier-asserted; adversarial wrong-id chain rejected) |
+| S2 | Coinbase maturity / BIP68-height fed placeholder metadata | soundness | **fixed** (real coin metadata; validated on 741000) |
+| S4a/b | BIP34 (height in coinbase), BIP30 (duplicate txid) | completeness | **fixed** (validated on 741000) |
+| C1 | No automated regression harness | quality | **fixed** (`check-full` / `regress` execute-mode) |
+| SEC-neg | Negative regression tests for SEC-1/2 | quality | **partial** — SEC-1 witness test done (corrupted-witness block rejected on `witness_ok`); SEC-2 position test open |
+| S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
+| BIP68-time | Needs real `coin_mtp` | completeness | **open** — arrives free with the archive-node bridge |
+| — | External audit | — | **open / wanted** |
+
+## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
+
+All three were validated by rebuilding the guest and re-running the full regression (block 170, block
+741000, `check-ibd` genesis→550) to **byte-identical** tip hashes — i.e. the fixes change nothing on
+valid data, they only reject the malicious cases they close.
+
+### SEC-1 (med-high) — `has_witness` was host-controlled ⇒ BIP141 witness-commitment bypass
+The guest derived `has_witness` (and the wtxids) from host-supplied input. A malicious prover could
+claim "no witness" for a segwit block with a missing or invalid witness commitment and have it prove
+valid, even though Core rejects it — and it opened a witness-malleability divergence.
+**Fix:** recompute `has_witness` *and* every wtxid in-guest from the raw transaction bytes, using
+Core's own `HasWitness()` / `GetWitnessHash()`. The host can no longer influence the witness-commitment
+decision. Block 741000 (segwit+taproot) still proves valid with an identical tip hash and 394 UTXO
+leaves.
+
+### SEC-2 (high-criticality location) — accumulator `delete` trusted an unverified position
+`delete(i, proof_i, proof_last)` verified *membership* of the proven leaves but never checked that the
+global index `i` actually matched them, nor that `proof_last` was the current rightmost coin. Fed
+inconsistent values, a prover could corrupt the accumulator — the worst case being a spent coin
+surviving (a double-spend). No working exploit was built, but the assumption was untested.
+**Fix:** pin `i` to the proven leaf — its tree height must equal the proof's, and its local offset
+(`i − tree_offset`) must equal `proof_i.position` (the *local* in-tree index) — and likewise pin
+`proof_last` to `last`. (Subtlety: `Proof.position` is the local index, not the global one; a first
+attempt that compared against the global `i` broke honest deletes at block 170 and was corrected.)
+
+### SEC-3 (low, robustness) — prevouts vector length unchecked
+`verify_input` / `check_tx` / `tx_full_sigops` indexed `spent[...]` without asserting
+`spent.size() == tx.vin.size()`; a short blob is an out-of-bounds read (the zkVM has no memory
+protection). Failed closed in practice.
+**Fix:** explicit length asserts on the prevouts vector in all three entry points.
+
+## Earlier findings (2026-07-15 self-audit) — status
+
+- **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call
+  `env::verify(self_id, prev_journal)` with a host-controlled `self_id`; the concern is the IVC
+  self-reference trap (a nested `self_id ≠ METHOD_ID` smuggling a malicious guest's receipt). **Fixed:**
+  `self_id` is committed and the verifier asserts `== METHOD_ID` at every level; the positive chain
+  verifies and an adversarial wrong-id chain is rejected. Argument written up in `SOUNDNESS.md §3`.
+  Single-block proofs were always unconditional here; this hardened the recursive case.
+- **S2 — maturity / BIP68-height fed placeholder metadata.** The harness set every spent coin's
+  `coin_height`/`coin_is_coinbase`/`coin_mtp` benign, so maturity + BIP68 never fired on real blocks.
+  **Fixed:** the fetcher/bridge sources each spent coin's real height + coinbase flag and threads them
+  into the witness; both checks fire on real blocks (validated on 741000). While closing this we also
+  found and fixed a latent header bug — the header builder hardcoded version 1 (masked by the
+  version-1-era test vectors), so PoW was wrong on modern blocks; it now uses the real versionbits.
+- **S3 — standalone block proofs don't bind to the real UTXO set.** `prove_full` fabricates `root_prev`
+  from the block's own prevouts + filler, so a standalone proof attests *internal validity +
+  accumulator consistency*, not "these coins were in mainnet's UTXO set at height N". **Not a bug —
+  inherent to standalone testing.** Real-UTXO binding comes from the chain recursion carrying
+  `root_next(N−1) == root_prev(N)` from a trusted anchor; operationally the archive-node bridge drives
+  the accumulator from the real coin set. Stated plainly so results aren't over-read.
+- **S4 — BIP34 / BIP30.** Both **added and validated on 741000** (`bip34_ok` / `bip30_ok`). BIP68-time
+  remains the one open completeness item (needs real `coin_mtp`, free with the bridge).
+- **C1 — regression harness.** **Added:** `check-full` / `regress` run known blocks + the adversarial
+  inflation case in execute mode (seconds, no proving) and assert the flags; standard pre-flight before
+  any GPU prove.
+- **C2 — duplication** between `build_block`/`build_full` and `chain_step`/`aggregate` (the witness_ok
+  conjunction drifted once). Low priority; a shared helper would prevent re-drift. **Open, cosmetic.**
+- **C3 — fabricated anchor timestamps/nbits** in standalone runs — resolved by real recursion (tied to
+  S2/S3). **Open only for near-retarget standalone runs.**
+- **H1** — a committed `.pyc`; **H2** — `Cargo.lock` gitignored (consider committing for reproducible
+  builds); **H3** — README refresh. Housekeeping.
+
+## Open items (the review bounty list)
+
+1. **SEC-neg** — negative regression tests proving the fixes *reject* the malicious cases (not just
+   that valid blocks still pass).
+   - **SEC-1 (witness) — done.** `prover/make_negative_tests.py` produces `block_741000_badwit.json`
+     (one byte flipped inside a transaction's witness → wtxid changes, txid does not). `check-full`
+     reports `merkle_ok=true, witness_ok=false, all_ok=false` — the block is rejected specifically on
+     the BIP141 witness commitment, confirming the check is enforced and unskippable.
+   - **SEC-2 (position) — open.** Needs a test-only host knob to feed `delete` an index inconsistent
+     with the proof and assert the accumulator update is rejected (the normal witness path derives the
+     index from the host accumulator, so it can't express the inconsistency without a hook).
+2. **BIP68 time-based** — needs real `coin_mtp`; arrives free with the archive-node bridge.
+3. **External audit** — especially of the accumulator (the one non-Core component) and the recursion
+   binding. Wanted.
+
+## TL;DR
+The hard part — proving the *real* Core consensus code, not a reimplementation — is done and is the
+thing that removes the soundness gap every prior effort carried. The findings so far are around the
+edges (a host-controllable witness flag, an under-constrained accumulator index, placeholder metadata,
+a couple of missing rules) and are all fixed and regression-checked. What remains is negative tests,
+one time-lock input from the bridge, and — the real ask — independent adversarial review.

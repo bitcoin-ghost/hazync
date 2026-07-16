@@ -1,0 +1,15 @@
+diff --git a/src/serialize.h b/src/serialize.h
+index 2af998f..e9be5f8 100644
+--- a/src/serialize.h
++++ b/src/serialize.h
+@@ -262,6 +262,10 @@ template<typename Stream> inline void Serialize(Stream& s, int32_t a ) { ser_wri
+ template<typename Stream> inline void Serialize(Stream& s, uint32_t a) { ser_writedata32(s, a); }
+ template<typename Stream> inline void Serialize(Stream& s, int64_t a ) { ser_writedata64(s, a); }
+ template<typename Stream> inline void Serialize(Stream& s, uint64_t a) { ser_writedata64(s, a); }
++// ILP32-target shim (riscv32 newlib): int32_t is `long`, so bare `int`/`unsigned` match no
++// overload above. These 32-bit forwards restore the assumption that int==int32_t on the zkVM target.
++template<typename Stream> inline void Serialize(Stream& s, int a) { ser_writedata32(s, (uint32_t)a); }
++template<typename Stream> inline void Serialize(Stream& s, unsigned int a) { ser_writedata32(s, (uint32_t)a); }
+ template <typename Stream, BasicByte B, int N> void Serialize(Stream& s, const B (&a)[N]) { s.write(MakeByteSpan(a)); }
+ template <typename Stream, BasicByte B, std::size_t N> void Serialize(Stream& s, const std::array<B, N>& a) { s.write(MakeByteSpan(a)); }
+ template <typename Stream, BasicByte B> void Serialize(Stream& s, Span<B> span) { s.write(AsBytes(span)); }

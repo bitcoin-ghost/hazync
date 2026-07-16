@@ -1,0 +1,12 @@
+Backfill hardening — validation results (2xL40S box, 2026-07-15)
+
+Build:     compiles first try, PROV_EXIT=0 (guest recompute + tx_out_leaves C helper).
+Regress 1: check-ibd genesis->199 = IDENTICAL (tip eb68047f..., cum_work 859006566600, 203 leaves)
+             -> guest now recomputes outputs from tx bytes; same answer on known-good data.
+Regress 2: check-full block 741000 = VALID, UTXO leaves 402 -> 394 (8 OP_RETURN skipped; H3 works).
+H1 in-block: first in-block spend at block 546 (scanner). check-ibd genesis->550 VALID
+             (tip 00000000314ff43c... == real block 550; cum_work 2366563090983 == 551*genesis).
+             Pre-fix this PANICS at 546; post-fix folds cleanly (ephemeral cancellation).
+H1 on GPU: range-fold [1..550] VERIFIED, 10-level tree, 1077s/2GPU, through block-170 external
+             AND block-546 in-block spends. range_work 2362268058150, cum_work 2366563090983.
+H2 BIP30: reasoned sound (height-in-leaf); live 91842 check deferred (needs full IBD).

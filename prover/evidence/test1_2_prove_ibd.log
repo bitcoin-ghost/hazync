@@ -1,0 +1,12 @@
+=== PROVE-IBD: recursive validity chain, genesis → block 170 (Test 1), then +3 tip extensions (Test 2) ===
+  [IBD] proved block 1: tip 4860eb18bf1b1620e37e9490fc8a427514416fd75159ab86688e9a8300000000 (1.3s this block, 1s cum)
+  [IBD] proved block 50: tip 33aa0fa26441ead7005df4b0ad2e61405e80cb805e3c657f194df32600000000 (1.2s this block, 59s cum)
+  [IBD] proved block 100: tip 9a22db7fd25e719abf9e8ccf869fbbc1e22fa71822a37efae054c17b00000000 (1.2s this block, 120s cum)
+  [IBD] proved block 150: tip 4d1f55defafd65567a149e8cd32e1a2019b993e17f52cfb43357a79c00000000 (1.2s this block, 182s cum)
+  [IBD] proved block 170: tip eea2d48d2fced4346842835c659e493d323f06d4034469a8905714d100000000 (4.4s this block, 209s cum)
+>>> IBD CHAIN PROOF genesis→170 in 209s — receipt VERIFIED. tip_hash eea2d48d2fced4346842835c659e493d323f06d4034469a8905714d100000000  cum_work 734450614443  UTXO leaves 171
+  [TIP] block 171 validated + folded onto the chain proof in 1.2s — tip now e0b4bf8d80026bbec5370a7bb06af54257a9679cef387fab8c53ecc900000000 (height 171)
+  [TIP] block 172 validated + folded onto the chain proof in 1.2s — tip now 54686892dd112de389acc225accc0118765f9c51c2ec9306f6abefe300000000 (height 172)
+  [TIP] block 173 validated + folded onto the chain proof in 1.2s — tip now c585ac476b5878f0f1917826430b3daec278ef28c121c2ec9dd6e9dc00000000 (height 173)
+>>> TIP PROOF at height 173 — one verified receipt attests genesis→173 valid. Marginal cost per tip block above.
+EXIT=0

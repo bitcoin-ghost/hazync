@@ -1,0 +1,20 @@
+CLUSTER: 16 chunks across 2 GPU(s)
+chunk 0 (42 inputs) proved in 153s -> chunk_0.bin
+chunk 1 (42 inputs) proved in 249s -> chunk_1.bin
+chunk 2 (42 inputs) proved in 244s -> chunk_2.bin
+chunk 3 (42 inputs) proved in 245s -> chunk_3.bin
+chunk 4 (42 inputs) proved in 246s -> chunk_4.bin
+chunk 5 (42 inputs) proved in 246s -> chunk_5.bin
+chunk 7 (42 inputs) proved in 246s -> chunk_7.bin
+chunk 6 (42 inputs) proved in 247s -> chunk_6.bin
+chunk 8 (42 inputs) proved in 245s -> chunk_8.bin
+chunk 9 (42 inputs) proved in 246s -> chunk_9.bin
+chunk 11 (42 inputs) proved in 105s -> chunk_11.bin
+chunk 10 (42 inputs) proved in 143s -> chunk_10.bin
+chunk 12 (42 inputs) proved in 102s -> chunk_12.bin
+chunk 13 (42 inputs) proved in 135s -> chunk_13.bin
+chunk 15 (40 inputs) proved in 194s -> chunk_15.bin
+chunk 14 (42 inputs) proved in 229s -> chunk_14.bin
+=== AGGREGATING 16 chunk receipts for block 741000 ===
+>>> BLOCK 741000 AGGREGATED in 1645.2s — receipt VERIFIED.
+  tip_hash f0e89160dbdf8d2d7ffe2676f041390e11f308404ba101000000000000000000  cum_work 130067740078906534883430  UTXO leaves 402

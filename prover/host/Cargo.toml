@@ -1,0 +1,17 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1"
+methods = { path = "../methods" }
+risc0-zkvm = { version = "^3.0.5" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+bitcoin = "0.32"
+bincode = "1"
+hazync-utreexo = { path = "../../accumulator" }
+
+[features]
+cuda = ["risc0-zkvm/cuda"]

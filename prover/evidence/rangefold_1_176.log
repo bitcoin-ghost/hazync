@@ -1,0 +1,366 @@
+=== LEVEL 0: prove blocks 1..176 as ranges across 2 GPUs (/root/witnesses_bridge) ===
+proved range [1..1] in 1.1s -> range_1.bin
+proved range [2..2] in 1.3s -> range_2.bin
+proved range [3..3] in 1.2s -> range_3.bin
+proved range [4..4] in 1.2s -> range_4.bin
+proved range [6..6] in 1.2s -> range_6.bin
+proved range [5..5] in 1.2s -> range_5.bin
+proved range [7..7] in 1.2s -> range_7.bin
+proved range [8..8] in 1.2s -> range_8.bin
+proved range [9..9] in 1.2s -> range_9.bin
+proved range [10..10] in 1.2s -> range_10.bin
+proved range [12..12] in 1.2s -> range_12.bin
+proved range [11..11] in 1.2s -> range_11.bin
+proved range [13..13] in 1.2s -> range_13.bin
+proved range [14..14] in 1.2s -> range_14.bin
+proved range [16..16] in 1.2s -> range_16.bin
+proved range [15..15] in 1.2s -> range_15.bin
+proved range [18..18] in 1.2s -> range_18.bin
+proved range [17..17] in 1.2s -> range_17.bin
+proved range [20..20] in 1.2s -> range_20.bin
+proved range [19..19] in 1.2s -> range_19.bin
+proved range [21..21] in 1.2s -> range_21.bin
+proved range [22..22] in 1.2s -> range_22.bin
+proved range [23..23] in 1.2s -> range_23.bin
+proved range [24..24] in 1.2s -> range_24.bin
+proved range [26..26] in 1.2s -> range_26.bin
+proved range [25..25] in 1.2s -> range_25.bin
+proved range [27..27] in 1.2s -> range_27.bin
+proved range [28..28] in 1.2s -> range_28.bin
+proved range [29..29] in 1.2s -> range_29.bin
+proved range [30..30] in 1.2s -> range_30.bin
+proved range [31..31] in 1.2s -> range_31.bin
+proved range [32..32] in 1.2s -> range_32.bin
+proved range [33..33] in 1.2s -> range_33.bin
+proved range [34..34] in 1.2s -> range_34.bin
+proved range [36..36] in 1.2s -> range_36.bin
+proved range [35..35] in 1.2s -> range_35.bin
+proved range [38..38] in 1.2s -> range_38.bin
+proved range [37..37] in 1.2s -> range_37.bin
+proved range [39..39] in 1.2s -> range_39.bin
+proved range [40..40] in 1.2s -> range_40.bin
+proved range [42..42] in 1.2s -> range_42.bin
+proved range [41..41] in 1.2s -> range_41.bin
+proved range [43..43] in 1.2s -> range_43.bin
+proved range [44..44] in 1.2s -> range_44.bin
+proved range [45..45] in 1.2s -> range_45.bin
+proved range [46..46] in 1.2s -> range_46.bin
+proved range [48..48] in 1.2s -> range_48.bin
+proved range [47..47] in 1.2s -> range_47.bin
+proved range [49..49] in 1.2s -> range_49.bin
+proved range [50..50] in 1.2s -> range_50.bin
+proved range [51..51] in 1.2s -> range_51.bin
+proved range [52..52] in 1.2s -> range_52.bin
+proved range [54..54] in 1.2s -> range_54.bin
+proved range [53..53] in 1.2s -> range_53.bin
+proved range [55..55] in 1.2s -> range_55.bin
+proved range [56..56] in 1.2s -> range_56.bin
+proved range [57..57] in 1.2s -> range_57.bin
+proved range [58..58] in 1.2s -> range_58.bin
+proved range [59..59] in 1.2s -> range_59.bin
+proved range [60..60] in 1.2s -> range_60.bin
+proved range [62..62] in 1.2s -> range_62.bin
+proved range [61..61] in 1.2s -> range_61.bin
+proved range [63..63] in 1.2s -> range_63.bin
+proved range [64..64] in 1.2s -> range_64.bin
+proved range [65..65] in 1.2s -> range_65.bin
+proved range [66..66] in 1.2s -> range_66.bin
+proved range [67..67] in 1.2s -> range_67.bin
+proved range [68..68] in 1.2s -> range_68.bin
+proved range [69..69] in 1.2s -> range_69.bin
+proved range [70..70] in 1.2s -> range_70.bin
+proved range [71..71] in 1.2s -> range_71.bin
+proved range [72..72] in 1.3s -> range_72.bin
+proved range [73..73] in 1.2s -> range_73.bin
+proved range [74..74] in 1.2s -> range_74.bin
+proved range [76..76] in 1.2s -> range_76.bin
+proved range [75..75] in 1.2s -> range_75.bin
+proved range [77..77] in 1.2s -> range_77.bin
+proved range [78..78] in 1.2s -> range_78.bin
+proved range [80..80] in 1.2s -> range_80.bin
+proved range [79..79] in 1.2s -> range_79.bin
+proved range [82..82] in 1.2s -> range_82.bin
+proved range [81..81] in 1.2s -> range_81.bin
+proved range [83..83] in 1.2s -> range_83.bin
+proved range [84..84] in 1.2s -> range_84.bin
+proved range [85..85] in 1.2s -> range_85.bin
+proved range [86..86] in 1.2s -> range_86.bin
+proved range [87..87] in 1.2s -> range_87.bin
+proved range [88..88] in 1.2s -> range_88.bin
+proved range [90..90] in 1.2s -> range_90.bin
+proved range [89..89] in 1.2s -> range_89.bin
+proved range [92..92] in 1.2s -> range_92.bin
+proved range [91..91] in 1.2s -> range_91.bin
+proved range [93..93] in 1.2s -> range_93.bin
+proved range [94..94] in 1.2s -> range_94.bin
+proved range [95..95] in 1.2s -> range_95.bin
+proved range [96..96] in 1.2s -> range_96.bin
+proved range [97..97] in 1.2s -> range_97.bin
+proved range [98..98] in 1.2s -> range_98.bin
+proved range [100..100] in 1.2s -> range_100.bin
+proved range [99..99] in 1.2s -> range_99.bin
+proved range [102..102] in 1.2s -> range_102.bin
+proved range [101..101] in 1.2s -> range_101.bin
+proved range [104..104] in 1.2s -> range_104.bin
+proved range [103..103] in 1.2s -> range_103.bin
+proved range [105..105] in 1.2s -> range_105.bin
+proved range [106..106] in 1.2s -> range_106.bin
+proved range [107..107] in 1.2s -> range_107.bin
+proved range [108..108] in 1.2s -> range_108.bin
+proved range [109..109] in 1.2s -> range_109.bin
+proved range [110..110] in 1.2s -> range_110.bin
+proved range [112..112] in 1.2s -> range_112.bin
+proved range [111..111] in 1.2s -> range_111.bin
+proved range [113..113] in 1.2s -> range_113.bin
+proved range [114..114] in 1.2s -> range_114.bin
+proved range [115..115] in 1.2s -> range_115.bin
+proved range [116..116] in 1.2s -> range_116.bin
+proved range [118..118] in 1.2s -> range_118.bin
+proved range [117..117] in 1.2s -> range_117.bin
+proved range [119..119] in 1.2s -> range_119.bin
+proved range [120..120] in 1.2s -> range_120.bin
+proved range [121..121] in 1.2s -> range_121.bin
+proved range [122..122] in 1.2s -> range_122.bin
+proved range [123..123] in 1.2s -> range_123.bin
+proved range [124..124] in 1.2s -> range_124.bin
+proved range [125..125] in 1.2s -> range_125.bin
+proved range [126..126] in 1.2s -> range_126.bin
+proved range [128..128] in 1.2s -> range_128.bin
+proved range [127..127] in 1.2s -> range_127.bin
+proved range [129..129] in 1.2s -> range_129.bin
+proved range [130..130] in 1.2s -> range_130.bin
+proved range [131..131] in 1.2s -> range_131.bin
+proved range [132..132] in 1.2s -> range_132.bin
+proved range [133..133] in 1.2s -> range_133.bin
+proved range [134..134] in 1.2s -> range_134.bin
+proved range [136..136] in 1.2s -> range_136.bin
+proved range [135..135] in 1.2s -> range_135.bin
+proved range [137..137] in 1.2s -> range_137.bin
+proved range [138..138] in 1.2s -> range_138.bin
+proved range [139..139] in 1.2s -> range_139.bin
+proved range [140..140] in 1.2s -> range_140.bin
+proved range [142..142] in 1.2s -> range_142.bin
+proved range [141..141] in 1.2s -> range_141.bin
+proved range [143..143] in 1.2s -> range_143.bin
+proved range [144..144] in 1.2s -> range_144.bin
+proved range [145..145] in 1.2s -> range_145.bin
+proved range [146..146] in 1.2s -> range_146.bin
+proved range [148..148] in 1.2s -> range_148.bin
+proved range [147..147] in 1.2s -> range_147.bin
+proved range [150..150] in 1.2s -> range_150.bin
+proved range [149..149] in 1.2s -> range_149.bin
+proved range [152..152] in 1.2s -> range_152.bin
+proved range [151..151] in 1.2s -> range_151.bin
+proved range [154..154] in 1.2s -> range_154.bin
+proved range [153..153] in 1.2s -> range_153.bin
+proved range [156..156] in 1.2s -> range_156.bin
+proved range [155..155] in 1.2s -> range_155.bin
+proved range [157..157] in 1.2s -> range_157.bin
+proved range [158..158] in 1.2s -> range_158.bin
+proved range [159..159] in 1.2s -> range_159.bin
+proved range [160..160] in 1.2s -> range_160.bin
+proved range [161..161] in 1.2s -> range_161.bin
+proved range [162..162] in 1.2s -> range_162.bin
+proved range [163..163] in 1.2s -> range_163.bin
+proved range [164..164] in 1.2s -> range_164.bin
+proved range [165..165] in 1.2s -> range_165.bin
+proved range [166..166] in 1.2s -> range_166.bin
+proved range [168..168] in 1.2s -> range_168.bin
+proved range [167..167] in 1.2s -> range_167.bin
+proved range [169..169] in 1.2s -> range_169.bin
+proved range [170..170] in 4.0s -> range_170.bin
+proved range [172..172] in 1.3s -> range_172.bin
+proved range [171..171] in 1.3s -> range_171.bin
+proved range [173..173] in 1.2s -> range_173.bin
+proved range [174..174] in 1.2s -> range_174.bin
+proved range [175..175] in 1.2s -> range_175.bin
+proved range [176..176] in 1.2s -> range_176.bin
+=== TREE FOLD (parallel per level) ===
+folded -> range [1..2] in 1.7s -> fold_L1_0.bin
+folded -> range [3..4] in 1.7s -> fold_L1_2.bin
+folded -> range [5..6] in 2.1s -> fold_L1_4.bin
+folded -> range [7..8] in 2.1s -> fold_L1_6.bin
+folded -> range [11..12] in 2.1s -> fold_L1_10.bin
+folded -> range [9..10] in 2.1s -> fold_L1_8.bin
+folded -> range [13..14] in 2.1s -> fold_L1_12.bin
+folded -> range [15..16] in 2.1s -> fold_L1_14.bin
+folded -> range [17..18] in 2.1s -> fold_L1_16.bin
+folded -> range [19..20] in 2.1s -> fold_L1_18.bin
+folded -> range [21..22] in 2.1s -> fold_L1_20.bin
+folded -> range [23..24] in 2.1s -> fold_L1_22.bin
+folded -> range [25..26] in 2.1s -> fold_L1_24.bin
+folded -> range [27..28] in 2.1s -> fold_L1_26.bin
+folded -> range [29..30] in 2.1s -> fold_L1_28.bin
+folded -> range [31..32] in 2.2s -> fold_L1_30.bin
+folded -> range [33..34] in 2.1s -> fold_L1_32.bin
+folded -> range [35..36] in 2.1s -> fold_L1_34.bin
+folded -> range [37..38] in 2.1s -> fold_L1_36.bin
+folded -> range [39..40] in 2.1s -> fold_L1_38.bin
+folded -> range [41..42] in 2.1s -> fold_L1_40.bin
+folded -> range [43..44] in 2.1s -> fold_L1_42.bin
+folded -> range [47..48] in 2.1s -> fold_L1_46.bin
+folded -> range [45..46] in 2.1s -> fold_L1_44.bin
+folded -> range [49..50] in 2.1s -> fold_L1_48.bin
+folded -> range [51..52] in 2.1s -> fold_L1_50.bin
+folded -> range [55..56] in 2.1s -> fold_L1_54.bin
+folded -> range [53..54] in 2.1s -> fold_L1_52.bin
+folded -> range [57..58] in 2.1s -> fold_L1_56.bin
+folded -> range [59..60] in 2.1s -> fold_L1_58.bin
+folded -> range [63..64] in 2.2s -> fold_L1_62.bin
+folded -> range [61..62] in 2.2s -> fold_L1_60.bin
+folded -> range [65..66] in 2.1s -> fold_L1_64.bin
+folded -> range [67..68] in 2.1s -> fold_L1_66.bin
+folded -> range [69..70] in 2.1s -> fold_L1_68.bin
+folded -> range [71..72] in 2.1s -> fold_L1_70.bin
+folded -> range [73..74] in 2.1s -> fold_L1_72.bin
+folded -> range [75..76] in 2.1s -> fold_L1_74.bin
+folded -> range [79..80] in 2.1s -> fold_L1_78.bin
+folded -> range [77..78] in 2.1s -> fold_L1_76.bin
+folded -> range [81..82] in 2.1s -> fold_L1_80.bin
+folded -> range [83..84] in 2.1s -> fold_L1_82.bin
+folded -> range [85..86] in 2.2s -> fold_L1_84.bin
+folded -> range [87..88] in 2.2s -> fold_L1_86.bin
+folded -> range [89..90] in 2.1s -> fold_L1_88.bin
+folded -> range [91..92] in 2.2s -> fold_L1_90.bin
+folded -> range [93..94] in 2.2s -> fold_L1_92.bin
+folded -> range [95..96] in 2.2s -> fold_L1_94.bin
+folded -> range [99..100] in 2.1s -> fold_L1_98.bin
+folded -> range [97..98] in 2.2s -> fold_L1_96.bin
+folded -> range [101..102] in 2.2s -> fold_L1_100.bin
+folded -> range [103..104] in 2.2s -> fold_L1_102.bin
+folded -> range [107..108] in 2.2s -> fold_L1_106.bin
+folded -> range [105..106] in 2.2s -> fold_L1_104.bin
+folded -> range [109..110] in 2.2s -> fold_L1_108.bin
+folded -> range [111..112] in 2.2s -> fold_L1_110.bin
+folded -> range [115..116] in 2.1s -> fold_L1_114.bin
+folded -> range [113..114] in 2.2s -> fold_L1_112.bin
+folded -> range [119..120] in 2.2s -> fold_L1_118.bin
+folded -> range [117..118] in 2.2s -> fold_L1_116.bin
+folded -> range [123..124] in 2.2s -> fold_L1_122.bin
+folded -> range [121..122] in 2.2s -> fold_L1_120.bin
+folded -> range [125..126] in 2.2s -> fold_L1_124.bin
+folded -> range [127..128] in 2.2s -> fold_L1_126.bin
+folded -> range [129..130] in 2.1s -> fold_L1_128.bin
+folded -> range [131..132] in 2.1s -> fold_L1_130.bin
+folded -> range [135..136] in 2.1s -> fold_L1_134.bin
+folded -> range [133..134] in 2.1s -> fold_L1_132.bin
+folded -> range [139..140] in 2.1s -> fold_L1_138.bin
+folded -> range [137..138] in 2.1s -> fold_L1_136.bin
+folded -> range [141..142] in 2.1s -> fold_L1_140.bin
+folded -> range [143..144] in 2.1s -> fold_L1_142.bin
+folded -> range [145..146] in 2.1s -> fold_L1_144.bin
+folded -> range [147..148] in 2.1s -> fold_L1_146.bin
+folded -> range [151..152] in 2.1s -> fold_L1_150.bin
+folded -> range [149..150] in 2.1s -> fold_L1_148.bin
+folded -> range [153..154] in 2.1s -> fold_L1_152.bin
+folded -> range [155..156] in 2.1s -> fold_L1_154.bin
+folded -> range [159..160] in 2.2s -> fold_L1_158.bin
+folded -> range [157..158] in 2.2s -> fold_L1_156.bin
+folded -> range [161..162] in 2.1s -> fold_L1_160.bin
+folded -> range [163..164] in 2.1s -> fold_L1_162.bin
+folded -> range [167..168] in 2.1s -> fold_L1_166.bin
+folded -> range [165..166] in 2.1s -> fold_L1_164.bin
+folded -> range [169..170] in 2.2s -> fold_L1_168.bin
+folded -> range [171..172] in 2.2s -> fold_L1_170.bin
+folded -> range [175..176] in 2.1s -> fold_L1_174.bin
+folded -> range [173..174] in 2.2s -> fold_L1_172.bin
+  level 1 -> 88 range(s) remain
+folded -> range [1..4] in 1.7s -> fold_L2_0.bin
+folded -> range [5..8] in 1.7s -> fold_L2_2.bin
+folded -> range [9..12] in 2.1s -> fold_L2_4.bin
+folded -> range [13..16] in 2.1s -> fold_L2_6.bin
+folded -> range [17..20] in 2.1s -> fold_L2_8.bin
+folded -> range [21..24] in 2.1s -> fold_L2_10.bin
+folded -> range [29..32] in 2.1s -> fold_L2_14.bin
+folded -> range [25..28] in 2.1s -> fold_L2_12.bin
+folded -> range [33..36] in 2.1s -> fold_L2_16.bin
+folded -> range [37..40] in 2.1s -> fold_L2_18.bin
+folded -> range [45..48] in 2.1s -> fold_L2_22.bin
+folded -> range [41..44] in 2.1s -> fold_L2_20.bin
+folded -> range [53..56] in 2.1s -> fold_L2_26.bin
+folded -> range [49..52] in 2.1s -> fold_L2_24.bin
+folded -> range [61..64] in 2.1s -> fold_L2_30.bin
+folded -> range [57..60] in 2.1s -> fold_L2_28.bin
+folded -> range [65..68] in 2.1s -> fold_L2_32.bin
+folded -> range [69..72] in 2.1s -> fold_L2_34.bin
+folded -> range [77..80] in 2.1s -> fold_L2_38.bin
+folded -> range [73..76] in 2.1s -> fold_L2_36.bin
+folded -> range [81..84] in 2.1s -> fold_L2_40.bin
+folded -> range [85..88] in 2.1s -> fold_L2_42.bin
+folded -> range [89..92] in 2.1s -> fold_L2_44.bin
+folded -> range [93..96] in 2.1s -> fold_L2_46.bin
+folded -> range [97..100] in 2.1s -> fold_L2_48.bin
+folded -> range [101..104] in 2.1s -> fold_L2_50.bin
+folded -> range [105..108] in 2.1s -> fold_L2_52.bin
+folded -> range [109..112] in 2.1s -> fold_L2_54.bin
+folded -> range [113..116] in 2.1s -> fold_L2_56.bin
+folded -> range [117..120] in 2.1s -> fold_L2_58.bin
+folded -> range [125..128] in 2.1s -> fold_L2_62.bin
+folded -> range [121..124] in 2.1s -> fold_L2_60.bin
+folded -> range [129..132] in 2.1s -> fold_L2_64.bin
+folded -> range [133..136] in 2.1s -> fold_L2_66.bin
+folded -> range [137..140] in 2.1s -> fold_L2_68.bin
+folded -> range [141..144] in 2.1s -> fold_L2_70.bin
+folded -> range [145..148] in 2.1s -> fold_L2_72.bin
+folded -> range [149..152] in 2.1s -> fold_L2_74.bin
+folded -> range [153..156] in 2.1s -> fold_L2_76.bin
+folded -> range [157..160] in 2.1s -> fold_L2_78.bin
+folded -> range [161..164] in 2.1s -> fold_L2_80.bin
+folded -> range [165..168] in 2.1s -> fold_L2_82.bin
+folded -> range [169..172] in 2.2s -> fold_L2_84.bin
+folded -> range [173..176] in 2.2s -> fold_L2_86.bin
+  level 2 -> 44 range(s) remain
+folded -> range [1..8] in 1.7s -> fold_L3_0.bin
+folded -> range [9..16] in 1.7s -> fold_L3_2.bin
+folded -> range [17..24] in 2.1s -> fold_L3_4.bin
+folded -> range [25..32] in 2.1s -> fold_L3_6.bin
+folded -> range [33..40] in 2.1s -> fold_L3_8.bin
+folded -> range [41..48] in 2.1s -> fold_L3_10.bin
+folded -> range [49..56] in 2.1s -> fold_L3_12.bin
+folded -> range [57..64] in 2.1s -> fold_L3_14.bin
+folded -> range [65..72] in 2.1s -> fold_L3_16.bin
+folded -> range [73..80] in 2.1s -> fold_L3_18.bin
+folded -> range [89..96] in 2.1s -> fold_L3_22.bin
+folded -> range [81..88] in 2.1s -> fold_L3_20.bin
+folded -> range [97..104] in 2.1s -> fold_L3_24.bin
+folded -> range [105..112] in 2.1s -> fold_L3_26.bin
+folded -> range [121..128] in 2.1s -> fold_L3_30.bin
+folded -> range [113..120] in 2.1s -> fold_L3_28.bin
+folded -> range [137..144] in 2.1s -> fold_L3_34.bin
+folded -> range [129..136] in 2.1s -> fold_L3_32.bin
+folded -> range [145..152] in 2.1s -> fold_L3_36.bin
+folded -> range [153..160] in 2.1s -> fold_L3_38.bin
+folded -> range [161..168] in 2.1s -> fold_L3_40.bin
+folded -> range [169..176] in 2.2s -> fold_L3_42.bin
+  level 3 -> 22 range(s) remain
+folded -> range [1..16] in 1.7s -> fold_L4_0.bin
+folded -> range [17..32] in 1.7s -> fold_L4_2.bin
+folded -> range [33..48] in 2.1s -> fold_L4_4.bin
+folded -> range [49..64] in 2.1s -> fold_L4_6.bin
+folded -> range [81..96] in 2.1s -> fold_L4_10.bin
+folded -> range [65..80] in 2.1s -> fold_L4_8.bin
+folded -> range [97..112] in 2.1s -> fold_L4_12.bin
+folded -> range [113..128] in 2.1s -> fold_L4_14.bin
+folded -> range [129..144] in 2.1s -> fold_L4_16.bin
+folded -> range [145..160] in 2.1s -> fold_L4_18.bin
+folded -> range [161..176] in 2.0s -> fold_L4_20.bin
+  level 4 -> 11 range(s) remain
+folded -> range [1..32] in 1.7s -> fold_L5_0.bin
+folded -> range [33..64] in 2.1s -> fold_L5_2.bin
+folded -> range [97..128] in 2.1s -> fold_L5_6.bin
+folded -> range [65..96] in 2.1s -> fold_L5_4.bin
+folded -> range [129..160] in 2.0s -> fold_L5_8.bin
+  level 5 -> 6 range(s) remain
+folded -> range [1..64] in 1.7s -> fold_L6_0.bin
+folded -> range [65..128] in 2.1s -> fold_L6_2.bin
+folded -> range [129..176] in 2.0s -> fold_L6_4.bin
+  level 6 -> 3 range(s) remain
+folded -> range [1..128] in 1.6s -> fold_L7_0.bin
+  level 7 -> 2 range(s) remain
+folded -> range [1..176] in 2.0s -> fold_L8_0.bin
+  level 8 -> 1 range(s) remain
+=== VERIFY (genesis-anchored) ===
+>>> RANGE PROOF [1..176] VERIFIED — genesis-anchored, one succinct receipt.
+  out_tip_hash 586ebdf7f1df4885ca322a3021773c6281691f9450e8b8edddf3a91600000000  range_work 755925778608  total_cum_work 760220811441  UTXO leaves 177
+TOTAL wall-clock: 320s
+ALLDONE

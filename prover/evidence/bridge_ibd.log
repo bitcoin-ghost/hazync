@@ -1,0 +1,3 @@
+2026-07-15T15:09:13Z Command-line arg: hazyncwitness="/witnesses"
+2026-07-15T15:09:13Z hazync: emitting block witnesses to /witnesses
+2026-07-15T15:22:02Z UpdateTip: new best=00000000b7691ccc084542565697eca256e56bb7f67e560b48789db27f0468eb height=199 version=0x00000001 log2_work=39.643878 tx=205 date='2009-01-12T09:32:37Z' progress=0.000000 cache=0.3MiB(204txo)
