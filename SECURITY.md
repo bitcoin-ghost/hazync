@@ -106,16 +106,22 @@ protection). Failed closed in practice.
      other flag true, isolating the rejection to the hardened `delete`'s position check. Without the
      knob the same block is VALID. The knob is inert unless the env var is set. See
      `prover/make_negative_tests.py`.
-2. **BIP68 time-based (soundness)** — the placeholder `coin_mtp = 0` makes the required-elapsed test
-   `spend_mtp ≥ (relative seconds ≤ ~388d)`, which any real block MTP satisfies, so a premature
-   time-based relative-locked spend would prove valid (Core rejects it). Latent (time-based relative
-   locks are rare and none of the tested blocks use one) but real. Closed by threading the real
-   creation-MTP, which the archive-node bridge has for free (the MTP of the block at `coin.nHeight`).
-   **Demonstrated** with real mainnet MTP data (`prover/test_bip68_locks.sh`,
-   `prover/evidence/bip68_locks.txt`): the identical 388-day time-locked spend proves VALID under
-   `coin_mtp = 0` but is correctly REJECTED (`-42`) once the real block-700000 creation-MTP is supplied
-   — same tx, same spending block, only the coin's creation-MTP differs. The check itself (guest
-   `check_input_locks`) is therefore correct; it is starved of real data until the bridge lands.
+2. **BIP68 time-based (soundness)** — the correct value is Core's `GetMedianTimePast(coinHeight−1)`;
+   the block-proving path currently feeds the creating block's raw timestamp (or `0` for pre-metadata
+   fetches like `block_741000.json`), neither of which is the real MTP. A wrong value skews the
+   required-elapsed test, so a premature time-based relative-locked spend could prove valid (Core
+   rejects it). Latent (time-based relative locks are rare and none of the early-history test blocks
+   use one) but real.
+   - **The check is now proven correct on REAL mainnet data.** `prover/test_bip68_real.sh`
+     (evidence `prover/evidence/bip68_real_mainnet.txt`) runs the real `check_input_locks` on a real
+     mainnet tx — `3fa669af…` in block 958250, a 90-day Taproot CSV lock — with the real
+     `coin_mtp = MTP(945408)` and `spend_mtp = MTP(958250)`. The coin is 90.2 days old, mainnet accepted
+     it, and the check returns VALID; a coin ~0.3 days younger is REJECTED (`-42`). Also demonstrated
+     against the `coin_mtp = 0` counterfactual in `prover/test_bip68_locks.sh`.
+   - **Remaining:** thread the real `MTP(coinHeight−1)` into the block-proving path itself (a
+     coordinated host+guest change, since the value is committed in the accumulator leaf and must match
+     on the creation and spend sides). In progress. The archive-node bridge supplies this MTP for free
+     (the median-time-past of the block at `coin.nHeight`).
 3. **External audit** — especially of the accumulator (the one non-Core component) and the recursion
    binding. Wanted.
 

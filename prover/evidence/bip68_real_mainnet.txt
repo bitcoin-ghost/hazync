@@ -1,0 +1,11 @@
+# BIP68 time-based relative-lock — proven on a REAL mainnet transaction
+# tx 3fa669af8754cb15309875350b88489e80b4f9254d6bc3bd772c56283b6ccfe8 (block 958250, vin[0])
+# nSequence 0x00403b53 = 90-day CSV time-lock; spends a coin created at height 945409.
+# Real median-time-past data (from mainnet block timestamps):
+#   coin_mtp  = MTP(945408) = 1776385451
+#   spend_mtp = MTP(958250) = 1784181022
+#   elapsed   = 7795571s (~90.2 d) vs required 7775744s (90.0 d) -> mainnet ACCEPTED this block.
+# Run through the REAL Core-derived check_input_locks (guest mode 8):
+
+REAL DATA (mainnet-valid, coin 90.2d old)      : LOCKS rc=1 (VALID)  [nSequence=0x00403b53 coin_mtp=1776385451 spend_mtp=1784181022 coin_h=100 spend_h=200 cb=0]
+COUNTERFACTUAL (coin bumped ~0.3d younger)     : LOCKS rc=-42 (REJECT time-lock-unmet)  [nSequence=0x00403b53 coin_mtp=1776410451 spend_mtp=1784181022 coin_h=100 spend_h=200 cb=0]

@@ -436,22 +436,30 @@ fn test_locks_cmd() {
     let coin_h = ev("HAZYNC_LOCK_COINH", 100);
     let spend_h = ev("HAZYNC_LOCK_SPENDH", 200);
     let cb = ev("HAZYNC_LOCK_CB", 0);
-    // minimal legacy v2 tx: 1 input (nSequence=seq), 1 zero output, locktime 0
-    let mut raw: Vec<u8> = Vec::new();
-    raw.extend_from_slice(&2u32.to_le_bytes()); // version 2
-    raw.push(1); // vin count
-    raw.extend_from_slice(&[0u8; 32]); // prev txid
-    raw.extend_from_slice(&0u32.to_le_bytes()); // prev vout
-    raw.push(0); // scriptSig len
-    raw.extend_from_slice(&seq.to_le_bytes()); // nSequence
-    raw.push(1); // vout count
-    raw.extend_from_slice(&0u64.to_le_bytes()); // value
-    raw.push(0); // scriptPubKey len
-    raw.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    // Real-tx mode: if HAZYNC_LOCK_RAWTX (hex) is set, feed the ACTUAL mainnet tx bytes to the real
+    // check_input_locks (its version + vin[idx].nSequence are read from these). Else build a minimal
+    // synthetic v2 tx carrying HAZYNC_LOCK_SEQ.
+    let input_idx: u32 = std::env::var("HAZYNC_LOCK_IDX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let raw: Vec<u8> = if let Ok(h) = std::env::var("HAZYNC_LOCK_RAWTX") {
+        hx(h.trim())
+    } else {
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(&2u32.to_le_bytes()); // version 2
+        raw.push(1); // vin count
+        raw.extend_from_slice(&[0u8; 32]); // prev txid
+        raw.extend_from_slice(&0u32.to_le_bytes()); // prev vout
+        raw.push(0); // scriptSig len
+        raw.extend_from_slice(&seq.to_le_bytes()); // nSequence
+        raw.push(1); // vout count
+        raw.extend_from_slice(&0u64.to_le_bytes()); // value
+        raw.push(0); // scriptPubKey len
+        raw.extend_from_slice(&0u32.to_le_bytes()); // locktime
+        raw
+    };
     let mut b = ExecutorEnv::builder();
     b.write(&8u32).unwrap();
     b.write(&raw).unwrap();
-    b.write(&0u32).unwrap(); // input_idx
+    b.write(&input_idx).unwrap(); // input_idx
     b.write(&coin_h).unwrap();
     b.write(&cb).unwrap();
     b.write(&coin_mtp).unwrap();
@@ -460,8 +468,10 @@ fn test_locks_cmd() {
     let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec");
     let rc: i32 = s.journal.decode().unwrap();
     let meaning = match rc { 1 => "VALID", -40 => "REJECT immature-coinbase", -41 => "REJECT height-lock-unmet", -42 => "REJECT time-lock-unmet", _ => "?" };
-    println!("LOCKS rc={} ({})  [seq={:#010x} coin_mtp={} spend_mtp={} coin_h={} spend_h={} cb={}]",
-        rc, meaning, seq, coin_mtp, spend_mtp, coin_h, spend_h, cb);
+    // display the ACTUAL nSequence the check read (from the real tx bytes, not the synthetic var)
+    let disp_seq = deserialize::<Transaction>(&raw).map(|t| t.input[input_idx as usize].sequence.0).unwrap_or(seq);
+    println!("LOCKS rc={} ({})  [nSequence={:#010x} coin_mtp={} spend_mtp={} coin_h={} spend_h={} cb={}]",
+        rc, meaning, disp_seq, coin_mtp, spend_mtp, coin_h, spend_h, cb);
 }
 
 // committing a multi-GPU prove; a false flag panics here in seconds-to-minutes on CPU, not hours on GPU.
