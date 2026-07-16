@@ -50,7 +50,28 @@
   .cols{display:grid;grid-template-columns:1.6fr 1fr;gap:20px;margin-top:34px;align-items:start}@media (max-width:900px){.cols{grid-template-columns:1fr}}
   .panel{border:1px solid var(--rule);border-radius:6px;overflow:hidden;background:var(--bg)}
   .panel .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--rule)}.panel .ph h2{font-size:15px;font-weight:600}.panel .ph .hint{font-family:var(--font-mono);font-size:11px;color:var(--dim)}
+  .ctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:15px 16px 0}
+  .seg{display:inline-flex;border:1px solid var(--rule-strong);border-radius:6px;overflow:hidden;flex:none}
+  .seg button{appearance:none;background:none;border:0;padding:8px 13px;font-family:var(--font-mono);font-size:11.5px;color:var(--dim);cursor:pointer;transition:color .12s,background .12s}
+  .seg button.on{background:var(--accent-weak);color:var(--accent)}
+  .find{display:flex;align-items:center;flex:1;min-width:190px;border:1px solid var(--rule-strong);border-radius:6px;overflow:hidden;transition:border-color .12s}
+  .find:focus-within{border-color:var(--accent)}
+  .find svg{width:15px;height:15px;margin:0 9px;color:var(--fainter);flex:none}
+  .find input{flex:1;min-width:0;appearance:none;background:none;border:0;padding:9px 0;font-family:var(--font-mono);font-size:13px;color:var(--fg);outline:none}
+  .find input::placeholder{color:var(--fainter)}
+  .find button{appearance:none;background:var(--accent-weak);border:0;border-left:1px solid var(--rule-strong);padding:9px 14px;font-family:var(--font-mono);font-size:11.5px;color:var(--accent);cursor:pointer}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;padding:12px 16px 0}
+  .chips button{appearance:none;background:none;border:1px solid var(--rule-strong);border-radius:999px;padding:5px 12px;font-family:var(--font-mono);font-size:11px;color:var(--dim);cursor:pointer;transition:color .12s,border-color .12s,background .12s}
+  .chips button.on{border-color:var(--accent);color:var(--accent);background:var(--accent-weak)}
+  .browse{padding:16px 16px 2px}
+  .browse input[type=range]{width:100%;height:5px;-webkit-appearance:none;appearance:none;background:var(--rule);border-radius:6px;outline:none;cursor:pointer}
+  .browse input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid var(--bg);cursor:pointer}
+  .browse input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid var(--bg);cursor:pointer}
+  .browse input[type=range]:focus-visible{box-shadow:0 0 0 2px var(--accent-weak)}
+  .browse-lbl{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:10.5px;color:var(--fainter);margin-top:7px}.browse-lbl #browse-pos{color:var(--dim)}
+  .tl-strip{cursor:pointer}
   .board{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:16px}@media (max-width:560px){.board{grid-template-columns:repeat(2,1fr)}}
+  .range.focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
   .range{border:1px solid var(--rule);border-radius:5px;padding:12px 13px;background:var(--surface);display:flex;flex-direction:column;gap:8px;min-height:90px}
   .range .rid{font-family:var(--font-mono);font-size:12.5px;font-weight:500;letter-spacing:-.01em}
   .range .rby{font-family:var(--font-mono);font-size:10.5px;color:var(--dim);display:flex;align-items:center;gap:5px;margin-top:auto}.range .rby .sig{color:var(--green)}
@@ -89,11 +110,32 @@
     <div class="tl-strip" id="tl-strip"></div>
     <div class="tl-legend"><span><i class="frontier"></i> frontier (verified + chained from genesis)</span><span><i class="ahead"></i> proven ahead (out of order)</span><span><i class="claimed"></i> in progress</span><span><i class="open"></i> open</span></div></div>
   <div class="cols">
-    <section class="panel" id="board-panel"><div class="ph"><h2>Pick a block range</h2><span class="hint" id="range-size"></span></div>
-      <div class="claim" id="claim"><div class="ch"><span>Claim · range <b id="crange">—</b></span><button class="cx" id="cclose">✕</button></div>
-<pre><span class="c"># pull the witness, prove on your GPU, submit — signed with your key</span>
-<span class="p">$</span> hazync claim <span id="ccmd">—</span> && hazync prove && hazync submit</pre>
-        <div class="cf">the coordinator verifies your signature + the STARK receipt, then credits the range to you <span class="sig">◈</span></div></div>
+    <section class="panel" id="board-panel"><div class="ph"><h2>Choose a block to prove</h2><span class="hint" id="board-hint"></span></div>
+      <div class="ctl">
+        <div class="seg" id="mode" role="tablist" aria-label="Claim size">
+          <button type="button" data-m="single" class="on">Single block</button>
+          <button type="button" data-m="range">Range</button>
+        </div>
+        <form class="find" id="find" autocomplete="off">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="find-in" inputmode="numeric" pattern="[0-9]*" placeholder="jump to an exact block number…" aria-label="Jump to block number">
+          <button type="submit">Go</button>
+        </form>
+      </div>
+      <div class="chips" id="filters" aria-label="Filter by status">
+        <button type="button" data-f="all" class="on">All</button>
+        <button type="button" data-f="open">Open</button>
+        <button type="button" data-f="proving">In progress</button>
+        <button type="button" data-f="verified">Verified</button>
+      </div>
+      <div class="browse">
+        <input type="range" id="slider" min="0" max="1000" value="0" aria-label="Browse the chain from genesis to tip">
+        <div class="browse-lbl"><span>◂ genesis</span><span id="browse-pos" class="mono"></span><span>tip ▸</span></div>
+      </div>
+      <div class="claim" id="claim"><div class="ch"><span>Claim · <span id="ckind">block</span> <b id="crange">—</b></span><button class="cx" id="cclose">✕</button></div>
+<pre><span class="c"># claim it, prove on your GPU, submit — signed with your key, in one command</span>
+<span class="p">$</span> hazync run <span id="ccmd">—</span></pre>
+        <div class="cf">the coordinator verifies your signature + the STARK receipt, then credits it to you <span class="sig">◈</span></div></div>
       <div class="board" id="board"></div></section>
     <div class="sidepanel">
       <section class="panel"><div class="ph"><h2>Leaderboard</h2><span class="hint" id="sigmode">signed ledger</span></div><div id="leaderboard"></div>
@@ -126,22 +168,69 @@
       var ahead=tl.per_seg.filter(function(v){return v===2}).length;
       $('tl-count').innerHTML='<b>'+fmt(p.frontier)+'</b> proven &amp; chained'+(ahead?' · +'+ahead+' seg ahead':'');
     }
-    // board
-    var b=d.board.map(function(r){
-      if(r.status==='verified')return '<div class="range"><span class="pill verified">verified</span><span class="rid">'+r.id+'</span><span class="rby"><span class="sig">◈</span> '+(r.handle||'—')+'</span></div>';
-      if(r.status==='claimed'){var el=r.elapsed?' · '+Math.floor(r.elapsed/60)+'m':'';return '<div class="range"><span class="pill claimed">'+(r.stale?'quiet':'proving')+'</span><span class="rid">'+r.id+'</span><span class="rby">'+(r.handle||'claimed')+el+'</span></div>';}
-      return '<div class="range avail" tabindex="0" data-r="'+r.id+'"><span class="pill open">open</span><span class="rid">'+r.id+'</span><span class="rby">claim this range →</span></div>';
-    }).join('');
-    $('board').innerHTML=b||'<div class="empty">no ranges yet</div>';
-    $('range-size').textContent=d.board.length?(d.board[0].hi-d.board[0].lo+1)+' blocks each':'';
+    // board (explorer — single/range, search, slider, filters; see controller below)
+    VIEW.data=d; renderBoard();
     // leaderboard
     var L=d.leaderboard.filter(function(x){return x.blocks>0});
     $('leaderboard').innerHTML=L.length?L.map(function(x,i){return '<div class="lrow"><span class="rk">'+(i+1)+'</span><span class="who"><span class="hn">'+(x.handle||'anon')+'</span><span class="ky">'+x.id+'… <span class="sig">◈</span></span></span><span class="n">'+fmt(x.blocks)+'<small>blocks</small></span></div>'}).join(''):'<div class="empty">no verified proofs yet — be the first</div>';
     // recent
     $('recent').innerHTML=d.recent.length?d.recent.map(function(s){return '<div class="frow"><span class="'+(s.verified?'ok':'no')+'">'+(s.verified?'✓':'…')+'</span><span class="blk">'+s.range+'</span><span class="by">'+(s.handle||'anon')+' · '+ago(s.ts)+'</span></div>'}).join(''):'<div class="empty">nothing yet</div>';
   }
-  $('board').addEventListener('click',function(e){var el=e.target.closest('.range.avail');if(el)openClaim(el)});
-  function openClaim(el){$('crange').textContent=el.dataset.r;$('ccmd').textContent=el.dataset.r;$('claim').classList.add('show');$('claim').scrollIntoView({behavior:'smooth',block:'nearest'})}
+  // ---- block explorer: single/range · search · slider · filters (all client-side over vranges/claims) ----
+  var VIEW={mode:'single',filter:'all',start:0,focus:null,data:null,init:false};
+  function tipOf(){return (VIEW.data&&VIEW.data.progress&&VIEW.data.progress.tip)||958301;}
+  function sizeOf(){return (VIEW.data&&VIEW.data.range_size)||1000;}
+  function worldOf(d){var p=d.progress||{};return {frontier:p.frontier||0,tip:p.tip||958301,size:d.range_size||1000,verified:d.vranges||[],claims:d.claims||[]};}
+  function hit(list,n){for(var i=0;i<list.length;i++){if(n>=list[i].lo&&n<=list[i].hi)return list[i];}return null;}
+  function overlap(a0,a1,b0,b1){return a0<=b1&&b0<=a1;}
+  function blkStatus(w,n){var v=hit(w.verified,n);if(v)return{s:'verified',handle:v.handle,ahead:v.lo>w.frontier};var c=hit(w.claims,n);if(c)return{s:'claimed',handle:c.handle,elapsed:c.elapsed,stale:c.stale};return{s:'open'};}
+  function rngStatus(w,lo,hi){for(var j=0;j<w.claims.length;j++){var c=w.claims[j];if(overlap(lo,hi,c.lo,c.hi))return{s:'claimed',handle:c.handle,elapsed:c.elapsed,stale:c.stale};}for(var i=0;i<w.verified.length;i++){var v=w.verified[i];if(v.lo<=lo&&v.hi>=hi)return{s:'verified',handle:v.handle,ahead:v.lo>w.frontier};}return{s:'open'};}
+  function matchF(s){return VIEW.filter==='all'||(VIEW.filter==='open'&&s==='open')||(VIEW.filter==='proving'&&s==='claimed')||(VIEW.filter==='verified'&&s==='verified');}
+  function firstOpen(w,from){var n=Math.max(0,from),k=0;while(n<w.tip&&k<400000){if(blkStatus(w,n).s==='open')return n;n++;k++;}return from;}
+  function bodyLine(st){
+    if(st.s==='verified')return '<span class="rby"><span class="sig">◈</span> '+(st.handle||'—')+'</span>';
+    if(st.s==='claimed'){var el=st.elapsed?' · '+Math.floor(st.elapsed/60)+'m':'';return '<span class="rby">'+(st.handle||'claimed')+el+'</span>';}
+    return '<span class="rby">claim '+(VIEW.mode==='single'?'this block':'this range')+' →</span>';
+  }
+  function pillOf(st){
+    if(st.s==='verified')return '<span class="pill verified">'+(st.ahead?'ahead':'verified')+'</span>';
+    if(st.s==='claimed')return '<span class="pill claimed">'+(st.stale?'quiet':'proving')+'</span>';
+    return '<span class="pill open">open</span>';
+  }
+  function card(id,st,focus){
+    var f=focus?' focus':'';
+    if(st.s==='open')return '<div class="range avail'+f+'" tabindex="0" data-r="'+id+'">'+pillOf(st)+'<span class="rid">'+id+'</span>'+bodyLine(st)+'</div>';
+    return '<div class="range'+f+'">'+pillOf(st)+'<span class="rid">'+id+'</span>'+bodyLine(st)+'</div>';
+  }
+  function updatePos(n){$('browse-pos').textContent=(VIEW.mode==='range'?'~ range at block ':'~ block ')+fmt(n);}
+  function syncSlider(){$('slider').value=Math.round(VIEW.start/Math.max(1,tipOf()-1)*1000);}
+  function setMode(m){VIEW.mode=m;var mm=$('mode').children;for(var i=0;i<mm.length;i++)mm[i].classList.toggle('on',mm[i].getAttribute('data-m')===m);}
+  function renderBoard(){
+    var d=VIEW.data;if(!d)return;var w=worldOf(d);
+    if(!VIEW.init){VIEW.init=true;VIEW.start=firstOpen(w,w.frontier);syncSlider();}   // open on the first claimable block
+    var N=VIEW.mode==='single'?12:6,html='',count=0;
+    if(VIEW.mode==='single'){
+      var n=Math.max(0,Math.min(VIEW.start,w.tip-1)),scan=0;
+      while(count<N&&n<w.tip&&scan<80000){var st=blkStatus(w,n);if(matchF(st.s)){html+=card(String(n),st,n===VIEW.focus);count++;}n++;scan++;}
+      $('board-hint').textContent='single blocks';
+    }else{
+      var size=w.size,k=Math.floor(VIEW.start/size),scan2=0;
+      while(count<N&&k*size<w.tip&&scan2<80000){var lo=k*size,hi=Math.min(lo+size-1,w.tip-1),st2=rngStatus(w,lo,hi);if(matchF(st2.s)){html+=card(lo+'-'+hi,st2,false);count++;}k++;scan2++;}
+      $('board-hint').textContent=fmt(size)+' blocks each';
+    }
+    $('board').innerHTML=html||'<div class="empty">no '+(VIEW.filter==='all'?'':VIEW.filter+' ')+'blocks here — slide along, or clear the filter</div>';
+    updatePos(VIEW.start);
+  }
+  // controls
+  $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;setMode(b.getAttribute('data-m'));VIEW.focus=null;renderBoard();});
+  $('filters').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var ff=this.children;for(var i=0;i<ff.length;i++)ff[i].classList.toggle('on',ff[i]===b);VIEW.filter=b.getAttribute('data-f');renderBoard();});
+  $('find').addEventListener('submit',function(e){e.preventDefault();var raw=($('find-in').value||'').replace(/[^0-9]/g,'');if(!raw)return;var v=Math.max(0,Math.min(parseInt(raw,10),tipOf()-1));setMode('single');VIEW.start=v;VIEW.focus=v;syncSlider();renderBoard();$('board-panel').scrollIntoView({behavior:'smooth',block:'nearest'});});
+  $('slider').addEventListener('input',function(){var frac=this.value/1000,n=Math.floor(frac*(tipOf()-1));if(VIEW.mode==='range'){var s=sizeOf();n=Math.floor(n/s)*s;}VIEW.start=n;VIEW.focus=null;renderBoard();});
+  $('tl-strip').addEventListener('click',function(e){var r=this.getBoundingClientRect();var frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));VIEW.start=Math.floor(frac*(tipOf()-1));VIEW.focus=null;syncSlider();renderBoard();$('board-panel').scrollIntoView({behavior:'smooth',block:'nearest'});});
+  // claim
+  function openClaim(id){var single=id.indexOf('-')<0;$('ckind').textContent=single?'block':'range';$('crange').textContent=id;$('ccmd').textContent=id;$('claim').classList.add('show');$('claim').scrollIntoView({behavior:'smooth',block:'nearest'});}
+  $('board').addEventListener('click',function(e){var el=e.target.closest('.range.avail');if(el)openClaim(el.getAttribute('data-r'));});
+  $('board').addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){var el=e.target.closest('.range.avail');if(el){e.preventDefault();openClaim(el.getAttribute('data-r'));}}});
   $('cclose').onclick=function(){$('claim').classList.remove('show')};
   // API base: same-origin by default; set window.HAZYNC_API to point at the coordinator when it's live.
   var API=(typeof window!=='undefined'&&window.HAZYNC_API)||'';
@@ -155,13 +244,16 @@
     return {
       progress:{proven:4000,frontier:2000,tip:958301,pct:0.209,contributors:3},
       timeline:{segs:240,per_seg:per,frontier_seg:0},
-      board:[
-        {id:"1000-1999",lo:1000,hi:1999,status:"verified",handle:"earlybird"},
-        {id:"2000-2999",lo:2000,hi:2999,status:"claimed",handle:"ghostnode",elapsed:1320,beat:35,stale:false},
-        {id:"3000-3999",lo:3000,hi:3999,status:"claimed",handle:"coldboot",elapsed:480,beat:1100,stale:true},
-        {id:"4000-4999",lo:4000,hi:4999,status:"open",handle:null},
-        {id:"5000-5999",lo:5000,hi:5999,status:"open",handle:null},
-        {id:"6000-6999",lo:6000,hi:6999,status:"open",handle:null}
+      range_size:1000,
+      vranges:[
+        {lo:0,hi:1999,handle:"earlybird"},
+        {lo:5000,hi:5999,handle:"aria"},
+        {lo:20000,hi:20999,handle:"ghostnode"}
+      ],
+      claims:[
+        {lo:2000,hi:2999,handle:"coldboot",elapsed:1320,stale:false},
+        {lo:3000,hi:3999,handle:"driftwood",elapsed:480,stale:true},
+        {lo:764321,hi:764321,handle:"solo",elapsed:210,stale:false}
       ],
       leaderboard:[
         {id:"9f2a7c1b3d",handle:"earlybird",blocks:2000},
@@ -169,9 +261,9 @@
         {id:"1a2b3c4d5e",handle:"ghostnode",blocks:1000}
       ],
       recent:[
-        {range:"20000-20999",handle:"aria",verified:true,ts:now-240,note:"verified"},
-        {range:"1000-1999",handle:"earlybird",verified:true,ts:now-1500,note:"verified"},
-        {range:"2000-2999",handle:"ghostnode",verified:false,ts:now-80,note:"proving"}
+        {range:"20000-20999",handle:"ghostnode",verified:true,ts:now-240,note:"verified"},
+        {range:"764321",handle:"solo",verified:false,ts:now-210,note:"proving one block"},
+        {range:"0-1999",handle:"earlybird",verified:true,ts:now-1500,note:"verified"}
       ],
       signatures:"ed25519",verify_mode:"real"
     };

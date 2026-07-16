@@ -121,11 +121,21 @@ def reap():
     c.commit(); c.close()
 
 def parse_range(rid):
-    """Validate a range id 'lo-hi': aligned to RANGE_SIZE, correct size, within [0, TIP). Returns (lo,hi)."""
+    """Validate a claim id. Two accepted forms:
+         'n'      → a single block n (any n in [0, TIP)) — 'I just want to do one block'.
+         'lo-hi'  → a range, must be RANGE_SIZE-aligned and exactly RANGE_SIZE long.
+       Aligned ranges and single blocks are the only shapes allowed, so two different claim
+       ids can never partially overlap (no double-claim ambiguity). Returns (lo, hi)."""
     try:
-        lo, hi = (int(x) for x in rid.split("-"))
+        parts = [int(x) for x in str(rid).split("-")]
     except Exception:
         return None
+    if len(parts) == 1:                                  # single block
+        n = parts[0]
+        return (n, n) if 0 <= n < TIP else None
+    if len(parts) != 2:
+        return None
+    lo, hi = parts
     if hi - lo + 1 != RANGE_SIZE or lo % RANGE_SIZE != 0 or lo < 0 or hi >= TIP:
         return None
     return lo, hi
@@ -274,11 +284,21 @@ def state():
     recent = [dict(range=s["range_id"], handle=s["handle"], verified=bool(s["verified"]),
                    ts=s["ts"], note=s["note"])
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
+    # full verified + claimed lists so the client can browse/search/filter any block, not just the
+    # frontier window (each is small: claims are few, verified ranges are RANGE_SIZE-coarse).
+    vranges = [dict(lo=r["lo"], hi=r["hi"], handle=r["handle"])
+               for r in c.execute("SELECT lo,hi,handle FROM vranges ORDER BY lo")]
+    claims = []
+    for r in c.execute("SELECT lo,hi,handle,claimed_at,last_beat FROM ranges WHERE status='claimed' ORDER BY lo"):
+        beat = int(now - (r["last_beat"] or r["claimed_at"] or now))
+        claims.append(dict(lo=r["lo"], hi=r["hi"], handle=r["handle"],
+                           elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL // 2))
     c.close()
     return {
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
         "board": board, "leaderboard": leaders, "recent": recent,
+        "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "timeline": timeline(fr),
         "signatures": "ed25519" if HAVE_ED else "dev (no signature lib installed)",
         "verify_mode": VERIFY,

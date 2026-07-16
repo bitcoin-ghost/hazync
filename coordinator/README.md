@@ -66,8 +66,10 @@ local witness data. It then proves each block in the range and folds them with t
 
 - `GET /api/state` — progress, board (with per-claim `elapsed`/`beat`/`stale`), leaderboard, recent
 - `GET /api/pick` — suggest the next open range past the frontier (skips claimed/verified)
-- `POST /api/claim` `{range, pubkey, handle}` — **lock** a range to you; rejected if held by someone else.
-  Any valid aligned range is claimable — the range row is auto-created on demand (no pre-seeded list)
+- `POST /api/claim` `{range, pubkey, handle}` — **lock** a block/range to you; rejected if held by someone
+  else. `range` is either a **single block** (`"764321"` — "I just want one block") or a RANGE_SIZE-aligned
+  range (`"45000-45999"`); the row is auto-created on demand (no pre-seeded list). Single blocks and aligned
+  ranges are the only shapes, so two claim ids can never partially overlap
 - `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<n>` — serve block `n`'s witness (accepts a block number or a `lo-hi` range id)

@@ -3,11 +3,11 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
-  hazync pick               # ask the coordinator which range to take next
-  hazync claim <range>      # reserve a range (e.g. 45000-45999) with the coordinator
-  hazync prove <range>      # prove the range on your GPU  -> a receipt .bin
-  hazync submit <range>     # sign the receipt with your key and submit it for verification
-  hazync run [range]        # claim + prove + submit, end to end (range optional: picks one if omitted)
+  hazync pick               # ask the coordinator which block/range to take next
+  hazync claim <id>         # reserve a single block (e.g. 764321) or a range (e.g. 45000-45999)
+  hazync prove <id>         # prove that block/range on your GPU  -> a receipt .bin
+  hazync submit <id>        # sign the receipt with your key and submit it for verification
+  hazync run [id]           # claim + prove + submit, end to end (id optional: picks one if omitted)
 
 Config (env):
   COORD_URL   coordinator base URL            (default http://localhost:8899)
@@ -95,7 +95,8 @@ def cmd_prove(args):
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
     _, pub, _ = identity()
-    lo, hi = [int(x) for x in rng.split("-")]
+    parts = [int(x) for x in rng.split("-")]            # "n" (single block) or "lo-hi" (range)
+    lo, hi = (parts[0], parts[0]) if len(parts) == 1 else (parts[0], parts[1])
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
     fetch_witnesses(lo, hi)                          # pull any witnesses we're missing from the coordinator
