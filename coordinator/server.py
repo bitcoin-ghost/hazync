@@ -30,6 +30,7 @@ SEED       = int(os.environ.get("SEED_RANGES", "60"))
 WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__), "witnesses"))
 HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
+STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -57,6 +58,7 @@ def init_db():
       CREATE TABLE IF NOT EXISTS submissions(
         id INTEGER PRIMARY KEY AUTOINCREMENT, range_id TEXT, pubkey TEXT, handle TEXT,
         receipt_sha TEXT, sig TEXT, verified INTEGER, note TEXT, ts REAL);
+      CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
     """)
     n = c.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
     if n == 0:
@@ -80,24 +82,63 @@ def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
     except Exception:
         return False
 
+def meta_get(k):
+    c = db(); r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone(); c.close()
+    return r["v"] if r else None
+
+def meta_set(k, v):
+    c = db(); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v))); c.commit(); c.close()
+
 def verify_receipt(receipt: bytes, rng) -> (bool, str):
-    """Verify a submitted STARK receipt. 'real' shells to `host verify-range`; 'mock' stubs the check."""
+    """Verify a submitted range receipt by FOLDING it onto the genesis-anchored chain frontier.
+
+    An individual range receipt [k..k] is a valid STARK, but it is anchored to block k-1 — not genesis —
+    so it only means something once chained. The coordinator keeps one genesis-anchored frontier proof
+    and folds each contiguous contribution onto it (real `fold-range` + `verify-range`). A contribution
+    is credited only when the fold + verify succeed, so a forged, wrong, or out-of-order proof credits
+    nothing. 'mock' stubs the STARK step for GPU-less testing of the rest.
+    """
     if VERIFY == "mock":
         return True, "mock-verified (VERIFY_MODE=mock — STARK check stubbed for testing)"
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification"
-    path = f"/tmp/hz_receipt_{rng['id']}.bin"
-    with open(path, "wb") as f:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, f"in_{rng['id']}.bin")
+    frontier = os.path.join(STATE_DIR, "frontier.bin")
+    with open(tmp, "wb") as f:
         f.write(receipt)
+
+    def run(args):
+        r = subprocess.run(args, capture_output=True, timeout=300)
+        return r.returncode, (r.stdout + r.stderr).decode(errors="replace")
+
+    fh = meta_get("frontier_hi")
     try:
-        r = subprocess.run([HOST_BIN, "verify-range", path], capture_output=True, timeout=120)
-        out = (r.stdout + r.stderr).decode(errors="replace")
-        ok = r.returncode == 0 and ("VERIFIED" in out or "verified" in out)
-        return ok, ("receipt VERIFIED" if ok else "receipt rejected: " + out[-200:])
+        if fh is None:
+            # first contribution — must be the genesis-anchored range starting at block 1
+            if rng["lo"] != 1:
+                return False, f"backfill starts at block 1 (this range starts at {rng['lo']})"
+            rc, out = run([HOST_BIN, "verify-range", tmp])
+            ok = rc == 0 and "VERIFIED" in out
+            if ok:
+                os.replace(tmp, frontier); meta_set("frontier_hi", rng["hi"])
+            return ok, (f"chain proof [1..{rng['hi']}] VERIFIED" if ok else "verification failed: " + out[-160:])
+        fh = int(fh)
+        if rng["lo"] != fh + 1:
+            return False, f"not contiguous — the next range to prove is {fh+1}-… (frontier at block {fh})"
+        newf = os.path.join(STATE_DIR, "frontier_new.bin")
+        rc, out = run([HOST_BIN, "fold-range", frontier, tmp, newf])
+        if rc != 0 or not os.path.exists(newf):
+            return False, "fold rejected — not adjacent to the chain: " + out[-160:]
+        rc2, out2 = run([HOST_BIN, "verify-range", newf])
+        ok = rc2 == 0 and "VERIFIED" in out2
+        if ok:
+            os.replace(newf, frontier); meta_set("frontier_hi", rng["hi"])
+        return ok, (f"chain proof [1..{rng['hi']}] VERIFIED" if ok else "verification failed: " + out2[-160:])
     except Exception as e:
         return False, f"verify error: {e}"
     finally:
-        try: os.remove(path)
+        try: os.remove(tmp)
         except Exception: pass
 
 def state():

@@ -58,9 +58,14 @@ block in the range and folds them with the existing `prove-range` / `fold-range`
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<range>` — serve a range's witness (if present)
 
-`/api/submit` verifies the **ed25519 signature over the receipt bytes**, then verifies the **STARK
-receipt** by shelling to `host verify-range` (`VERIFY_MODE=real`). Only a proof that actually verifies
-credits the range — a forged or wrong receipt is recorded as failed and credits nothing.
+`/api/submit` verifies the **ed25519 signature over the receipt bytes**, then verifies the proof by
+**folding it onto the genesis-anchored chain frontier** (`fold-range` + `verify-range`,
+`VERIFY_MODE=real`). An individual range receipt `[k..k]` is a valid STARK, but it's anchored to block
+*k−1*, not genesis — so it only means something once chained. The coordinator keeps one running
+genesis-anchored proof and folds each **contiguous** contribution onto it. A contribution is credited
+only when the fold **and** verify both succeed; a forged, wrong, or out-of-order proof credits nothing.
+(The fold is itself a proving step — cheap on CPU for early/tiny blocks; a real deployment gives the
+coordinator a GPU for the folds at scale.)
 
 ## Deploy
 
@@ -70,7 +75,8 @@ public `bitcoinghost.org/hazync` page can point its board at this API (CORS is o
 
 ## Status — honest
 
-MVP. Single-file, SQLite, single-process. It proves the flow works end-to-end (tested: claim → sign →
-submit → real ed25519 verify → STARK verify → credit → dashboard updates). Not yet hardened for
-hostile scale — no rate limiting, no witness-integrity binding beyond the receipt, no auth on `claim`.
-Those are the next steps once the flow is exercised with real proving.
+MVP. Single-file, SQLite, single-process. **Verified end-to-end with real proofs** on a CPU (no GPU):
+blocks 1 and 2 were CPU-proved (~64s / ~109s), signed, submitted, folded onto the genesis-anchored
+frontier ([1..1] → [1..2]), and credited on the signed ledger. Not yet hardened for hostile scale —
+no rate limiting, no auth on `claim`, no out-of-order fold tree (contiguous submissions only), no
+witness-integrity binding beyond the receipt. Those are the next steps.
