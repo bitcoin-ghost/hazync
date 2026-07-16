@@ -41,9 +41,16 @@ The coordinator must **not** fold (folding is a proving step — GPU work). Inst
   range id; pick skips a claimed range (→ 2-2); un-served block → 404; `hazync pick` + `fetch_witnesses`
   pull the right blocks into an empty contributor dir and fail cleanly on a block the coordinator lacks.
 
-## 4. Timeline UI
-- A genesis→tip strip: green = verified, orange = in-progress (contributor + elapsed), grey = open.
-- Colour + contributor + elapsed per block; the two-number header (verified / frontier).
+## 4. Timeline UI  ✅ DONE
+- A genesis→tip strip on the dashboard, bucketed server-side into 240 segments (`state().timeline`,
+  bounded payload at any chain size). Four states: **frontier** (solid green — verified *and* chained
+  from genesis), **ahead** (light green — verified but out of order), **in progress** (orange —
+  claimed), **open** (grey). A marker sits at the frontier position; a legend explains each state, and
+  the header shows the two-number story (proven-&-chained + segments ahead).
+- The rolling **board** below it stays the per-range zoom for the active window (contributor + elapsed +
+  quiet/proving), so the strip is the macro view and the board the micro view.
+- Tested: `timeline()` maps a genesis-chained run → frontier, an out-of-order verified range → ahead, a
+  live claim → in-progress, everything else → open; `frontier==0` renders no green (edge fixed).
 
 ## 5. Harden + archive decision (last, before opening it up)
 - Rate limiting, auth-on-claim, input caps.

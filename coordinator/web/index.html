@@ -30,6 +30,18 @@
   .progress .pt{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:10px}
   .track{height:10px;border-radius:6px;background:var(--bg);border:1px solid var(--rule);overflow:hidden}.fill{height:100%;background:var(--accent);border-radius:6px 0 0 6px;transition:width .5s}
   .frontier{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--fainter);margin-top:8px}
+  .timeline{margin-top:16px;border:1px solid var(--rule);border-radius:6px;padding:15px 18px 14px;background:var(--bg)}
+  .tl-head{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:11px}.tl-head b{color:var(--fg);font-weight:500}
+  .tl-strip{position:relative;display:flex;height:24px;border-radius:4px;overflow:hidden;border:1px solid var(--rule)}
+  .tl-seg{flex:1 1 0;min-width:0;background:var(--rule)}
+  .tl-seg.claimed{background:var(--accent)}
+  .tl-seg.ahead{background:color-mix(in srgb,var(--green) 42%,var(--bg))}
+  .tl-seg.frontier{background:var(--green)}
+  .tl-mark{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);pointer-events:none}
+  .tl-mark::after{content:"frontier";position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);white-space:nowrap}
+  .tl-legend{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;font-family:var(--font-mono);font-size:10.5px;color:var(--dim)}
+  .tl-legend span{display:inline-flex;align-items:center;gap:7px}.tl-legend i{width:11px;height:11px;border-radius:2px;display:inline-block;flex:none}
+  .tl-legend i.frontier{background:var(--green)}.tl-legend i.ahead{background:color-mix(in srgb,var(--green) 42%,var(--bg))}.tl-legend i.claimed{background:var(--accent)}.tl-legend i.open{background:var(--rule)}
   .cols{display:grid;grid-template-columns:1.6fr 1fr;gap:20px;margin-top:34px;align-items:start}@media (max-width:900px){.cols{grid-template-columns:1fr}}
   .panel{border:1px solid var(--rule);border-radius:6px;overflow:hidden;background:var(--bg)}
   .panel .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--rule)}.panel .ph h2{font-size:15px;font-weight:600}.panel .ph .hint{font-family:var(--font-mono);font-size:11px;color:var(--dim)}
@@ -64,9 +76,12 @@
 <main><div class="wrap">
   <p class="eyebrow">Proof party · genesis → tip</p>
   <h1>Prove Bitcoin's history, <span class="a">together.</span></h1>
-  <p class="sub-lead">Claim a range of blocks, prove them on your GPU, submit the signed receipt. The coordinator verifies every proof — nobody can fake it — folds it into the chain proof, and credits the block to you on an open signed ledger.</p>
+  <p class="sub-lead">Claim a range of blocks, prove them on your GPU, submit the signed receipt. The coordinator verifies every proof — nobody can fake it — chains it onto the genesis-anchored frontier, and credits the block to you on an open signed ledger.</p>
   <div class="metrics" id="metrics"></div>
   <div class="progress"><div class="pt"><span>Proof frontier</span><span id="pct">—</span></div><div class="track"><div class="fill" id="fill" style="width:0"></div></div><div class="frontier"><span>◂ genesis · 0</span><span id="frontier">—</span><span id="tip">tip</span></div></div>
+  <div class="timeline"><div class="tl-head"><span>Timeline · genesis → tip</span><span id="tl-count">—</span></div>
+    <div class="tl-strip" id="tl-strip"></div>
+    <div class="tl-legend"><span><i class="frontier"></i> frontier (verified + chained from genesis)</span><span><i class="ahead"></i> proven ahead (out of order)</span><span><i class="claimed"></i> in progress</span><span><i class="open"></i> open</span></div></div>
   <div class="cols">
     <section class="panel" id="board-panel"><div class="ph"><h2>Pick a block range</h2><span class="hint" id="range-size"></span></div>
       <div class="claim" id="claim"><div class="ch"><span>Claim · range <b id="crange">—</b></span><button class="cx" id="cclose">✕</button></div>
@@ -95,6 +110,16 @@
     $('pct').textContent=p.pct+'% of '+fmt(p.tip);$('fill').style.width=Math.max(0.5,p.pct)+'%';
     $('frontier').textContent='proven to '+fmt(p.proven)+' →';$('tip').textContent='tip · '+fmt(p.tip);
     $('sigmode').textContent=d.signatures.indexOf('ed25519')>=0?'signed ledger':'dev mode';
+    // timeline strip (genesis → tip)
+    var tl=d.timeline;
+    if(tl&&tl.per_seg){
+      var cls=['','claimed','ahead','frontier'];
+      var segs=tl.per_seg.map(function(v){return '<div class="tl-seg '+cls[v]+'"></div>'}).join('');
+      var mk=Math.min(99.8,100*tl.frontier_seg/tl.segs);
+      $('tl-strip').innerHTML=segs+'<div class="tl-mark" style="left:'+mk+'%"></div>';
+      var ahead=tl.per_seg.filter(function(v){return v===2}).length;
+      $('tl-count').innerHTML='<b>'+fmt(p.frontier)+'</b> proven &amp; chained'+(ahead?' · +'+ahead+' seg ahead':'');
+    }
     // board
     var b=d.board.map(function(r){
       if(r.status==='verified')return '<div class="range"><span class="pill verified">verified</span><span class="rid">'+r.id+'</span><span class="rby"><span class="sig">◈</span> '+(r.handle||'—')+'</span></div>';

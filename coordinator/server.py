@@ -186,6 +186,34 @@ def frontier_hi():
         seen.add(tip); r = by_in[tip]; hi = r["hi"]; tip = r["out_tip"]
     return hi
 
+def timeline(fr, segs=240):
+    """Whole-chain genesis→tip strip, bucketed into `segs` segments (bounded payload at any chain size).
+
+    Each segment reports the strongest status of the blocks it covers:
+      'frontier' — inside the contiguous genesis-anchored frontier (solid green, done + chained)
+      'ahead'    — verified but past the frontier (out-of-order proof, not yet connected to genesis)
+      'claimed'  — someone is proving it right now
+      'open'     — nobody on it
+    Returns {segs, per_seg (bytes 0=open/1=claimed/2=ahead/3=frontier), frontier_seg}.
+    """
+    per = bytearray(segs)  # 0 open
+    bps = TIP / segs if segs else TIP
+    c = db()
+    vr = c.execute("SELECT lo,hi FROM vranges").fetchall()
+    cl = c.execute("SELECT lo,hi FROM ranges WHERE status='claimed'").fetchall()
+    c.close()
+    def mark(lo, hi, val):
+        s0 = int(lo / bps); s1 = min(segs - 1, int(hi / bps))
+        for s in range(max(0, s0), s1 + 1):
+            if per[s] < val: per[s] = val
+    for r in cl: mark(r["lo"], r["hi"], 1)          # claimed
+    for r in vr: mark(r["lo"], r["hi"], 2)          # verified (ahead)
+    fr_seg = int(fr / bps) if bps else 0
+    if fr > 0:                                       # fr==0 means nothing proven — no green
+        for s in range(min(fr_seg + 1, segs)):       # contiguous frontier overrides to solid green
+            if s * bps <= fr: per[s] = 3
+    return {"segs": segs, "per_seg": list(per), "frontier_seg": fr_seg}
+
 def state():
     reap()
     now = time.time()
@@ -222,6 +250,7 @@ def state():
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
         "board": board, "leaderboard": leaders, "recent": recent,
+        "timeline": timeline(fr),
         "signatures": "ed25519" if HAVE_ED else "dev (no signature lib installed)",
         "verify_mode": VERIFY,
     }

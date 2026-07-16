@@ -96,6 +96,8 @@ MVP. Single-file, SQLite, single-process, **verify-only (CPU, no GPU)**. Verifie
 proofs: blocks 1..10 were CPU-proved on a laptop (~64–110s each), signed, submitted, verified with
 `verify-any`, and chained into the genesis frontier [1..10]. Out-of-order submission tested (block 3
 before block 2: verified but the frontier held at 1, then jumped to 3 when block 2 filled the gap);
-wrong-range receipts rejected; ed25519 signed ledger enforced. Next (see `ROADMAP.md`): claim-lock +
-heartbeat auto-release, pick-any-block + witness serving, timeline UI, then hardening + the archive
-decision.
+wrong-range receipts rejected; ed25519 signed ledger enforced. Roadmap items 2–4 are done on top of
+this MVP: **claim-lock + heartbeat auto-release**, **pick-any-block + witness serving** (the CLI
+auto-fetches the witnesses it needs), and the **genesis→tip timeline UI** (frontier / ahead /
+in-progress / open). Remaining before opening it up (see `ROADMAP.md`): item 5 — hardening (rate limits,
+auth-on-claim, input caps) + the archive/witness-source decision.
