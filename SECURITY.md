@@ -25,6 +25,8 @@ full trust base and the two portability shims.
 | SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
 | BIP68-time | Block-proving path now commits real `MTP(coinHeight−1)` | **soundness** | **fixed** (validated; check also proven on a real mainnet tx) |
+| COV-1 | `time-too-old`: block timestamp must exceed MTP(prev 11) — was unchecked | **soundness** | **fixed** (asserted in chain_step/aggregate/prove_range; 550-block regression clean) |
+| COV-2 | Merkle CVE-2012-2459 mutation flag was discarded (`nullptr`) | **soundness** | **fixed** (capture Core's `mutated` and reject) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -90,6 +92,21 @@ protection). Failed closed in practice.
   S2/S3). **Open only for near-retarget standalone runs.**
 - **H1** — a committed `.pyc`; **H2** — `Cargo.lock` gitignored (consider committing for reproducible
   builds); **H3** — README refresh. Housekeeping.
+
+## Coverage audit (2026-07-16)
+
+A pass over Bitcoin Core's block-validation surface for rules we might not enforce found two — both
+real consensus rules Core checks, both now fixed (see the COV rows above):
+- **COV-1 `time-too-old`:** a block whose timestamp is ≤ the median-time-past of the previous 11 blocks
+  is invalid; `chain_step`/`aggregate`/`prove_range` now assert `block_time > prev_mtp`.
+- **COV-2 merkle mutation (CVE-2012-2459):** the `ComputeMerkleRoot` call discarded Core's `mutated`
+  flag (duplicate-txid tree malleability); it is now captured and rejected.
+
+Deliberately **not** enforced (documented trust boundaries, not gaps): the 2-hour future-time limit
+(node-local wall-clock, unprovable); standardness/policy (not consensus). "Only the coinbase is a
+coinbase" is covered by Core's `CheckTransaction` (null-prevout rejection for non-coinbase inputs).
+The COV fixes were validated for no-regression (check-ibd 550 + 741000 + demo all still VALID);
+adversarial negative tests (a backdated block, a mutated tree) are a follow-up.
 
 ## Open items (the review bounty list)
 

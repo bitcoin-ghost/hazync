@@ -36,7 +36,7 @@ extern "C" {
     // Header proof-of-work (real arith_uint256 SetCompact + compare, mainnet powLimit).
     fn check_pow(header: *const u8) -> i32;
     // Real Core ComputeMerkleRoot over `n` 32-byte txids (internal order) -> out_root[32].
-    fn merkle_root(txids: *const u8, n: u32, out_root: *mut u8);
+    fn merkle_root(txids: *const u8, n: u32, out_root: *mut u8, out_mutated: *mut u8);
     // BIP141 witness commitment check (coinbase commits to the witness merkle root over `wtxids`).
     fn check_witness_commitment(cb: *const u8, cb_len: u32, wtxids: *const u8, n: u32, has_witness: u32) -> i32;
     // BIP34: coinbase scriptSig must encode the block height (from height 227836).
@@ -388,9 +388,11 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let pow_ok = unsafe { check_pow(w.header.as_ptr()) } == 1;
 
     let mut mroot = [0u8; 32];
+    let mut mutated = 0u8;
     let flat: Vec<u8> = w.txids.iter().flatten().copied().collect();
-    unsafe { merkle_root(flat.as_ptr(), w.txids.len() as u32, mroot.as_mut_ptr()) };
-    let merkle_ok = mroot[..] == w.header[36..68]; // header bytes 36..68 = hashMerkleRoot
+    unsafe { merkle_root(flat.as_ptr(), w.txids.len() as u32, mroot.as_mut_ptr(), &mut mutated) };
+    // root matches header AND the tree is not malleated (CVE-2012-2459 duplicate-txid mutation).
+    let merkle_ok = mroot[..] == w.header[36..68] && mutated == 0; // header 36..68 = hashMerkleRoot
 
     // BIP141 witness commitment (SEC-1): recompute the wtxids + has_witness from the REAL tx bytes —
     // NOT the host-supplied w.wtxids — so a prover cannot claim "no witness" to skip the commitment.
@@ -601,10 +603,15 @@ fn chain_step() {
     };
     let retarget_ok = r.nbits == expected_nbits;
 
+    // "time-too-old" (Core ContextualCheckBlockHeader): a block's timestamp must exceed the
+    // median-time-past of the previous 11 blocks. (The 2-hour future limit is node-local — it depends
+    // on wall-clock adjusted time — so it is NOT a provable consensus rule and is intentionally omitted.)
+    let time_ok = r.block_time > prev_mtp;
+
     assert!(
-        block_valid && prevhash_ok && carry_ok && retarget_ok,
-        "chain step: block_valid={} prevhash_ok={} carry_ok={} retarget_ok={}",
-        block_valid, prevhash_ok, carry_ok, retarget_ok
+        block_valid && prevhash_ok && carry_ok && retarget_ok && time_ok,
+        "chain step: block_valid={} prevhash_ok={} carry_ok={} retarget_ok={} time_ok={}",
+        block_valid, prevhash_ok, carry_ok, retarget_ok, time_ok
     );
 
     let mut cum = prev.cum_work;
@@ -659,8 +666,9 @@ fn prove_range() {
     let expected_nbits = if height % RETARGET_INTERVAL != 0 { in_nbits }
         else { unsafe { calc_next_bits(in_nbits, in_epoch_start as i64, in_time as i64) } };
     let retarget_ok = r.nbits == expected_nbits;
-    assert!(block_valid && prevhash_ok && carry_ok && retarget_ok,
-        "prove_range block {}: bv={} ph={} carry={} rt={}", height, block_valid, prevhash_ok, carry_ok, retarget_ok);
+    let time_ok = r.block_time > prev_mtp; // time-too-old (Core ContextualCheckBlockHeader)
+    assert!(block_valid && prevhash_ok && carry_ok && retarget_ok && time_ok,
+        "prove_range block {}: bv={} ph={} carry={} rt={} time={}", height, block_valid, prevhash_ok, carry_ok, retarget_ok, time_ok);
 
     let mut range_work = [0u8; 32];
     unsafe { add_work(range_work.as_mut_ptr(), r.nbits) };
@@ -843,8 +851,9 @@ fn aggregate() {
     let height = prev.height + 1;
     let expected_nbits = if height % RETARGET_INTERVAL != 0 { prev.prev_nbits } else { unsafe { calc_next_bits(prev.prev_nbits, prev.epoch_start as i64, prev.prev_time as i64) } };
     let retarget_ok = r.nbits == expected_nbits;
-    assert!(block_valid && prevhash_ok && carry_ok && retarget_ok,
-        "aggregate: bv={} ph={} carry={} rt={}", block_valid, prevhash_ok, carry_ok, retarget_ok);
+    let time_ok = r.block_time > prev_mtp; // time-too-old (Core ContextualCheckBlockHeader)
+    assert!(block_valid && prevhash_ok && carry_ok && retarget_ok && time_ok,
+        "aggregate: bv={} ph={} carry={} rt={} time={}", block_valid, prevhash_ok, carry_ok, retarget_ok, time_ok);
     let mut cum = prev.cum_work;
     unsafe { add_work(cum.as_mut_ptr(), r.nbits) };
     let epoch_start = if height % RETARGET_INTERVAL == 0 { r.block_time } else { prev.epoch_start };

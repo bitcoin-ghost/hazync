@@ -60,9 +60,12 @@ ENFORCED (real Core unless noted):
 - `CheckTransaction` (structure, dup inputs, value bounds).
 - No inflation: Σin ≥ Σout per tx; coinbase ≤ subsidy(height)+Σfees (subsidy = exact halving formula).
 - PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget rule.
-- Merkle root; **BIP141 witness commitment** (new).
+- Merkle root, **including the CVE-2012-2459 mutation check** (duplicate-txid malleability — Core's
+  `mutated` flag is captured and rejected); **BIP141 witness commitment**.
 - Block weight ≤ 4M; full sigop cost ≤ 80k (legacy + P2SH + witness).
-- Absolute locktime (`IsFinalTx`); BIP68 relative locktime (height + time) — *logic present*.
+- **`time-too-old`**: a block's timestamp must exceed the median-time-past of the previous 11 blocks.
+  (The 2-hour future-time limit is node-local wall-clock — not a provable consensus rule; see §6.)
+- Absolute locktime (`IsFinalTx`); BIP68 relative locktime (height + time, real `MTP(coinHeight−1)`).
 
 - **Coinbase maturity + BIP68 (height)** — CLOSED (S2, 2026-07-15). The fetcher/bridge now sources each
   spent coin's real `coin_height` + `coin_is_coinbase` and threads them into the witness (`build_full`,

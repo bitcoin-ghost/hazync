@@ -267,13 +267,15 @@ extern "C" int check_bip34(const uint8_t* cb, unsigned cb_len, uint32_t height) 
 }
 
 // Merkle root over the block's txids (internal byte order), via real Core ComputeMerkleRoot.
-extern "C" void merkle_root(const uint8_t* txids, uint32_t n, uint8_t* out_root) {
+extern "C" void merkle_root(const uint8_t* txids, uint32_t n, uint8_t* out_root, uint8_t* out_mutated) {
     std::vector<uint256> hashes(n);
     for (uint32_t i = 0; i < n; i++) {
         std::memcpy(hashes[i].begin(), txids + 32 * i, 32);
     }
-    uint256 r = ComputeMerkleRoot(std::move(hashes), nullptr);
+    bool mutated = false;
+    uint256 r = ComputeMerkleRoot(std::move(hashes), &mutated); // mutated = CVE-2012-2459 malleability
     std::memcpy(out_root, r.begin(), 32);
+    *out_mutated = mutated ? 1 : 0;
 }
 
 // Sum of a coinbase tx's output values (for the subsidy bound).

@@ -6,8 +6,9 @@ script from genesis. The proofs are **recursive/foldable**, so a whole chain col
 succinct receipt.
 
 > **New to zero-knowledge proofs?** Start with **[`EXPLAINER.md`](EXPLAINER.md)** — a plain-English,
-> no-jargon walkthrough of what this is, why it matters, and how to help. This README is the technical
-> overview.
+> no-jargon walkthrough of what this is, why it matters, and how to help. For the full technical
+> narrative (novelty, coverage matrix, trust model, "try to break it"), see **[`WRITEUP.md`](WRITEUP.md)**.
+> This README is the quick technical overview.
 
 The distinguishing property: **it is not a reimplementation.** Bitcoin Core's actual
 `interpreter.cpp` (script evaluation), `SignatureHash`, and `libsecp256k1` are compiled to `riscv32im`
