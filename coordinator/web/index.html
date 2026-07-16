@@ -18,6 +18,11 @@
   nav{margin-left:auto;display:flex;align-items:center;gap:18px;font-size:13.5px}nav a{color:var(--dim)}nav a:hover{color:var(--fg)}
   .tt{appearance:none;background:none;border:1px solid var(--rule-strong);cursor:pointer;color:var(--dim);width:32px;height:32px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center}.tt:hover{color:var(--fg);border-color:var(--fg)}.tt svg{width:16px;height:16px}
   main{padding:clamp(26px,4vw,42px) 0 70px}
+  .preview-bar{display:none;background:var(--accent-weak);border-bottom:1px solid color-mix(in srgb,var(--accent) 40%,transparent)}
+  .preview-bar.show{display:block}
+  .preview-bar .wrap{display:flex;align-items:center;gap:10px;padding:9px 0;font-family:var(--font-mono);font-size:11.5px;line-height:1.5;color:var(--fg)}
+  .preview-bar b{color:var(--accent)}
+  .preview-bar .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
   .eyebrow{display:inline-flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);margin:0 0 14px}.eyebrow::before{content:"";width:20px;height:1px;background:var(--accent)}
   h1{font-size:clamp(26px,4vw,40px);font-weight:600;letter-spacing:-.025em;line-height:1.08;max-width:20ch}h1 .a{color:var(--accent)}
   .sub-lead{color:var(--dim);font-size:clamp(15px,1.8vw,17px);max-width:62ch;margin-top:14px}
@@ -73,6 +78,7 @@
   <nav><a href="https://bitcoinghost.org/hazync.html">About</a><a href="https://github.com/bitcoin-ghost/hazync">Repo ↗</a>
     <button class="tt" id="tt" aria-label="Toggle theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg></button></nav>
 </div></header>
+<div class="preview-bar" id="preview-bar"><div class="wrap"><span class="dot"></span><span><b>Preview · sample data.</b> The live proof party begins once the prover network is running — this is a look at how it works: claim a range, prove it on your GPU, and put your name on Bitcoin's history.</span></div></div>
 <main><div class="wrap">
   <p class="eyebrow">Proof party · genesis → tip</p>
   <h1>Prove Bitcoin's history, <span class="a">together.</span></h1>
@@ -137,6 +143,43 @@
   $('board').addEventListener('click',function(e){var el=e.target.closest('.range.avail');if(el)openClaim(el)});
   function openClaim(el){$('crange').textContent=el.dataset.r;$('ccmd').textContent=el.dataset.r;$('claim').classList.add('show');$('claim').scrollIntoView({behavior:'smooth',block:'nearest'})}
   $('cclose').onclick=function(){$('claim').classList.remove('show')};
-  function poll(){fetch('/api/state').then(function(r){return r.json()}).then(render).catch(function(){});}
+  // API base: same-origin by default; set window.HAZYNC_API to point at the coordinator when it's live.
+  var API=(typeof window!=='undefined'&&window.HAZYNC_API)||'';
+  function showBanner(on){var b=$('preview-bar');if(b)b.classList.toggle('show',!!on);}
+  function sampleData(){
+    var now=Math.floor(Date.now()/1000);
+    var per=new Array(240).fill(0);
+    per[0]=3;                 // genesis frontier (proven & chained)
+    per[1]=2;per[5]=2;        // out-of-order ranges already verified
+    per[2]=1;per[8]=1;        // ranges being proved right now (pick-any-block)
+    return {
+      progress:{proven:4000,frontier:2000,tip:958301,pct:0.209,contributors:3},
+      timeline:{segs:240,per_seg:per,frontier_seg:0},
+      board:[
+        {id:"1000-1999",lo:1000,hi:1999,status:"verified",handle:"earlybird"},
+        {id:"2000-2999",lo:2000,hi:2999,status:"claimed",handle:"ghostnode",elapsed:1320,beat:35,stale:false},
+        {id:"3000-3999",lo:3000,hi:3999,status:"claimed",handle:"coldboot",elapsed:480,beat:1100,stale:true},
+        {id:"4000-4999",lo:4000,hi:4999,status:"open",handle:null},
+        {id:"5000-5999",lo:5000,hi:5999,status:"open",handle:null},
+        {id:"6000-6999",lo:6000,hi:6999,status:"open",handle:null}
+      ],
+      leaderboard:[
+        {id:"9f2a7c1b3d",handle:"earlybird",blocks:2000},
+        {id:"4d8e0a2f91",handle:"aria",blocks:1000},
+        {id:"1a2b3c4d5e",handle:"ghostnode",blocks:1000}
+      ],
+      recent:[
+        {range:"20000-20999",handle:"aria",verified:true,ts:now-240,note:"verified"},
+        {range:"1000-1999",handle:"earlybird",verified:true,ts:now-1500,note:"verified"},
+        {range:"2000-2999",handle:"ghostnode",verified:false,ts:now-80,note:"proving"}
+      ],
+      signatures:"ed25519",verify_mode:"real"
+    };
+  }
+  function poll(){
+    fetch(API+'/api/state').then(function(r){if(!r.ok)throw 0;return r.json()})
+      .then(function(d){showBanner(false);render(d);})
+      .catch(function(){showBanner(true);render(sampleData());});   // no backend yet → show the preview
+  }
   poll();setInterval(poll,10000);
 </script></body></html>
