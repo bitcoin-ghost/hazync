@@ -27,10 +27,19 @@ The coordinator must **not** fold (folding is a proving step — GPU work). Inst
 - Tested: A claims → B rejected (locked); A heartbeats → stays; no heartbeat past TTL → auto-released;
   B reclaims → A's stale heartbeat rejected.
 
-## 3. Pick-any-block + witness serving (rolling window)
-- Let a contributor pick any open block/range.
-- Serve that block's **witness** (`GET /api/witness/<range>`) from a rolling window covering the active
-  frontier. Full-chain witness hosting is the archive decision (item 5).
+## 3. Pick-any-block + witness serving (rolling window)  ✅ DONE
+- **Pick:** `GET /api/pick` suggests the next open range past the frontier (skips claimed/verified);
+  `hazync pick` prints it, and `hazync run` (no arg) claims whatever it hands back. Any valid aligned
+  range can also be claimed directly — `claim` auto-creates the range row on demand (`parse_range`
+  validates alignment/size/bounds), so contributors aren't limited to a pre-seeded list.
+- **Witness serving:** `GET /api/witness/<n>` (block number) or `/api/witness/<lo>-<hi>` (range id)
+  serves that block's witness from the coordinator's `WITNESS_DIR`. The CLI's `prove` auto-fetches every
+  witness it's missing (blocks 1..hi — the prover replays them to rebuild the accumulator) before it
+  starts, so a contributor needs no local witness data. A block the coordinator doesn't hold yet returns
+  404 and the CLI stops with a clear message. Full-chain witness hosting is the archive decision (item 5).
+- Tested (mock): pick → 1-1; claim-any auto-creates the row; witness served by both block number and
+  range id; pick skips a claimed range (→ 2-2); un-served block → 404; `hazync pick` + `fetch_witnesses`
+  pull the right blocks into an empty contributor dir and fail cleanly on a block the coordinator lacks.
 
 ## 4. Timeline UI
 - A genesis→tip strip: green = verified, orange = in-progress (contributor + elapsed), grey = open.

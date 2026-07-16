@@ -91,6 +91,35 @@ def reap():
               (now, CLAIM_TTL, now, CLAIM_MAX))
     c.commit(); c.close()
 
+def parse_range(rid):
+    """Validate a range id 'lo-hi': aligned to RANGE_SIZE, correct size, within [0, TIP). Returns (lo,hi)."""
+    try:
+        lo, hi = (int(x) for x in rid.split("-"))
+    except Exception:
+        return None
+    if hi - lo + 1 != RANGE_SIZE or lo % RANGE_SIZE != 0 or lo < 0 or hi >= TIP:
+        return None
+    return lo, hi
+
+def pick(body):
+    """Suggest the next open block/range after the genesis frontier — the 'just give me something' pick."""
+    reap()
+    fr = frontier_hi()
+    c = db()
+    taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
+    c.close()
+    k = max(1, fr + 1)
+    for _ in range(200000):
+        lo = (k // RANGE_SIZE) * RANGE_SIZE
+        hi = lo + RANGE_SIZE - 1
+        rid = f"{lo}-{hi}"
+        if hi >= TIP:
+            break
+        if lo >= 1 and rid not in taken:
+            return 200, {"range": rid, "lo": lo, "hi": hi, "cmd": f"hazync run {rid}"}
+        k = hi + 1
+    return 404, {"error": "no open range available"}
+
 def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
     """ed25519 signature over the receipt bytes. Dev mode (no lib) accepts and flags."""
     if not HAVE_ED:
@@ -164,13 +193,24 @@ def state():
     proven = c.execute("SELECT COALESCE(SUM(hi-lo+1),0) FROM vranges").fetchone()[0]
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
     # board window: all verified + claimed, then a few open around the frontier
+    fr = frontier_hi()
+    # rolling window around the frontier: a little behind, then open blocks ahead (synthesised so the
+    # board shows what's next to prove even before those range rows exist).
+    start = max(0, (fr // RANGE_SIZE) - 1) * RANGE_SIZE
+    existing = {r["id"]: r for r in c.execute("SELECT * FROM ranges WHERE lo >= ? ORDER BY lo LIMIT 60", (start,))}
     board = []
-    for r in c.execute("SELECT * FROM ranges ORDER BY lo LIMIT 18"):
-        b = {"id": r["id"], "lo": r["lo"], "hi": r["hi"], "status": r["status"], "handle": r["handle"]}
-        if r["status"] == "claimed":
-            b["elapsed"] = int(now - (r["claimed_at"] or now))          # seconds since claimed
-            b["beat"] = int(now - (r["last_beat"] or r["claimed_at"] or now))  # seconds since last heartbeat
-            b["stale"] = b["beat"] > CLAIM_TTL // 2                     # heartbeat going quiet
+    for i in range(18):
+        lo = start + i * RANGE_SIZE; hi = lo + RANGE_SIZE - 1
+        if lo >= TIP: break
+        rid = f"{lo}-{hi}"; r = existing.get(rid)
+        if r and r["status"] in ("claimed", "verified"):
+            b = {"id": rid, "lo": lo, "hi": hi, "status": r["status"], "handle": r["handle"]}
+            if r["status"] == "claimed":
+                b["elapsed"] = int(now - (r["claimed_at"] or now))
+                b["beat"] = int(now - (r["last_beat"] or r["claimed_at"] or now))
+                b["stale"] = b["beat"] > CLAIM_TTL // 2
+        else:
+            b = {"id": rid, "lo": lo, "hi": hi, "status": "open", "handle": None}
         board.append(b)
     leaders = [dict(id=x["pubkey"][:10], handle=x["handle"], blocks=x["blocks"])
                for x in c.execute("SELECT * FROM contributors ORDER BY blocks DESC LIMIT 8")]
@@ -178,7 +218,6 @@ def state():
                    ts=s["ts"], note=s["note"])
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
     c.close()
-    fr = frontier_hi()
     return {
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
@@ -195,7 +234,11 @@ def claim(body):
     with _lock:
         c = db()
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
-        if not r: c.close(); return 404, {"error": "no such range"}
+        if not r:
+            pr = parse_range(rid)                       # pick-any: auto-create a valid range on demand
+            if not pr: c.close(); return 400, {"error": "invalid range id"}
+            c.execute("INSERT INTO ranges(id,lo,hi) VALUES(?,?,?)", (rid, pr[0], pr[1]))
+            r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
         if r["status"] == "claimed" and r["assignee"] != pk:
             # locked to someone else and still alive (reap() already freed stale ones)
@@ -208,7 +251,7 @@ def claim(body):
         c.execute("UPDATE ranges SET status='claimed', assignee=?, handle=?, claimed_at=?, last_beat=? WHERE id=?",
                   (pk, handle, now, now, rid))
         c.commit(); c.close()
-    wit = os.path.join(WITNESS, f"witness_{rid}.json")
+    wit = os.path.join(WITNESS, f"block_{r['lo']}.json")
     return 200, {"ok": True, "range": rid,
                  "witness": f"/api/witness/{rid}" if os.path.exists(wit) else None,
                  "cmd": f"hazync prove {rid}", "heartbeat_ttl": CLAIM_TTL}
@@ -280,12 +323,15 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path).path
         if p == "/api/state": return self._send(200, state())
+        if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p.startswith("/api/witness/"):
-            rid = p.rsplit("/", 1)[-1]
-            f = os.path.join(WITNESS, f"witness_{rid}.json")
-            if os.path.exists(f):
-                return self._send(200, raw=open(f, "rb").read())
-            return self._send(404, {"error": "witness not available for this range"})
+            seg = p.rsplit("/", 1)[-1]
+            blk = int(seg) if seg.isdigit() else (parse_range(seg) or [None])[0]  # block number or range id
+            if blk is not None:
+                f = os.path.join(WITNESS, f"block_{blk}.json")     # per-block witness (bridge output)
+                if os.path.exists(f):
+                    return self._send(200, raw=open(f, "rb").read())
+            return self._send(404, {"error": "witness not available"})
         # static frontend
         rel = "index.html" if p in ("/", "") else p.lstrip("/")
         fp = os.path.normpath(os.path.join(WEB, rel))

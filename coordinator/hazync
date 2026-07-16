@@ -3,10 +3,11 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
+  hazync pick               # ask the coordinator which range to take next
   hazync claim <range>      # reserve a range (e.g. 45000-45999) with the coordinator
   hazync prove <range>      # prove the range on your GPU  -> a receipt .bin
   hazync submit <range>     # sign the receipt with your key and submit it for verification
-  hazync run <range>        # claim + prove + submit, end to end
+  hazync run [range]        # claim + prove + submit, end to end (range optional: picks one if omitted)
 
 Config (env):
   COORD_URL   coordinator base URL            (default http://localhost:8899)
@@ -47,11 +48,37 @@ def post(path, body):
         headers={"Content-Type": "application/json"}))
     return json.load(r)
 
+def get(path):
+    return urllib.request.urlopen(urllib.request.Request(COORD + path)).read()
+
+def fetch_witnesses(lo, hi):
+    # the prover replays blocks 1..hi to rebuild the accumulator, so it needs every witness up to hi.
+    # pull any we don't already have from the coordinator's rolling window.
+    os.makedirs(WITNESS, exist_ok=True)
+    for i in range(1, hi + 1):
+        wf = os.path.join(WITNESS, f"block_{i}.json")
+        if os.path.exists(wf):
+            continue
+        try:
+            data = get(f"/api/witness/{i}")
+        except Exception as e:
+            sys.exit(f"could not fetch witness for block {i} from {COORD}: {e}")
+        with open(wf, "wb") as fh:
+            fh.write(data)
+
 def cmd_id(args):
     _, pub, handle = identity()
     if args: HANDLE.write_text(args[0]); handle = args[0]
     print("handle :", handle); print("pubkey :", pub); print("coord  :", COORD)
     print("(set a handle:  hazync id <name>)")
+
+def cmd_pick(args):
+    r = json.loads(get("/api/pick"))
+    if r.get("range"):
+        print("next open range:", r["range"], "  (claim it:  hazync run", r["range"] + ")")
+    else:
+        print(r.get("note", "nothing open"))
+    return r.get("range")
 
 def cmd_claim(args):
     rng = args[0]; _, pub, handle = identity()
@@ -71,6 +98,7 @@ def cmd_prove(args):
     lo, hi = [int(x) for x in rng.split("-")]
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
+    fetch_witnesses(lo, hi)                          # pull any witnesses we're missing from the coordinator
     env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
     stop = threading.Event()
     threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
@@ -106,12 +134,17 @@ def cmd_submit(args):
     print(res); sys.exit(0 if res.get("ok") else 1)
 
 def cmd_run(args):
+    if not args:                                     # no range given — let the coordinator pick one
+        rng = cmd_pick([])
+        if not rng: sys.exit("nothing open to claim")
+        args = [rng]
     cmd_claim(args); cmd_prove(args); cmd_submit(args)
 
 def main():
     if len(sys.argv) < 2: print(__doc__); sys.exit(1)
     c = sys.argv[1]; a = sys.argv[2:]
-    fn = {"id": cmd_id, "claim": cmd_claim, "prove": cmd_prove, "submit": cmd_submit, "run": cmd_run}.get(c)
+    fn = {"id": cmd_id, "pick": cmd_pick, "claim": cmd_claim, "prove": cmd_prove,
+          "submit": cmd_submit, "run": cmd_run}.get(c)
     if not fn: print(__doc__); sys.exit(1)
     fn(a)
 

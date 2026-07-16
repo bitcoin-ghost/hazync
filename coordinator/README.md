@@ -9,8 +9,8 @@ The web **coordinates**; a contributor's **local GPU + CLI** does the proving. T
 runs the prover.
 
 ```
-  claim a range ──► GET witness ──► hazync prove (your GPU) ──► sign ──► hazync submit
-        coordinator verifies signature + STARK receipt ──► folds it ──► credits the block to you
+  pick/claim a range ──► witnesses auto-fetched ──► hazync prove (your GPU) ──► sign ──► hazync submit
+   coordinator verifies signature + STARK receipt ──► chains it by tip ──► credits the block to you
 ```
 
 ## Run it
@@ -33,7 +33,7 @@ clearly flagged in `/api/state` and on the dashboard). Install it for the real s
 | `TIP_HEIGHT` | `958301` | chain tip (denominator for % complete) |
 | `RANGE_SIZE` | `1000` | blocks per claimable range |
 | `SEED_RANGES` | `60` | ranges to create on first run |
-| `WITNESS_DIR` | `./witnesses` | per-range witness files: `witness_<lo>-<hi>.json` |
+| `WITNESS_DIR` | `./witnesses` | per-block witness files: `block_<n>.json` (served via `/api/witness/<n>`) |
 | `HAZYNC_HOST` | — | path to the prover `host` binary (for real verification) |
 | `VERIFY_MODE` | `real` if `HAZYNC_HOST` set, else `mock` | `mock` stubs the STARK check for testing |
 | `CLAIM_TTL` | `1800` | auto-release a claim after this many seconds without a heartbeat |
@@ -47,19 +47,26 @@ export HAZYNC_HOST=/path/to/prover/target/release/host    # your GPU box
 export WITNESS_DIR=/path/to/witnesses
 
 ./hazync id  my-handle          # create your ed25519 identity
+./hazync pick                   # ask the coordinator which range to take next
 ./hazync run 45000-45999        # claim + prove (GPU) + sign + submit, end to end
+./hazync run                    # no range → picks the next open one for you
 ```
 
-Identity (`~/.hazync/key.hex`) and receipts (`~/.hazync/receipts/`) are local. `prove` proves each
-block in the range and folds them with the existing `prove-range` / `fold-range` commands.
+Identity (`~/.hazync/key.hex`) and receipts (`~/.hazync/receipts/`) are local. `prove` **auto-fetches**
+every witness it's missing (blocks `1..hi`, which the prover replays to rebuild the accumulator) from
+the coordinator's `/api/witness/` endpoint into `WITNESS_DIR` before it starts — so you don't need any
+local witness data. It then proves each block in the range and folds them with the existing
+`prove-range` / `fold-range` commands.
 
 ## API
 
 - `GET /api/state` — progress, board (with per-claim `elapsed`/`beat`/`stale`), leaderboard, recent
-- `POST /api/claim` `{range, pubkey, handle}` — **lock** a range to you; rejected if held by someone else
+- `GET /api/pick` — suggest the next open range past the frontier (skips claimed/verified)
+- `POST /api/claim` `{range, pubkey, handle}` — **lock** a range to you; rejected if held by someone else.
+  Any valid aligned range is claimable — the range row is auto-created on demand (no pre-seeded list)
 - `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
-- `GET /api/witness/<range>` — serve a range's witness (if present)
+- `GET /api/witness/<n>` — serve block `n`'s witness (accepts a block number or a `lo-hi` range id)
 
 **Claim-lock + auto-release:** a claim locks the range to one contributor. The prover heartbeats while
 working; if heartbeats stop for `CLAIM_TTL` (or the claim exceeds `CLAIM_MAX`), the coordinator
