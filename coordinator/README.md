@@ -58,14 +58,15 @@ block in the range and folds them with the existing `prove-range` / `fold-range`
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<range>` — serve a range's witness (if present)
 
-`/api/submit` verifies the **ed25519 signature over the receipt bytes**, then verifies the proof by
-**folding it onto the genesis-anchored chain frontier** (`fold-range` + `verify-range`,
-`VERIFY_MODE=real`). An individual range receipt `[k..k]` is a valid STARK, but it's anchored to block
-*k−1*, not genesis — so it only means something once chained. The coordinator keeps one running
-genesis-anchored proof and folds each **contiguous** contribution onto it. A contribution is credited
-only when the fold **and** verify both succeed; a forged, wrong, or out-of-order proof credits nothing.
-(The fold is itself a proving step — cheap on CPU for early/tiny blocks; a real deployment gives the
-coordinator a GPU for the folds at scale.)
+`/api/submit` verifies the **ed25519 signature over the receipt bytes**, then verifies the proof on
+**CPU** with `host verify-any` (real STARK verification, no genesis assertion, `VERIFY_MODE=real`),
+confirms it's for the claimed `[lo..hi]`, and records its boundary tips. It **does not fold** — folding
+is GPU proving work that belongs on contributors' boxes. Instead the coordinator **chains** verified
+ranges by tip (`out_tip` of *k* == `in_tip` of *k+1*) to compute the genesis-anchored frontier. So any
+block can be proved **out of order** and verified independently; the frontier advances as contiguous
+runs connect. A forged/wrong proof fails `verify-any`; a receipt claiming the wrong range is rejected;
+neither credits anything. The dashboard shows **two numbers**: *verified* blocks (any) and the
+*genesis frontier* (contiguous from block 1).
 
 ## Deploy
 
@@ -75,8 +76,10 @@ public `bitcoinghost.org/hazync` page can point its board at this API (CORS is o
 
 ## Status — honest
 
-MVP. Single-file, SQLite, single-process. **Verified end-to-end with real proofs** on a CPU (no GPU):
-blocks 1 and 2 were CPU-proved (~64s / ~109s), signed, submitted, folded onto the genesis-anchored
-frontier ([1..1] → [1..2]), and credited on the signed ledger. Not yet hardened for hostile scale —
-no rate limiting, no auth on `claim`, no out-of-order fold tree (contiguous submissions only), no
-witness-integrity binding beyond the receipt. Those are the next steps.
+MVP. Single-file, SQLite, single-process, **verify-only (CPU, no GPU)**. Verified end-to-end with real
+proofs: blocks 1..10 were CPU-proved on a laptop (~64–110s each), signed, submitted, verified with
+`verify-any`, and chained into the genesis frontier [1..10]. Out-of-order submission tested (block 3
+before block 2: verified but the frontier held at 1, then jumped to 3 when block 2 filled the gap);
+wrong-range receipts rejected; ed25519 signed ledger enforced. Next (see `ROADMAP.md`): claim-lock +
+heartbeat auto-release, pick-any-block + witness serving, timeline UI, then hardening + the archive
+decision.

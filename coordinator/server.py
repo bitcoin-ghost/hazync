@@ -31,6 +31,7 @@ WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__
 HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
+GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -59,6 +60,9 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, range_id TEXT, pubkey TEXT, handle TEXT,
         receipt_sha TEXT, sig TEXT, verified INTEGER, note TEXT, ts REAL);
       CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+      CREATE TABLE IF NOT EXISTS vranges(
+        id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER, in_tip TEXT, out_tip TEXT,
+        pubkey TEXT, handle TEXT, ts REAL);
     """)
     n = c.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
     if n == 0:
@@ -89,61 +93,57 @@ def meta_get(k):
 def meta_set(k, v):
     c = db(); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v))); c.commit(); c.close()
 
-def verify_receipt(receipt: bytes, rng) -> (bool, str):
-    """Verify a submitted range receipt by FOLDING it onto the genesis-anchored chain frontier.
+def verify_receipt(receipt: bytes, rng):
+    """Verify a submitted range receipt on CPU — no folding, no GPU (the 'verify-only' coordinator).
 
-    An individual range receipt [k..k] is a valid STARK, but it is anchored to block k-1 — not genesis —
-    so it only means something once chained. The coordinator keeps one genesis-anchored frontier proof
-    and folds each contiguous contribution onto it (real `fold-range` + `verify-range`). A contribution
-    is credited only when the fold + verify succeed, so a forged, wrong, or out-of-order proof credits
-    nothing. 'mock' stubs the STARK step for GPU-less testing of the rest.
+    Runs `host verify-any` (real STARK verification, without the genesis assertion), confirms the receipt
+    is for the claimed [lo..hi], and reports the boundary tips. The coordinator records each verified
+    range and chains them by tip (out_tip of k == in_tip of k+1) to compute the genesis-anchored frontier
+    — so any block can be proved OUT OF ORDER and verified independently, and the frontier advances as
+    contiguous runs connect. Forging/wrong proofs fail verify-any; a range claiming the wrong [lo..hi] is
+    rejected. Folding into one succinct proof, when wanted, is separate GPU work. Returns
+    (ok, note, meta) where meta = {in_tip, out_tip}. 'mock' stubs the STARK step for GPU-less testing.
     """
     if VERIFY == "mock":
-        return True, "mock-verified (VERIFY_MODE=mock — STARK check stubbed for testing)"
+        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"]}
     if not HOST_BIN or not os.path.exists(HOST_BIN):
-        return False, "no HAZYNC_HOST binary configured for real verification"
+        return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = os.path.join(STATE_DIR, f"in_{rng['id']}.bin")
-    frontier = os.path.join(STATE_DIR, "frontier.bin")
     with open(tmp, "wb") as f:
         f.write(receipt)
-
-    def run(args):
-        r = subprocess.run(args, capture_output=True, timeout=300)
-        return r.returncode, (r.stdout + r.stderr).decode(errors="replace")
-
-    fh = meta_get("frontier_hi")
     try:
-        if fh is None:
-            # first contribution — must be the genesis-anchored range starting at block 1
-            if rng["lo"] != 1:
-                return False, f"backfill starts at block 1 (this range starts at {rng['lo']})"
-            rc, out = run([HOST_BIN, "verify-range", tmp])
-            ok = rc == 0 and "VERIFIED" in out
-            if ok:
-                os.replace(tmp, frontier); meta_set("frontier_hi", rng["hi"])
-            return ok, (f"chain proof [1..{rng['hi']}] VERIFIED" if ok else "verification failed: " + out[-160:])
-        fh = int(fh)
-        if rng["lo"] != fh + 1:
-            return False, f"not contiguous — the next range to prove is {fh+1}-… (frontier at block {fh})"
-        newf = os.path.join(STATE_DIR, "frontier_new.bin")
-        rc, out = run([HOST_BIN, "fold-range", frontier, tmp, newf])
-        if rc != 0 or not os.path.exists(newf):
-            return False, "fold rejected — not adjacent to the chain: " + out[-160:]
-        rc2, out2 = run([HOST_BIN, "verify-range", newf])
-        ok = rc2 == 0 and "VERIFIED" in out2
-        if ok:
-            os.replace(newf, frontier); meta_set("frontier_hi", rng["hi"])
-        return ok, (f"chain proof [1..{rng['hi']}] VERIFIED" if ok else "verification failed: " + out2[-160:])
+        r = subprocess.run([HOST_BIN, "verify-any", tmp], capture_output=True, timeout=120)
+        out = (r.stdout + r.stderr).decode(errors="replace")
+        if r.returncode != 0 or "RANGE-OK" not in out:
+            return False, "receipt rejected (not a valid proof): " + out[-160:], None
+        kv = dict(t.split("=", 1) for t in out.split("RANGE-OK", 1)[1].split() if "=" in t)
+        lo, hi = int(kv["lo"]), int(kv["hi"])
+        if lo != rng["lo"] or hi != rng["hi"]:
+            return False, f"receipt proves [{lo}..{hi}], not the claimed [{rng['lo']}..{rng['hi']}]", None
+        return True, f"range [{lo}..{hi}] VERIFIED", {"in_tip": kv["in_tip"], "out_tip": kv["out_tip"]}
     except Exception as e:
-        return False, f"verify error: {e}"
+        return False, f"verify error: {e}", None
     finally:
         try: os.remove(tmp)
         except Exception: pass
 
+def frontier_hi():
+    """Highest block covered by a contiguous chain of verified ranges from genesis (tip-matched)."""
+    c = db()
+    rows = c.execute("SELECT lo,hi,in_tip,out_tip FROM vranges").fetchall()
+    c.close()
+    by_in = {}
+    for r in rows:
+        by_in.setdefault(r["in_tip"], r)  # first wins on ties
+    tip, hi, seen = GENESIS_TIP, 0, set()
+    while tip in by_in and tip not in seen:
+        seen.add(tip); r = by_in[tip]; hi = r["hi"]; tip = r["out_tip"]
+    return hi
+
 def state():
     c = db()
-    proven = c.execute("SELECT COALESCE(SUM(hi-lo+1),0) FROM ranges WHERE status='verified'").fetchone()[0]
+    proven = c.execute("SELECT COALESCE(SUM(hi-lo+1),0) FROM vranges").fetchone()[0]
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
     # board window: all verified + claimed, then a few open around the frontier
     board = []
@@ -156,9 +156,10 @@ def state():
                    ts=s["ts"], note=s["note"])
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
     c.close()
+    fr = frontier_hi()
     return {
-        "progress": {"proven": proven, "tip": TIP,
-                     "pct": round(100.0*proven/TIP, 3) if TIP else 0, "contributors": ncontrib},
+        "progress": {"proven": proven, "frontier": fr, "tip": TIP,
+                     "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
         "board": board, "leaderboard": leaders, "recent": recent,
         "signatures": "ed25519" if HAVE_ED else "dev (no signature lib installed)",
         "verify_mode": VERIFY,
@@ -197,13 +198,16 @@ def submit(body):
         if not r: c.close(); return 404, {"error": "no such range"}
         if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
         sig_ok = verify_sig(pk, sig, receipt)
-        rcpt_ok, note = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid")
+        rcpt_ok, note, meta = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid", None)
         ok = sig_ok and rcpt_ok
         c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
                   " VALUES(?,?,?,?,?,?,?,?)", (rid, pk, handle, sha, sig, int(ok), note, time.time()))
         if ok:
             c.execute("UPDATE ranges SET status='verified', receipt_sha=?, verified_at=? WHERE id=?",
                       (sha, time.time(), rid))
+            c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts)"
+                      " VALUES(?,?,?,?,?,?,?,?)",
+                      (rid, r["lo"], r["hi"], meta["in_tip"], meta["out_tip"], pk, handle, time.time()))
             c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",

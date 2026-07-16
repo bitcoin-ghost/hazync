@@ -907,6 +907,19 @@ fn verify_range_cmd(bin: &str) {
         hex(&rs.out_tip_hash), work_u128(&rs.range_work), work_u128(&total), rs.out_leaves);
 }
 
+// Verify a range receipt WITHOUT the genesis assertion — the CPU check a coordinator runs on each
+// submitted contribution. Confirms the STARK is valid and reports the committed [lo,hi] + boundary
+// tips, so the coordinator can chain ranges (out_tip of k == in_tip of k+1) into a genesis-anchored
+// frontier without doing any proving/folding itself.
+fn verify_any_cmd(bin: &str) {
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
+    r.verify(METHOD_ID).expect("verify"); // real STARK verification
+    let rs: RangeState = r.journal.decode().unwrap();
+    assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={}",
+        rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work));
+}
+
 // SEGMENTED proof: split the block's inputs into chunks, prove each chunk's scripts (mode 4), then
 // aggregate (mode 5) — env::verify the chunks + do the cheap accumulator transition + block checks.
 fn prove_seg() {
@@ -1135,6 +1148,10 @@ fn main() {
     }
     if let Some(p) = args.iter().position(|a| a == "verify-range") {
         verify_range_cmd(args.get(p + 1).expect("verify-range <bin>"));
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "verify-any") {
+        verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
         return;
     }
     if args.iter().any(|a| a == "prove-full") {
