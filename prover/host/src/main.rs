@@ -370,6 +370,12 @@ fn build_full() -> (ChainState, BlockWitness) {
     let mut txids = vec![cb_txid];
     let mut wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase wtxid = zeros (BIP141)
     let mut inputs: Vec<BlockInput> = Vec::new();
+    // SEC-2 negative-test hook (test-only, inert unless HAZYNC_SEC2_BADPOS is set): corrupt the FIRST
+    // spend's claimed global position while leaving its inclusion proof honest — the exact inconsistency
+    // an honest witness-builder cannot express (both fields normally derive from the same `pos`). The
+    // guest's hardened `delete` must reject it (`all_ok=false`, and the accumulator diverges so
+    // `root_matches=false`). See SECURITY.md / ROADMAP (SEC-2). NEVER set in production.
+    let sec2_bad = std::env::var("HAZYNC_SEC2_BADPOS").is_ok();
     for p in &ptxs {
         txids.push(p.txid);
         wtxids.push(p.tx.compute_wtxid().to_byte_array());
@@ -379,9 +385,15 @@ fn build_full() -> (ChainState, BlockWitness) {
             let coin = leaf_of(&p.tx.input[i].previous_output, &p.prevouts[i], ch_i, cb_i, mtp_i);
             let pos = forest.leaves.iter().position(|x| *x == coin).expect("input coin in accumulator");
             let last = forest.leaves.len() - 1;
+            let mut global_pos = pos as u64;
+            if sec2_bad && inputs.is_empty() {
+                // a different but in-range index -> membership proof stays valid, position is a lie
+                global_pos = if (pos as u64) < last as u64 { pos as u64 + 1 } else { (pos as u64).saturating_sub(1) };
+                eprintln!("[SEC2-TEST] corrupting first spend global_pos {} -> {} (proof_i left honest)", pos, global_pos);
+            }
             inputs.push(BlockInput {
                 raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(), flags: 0,
-                global_pos: pos as u64, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
+                global_pos, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
                 proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
             });
             forest.delete(pos);

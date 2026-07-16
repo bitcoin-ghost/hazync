@@ -22,7 +22,7 @@ full trust base and the two portability shims.
 | S2 | Coinbase maturity / BIP68-height fed placeholder metadata | soundness | **fixed** (real coin metadata; validated on 741000) |
 | S4a/b | BIP34 (height in coinbase), BIP30 (duplicate txid) | completeness | **fixed** (validated on 741000) |
 | C1 | No automated regression harness | quality | **fixed** (`check-full` / `regress` execute-mode) |
-| SEC-neg | Negative regression tests for SEC-1/2 | quality | **partial** — SEC-1 witness test done (corrupted-witness block rejected on `witness_ok`); SEC-2 position test open |
+| SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
 | BIP68-time | Needs real `coin_mtp` | completeness | **open** — arrives free with the archive-node bridge |
 | — | External audit | — | **open / wanted** |
@@ -92,15 +92,19 @@ protection). Failed closed in practice.
 
 ## Open items (the review bounty list)
 
-1. **SEC-neg** — negative regression tests proving the fixes *reject* the malicious cases (not just
-   that valid blocks still pass).
+1. **SEC-neg — DONE.** Negative regression tests proving the fixes *reject* the malicious cases (not
+   just that valid blocks still pass). Both halves below now demonstrate rejection.
    - **SEC-1 (witness) — done.** `prover/make_negative_tests.py` produces `block_741000_badwit.json`
      (one byte flipped inside a transaction's witness → wtxid changes, txid does not). `check-full`
      reports `merkle_ok=true, witness_ok=false, all_ok=false` — the block is rejected specifically on
      the BIP141 witness commitment, confirming the check is enforced and unskippable.
-   - **SEC-2 (position) — open.** Needs a test-only host knob to feed `delete` an index inconsistent
-     with the proof and assert the accumulator update is rejected (the normal witness path derives the
-     index from the host accumulator, so it can't express the inconsistency without a hook).
+   - **SEC-2 (position) — done.** A test-only host knob (`HAZYNC_SEC2_BADPOS=1`) corrupts the first
+     spend's `global_pos` to a different in-range index while leaving its inclusion proof honest — the
+     exact inconsistency the normal path can't express (both fields derive from the same accumulator
+     lookup). `check-full` on block 170 then reports `all_ok=false, root_matches=false` with every
+     other flag true, isolating the rejection to the hardened `delete`'s position check. Without the
+     knob the same block is VALID. The knob is inert unless the env var is set. See
+     `prover/make_negative_tests.py`.
 2. **BIP68 time-based** — needs real `coin_mtp`; arrives free with the archive-node bridge.
 3. **External audit** — especially of the accumulator (the one non-Core component) and the recursion
    binding. Wanted.

@@ -10,6 +10,19 @@ These prove the guest REJECTS malicious inputs, not just that it accepts valid o
   (the guest recomputes `has_witness` in-guest, so a prover can't claim "no witness" to skip it).
 
 Usage:  python3 make_negative_tests.py           # reads block_741000.json, writes the fixture(s)
+
+--- SEC-2 (accumulator delete position) is a *runtime* negative test, not a fixture ---
+The SEC-2 attack (a valid inclusion proof paired with a lying global position) cannot be expressed in
+witness JSON, because the honest host derives both the position and the proof from the same accumulator
+lookup. It is injected by a test-only host knob instead:
+
+    HAZYNC_SEC2_BADPOS=1 HAZYNC_BLOCK=block_170.json host check-full
+
+With the knob set, the host corrupts the first spend's `global_pos` (a different but in-range index)
+while leaving its inclusion proof honest. The hardened guest `delete` must reject it: `check-full`
+reports `all_ok=false, root_matches=false` with every other flag true (pow/merkle/subsidy/weight/
+sigops/witness/bip34/bip30), isolating the failure to the position-consistency check. Without the knob
+the same block is VALID. The knob is inert unless the env var is set; NEVER set it in production.
 """
 import json
 import sys

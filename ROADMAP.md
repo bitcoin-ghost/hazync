@@ -22,12 +22,14 @@ regression (block 170, block 741000, `check-ibd` genesis→550) to **identical**
   honest deletes at block 170 and was corrected.)
 - [x] **SEC-3 (low, robustness): prevouts vector length unchecked.** FIXED (`6c63565`): length asserts
   `spent.size() == tx.vin.size()` in `verify_input` / `check_tx` / `tx_full_sigops`.
-- [~] **SEC-neg: negative regression tests.** Prove the fixes REJECT the malicious cases.
+- [x] **SEC-neg: negative regression tests.** Both fixes shown to REJECT the malicious cases.
   - [x] SEC-1 (witness): `prover/make_negative_tests.py` → `block_741000_badwit.json` (one witness byte
     flipped). `check-full` reports `merkle_ok=true, witness_ok=false, all_ok=false` — rejected on the
     BIP141 commitment, exactly the check SEC-1 makes unskippable.
-  - [ ] SEC-2 (position): needs a test-only host knob to feed `delete` an index inconsistent with the
-    proof and assert rejection (the normal path derives the index from the host accumulator).
+  - [x] SEC-2 (position): test-only host knob `HAZYNC_SEC2_BADPOS=1` corrupts the first spend's
+    `global_pos` (different in-range index) while leaving `proof_i` honest. `check-full` on block 170
+    reports `all_ok=false, root_matches=false`, every other flag true — rejected by the hardened
+    `delete`'s position check. Inert unless the env var is set; VALID without it.
 
 > Validation: SEC-1/2/3 all verified by rebuilding the guest + re-running the regression (block 170,
 > block 741000, `check-ibd` genesis→550) to **byte-identical** tip hashes — the fixes reject the
