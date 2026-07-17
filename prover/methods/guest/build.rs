@@ -33,8 +33,10 @@ fn lib_dir(gcc: &str, query: &[&str]) -> String {
 }
 
 fn main() {
+    // Consensus source root: Bitcoin Core + secp256k1 + the coreshim, laid out by provision-vps.sh.
+    // Set HAZYNC_BASE to point at it; the default matches provision's WORK dir ($HOME/hazync-build).
     let base = std::env::var("HAZYNC_BASE").unwrap_or_else(|_| {
-        "/tmp/claude-1000/-home-defenwycke/05711464-155c-4610-b5b1-7ae9ee3f568e/scratchpad/bakeoff".into()
+        format!("{}/hazync-build", std::env::var("HOME").unwrap_or_default())
     });
     let secp = format!("{base}/secp256k1");
     let core = format!("{base}/bitcoin-core/src");

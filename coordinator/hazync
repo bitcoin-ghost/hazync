@@ -3,11 +3,15 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
-  hazync pick               # ask the coordinator which block/range to take next
-  hazync claim <id>         # reserve a single block (e.g. 764321) or a range (e.g. 45000-45999)
-  hazync prove <id>         # prove that block/range on your GPU  -> a receipt .bin
+  hazync pick               # ask the coordinator for the next OPEN range (near the frontier)
+  hazync claim <id>         # reserve an open range from the board (e.g. 0-999)
+  hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
-  hazync run [id]           # claim + prove + submit, end to end (id optional: picks one if omitted)
+  hazync run [id]           # claim + prove + submit, end to end (id optional: picks the next open range)
+
+The party proves the chain forward from genesis, so you take a range near the current
+frontier. Proving a range needs the witnesses up to it (the coordinator serves them for
+its window); an arbitrary far-future block is not something a fresh contributor can prove.
 
 Config (env):
   COORD_URL   coordinator base URL            (default http://localhost:8899)
@@ -132,7 +136,11 @@ def cmd_submit(args):
     sig = sk.sign(receipt).hex()
     res = post("/api/submit", {"range": rng, "pubkey": pub, "handle": handle,
                                "sig": sig, "receipt": base64.b64encode(receipt).decode()})
-    print(res); sys.exit(0 if res.get("ok") else 1)
+    if res.get("ok"):
+        print(f"✓ range {rng}: the coordinator re-verified your proof and put it on the board as '{handle}'.")
+    else:
+        print("✗ submit rejected:", res.get("error") or res)
+    sys.exit(0 if res.get("ok") else 1)
 
 def cmd_run(args):
     if not args:                                     # no range given — let the coordinator pick one

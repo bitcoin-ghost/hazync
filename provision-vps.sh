@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Hazync prover — VPS provisioning (fresh Ubuntu 22.04/24.04, ≥64 GB RAM; 256 GB for full blocks).
+# Hazync prover — VPS provisioning (fresh Ubuntu 22.04/24.04). ~16 GB RAM builds and proves early/small
+# blocks; big modern blocks (thousands of inputs) want 64 GB+ and a GPU. ~80 GB disk for the build.
 # Turnkey: installs RISC0 + Rust + the Bitcoin Core consensus source + patches, then builds the prover.
 # GPU proving (CUDA) is a big speedup — see the GPU section at the bottom (optional).
 #
@@ -13,7 +14,7 @@ CORE_TAG="v28.0"
 
 echo "== 1. system packages =="
 sudo apt-get update
-sudo apt-get install -y build-essential cmake git curl pkg-config libssl-dev clang lld python3
+sudo apt-get install -y build-essential cmake git curl ca-certificates pkg-config libssl-dev clang lld python3 protobuf-compiler
 
 echo "== 2. Rust =="
 if ! command -v cargo >/dev/null; then
@@ -51,29 +52,50 @@ export RISC0_HOME="\$HOME/.risc0"
 export HAZYNC_BASE="$WORK"
 EOF
 
-echo "== 7. build the prover (release) =="
-cd "$REPO_DIR/prover"
-cargo build --release
-
+# 7. (optional) CUDA for GPU proving — installed BEFORE the build so we can compile the CUDA backend.
+GPU_FEATURES=""
 if [ "${GPU:-0}" = "1" ]; then
-  echo "== 8. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x"
-  echo "   that UpCloud L40S boxes ship — cccl header errors; 12.6 works). =="
-  sudo apt-get install -y -qq protobuf-compiler   # circom-witnesscalc (Groth16) needs protoc
+  echo "== 7. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x"
+  echo "   that some L40S boxes ship — cccl header errors; 12.6 works). =="
   if [ ! -d /usr/local/cuda-12.6 ]; then
-    ( cd /root && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
-      && sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update -qq \
-      && sudo apt-get install -y -qq cuda-toolkit-12-6 )
+    # Pick the CUDA repo matching this Ubuntu release (don't hardcode 24.04).
+    . /etc/os-release
+    case "${VERSION_ID:-}" in
+      24.04) CUDA_REPO=ubuntu2404 ;;
+      22.04) CUDA_REPO=ubuntu2204 ;;
+      *)     CUDA_REPO=ubuntu2404; echo "  (unrecognised Ubuntu '${VERSION_ID:-?}'; defaulting to ${CUDA_REPO} repo)" ;;
+    esac
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "$tmp/cuda-keyring.deb" \
+      "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
+    sudo dpkg -i "$tmp/cuda-keyring.deb"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq cuda-toolkit-12-6
+    rm -rf "$tmp"
   fi
-  sudo ln -sfn /usr/local/cuda-12.6 /usr/local/cuda   # make the build pick 12.6, not the shipped 13.x
-  echo "  Build + prove on GPU:"
-  echo "    export CUDA_PATH=/usr/local/cuda-12.6 PATH=/usr/local/cuda-12.6/bin:\$PATH"
-  echo "    cargo build --release --features cuda"
-  echo "    ./target/release/host prove-block           # single block"
-  echo "    NGPU=<n> HAZYNC_CHUNKS=<k> HAZYNC_BLOCK=<block.json> ./cluster.sh   # multi-GPU fan-out"
+  sudo ln -sfn /usr/local/cuda-12.6 /usr/local/cuda   # make the build pick 12.6, not a shipped 13.x
+  export CUDA_PATH=/usr/local/cuda-12.6
+  export PATH="/usr/local/cuda-12.6/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+  GPU_FEATURES="--features cuda"
+  grep -q 'CUDA_PATH' "$HOME/.bashrc" || cat >> "$HOME/.bashrc" <<'EOF'
+export CUDA_PATH=/usr/local/cuda-12.6
+export PATH="/usr/local/cuda-12.6/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+EOF
 fi
 
+echo "== 8. build the prover (release${GPU_FEATURES:+ + CUDA}) — HAZYNC_BASE is exported above =="
+cd "$REPO_DIR/prover"
+cargo build --release $GPU_FEATURES
+
 echo
-echo "DONE. Prove with:"
-echo "  cd $REPO_DIR/prover && cargo run --release -- prove-block     # single block 170 -> real STARK receipt"
-echo "  cd $REPO_DIR/prover && cargo run --release -- prove-chain     # 2-step recursive fold (see PROVING.md)"
-echo "  (no arg = the fast execute-mode validation demo)"
+echo "DONE. Verify the build with the self-contained checks (no GPU, no files):"
+echo "  cd $REPO_DIR/prover && ./target/release/host regress        # block 170 consensus regression"
+echo "  cd $REPO_DIR/prover && ./target/release/host adversarial    # soundness suite (all holes must REJECT)"
+echo "Then prove:"
+echo "  ./target/release/host prove-block                           # single block 170 -> real STARK receipt"
+if [ "${GPU:-0}" = "1" ]; then
+  echo "  (CUDA env is set in this shell and persisted to ~/.bashrc for future logins)"
+fi
+echo "Or join the proof party — see CONTRIBUTING.md."

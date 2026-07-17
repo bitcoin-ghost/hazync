@@ -31,7 +31,14 @@ portability shims** and libc/unwinder glue — no consensus-logic changes:
 - `serialize.h`: a 32-bit `int` overload so ILP32 `riscv32` serialises identically to LP64 (patch 0001).
 - SHA-256 routed to RISC0's accelerator, byte-identical to Core's (patch 0002).
 
-Both are auditable and narrow. A gotcha worth noting for anyone reproducing: C++ static constructors
+Both are auditable and narrow, and neither changes consensus logic: ECDSA and Schnorr both go through
+the compiled, unmodified `libsecp256k1`. There is a *third* patch, `patches/0003`, which substitutes
+RustCrypto's `k256` for libsecp's ECDSA verify purely as a speed option. It is **not** applied in the
+sound build (`provision-vps.sh` applies only 0001 + 0002) and is **not** part of the "runs Core" claim —
+using it would reintroduce exactly the reimplementation-equivalence question this project avoids, which
+is why it is opt-in and quarantined to `ACCELERATION.md`.
+
+A gotcha worth noting for anyone reproducing: C++ static constructors
 don't run in the bare-metal guest, so Core's global tagged-hash midstates (e.g. `TapSighash`) are
 garbage until you call `__libc_init_array()` once at guest entry — without it, taproot sighashes are
 silently wrong.
@@ -82,8 +89,11 @@ composition via `env::verify`), and a **parallel range-fold** — prove each blo
 merge adjacent ranges in a log-depth tree, checking `tip_hash`/`root`/`cumwork` boundaries at each
 join. The range-fold is the backfill path: genesis→tip is embarrassingly parallel, so the one-time
 historical proof distributes across many machines, and the tip is then kept current by a small cluster.
-Within a block, inputs prove in parallel (segmentation) and aggregate; the EC-heavy `libsecp256k1`
-verification is routed through RISC0's accelerated backend.
+Within a block, inputs prove in parallel (segmentation) and aggregate. In the sound build only SHA-256
+is routed to RISC0's accelerator (patch 0002, byte-identical); the EC-heavy `libsecp256k1` verification
+runs *unaccelerated*, so the cycle counts above are for unaccelerated EC. Speeding it up — a bigint2
+field backend, or the k256 substitution in `patches/0003` — is open work tracked in `ACCELERATION.md`
+and is **not** used for any soundness claim.
 
 ## Trust model — what you actually assume
 

@@ -2,7 +2,7 @@
 // + libsecp256k1 — all compiled into the guest via build.rs.
 use risc0_zkvm::guest::env;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
 
@@ -41,6 +41,9 @@ extern "C" {
     fn check_witness_commitment(cb: *const u8, cb_len: u32, wtxids: *const u8, n: u32, has_witness: u32) -> i32;
     // BIP34: coinbase scriptSig must encode the block height (from height 227836).
     fn check_bip34(cb: *const u8, cb_len: u32, height: u32) -> i32;
+    // Real Core CTransaction::IsCoinBase() on the raw tx bytes: 1 iff exactly one input with a null
+    // prevout (#4 — assert the block's "coinbase" really is structurally a coinbase).
+    fn is_coinbase_tx(tx: *const u8, tx_len: u32) -> i32;
     // Sum of a coinbase tx's outputs, and the height's block subsidy (exact halving formula).
     fn coinbase_value(tx: *const u8, tx_len: u32) -> i64;
     fn block_subsidy(height: u32) -> i64;
@@ -242,6 +245,27 @@ fn dsha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(h1).into()
 }
 
+// #2: canonical digest binding one input's ENTIRE script-verification context — the exact spending tx
+// bytes, the input index, the prevouts the script ran against, the spent coin's metadata, AND the
+// consensus flags. A chunk proof (mode 4) commits this per input; the aggregation (mode 5) recomputes
+// it from the block's own input and requires equality. Without it a chunk could prove "some valid spend
+// of this coin under attacker-chosen (weaker) flags" and the aggregation would accept a DIFFERENT
+// spending witness / lower-flag verification for the block's input. Length-prefixed to be unambiguous.
+fn input_bind(raw_tx: &[u8], input_idx: u32, prevouts: &[u8],
+              coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32, flags: u32) -> [u8; 32] {
+    let mut m = Vec::with_capacity(raw_tx.len() + prevouts.len() + 24);
+    m.extend_from_slice(&(raw_tx.len() as u32).to_le_bytes());
+    m.extend_from_slice(raw_tx);
+    m.extend_from_slice(&input_idx.to_le_bytes());
+    m.extend_from_slice(&(prevouts.len() as u32).to_le_bytes());
+    m.extend_from_slice(prevouts);
+    m.extend_from_slice(&coin_height.to_le_bytes());
+    m.extend_from_slice(&coin_is_coinbase.to_le_bytes());
+    m.extend_from_slice(&coin_mtp.to_le_bytes());
+    m.extend_from_slice(&flags.to_le_bytes());
+    dsha256(&m)
+}
+
 // Validate one whole block against `w.root_prev`: every input's script (real VerifyScript), the coin
 // it spends present in the UTXO accumulator (bound by canonical leaf), spent coins removed + created
 // inserted == root_next, plus real CheckTransaction, no-inflation amounts, PoW, merkle root, subsidy.
@@ -269,6 +293,11 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // output set also lets us detect in-block-created coins (H1): an input whose leaf is in this set
     // spends a coin created earlier in this block (ephemeral — never entered the accumulator).
     let mut output_leaves: Vec<[u8; 32]> = Vec::new();
+    // #3: map each in-block-created coin leaf -> the index of the tx that created it (0 = coinbase,
+    // 1 = first non-coinbase tx, ...). An input spending one of these ephemeral coins must be in a
+    // strictly LATER tx and may spend it at most once. The accumulator (which normally enforces
+    // single-spend) is bypassed for in-block coins, so both rules must be enforced explicitly below.
+    let mut created_at: BTreeMap<[u8; 32], u32> = BTreeMap::new();
     let gather = |raw: &[u8], is_cb: u32, sink: &mut Vec<[u8; 32]>| -> [u8; 32] {
         let mut buf = vec![0u8; (raw.len() / 8 + 1) * 32];
         let mut txid = [0u8; 32];
@@ -283,21 +312,26 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         }
         txid
     };
+    let cb_start = output_leaves.len();
     let cb_txid = gather(&w.coinbase_tx, 1, &mut output_leaves);
+    for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
     if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
     let mut tx_idx = 1usize;
     for inp in &w.inputs {
         if inp.tx_first == 1 {
+            let start = output_leaves.len();
             let t = gather(&inp.raw_tx, 0, &mut output_leaves);
+            for l in &output_leaves[start..] { created_at.entry(*l).or_insert(tx_idx as u32); }
             if tx_idx >= w.txids.len() || t != w.txids[tx_idx] { all_ok = false; }
             tx_idx += 1;
         }
     }
     if tx_idx != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
-    let output_set: BTreeSet<[u8; 32]> = output_leaves.iter().copied().collect();
     let mut spent_in_block: BTreeSet<[u8; 32]> = BTreeSet::new();
+    let mut cur_tx: u32 = 0; // index of the tx currently being processed (increments on each tx_first)
 
     for (idx, inp) in w.inputs.iter().enumerate() {
+        if inp.tx_first == 1 { cur_tx += 1; } // this input begins a new tx (1 = first non-coinbase tx)
         let mut leaf = [0u8; 32];
         let r = match chunk {
             None => unsafe {
@@ -309,8 +343,13 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                     leaf.as_mut_ptr(),
                 )
             },
-            Some((chunk_leaves, all_valid)) => {
-                // Aggregation: recompute the leaf (cheap) and take script validity from the chunks.
+            Some((chunk_binds, all_valid)) => {
+                // Aggregation: recompute the leaf (cheap, for the accumulator delete below) and take
+                // script validity from the chunks — but ONLY after proving the chunk verified THIS
+                // input. #2: recompute the same binding digest the chunk committed (tx bytes, input idx,
+                // prevouts, coin metadata, and the block's own flags) and require it matches. This binds
+                // both the spending witness and the flags, so a chunk cannot substitute a different
+                // valid spend of the coin or validate it under attacker-chosen weaker flags.
                 unsafe {
                     coin_leaf_only(
                         inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.input_idx,
@@ -318,7 +357,9 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                         inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, leaf.as_mut_ptr(),
                     )
                 };
-                if idx < chunk_leaves.len() && chunk_leaves[idx] == leaf && all_valid { 1 } else { -1 }
+                let d = input_bind(&inp.raw_tx, inp.input_idx, &inp.prevouts,
+                    inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, flags);
+                if idx < chunk_binds.len() && chunk_binds[idx] == d && all_valid { 1 } else { -1 }
             }
         };
         script_results.push(r);
@@ -356,10 +397,14 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         if r != 1 {
             all_ok = false;
         }
-        if output_set.contains(&leaf) {
+        if let Some(&creator) = created_at.get(&leaf) {
             // IN-BLOCK spend (H1): this coin was created by an earlier tx in THIS block, so it never
             // entered the accumulator — cancel it (ephemeral). Its script still had to pass (above).
-            spent_in_block.insert(leaf);
+            // #3: the coin must be created by a STRICTLY earlier tx (no spend-before-create, no
+            // self-spend) and spent AT MOST ONCE (BTreeSet::insert returns false on a repeat) — else a
+            // prover consumes one in-block output twice and mints its value.
+            if creator >= cur_tx { all_ok = false; }
+            if !spent_in_block.insert(leaf) { all_ok = false; }
         } else {
             // EXTERNAL spend: the coin exists in the accumulator — verify inclusion + delete it.
             if inp.proof_i.leaf != leaf {
@@ -422,6 +467,20 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         ids.sort_unstable();
         ids.windows(2).all(|w| w[0] != w[1])
     };
+
+    // #4: run the coinbase through real Core CheckTransaction (bad-cb-length, per-output MoneyRange,
+    // duplicate-input, value-sum range) and assert it is structurally a coinbase. Previously the
+    // coinbase only reached subsidy/BIP34/witness-commitment checks and never CheckTransaction, so a
+    // malformed coinbase (or one whose output sum overflows i64 inside coinbase_value) could slip
+    // through. Empty prevouts blob = a serialized empty CTxOut vector (CompactSize 0 == one 0x00 byte).
+    let cb_empty_prevouts = [0u8; 1];
+    let mut cb_fee: i64 = 0;
+    let cb_struct_ok = unsafe {
+        check_tx(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32,
+            cb_empty_prevouts.as_ptr(), cb_empty_prevouts.len() as u32, &mut cb_fee as *mut i64)
+    } == 1;
+    let cb_is_coinbase = unsafe { is_coinbase_tx(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32) } == 1;
+    if !cb_struct_ok || !cb_is_coinbase { all_ok = false; }
 
     let coinbase_val = unsafe { coinbase_value(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32) };
     let subsidy = unsafe { block_subsidy(w.height) };
@@ -579,6 +638,12 @@ fn chain_step() {
     if is_base == 0 {
         assert!(prev.self_id == self_id, "recursion image-id mismatch");
     }
+
+    // #1: the block's height (which selects the script FLAGS and the coinbase SUBSIDY schedule) is
+    // host-supplied in `w.height`. It must equal the real chain height prev.height+1, or a prover sets
+    // w.height=1 to turn every soft-fork flag off (segwit/taproot outputs become anyone-can-spend) and
+    // inflate the subsidy to 50 BTC, while the journal still commits the true height. Bind them.
+    assert!(w.height == prev.height + 1, "chain step: block height {} != chain height {}", w.height, prev.height + 1);
 
     // BIP113/BIP68 use the PREVIOUS block's median-time-past (median of the last ≤11 timestamps).
     let prev_mtp = median_time_past(&prev.recent_times);
@@ -788,7 +853,7 @@ fn legacy() {
 #[derive(Deserialize)]
 struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
 #[derive(Serialize, Deserialize)]
-struct ChunkOut { all_valid: bool, leaves: Vec<[u8; 32]> }
+struct ChunkOut { all_valid: bool, binds: Vec<[u8; 32]> }
 
 // Mode 4: prove a BATCH of inputs' scripts (the expensive VerifyScript). Parallelisable across a
 // block; commits the coin leaves it verified so the aggregation can bind them to the block's inputs.
@@ -796,7 +861,7 @@ fn chunk_prove() {
     let height: u32 = env::read();
     let flags = block_script_flags(height);
     let n: u32 = env::read();
-    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
+    let mut binds: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
     let mut all_valid = true;
     for _ in 0..n {
         let c: ChunkInput = env::read();
@@ -809,9 +874,11 @@ fn chunk_prove() {
             )
         };
         if r != 1 { all_valid = false; }
-        leaves.push(leaf);
+        // Bind exactly what was verified (tx bytes, input idx, prevouts, coin metadata, flags) so the
+        // aggregation can prove the block's input is the one this chunk validated — see input_bind (#2).
+        binds.push(input_bind(&c.raw_tx, c.input_idx, &c.prevouts, c.coin_height, c.coin_is_coinbase, c.coin_mtp, flags));
     }
-    env::commit(&ChunkOut { all_valid, leaves });
+    env::commit(&ChunkOut { all_valid, binds });
 }
 
 // Mode 5: aggregate K chunk proofs into a block/chain proof. env::verify each chunk (composition),
@@ -820,7 +887,7 @@ fn chunk_prove() {
 fn aggregate() {
     let self_id: [u32; 8] = env::read();
     let k: u32 = env::read();
-    let mut all_leaves: Vec<[u8; 32]> = Vec::new();
+    let mut all_binds: Vec<[u8; 32]> = Vec::new();
     let mut chunks_ok = true;
     for _ in 0..k {
         let cj: Vec<u8> = env::read();
@@ -828,7 +895,7 @@ fn aggregate() {
         let words: Vec<u32> = cj.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let out: ChunkOut = risc0_zkvm::serde::from_slice(&words).expect("decode chunk");
         if !out.all_valid { chunks_ok = false; }
-        all_leaves.extend(out.leaves);
+        all_binds.extend(out.binds);
     }
     let prev_journal: Vec<u8> = env::read();
     let w: BlockWitness = env::read();
@@ -842,9 +909,13 @@ fn aggregate() {
     if is_base == 0 {
         assert!(prev.self_id == self_id, "recursion image-id mismatch");
     }
+    // #1: bind the block's height to the real chain height (same reason as chain_step — otherwise the
+    // segmented path validates flags/subsidy at an attacker-chosen height). Also closes half of #2: the
+    // per-input binding digest folds in `flags = block_script_flags(w.height)`, now pinned to the height.
+    assert!(w.height == prev.height + 1, "aggregate: block height {} != chain height {}", w.height, prev.height + 1);
     let prev_mtp = median_time_past(&prev.recent_times);
 
-    let r = validate_block(&w, prev_mtp, Some((&all_leaves, chunks_ok)));
+    let r = validate_block(&w, prev_mtp, Some((&all_binds, chunks_ok)));
     let block_valid = r.all_ok && r.root_matches && r.pow_ok && r.merkle_ok && r.subsidy_ok && r.weight_ok && r.sigops_ok && r.witness_ok && r.bip34_ok && r.bip30_ok;
     let prevhash_ok = w.header[4..36] == prev.tip_hash[..];
     let carry_ok = normalize(w.root_prev.roots.clone()) == normalize(prev.utxo_roots.clone()) && w.root_prev.num_leaves == prev.utxo_leaves;

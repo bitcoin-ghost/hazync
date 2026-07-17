@@ -7,7 +7,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 - A Linux machine, Ubuntu 22.04 or 24.04. A cloud GPU box works well.
 - An NVIDIA GPU if you can get one. It makes proving about twenty times faster. No GPU still works for the early blocks, it is just slower.
 - Roughly 16 GB of RAM and 80 GB of disk for the one-time build.
-- About 25 minutes for the build the first time. After that, proving a block takes seconds.
+- About 25 minutes for the build the first time. After that, an early block proves in seconds on a GPU; a full range of blocks takes proportionally longer.
 
 ## Minimum spec, by what you want to do
 
@@ -56,31 +56,35 @@ export WITNESS_DIR=$PWD/w
 
 Your name can be anything. It is tied to a signing key the tool makes for you and keeps in `~/.hazync`, so nobody else can claim your blocks. Back that folder up if you care about keeping the same identity.
 
-## Step 5: prove a block
+## Step 5: prove a range
 
 ```
 ./coordinator/hazync run
 ```
 
-That picks an open block, fetches what it needs, proves it on your machine, signs it, and submits it. When it prints VERIFIED, refresh https://bitcoinghost.org/hazync and you will see your block with your name on it.
+That asks the coordinator for the next open range near the frontier, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a line starting with `✓`, your name is on the board at https://bitcoinghost.org/hazync.
 
-Want a specific block? Give it a number:
+The party proves the chain forward from genesis, so you take a range near the current frontier. You can see the open ranges on the board. Want a specific one? Pass it:
 
 ```
-./coordinator/hazync run 764321
+./coordinator/hazync run 0-999
 ```
 
-Prove as many as you like. Just run it again.
+Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block is not something a fresh contributor can prove: the coordinator serves witnesses for its window near the frontier, and proving needs the chain up to that point.
 
 ## Just want to check a proof, not make one?
 
-You never have to trust the party. Download any proof from the board and verify it yourself. No GPU needed.
+You never have to trust the party. Every verified proof is public at `https://bitcoinghost.org/hazync/api/proof/<block>`, and you can also click any green block on the board to download it. Then check it yourself, no GPU needed:
 
 ```
+# download block 170's proof receipt
+curl https://bitcoinghost.org/hazync/api/proof/170 -o proof_170.bin
+
+# verify it against the same real Bitcoin Core consensus code
 ./prover/target/release/host verify-any proof_170.bin
 ```
 
-That is the whole point of this project: every proof is public and anyone can check it.
+If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the whole point of this project: every proof is public and anyone can check it, no trust required.
 
 ## If something breaks
 

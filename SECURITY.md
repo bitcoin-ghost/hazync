@@ -27,6 +27,10 @@ full trust base and the two portability shims.
 | BIP68-time | Block-proving path now commits real `MTP(coinHeight−1)` | **soundness** | **fixed** (validated; check also proven on a real mainnet tx) |
 | COV-1 | `time-too-old`: block timestamp must exceed MTP(prev 11) — was unchecked | **soundness** | **fixed + negative-tested** (asserted in chain_step/aggregate/prove_range) |
 | COV-2 | Merkle CVE-2012-2459 mutation flag was discarded (`nullptr`) | **soundness** | **fixed + negative-tested** (capture Core's `mutated` and reject) |
+| H1 | Block height host-controlled (flag/subsidy downgrade) | **critical** | **fixed + negative-tested** (`w.height == prev.height+1`; `host adversarial` #1) |
+| H2 | Segmented chunks bound neither flags nor spending witness | **critical** | **fixed + negative-tested** (per-input binding digest; `HAZYNC_H2_BADHEIGHT` prove-seg) |
+| H3 | In-block coin double-spend / ordering (inflation) | **high** | **fixed + negative-tested** (ordered multiplicity guard; `host adversarial` #3) |
+| H4 | Coinbase never run through `CheckTransaction` | med | **fixed + negative-tested** (`host adversarial` #4) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -59,6 +63,41 @@ attempt that compared against the global `i` broke honest deletes at block 170 a
 `spent.size() == tx.vin.size()`; a short blob is an out-of-bounds read (the zkVM has no memory
 protection). Failed closed in practice.
 **Fix:** explicit length asserts on the prevouts vector in all three entry points.
+
+## Fixed 2026-07-17 — deeper adversarial pass (H1–H4: binding the proof to the block)
+
+A second adversarial review looked specifically for ways a mining-capable prover could make an invalid
+block prove valid, and found four under-constraints between the (real, correct) Core code and the block
+being proven. All four are fixed; each has a negative test that must reject, alongside an honest
+baseline that must still be accepted. The execute-mode cases run self-contained via `host adversarial`
+(and in CI); the segmented one runs on a GPU box.
+
+### H1 (critical) — block height was host-controlled
+`chain_step`/`aggregate` committed `height = prev.height + 1` but validated the block using the
+host-supplied `w.height` with no equality check. Height selects the script flags and the coinbase
+subsidy, so `w.height = 1` turned every soft-fork flag off (segwit/taproot outputs become
+anyone-can-spend) and set the subsidy to 50 BTC, while the journal still committed the true height.
+**Fix:** assert `w.height == prev.height + 1`. **Test:** `host adversarial` (#1). The range-fold path
+was already bound by its genesis pin + adjacency check.
+
+### H2 (critical) — segmented chunks bound neither flags nor the spending witness
+A chunk proof committed only the coin leaf, so the aggregation could accept a *different* valid spend of
+the same coin, or the spend validated under attacker-chosen weaker flags. **Fix:** each chunk commits a
+binding digest over `(raw_tx, input_idx, prevouts, coin metadata, flags)`; the aggregation recomputes it
+under the block's real flags and requires equality. **Test:** `HAZYNC_H2_BADHEIGHT=1 host prove-seg`
+(aggregate rejects).
+
+### H3 (high, inflation) — in-block coins had no double-spend / ordering guard
+A coin created earlier in the same block bypasses the accumulator; the set that tracked it did not count
+multiplicity or check ordering, so it could be spent twice (minting its value) or before it was created.
+**Fix:** enforce creation by a strictly earlier tx and spend-at-most-once. **Tests:** `host adversarial`
+(#3 double-spend, #3 spend-before-create).
+
+### H4 (medium) — the coinbase never ran through CheckTransaction
+The coinbase reached only the subsidy/BIP34/witness-commitment checks, never `CheckTransaction`, so a
+malformed coinbase (bad-cb-length, out-of-range or overflowing output sum) could pass. **Fix:** run the
+coinbase through real Core `CheckTransaction` plus an `IsCoinBase` assertion. **Test:** `host
+adversarial` (#4).
 
 ## Earlier findings (2026-07-15 self-audit) — status
 

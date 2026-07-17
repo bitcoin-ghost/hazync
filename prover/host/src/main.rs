@@ -1,6 +1,6 @@
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash as _;
-use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
+use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use hazync_utreexo::{hash_leaf, Forest, Hash};
 use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
@@ -32,7 +32,7 @@ struct ChainState {
 #[derive(Serialize, Deserialize)]
 struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
 #[derive(Serialize, Deserialize)]
-struct ChunkOut { all_valid: bool, leaves: Vec<[u8; 32]> }
+struct ChunkOut { all_valid: bool, binds: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct SpendCheck { raw_tx: Vec<u8>, prevouts: Vec<u8>, block_height: u32 }
 #[derive(Serialize, Deserialize)]
@@ -928,7 +928,15 @@ fn prove_seg() {
     let n = w.inputs.len();
     let nchunks: usize = std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1).min(n.max(1));
     let sz = n.div_ceil(nchunks);
+    // ADVERSARIAL #2 (test-only, inert unless HAZYNC_H2_BADHEIGHT set): prove the chunk at height 1
+    // (script flags 0) while aggregating into the real modern block. The chunk's committed binding
+    // digest folds in flags(1)=0, but the aggregation recomputes it with the block's real flags, so the
+    // digests differ and the aggregate MUST reject. Pre-fix (chunk committed bare coin leaves) this was
+    // ACCEPTED — the segmented-path flag/witness hole. NEVER set in production.
+    let h2_bad = std::env::var("HAZYNC_H2_BADHEIGHT").is_ok();
+    let chunk_height = if h2_bad { 1 } else { w.height };
     println!("=== SEGMENTED PROOF block {}: {} inputs → {} chunks → aggregate (on GPU) ===", w.height, n, nchunks);
+    if h2_bad { println!("  [H2-TEST] proving chunks at height {} (flags 0) — aggregate must REJECT", chunk_height); }
     let t = Instant::now();
 
     let mut chunk_receipts: Vec<risc0_zkvm::Receipt> = Vec::new();
@@ -938,7 +946,7 @@ fn prove_seg() {
         if lo >= hi { break; }
         let mut b = ExecutorEnv::builder();
         b.write(&4u32).unwrap();
-        b.write(&w.height).unwrap();
+        b.write(&chunk_height).unwrap();
         b.write(&((hi - lo) as u32)).unwrap();
         for inp in &w.inputs[lo..hi] {
             b.write(&ChunkInput {
@@ -962,8 +970,14 @@ fn prove_seg() {
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
     b.write(&1u32).unwrap();
-    let agg = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
+    let agg_res = default_prover().prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct());
+    if h2_bad {
+        match agg_res {
+            Ok(_) => { println!(">>> ADVERSARIAL #2: FAIL — chunk at wrong height ACCEPTED (soundness hole!)"); std::process::exit(1); }
+            Err(e) => { println!(">>> ADVERSARIAL #2: wrong-height chunk REJECTED ✓  ({})", format!("{e}").lines().next().unwrap_or("")); return; }
+        }
+    }
+    let agg = agg_res.unwrap().receipt;
     agg.verify(METHOD_ID).unwrap();
     let tip: ChainState = agg.journal.decode().unwrap();
     assert!(tip.self_id == METHOD_ID, "S1: proof recursed against wrong image id");
@@ -1096,12 +1110,163 @@ fn regress() {
     if !ok { std::process::exit(1); }
 }
 
+// ============================================================================================
+// ADVERSARIAL SOUNDNESS SUITE — execute-mode, self-contained, no GPU, no external files. Each case
+// builds a witness that exploits a specific hole from the 2026-07 soundness audit and asserts the
+// guest REJECTS it, alongside an honest baseline that must be ACCEPTED (so a broken baseline can't
+// make a malicious case look "rejected" for the wrong reason). Run with `host adversarial`; wired
+// into CI. Holes: #1 host-controlled height, #3 in-block double-spend / ordering, #4 coinbase checks.
+// (#2 segmented flag/witness binding needs proven chunks -> GPU box, see `prove-chunk-badheight`.)
+// ============================================================================================
+
+// Decode of the guest's mode-1 BlockOutput journal (field order MUST match the guest's BlockOutput).
+#[derive(Deserialize)]
+struct BlockOut {
+    _script_results: Vec<i32>, _tx_checks: Vec<i32>, _coin_leaves: Vec<[u8; 32]>, _total_fee: i64,
+    _pow_ok: bool, _merkle_ok: bool, _coinbase_val: i64, _subsidy: i64, _subsidy_ok: bool,
+    all_ok: bool, _root_matches: bool,
+}
+
+// Execute one block witness in mode-1 (block_proof) and return the committed `all_ok` — which is
+// independent of PoW/merkle, so a synthetic block with a dummy header still exercises the accumulator,
+// script, coinbase and in-block-spend logic. A guest panic surfaces as Err => treated as rejected.
+fn block_all_ok(w: &BlockWitness) -> bool {
+    let mut b = ExecutorEnv::builder();
+    b.write(&1u32).unwrap();
+    b.write(w).unwrap();
+    match default_executor().execute(b.build().unwrap(), METHOD_ELF) {
+        Ok(s) => { let o: BlockOut = s.journal.decode().unwrap(); o.all_ok }
+        Err(_) => false,
+    }
+}
+
+// Build a synthetic OP_TRUE block: a coinbase, then `txs` (each a single-input tx) where inblock[i]
+// marks txs[i] as spending an in-block-created coin (tx A's output 0) rather than the external coin C.
+// Height 1000 => script flags 0, so bare OP_TRUE spends validate. Values: C=50.00001 BTC funds A
+// (out 50 BTC), B/D spend A:0 (out 49.99999 / 49.99998), coinbase = 50 BTC + 2000 sat fees.
+const SYNTH_H: u32 = 1000;
+const SYNTH_T: u32 = 1_400_000_000;
+fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> BlockWitness {
+    let optrue = || ScriptBuf::from_bytes(vec![0x51]);
+    let c_leaf = coin_leaf(&[0x11u8; 32], 0, 5_000_001_000, &[0x51], 1, false, 0);
+    let mut forest = Forest::new();
+    for i in 0..4u64 { forest.add(hash_leaf(&[b"pre".as_slice(), &i.to_le_bytes()].concat())); }
+    forest.add(c_leaf);
+    for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
+    let root_prev = wire_stump(&forest);
+
+    let cb_txid = cb.compute_txid().to_byte_array();
+    let mut txids = vec![cb_txid];
+    let mut wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase wtxid = zeros (BIP141)
+    let mut inputs: Vec<BlockInput> = Vec::new();
+    for (i, tx) in txs.iter().enumerate() {
+        txids.push(tx.compute_txid().to_byte_array());
+        wtxids.push(tx.compute_wtxid().to_byte_array());
+        if inblock[i] {
+            // spends A:0 (in-block coin, created THIS block at height H, mtp = block_time). No
+            // accumulator proof needed — the guest skips the delete for in-block coins.
+            let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_000_000), script_pubkey: optrue() }]);
+            inputs.push(BlockInput {
+                raw_tx: serialize(*tx), input_idx: 0, prevouts, flags: 0,
+                global_pos: 0, coin_height: SYNTH_H, coin_is_coinbase: 0, coin_mtp: SYNTH_T, tx_first: 1,
+                proof_i: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
+                proof_last: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
+            });
+        } else {
+            // external: spends C from the accumulator (real inclusion proof).
+            let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_001_000), script_pubkey: optrue() }]);
+            let pos = forest.leaves.iter().position(|x| *x == c_leaf).expect("C in accumulator");
+            let last = forest.leaves.len() - 1;
+            inputs.push(BlockInput {
+                raw_tx: serialize(*tx), input_idx: 0, prevouts, flags: 0,
+                global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: 1,
+                proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
+            });
+            forest.delete(pos);
+        }
+    }
+    let root_next = wire_stump(&forest); // approximate — root_matches is not part of all_ok
+    let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, inputs, new_outputs: vec![], root_next }
+}
+
+// The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
+fn synth_txs() -> (Transaction, Transaction, Transaction, Transaction, Transaction) {
+    let optrue = || ScriptBuf::from_bytes(vec![0x51]);
+    let txout = |sat: u64| TxOut { value: Amount::from_sat(sat), script_pubkey: optrue() };
+    let vin = |txid: Txid, vout: u32, ss: Vec<u8>| TxIn {
+        previous_output: OutPoint { txid, vout }, script_sig: ScriptBuf::from_bytes(ss),
+        sequence: Sequence::MAX, witness: Witness::new(),
+    };
+    let mktx = |input: Vec<TxIn>, output: Vec<TxOut>| Transaction {
+        version: transaction::Version(1), lock_time: absolute::LockTime::ZERO, input, output,
+    };
+    let c_txid = Txid::from_byte_array([0x11u8; 32]);
+    let a = mktx(vec![vin(c_txid, 0, vec![])], vec![txout(5_000_000_000)]);
+    let a_txid = a.compute_txid();
+    let b = mktx(vec![vin(a_txid, 0, vec![])], vec![txout(4_999_999_000)]);
+    let d = mktx(vec![vin(a_txid, 0, vec![])], vec![txout(4_999_998_000)]);
+    let cb_ok = mktx(vec![vin(Txid::all_zeros(), 0xffff_ffff, vec![0x51, 0x51])], vec![txout(5_000_002_000)]);
+    let cb_bad = mktx(vec![vin(Txid::all_zeros(), 0xffff_ffff, vec![0x51; 101])], vec![txout(5_000_002_000)]);
+    (cb_ok, cb_bad, a, b, d)
+}
+
+// #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
+// (its `w.height == prev.height+1` assert fires => execute Err).
+fn adv_height_rejected() -> bool {
+    let (mut forest, anchor) = seed_and_anchor();
+    let mut w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&anchor.recent_times));
+    w.height = 1; // attacker: height 1 turns every soft-fork flag off + subsidy -> 50 BTC
+    let mut b = ExecutorEnv::builder();
+    b.write(&2u32).unwrap();
+    b.write(&state_journal_bytes(&anchor)).unwrap();
+    b.write(&w).unwrap();
+    b.write(&1u32).unwrap(); // is_base = 1
+    b.write(&METHOD_ID).unwrap();
+    default_executor().execute(b.build().unwrap(), METHOD_ELF).is_err()
+}
+
+fn adversarial() {
+    println!("=== HAZYNC ADVERSARIAL SOUNDNESS SUITE (execute-mode) — every malicious witness must be REJECTED ===\n");
+    let verdict = |rejected: bool| if rejected { "REJECTED ✓" } else { "ACCEPTED ✗ (SOUNDNESS HOLE)" };
+    let mut pass = true;
+    let (cb_ok, cb_bad, a, b, d) = synth_txs();
+
+    // Baseline: an honest in-block spend (B spends A's output created in the same block) must be ACCEPTED.
+    let honest = block_all_ok(&synth_block(&cb_ok, &[&a, &b], &[false, true]));
+    println!("[baseline] honest in-block-spend block accepted ......... {}", if honest { "yes ✓" } else { "NO ✗ (baseline broken — fix before trusting the rejects)" });
+    pass &= honest;
+
+    let r1 = adv_height_rejected();
+    println!("#1 host-controlled height (flag/subsidy downgrade) ...... {}", verdict(r1));
+    pass &= r1;
+
+    // #3a: B and D both spend A:0 in the same block (double-spend -> inflation).
+    let r3a = !block_all_ok(&synth_block(&cb_ok, &[&a, &b, &d], &[false, true, true]));
+    println!("#3 in-block coin spent twice (inflation) ................ {}", verdict(r3a));
+    pass &= r3a;
+
+    // #3b: B (spending A:0) placed BEFORE A creates it (spend-before-create / ordering).
+    let r3b = !block_all_ok(&synth_block(&cb_ok, &[&b, &a], &[true, false]));
+    println!("#3 spend-before-create ordering violation ............... {}", verdict(r3b));
+    pass &= r3b;
+
+    // #4: coinbase with a 101-byte scriptSig (bad-cb-length) now runs through CheckTransaction.
+    let r4 = !block_all_ok(&synth_block(&cb_bad, &[&a, &b], &[false, true]));
+    println!("#4 malformed coinbase (never CheckTransaction'd before) . {}", verdict(r4));
+    pass &= r4;
+
+    println!("\n>>> ADVERSARIAL SUITE {}", if pass { "PASS ✓ — all holes closed" } else { "FAIL ✗ — a hole is OPEN" });
+    if !pass { std::process::exit(1); }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "prove-chain-bad") { prove_chain_bad(); return; }
+    if args.iter().any(|a| a == "adversarial") { adversarial(); return; }
     if args.iter().any(|a| a == "regress") { regress(); return; }
     if let Some(p) = args.iter().position(|a| a == "prove-chunk") {
         let idx: usize = args.get(p + 1).and_then(|s| s.parse().ok()).expect("prove-chunk <index>");
@@ -1241,10 +1406,16 @@ fn main() {
 
     // ---- Multi-tx segwit/P2SH/taproot validation with correct per-height flags + full sigops. ----
     println!("\n=== Multi-tx modern validation: real segwit/P2SH/taproot spends at height 800000 (all soft-forks active) ===");
-    let base = "/tmp/claude-1000/-home-defenwycke/05711464-155c-4610-b5b1-7ae9ee3f568e/scratchpad/bakeoff";
+    let base = std::env::var("HAZYNC_BASE")
+        .unwrap_or_else(|_| format!("{}/hazync-build", std::env::var("HOME").unwrap_or_default()));
     let mut specs: Vec<(&str, SpendCheck)> = Vec::new();
-    let cov: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{base}/coverage_spends.json")).unwrap()).unwrap();
+    let cov: serde_json::Value = match std::fs::read_to_string(format!("{base}/coverage_spends.json")) {
+        Ok(txt) => serde_json::from_str(&txt).unwrap(),
+        Err(_) => {
+            println!("    (skipped — modern-validation test vectors not found under {base}; set HAZYNC_BASE to the build dir to run this demo)");
+            return;
+        }
+    };
     for (key, name) in [("v0_p2wpkh", "P2WPKH"), ("p2sh", "P2SH"), ("v0_p2wsh", "P2WSH-multisig")] {
         let j = &cov[key];
         specs.push((name, SpendCheck {

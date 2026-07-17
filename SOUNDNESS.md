@@ -34,13 +34,43 @@ host input (`prover/methods/guest/src/main.rs`). The concern: a malicious prover
 - The load-bearing question is whether a nested `self_id ≠ METHOD_ID` can smuggle a malicious guest's
   receipt into the chain. It cannot survive top-level verification **iff every nested composition used
   the true image id**. Relying on that implicitly is the trap.
-- **Hardening (spec, to implement + prove-verify on a box):** commit `self_id` into the journal of
-  every recursive step and have the top-level verifier assert `committed_self_id == METHOD_ID` at every
-  level (or, equivalently, pin the id: the guest hardcodes the expected `METHOD_ID` digest once it's
-  known and rejects any other). Either makes the self-reference explicit and checkable. **Until this is
-  in, treat recursive proofs as "sound under an honest prover"; single-block proofs are unconditional.**
-- This is the standard IVC concern; the fix is small and localized to `chain_step`/`aggregate` + the
-  verifier. Tracked as the #1 pre-production item.
+- **Hardening (implemented).** Every recursive step commits `self_id` into its journal and asserts the
+  previous step recursed against the same id (`prev.self_id == self_id` in `chain_step`/`aggregate`);
+  the host verifier asserts the *final* `self_id == METHOD_ID` after `receipt.verify(METHOD_ID)`.
+  Together these force every nested composition to the true image id. The adversarial `prove-chain-bad`
+  test folds a block against a corrupted `self_id` and confirms it is rejected. Recursive proofs are
+  therefore sound on the same footing as single-block proofs — no honest-prover assumption — given the
+  verifier obligation below.
+- **Verifier obligation.** The ultimate external verifier must replicate the `self_id == METHOD_ID`
+  check and pin the leftmost in-boundary to the genesis anchor. A verifier that skips these has not
+  checked the chain.
+
+## 3b. Binding each proof to the block it claims (2026-07 adversarial audit)
+
+An external adversarial soundness review found four places where the guest under-constrained the
+witness relative to the block being proven. All four are fixed, and each has a negative test — the
+execute-mode `adversarial` suite (self-contained, in CI) or a GPU-box proving test — alongside an
+honest baseline that must still be accepted, so a rejection can't pass for the wrong reason.
+
+- **H1 — block height.** `chain_step`/`aggregate` now assert `w.height == prev.height + 1`. The height
+  selects the script flags and the coinbase subsidy, so an unbound, host-supplied height let a
+  mining-capable prover set `w.height = 1`, turning every soft-fork flag off (segwit/taproot outputs
+  become anyone-can-spend) and inflating the subsidy to 50 BTC while the journal still committed the
+  true height. Test: `host adversarial` (#1). (The range-fold path was already bound by its genesis
+  pin + adjacency check.)
+- **H2 — segmented flags and witness.** Each chunk proof commits a per-input binding digest over the
+  exact `(raw_tx, input_idx, prevouts, coin metadata, flags)` it verified; the aggregation recomputes
+  it from the block's own input under the block's real flags and requires equality. Previously a chunk
+  committed only the coin leaf, so it could substitute a *different* valid spend of the same coin, or
+  validate the spend under attacker-chosen weaker flags. Test: `HAZYNC_H2_BADHEIGHT=1 host prove-seg`
+  (aggregate rejects on the GPU box).
+- **H3 — in-block coins.** A coin created earlier in the same block bypasses the accumulator, so the
+  guest now enforces that it was created by a strictly earlier transaction and is spent at most once
+  (ordered, multiplicity-checked). Previously an in-block output could be spent twice (inflation) or
+  before it was created. Tests: `host adversarial` (#3 double-spend, #3 spend-before-create).
+- **H4 — coinbase.** The coinbase now runs through real Core `CheckTransaction` plus an `IsCoinBase`
+  assertion (bad-cb-length, per-output `MoneyRange`, value-sum range), which it previously skipped.
+  Test: `host adversarial` (#4).
 
 ## 4. Scope of each proof type (audit S3 — be explicit)
 - **Single-block / segmented block proof** (`prove-full`, `prove-seg`): attests the block is

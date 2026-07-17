@@ -71,8 +71,10 @@ unconditional; from a mid-chain checkpoint the anchor is a trust input.
 
 The proof rests on exactly four things, stated plainly:
 1. **Real Bitcoin Core v28 code** (two portability shims only — `serialize.h` 32-bit int overload,
-   SHA-256 routed to the RISC0 accelerator byte-identically; **no consensus-logic changes**). See
-   `patches/` and `SOUNDNESS.md`.
+   SHA-256 routed to the RISC0 accelerator byte-identically; **no consensus-logic changes**; ECDSA and
+   Schnorr both run through the compiled, unmodified `libsecp256k1`). The `k256` substitution in
+   `patches/0003` is an opt-in speed option that is **not** applied in the sound build and would
+   reintroduce the reimplementation question — see `ACCELERATION.md`. See also `patches/` and `SOUNDNESS.md`.
 2. **RISC0 zkVM soundness** (standard STARK/SNARK assumption).
 3. **SHA-256** collision resistance (the accumulator + merkle/commitment checks).
 4. **The anchor** (genesis is unconditional; a checkpoint is a documented trust input).
@@ -116,9 +118,10 @@ All tip hashes, cumulative work, and UTXO-leaf counts match mainnet exactly.
 
 ## Scope: what is and isn't proven
 
-**Proven:** the method is sound (real Core code), complete (full consensus surface), and demonstrated on
-real mainnet data at single-block, chain, tip, and parallel-backfill levels, with the real-UTXO binding
-from the genesis anchor.
+**Proven:** the method is sound (real Core code), complete over the consensus surface enumerated above
+(with the explicit boundaries below — the 2-hour future-time limit is node-local and out of scope, as is
+policy/standardness), and demonstrated on real mainnet data at single-block, chain, tip, and
+parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 
 **Not yet done (compute + review, not capability):**
 - The **full genesis→tip backfill** (all ~900k blocks) — a parallelizable GPU-compute campaign.

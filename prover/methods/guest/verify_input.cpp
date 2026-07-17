@@ -289,6 +289,18 @@ extern "C" int64_t coinbase_value(const uint8_t* tx_bytes, unsigned tx_len) {
     return s;
 }
 
+// Real Core CTransaction::IsCoinBase() on raw bytes: 1 iff exactly one input with a null prevout.
+// (#4) Used so validate_block can assert the block's declared coinbase really is structurally a
+// coinbase before trusting it for the subsidy/BIP34/witness-commitment checks.
+extern "C" int is_coinbase_tx(const uint8_t* tx_bytes, unsigned tx_len) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    CTransaction tx{mtx};
+    return tx.IsCoinBase() ? 1 : 0;
+}
+
 // Per-tx weight + legacy sigop cost (real Core: GetSerializeSize + CScript::GetSigOpCount).
 // weight = base_size*(WITNESS_SCALE_FACTOR-1) + total_size; sigop cost = legacy count * WITNESS_SCALE_FACTOR.
 extern "C" void tx_wu_sigops(const uint8_t* tx_bytes, unsigned tx_len, int64_t* out_weight, int64_t* out_sigops) {
