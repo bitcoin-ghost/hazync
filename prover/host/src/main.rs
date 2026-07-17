@@ -12,7 +12,7 @@ const KIND_RANGE: u32 = 0xC4A1_0006;
 const KIND_CHUNK: u32 = 0xC4A1_0004;
 
 // ---- Wire format: MUST match the guest structs field-for-field, in order. ----
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct BlockInput {
@@ -20,12 +20,17 @@ struct BlockInput {
     global_pos: u64, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32, tx_first: u32,
     proof_i: WireProof, proof_last: WireProof,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct WireStump { roots: Vec<Option<[u8; 32]>>, num_leaves: u64 }
+#[derive(Serialize, Deserialize, Clone)]
+struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
+#[derive(Serialize, Deserialize, Clone)]
+struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // F3: superseded coinbase deletes
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
     header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>, wtxids: Vec<[u8; 32]>,
     root_prev: WireStump, inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
+    bip30: Option<Bip30Overwrite>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct ChainState {
@@ -51,6 +56,12 @@ const SPEND170_PREV_SPK: &str = "410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b
 const SPEND170_PREV_VALUE: u64 = 5_000_000_000;
 const CB171: &str = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0704ffff001d010effffffff0100f2052a01000000434104566824c312073315df60e5aa6490b6cdd80cd90f6a8f02e022ca3c2d52968c253006c9c602e03aed7be52d6ac55f5b557c72529bcc3899ace7eb4227153eb44bac00000000";
 const CB172: &str = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0704ffff001d0106ffffffff0100f2052a010000004341044c718603ac207940cfce606b414b42b7cb10abbc714fe44f42f1c10a9990fb0f7202838cfb4fb8512f884ee3e2f47d55992d916880a2c6b46e254d86cd5952b3ac00000000";
+
+// Real block 91842 (coinbase-only) — a BIP30 grandfathered block: its coinbase duplicates block 91812's
+// still-unspent coinbase (merkle == that coinbase's txid). Used by check-bip30 (F3).
+const CB91842: &str = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff060456720e1b00ffffffff0100f2052a010000004341046896ecfc449cb8560594eb7f413f199deb9b4e5d947a142e7dc7d2de0b811b8e204833ea2a2fd9d4c7b153a8ca7661d0a0b7fc981df1f42f55d64b26b3da1e9cac00000000";
+const PREV91842: &str = "00000000000a1e92acbcbdf594cac25d1095544d5fbf5113bfec85a9eb4b1120";
+const MERKLE91842: &str = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599";
 
 const HASH169: &str = "000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55"; // block 170's prev
 const HASH170: &str = "00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee";
@@ -183,7 +194,7 @@ fn build_block(
     }
     let root_next = wire_stump(forest);
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -450,7 +461,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); forest.add(l); new_outputs.push(l); }
     for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
-    let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next };
+    let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
     (anchor, w)
 }
 
@@ -728,7 +739,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         add_out(&p.tx, &p.txid, false, forest, &mut new_outputs);
     }
     let root_next = wire_stump(forest);
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1254,7 +1265,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     }
     let root_next = wire_stump(&forest); // approximate — root_matches is not part of all_ok
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, inputs, new_outputs: vec![], root_next }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, inputs, new_outputs: vec![], root_next, bip30: None }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -1332,7 +1343,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
         wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
-        root_prev, inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest) }
+        root_prev, inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None }
 }
 
 // #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
@@ -1393,6 +1404,72 @@ fn adversarial() {
     if !pass { std::process::exit(1); }
 }
 
+// Execute one witness in mode-1 and return (all_ok, root_matches).
+fn block_out(w: &BlockWitness) -> (bool, bool) {
+    let mut b = ExecutorEnv::builder();
+    b.write(&1u32).unwrap();
+    b.write(w).unwrap();
+    match default_executor().execute(b.build().unwrap(), METHOD_ELF) {
+        Ok(s) => { let o: BlockOut = s.journal.decode().unwrap(); (o.all_ok, o._root_matches) }
+        Err(_) => (false, false),
+    }
+}
+
+// F3: the BIP30 grandfathered overwrite, tested on REAL block 91842 (coinbase-only, whose coinbase
+// duplicates block 91812's still-unspent coinbase outpoint). The honest overwrite must ACCEPT with a
+// matching root (superseded leaf deleted, new one added); skipping it, or claiming the wrong old height,
+// must REJECT. Needs block_91842.json (fetch_block.py 91842).
+fn check_bip30() {
+    let (height, time, bits, nonce): (u32, u32, u32, u32) = (91842, 1_289_768_691, 453_931_606, 3_778_549_762);
+    let header = build_header_v(1, PREV91842, &arr(rev(hx(MERKLE91842))), time, bits, nonce);
+    let cb_hex = CB91842;
+    let coinbase: Transaction = deserialize(&hx(cb_hex)).unwrap();
+    let cb_txid = coinbase.compute_txid().to_byte_array();
+    let old_height: u32 = 91812;          // block 91842 duplicates 91812's coinbase
+    let (old_mtp, new_mtp) = (time, time); // test: seed and witness use the same value (a real run uses MTP(h-1))
+
+    // root_prev = fillers + the SUPERSEDED coinbase outputs (this coinbase at old_height/old_mtp).
+    let mut forest = Forest::new();
+    for i in 0..4u64 { forest.add(hash_leaf(&[b"pre".as_slice(), &i.to_le_bytes()].concat())); }
+    let mut superseded: Vec<Hash> = Vec::new();
+    for v in 0..coinbase.output.len() {
+        if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
+        let l = out_leaf_of(&coinbase, &cb_txid, v, old_height, true, old_mtp);
+        forest.add(l); superseded.push(l);
+    }
+    for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
+    let root_prev = wire_stump(&forest);
+
+    // overwrite: delete the superseded leaves (against root_prev), then add the NEW coinbase outputs.
+    let mut dels: Vec<Bip30Del> = Vec::new();
+    for l in &superseded {
+        let pos = forest.leaves.iter().position(|x| *x == *l).expect("superseded coin present");
+        let last = forest.leaves.len() - 1;
+        dels.push(Bip30Del { global_pos: pos as u64, proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) });
+        forest.delete(pos);
+    }
+    for v in 0..coinbase.output.len() {
+        if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
+        forest.add(out_leaf_of(&coinbase, &cb_txid, v, height, true, new_mtp));
+    }
+    let root_next = wire_stump(&forest);
+
+    let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
+        root_prev: root_prev.clone(), inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+    };
+    let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
+    let skip = block_out(&mk(None));
+    let wrong = block_out(&mk(Some(Bip30Overwrite { old_height: 91722, old_mtp, dels: dels.clone() }))); // wrong pair
+    println!("=== F3 BIP30 grandfathered overwrite — REAL block {} (dup of 91812) ===", height);
+    println!("[honest overwrite] accepted + root matches ... all_ok={} root_matches={}  (both true)", honest.0, honest.1);
+    println!("[skip overwrite]   rejected (mandatory) ...... all_ok={}  (must be false)", skip.0);
+    println!("[wrong old_height] rejected (delete misses) .. all_ok={}  (must be false)", wrong.0);
+    let pass = honest.0 && honest.1 && !skip.0 && !wrong.0;
+    println!(">>> F3 BIP30 OVERWRITE TEST {}", if pass { "PASS ✓" } else { "FAIL ✗" });
+    if !pass { std::process::exit(1); }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -1400,6 +1477,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "prove-chain-bad") { prove_chain_bad(); return; }
     if args.iter().any(|a| a == "adversarial") { adversarial(); return; }
+    if args.iter().any(|a| a == "check-bip30") { check_bip30(); return; }
     if args.iter().any(|a| a == "regress") { regress(); return; }
     if let Some(p) = args.iter().position(|a| a == "prove-chunk") {
         let idx: usize = args.get(p + 1).and_then(|s| s.parse().ok()).expect("prove-chunk <index>");

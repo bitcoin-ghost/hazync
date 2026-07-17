@@ -94,6 +94,14 @@ const RETARGET_INTERVAL: u32 = 2016;
 const BIP16_EXCEPTION: [u8; 32] = [0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d, 0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0xd5, 0x85, 0xc5, 0xe8, 0x1d, 0x44, 0xb5, 0x6a, 0x98, 0x1e, 0x84, 0x2d, 0x5b, 0xc3, 0x14, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
+// BIP30 grandfathered duplicate-coinbase blocks (internal/dsha256(header) order). Each reuses an
+// earlier still-unspent coinbase's outpoint; pre-BIP30-enforcement Core OVERWRITES the old coin (it
+// becomes unspendable). At exactly these two blocks the guest deletes the superseded coinbase leaf so
+// it can't linger spendable (F3). 91842 duplicates 91812's coinbase; 91880 duplicates 91722's.
+// (BIP34, enforced from 227931, makes coinbases unique thereafter, so no later duplicate can occur.)
+const BIP30_OVERWRITE_A: [u8; 32] = [0xec, 0xca, 0xe0, 0x00, 0xe3, 0xc8, 0xe4, 0xe0, 0x93, 0x93, 0x63, 0x60, 0x43, 0x1f, 0x3b, 0x76, 0x03, 0xc5, 0x63, 0xc1, 0xff, 0x61, 0x81, 0x39, 0x0a, 0x4d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91842
+const BIP30_OVERWRITE_B: [u8; 32] = [0x21, 0xd7, 0x7c, 0xcb, 0x4c, 0x08, 0x38, 0x6a, 0x04, 0xac, 0x01, 0x96, 0xae, 0x10, 0xf6, 0xa1, 0xd2, 0xc2, 0xa3, 0x77, 0x55, 0x8c, 0xa1, 0x90, 0xf1, 0x43, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91880
+
 // Consensus script flags for a block — replicates Core's GetBlockScriptFlags (validation.cpp) EXACTLY:
 // the base P2SH|WITNESS|TAPROOT is ALWAYS on (retroactive to genesis) except for the two exception
 // blocks above (which override it), then DERSIG/CLTV/CSV/NULLDUMMY are OR'd in at their buried-deployment
@@ -203,6 +211,14 @@ struct WireStump {
     roots: Vec<Option<[u8; 32]>>,
     num_leaves: u64,
 }
+// F3 / BIP30 overwrite: at the two grandfathered duplicate-coinbase blocks, the proof(s) to delete the
+// superseded coinbase leaf(s). The leaf itself is RECOMPUTED by the guest from this block's coinbase at
+// `old_height`/`old_mtp` (the duplicate coinbase is byte-identical), so a prover cannot delete an
+// arbitrary coin — only a genuine earlier duplicate of this coinbase's outpoint.
+#[derive(Deserialize)]
+struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
+#[derive(Deserialize)]
+struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> }
 #[derive(Deserialize)]
 struct BlockWitness {
     header: Vec<u8>,            // 80-byte block header
@@ -214,6 +230,7 @@ struct BlockWitness {
     inputs: Vec<BlockInput>,   // non-coinbase input verifications
     new_outputs: Vec<[u8; 32]>, // leaves of the coins the block creates
     root_next: WireStump,
+    bip30: Option<Bip30Overwrite>, // Some ONLY at the two grandfathered BIP30 blocks (F3)
 }
 #[derive(Serialize)]
 struct BlockOutput {
@@ -473,6 +490,34 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                 all_ok = false;
             }
         }
+    }
+
+    // F3 / BIP30 grandfathered overwrite (blocks 91842/91880 ONLY): the coinbase reuses an earlier
+    // still-unspent coinbase's outpoint; pre-enforcement Core OVERWRITES it. Recompute the superseded
+    // coinbase output leaf(s) — this coinbase's spendable outputs at the OLD height/mtp (the duplicate
+    // coinbase is byte-identical, so same txid/value/spk; only height+mtp differ) — and delete them, so
+    // the superseded coins can't linger spendable. The delete is bound to this coinbase's outpoint at a
+    // real earlier height (a wrong old_height => recomputed leaf misses the accumulator => delete fails),
+    // so only a genuine duplicate can be removed. Mandatory at these two hashes; the witness must carry it.
+    let is_bip30_block = block_hash == BIP30_OVERWRITE_A || block_hash == BIP30_OVERWRITE_B;
+    match (&w.bip30, is_bip30_block) {
+        (Some(ov), true) => {
+            let mut buf = vec![0u8; (w.coinbase_tx.len() / 8 + 1) * 32];
+            let mut _t = [0u8; 32];
+            let n = unsafe { tx_out_leaves(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32, ov.old_height, 1, ov.old_mtp, buf.as_mut_ptr(), _t.as_mut_ptr()) } as usize;
+            if n != ov.dels.len() { all_ok = false; }
+            for (i, d) in ov.dels.iter().enumerate() {
+                if i >= n { all_ok = false; break; }
+                let mut leaf = [0u8; 32];
+                leaf.copy_from_slice(&buf[i * 32..i * 32 + 32]);
+                let pi = utreexo::Proof { leaf, position: d.proof_i.position, siblings: d.proof_i.siblings.clone() };
+                let pl = to_proof(&d.proof_last);
+                if !stump.delete(d.global_pos, &pi, &pl) { all_ok = false; }
+            }
+        }
+        (None, true) => all_ok = false,     // overwrite REQUIRED at these two blocks — a prover cannot skip it
+        (Some(_), false) => all_ok = false, // overwrite only permitted at the two grandfathered blocks
+        (None, false) => {}
     }
 
     // Add the SURVIVING created outputs — recomputed from the txs (unspendable skipped, in-block-spent

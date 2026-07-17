@@ -44,21 +44,28 @@ in-block (the referenced txid wouldn't be in this block), cannot fake an output 
 tx bytes), and cannot omit a surviving output (the guest adds all of them). Ephemeral cancellation gives
 the identical net root as add-then-delete.
 
-## H2 — BIP30 duplicate-coinbase exception blocks (91842, 91880)
+## H2 — BIP30 duplicate-coinbase exception blocks (91842, 91880) — overwrite implemented (F3)
 
-Pre-BIP34, blocks 91842/91880 carried coinbases with the same txid as 91812/91722. Our leaves commit
-the creation **height**, so a "duplicate" coinbase produces a DISTINCT leaf (different height) — no
-accumulator collision; the superseded coin becomes an unspent bloat leaf, sound. Post-BIP34 (227931)
-duplicate txids are impossible (height in coinbase scriptSig ⇒ unique coinbase txid), which the guest
-already enforces (`bip34_ok`). So H2 needs no code change for correctness; the two blocks validate.
+Pre-BIP34, blocks 91842/91880 carried coinbases with the same txid as 91812/91722. Our leaves commit the
+creation **height**, so a "duplicate" coinbase produces a DISTINCT leaf — there is no accumulator
+*collision* (the collision-free property holds). BIP34 (enforced from 227931) makes coinbase txids unique
+thereafter, so no later duplicate can occur.
 
-**VERIFIED (2026-07-15).** Blocks 91812 and 91842 do carry the identical coinbase txid
-`d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599`. Computing our coin leaf for their
-(identical) coinbase output at each height gives DIFFERENT leaves (`9f29c35f…` vs `26ad4502…`) — the
-height commitment disambiguates, so no accumulator collision even if both coexist. `check-full` on both
-blocks: VALID, tips byte-match mainnet. (This is the standalone validation of the mechanism + each
-block's validity; a live genesis→91842 fold with both leaves present is unrun but moot given the leaves
-provably differ.)
+But pre-enforcement Core does not merely tolerate the duplicate: it **overwrites** the old outpoint, so
+block 91812's coinbase output becomes permanently unspendable. Keeping both leaves (the earlier reasoning
+here — "an unspent bloat leaf, sound") would leave that superseded ~50 BTC coin spendable in the
+accumulator, a divergence a from-genesis prove crossing height 91842 could exploit. **This was F3, now
+fixed:** at exactly those two block hashes the guest deletes the superseded coinbase leaf, recomputed from
+*this* block's coinbase at the (host-supplied) old height/mtp — the duplicate coinbase is byte-identical,
+so the delete can only remove a genuine earlier duplicate of this coinbase's outpoint, and it is mandatory
+(a prover cannot skip it).
+
+**VERIFIED.** Blocks 91812 and 91842 carry the identical coinbase txid
+`d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599`; our coin leaf for that (identical)
+coinbase output at each height gives DIFFERENT leaves (the height commitment disambiguates). Test:
+`host check-bip30` on real block 91842 — the honest overwrite is accepted with a matching accumulator
+root (the 91812 leaf deleted, the 91842 leaf added, matching Core's UTXO set); skipping the overwrite, or
+claiming the wrong old height, is rejected. Wired into CI.
 
 ## H3 — provably-unspendable outputs
 

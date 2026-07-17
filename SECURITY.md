@@ -219,14 +219,17 @@ documented gap, one false alarm, plus a large docs-currency pass.
   `GetBlockScriptFlags` (read on the box) confirm the base P2SH|WITNESS|TAPROOT is always-on with exactly
   the two exception blocks — the exact code a from-genesis IBD runs (Core itself would stall otherwise).
   Height-gating would be the accept-invalid behaviour already flagged as H-S4. No change.
-- **F3 (low, KNOWN GAP, not live-exploitable) — pre-BIP34 BIP30 duplicate-coinbase overwrite.** The two
-  historical duplicate-coinbase blocks (91842 / 91880, below the BIP34 height) have *distinct* accumulator
-  leaves — the leaf commits height, so there is no collision and the "collision-free" claim holds — but
-  Core **overwrites** the old outpoint whereas the guest keeps both, leaving one extra leaf Core discards.
-  A from-genesis prove only reaches this at height ~91842 (the live frontier is ~492), so it is not
-  currently exploitable; before a full-chain run the guest must special-case the overwrite (remove the old
-  leaf), exactly as Core hardcodes those two blocks. **Documented, not yet implemented** — a from-genesis
-  run must not cross height 91842 until it is.
+- **F3 (low, pre-BIP34 BIP30 duplicate-coinbase overwrite) — FIXED + tested.** The two historical
+  duplicate-coinbase blocks (91842 / 91880, below the BIP34 height) have *distinct* accumulator leaves
+  (the leaf commits height, so no collision and the "collision-free" claim holds), but pre-enforcement Core
+  **overwrites** the old outpoint whereas the guest kept both, leaving one extra leaf Core discards — which
+  a from-genesis prove crossing height ~91842 could later spend. **Fix:** at exactly those two block hashes
+  the guest now deletes the superseded coinbase leaf, recomputed from *this* block's coinbase at the
+  host-supplied old height/mtp (the duplicate coinbase is byte-identical), so the delete can only remove a
+  genuine earlier duplicate of this coinbase's outpoint, and it is *mandatory* at those hashes (a prover
+  cannot skip it). BIP34 (enforced from 227931) makes coinbases unique thereafter, so no later duplicate can
+  occur. **Test:** `host check-bip30` on real block 91842 — honest overwrite accepted with a matching root,
+  skipping it rejected, wrong old-height rejected. In CI.
 - **Docs currency:** rewrote the stale `PROVING.md` (it described recursion as unimplemented and handed
   out a pre-hardening `chain_step`), corrected the README `ACCELERATION` repo-map line + status/audit
   language, `HARDENING.md`'s BIP34 height (227836→227931), annotated the stale 741000 evidence log

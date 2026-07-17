@@ -42,10 +42,9 @@ unconditional; from a mid-chain checkpoint the anchor is a trust input.
 - **Merkle root**; **BIP141 witness commitment**.
 - **Block weight** ≤ 4M; **full sigop cost** ≤ 80k (legacy + P2SH + witness).
 - **Coinbase maturity**; **absolute locktime** (`IsFinalTx`); **BIP68** relative locktime (height + time).
-- **BIP34** (coinbase height); **BIP30** (duplicate-txid; the height-committed leaf keeps even the two
-  historical duplicate-coinbase blocks collision-free). One documented pre-full-run item: replicating
-  Core's outpoint *overwrite* for those two pre-BIP34 blocks (`SECURITY.md` F3) before a genesis→tip run
-  crosses height 91842.
+- **BIP34** (coinbase height); **BIP30** (duplicate-txid): within-block distinctness, plus Core's outpoint
+  *overwrite* for the two grandfathered pre-BIP34 duplicate-coinbase blocks (91842/91880) — the superseded
+  coinbase leaf is deleted to match Core (tested via `host check-bip30`; BIP34 makes coinbases unique after).
 - **UTXO accumulator transition** (Utreexo): in-block-spend cancellation, unspendable-output skipping
   (`IsUnspendable`), so the committed root equals Core's UTXO set exactly. The guest **recomputes** the
   block's output set from the tx bytes (bound to the merkle root) — it does not trust the prover's list.
