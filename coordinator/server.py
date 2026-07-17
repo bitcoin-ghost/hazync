@@ -50,6 +50,10 @@ except Exception:
 _lock = threading.Lock()
 _rate = {}          # ip -> [timestamps] sliding window, guarded by _rate_lock
 _rate_lock = threading.Lock()
+# Bound concurrent STARK verifications. submit() runs verify-any OUTSIDE _lock (so it can't stall
+# claims/heartbeats), but without a cap a burst of submits would spawn unlimited concurrent `host
+# verify-any` subprocesses (each up to 120s + a multi-MiB receipt) and exhaust this small box's CPU/RAM.
+_verify_sem = threading.Semaphore(int(os.environ.get("VERIFY_CONCURRENCY", str(max(1, (os.cpu_count() or 2))))))
 
 def rate_ok(ip):
     """Sliding-window per-IP write limiter. True if this write is within budget."""
@@ -451,9 +455,11 @@ def submit(body):
         c.close()
     if not r: return 404, {"error": "no such range"}
     if r["status"] == "verified": return 409, {"error": "already proven"}
-    # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges now run in parallel)
-    sig_ok = verify_sig(pk, sig, receipt)
-    rcpt_ok, note, meta = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid", None)
+    # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges run in parallel),
+    #    but bounded by _verify_sem so a burst can't spawn unlimited STARK verifications and OOM the box.
+    with _verify_sem:
+        sig_ok = verify_sig(pk, sig, receipt)
+        rcpt_ok, note, meta = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid", None)
     ok = sig_ok and rcpt_ok
     # 3. commit under the lock, re-checking status so a racing submit for the same range can't double-credit
     with _lock:
