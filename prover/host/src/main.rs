@@ -104,8 +104,15 @@ fn header_hash(header: &[u8]) -> [u8; 32] { bitcoin::hashes::sha256d::Hash::hash
 // difficulty, and the MTP window). Chaining ranges on `out_bhash(k) == in_bhash(k+1)` reproduces the
 // guest fold's seam check that tip-hash equality alone does NOT (a mid-chain range could otherwise
 // fabricate its in-boundary UTXO set / in_time / MTP window). Roots are normalized so padding can't vary.
-fn boundary_digest(tip: &[u8; 32], roots: &[Option<[u8; 32]>], leaves: u64, nbits: u32, time: u32, epoch: u32, recent: &[u32]) -> [u8; 32] {
+fn boundary_digest(height: u32, tip: &[u8; 32], roots: &[Option<[u8; 32]>], leaves: u64, nbits: u32, time: u32, epoch: u32, recent: &[u32]) -> [u8; 32] {
     let mut m: Vec<u8> = Vec::new();
+    // H9: bind the boundary's HEIGHT (out-boundary = hi, in-boundary = lo-1). RangeState.lo/hi are
+    // committed in-circuit (prove_range sets lo=hi=w.height, the same value that selects the script
+    // flags and coinbase subsidy; fold_range asserts hi+1==lo adjacency). Folding height into the seam
+    // digest makes the coordinator's out_bhash(k)==in_bhash(k+1) chaining STRUCTURALLY require
+    // hi(k)==lo(k+1)-1 — so a block mined onto the real tip but labelled a false (low) height, claiming a
+    // larger subsidy / weaker flags, cannot chain even though its UTXO/difficulty/MTP boundary is valid.
+    m.extend_from_slice(&height.to_le_bytes());
     m.extend_from_slice(tip);
     let nr = normalize_host(roots.to_vec());
     m.extend_from_slice(&(nr.len() as u32).to_le_bytes());
@@ -989,8 +996,9 @@ fn verify_any_cmd(bin: &str) {
     // Expose FULL-boundary digests so the coordinator chains on `out_bhash(k) == in_bhash(k+1)` — the
     // complete seam check the guest fold does (tip + UTXO roots + leaves + difficulty + MTP window), not
     // just tip-hash. Without this a mid-chain range can fabricate its in-boundary UTXO set / difficulty.
-    let in_bh = boundary_digest(&rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent);
-    let out_bh = boundary_digest(&rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent);
+    // in-boundary = the chain state after block lo-1; out-boundary = after block hi (H9 height binding).
+    let in_bh = boundary_digest(rs.lo.saturating_sub(1), &rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent);
+    let out_bh = boundary_digest(rs.hi, &rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent);
     println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_bhash={} out_bhash={}",
         rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work),
         hex(&in_bh), hex(&out_bh));

@@ -150,6 +150,7 @@
   tt.onclick=function(){var n=(root.getAttribute('data-theme')==='dark')?'light':'dark';root.setAttribute('data-theme',n);try{localStorage.setItem('ghost-theme',n)}catch(e){}};
   var $=function(id){return document.getElementById(id)};
   function fmt(n){return (n||0).toLocaleString()}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
   function metric(l,v){return '<div class="metric"><div class="label">'+l+'</div><div class="value">'+v+'</div></div>'}
   function ago(ts){var s=Math.max(0,(Date.now()/1000-ts));if(s<60)return'just now';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
   function render(d){
@@ -172,9 +173,9 @@
     VIEW.data=d; renderBoard();
     // leaderboard
     var L=d.leaderboard.filter(function(x){return x.blocks>0});
-    $('leaderboard').innerHTML=L.length?L.map(function(x,i){return '<div class="lrow"><span class="rk">'+(i+1)+'</span><span class="who"><span class="hn">'+(x.handle||'anon')+'</span><span class="ky">'+x.id+'… <span class="sig">◈</span></span></span><span class="n">'+fmt(x.blocks)+'<small>blocks</small></span></div>'}).join(''):'<div class="empty">no verified proofs yet — be the first</div>';
+    $('leaderboard').innerHTML=L.length?L.map(function(x,i){return '<div class="lrow"><span class="rk">'+(i+1)+'</span><span class="who"><span class="hn">'+esc(x.handle||'anon')+'</span><span class="ky">'+esc(x.id)+'… <span class="sig">◈</span></span></span><span class="n">'+fmt(x.blocks)+'<small>blocks</small></span></div>'}).join(''):'<div class="empty">no verified proofs yet — be the first</div>';
     // recent
-    $('recent').innerHTML=d.recent.length?d.recent.map(function(s){return '<div class="frow"><span class="'+(s.verified?'ok':'no')+'">'+(s.verified?'✓':'…')+'</span><span class="blk">'+s.range+'</span><span class="by">'+(s.handle||'anon')+' · '+ago(s.ts)+'</span></div>'}).join(''):'<div class="empty">nothing yet</div>';
+    $('recent').innerHTML=d.recent.length?d.recent.map(function(s){return '<div class="frow"><span class="'+(s.verified?'ok':'no')+'">'+(s.verified?'✓':'…')+'</span><span class="blk">'+esc(s.range)+'</span><span class="by">'+esc(s.handle||'anon')+' · '+ago(s.ts)+'</span></div>'}).join(''):'<div class="empty">nothing yet</div>';
   }
   // ---- block explorer: single/range · search · slider · filters (all client-side over vranges/claims) ----
   var VIEW={mode:'single',filter:'all',start:0,focus:null,data:null,init:false};
@@ -188,8 +189,8 @@
   function matchF(s){return VIEW.filter==='all'||(VIEW.filter==='open'&&s==='open')||(VIEW.filter==='proving'&&s==='claimed')||(VIEW.filter==='verified'&&s==='verified');}
   function firstOpen(w,from){var n=Math.max(0,from),k=0;while(n<w.tip&&k<400000){if(blkStatus(w,n).s==='open')return n;n++;k++;}return from;}
   function bodyLine(st){
-    if(st.s==='verified')return '<span class="rby"><span class="sig">◈</span> '+(st.handle||'—')+'</span>';
-    if(st.s==='claimed'){var el=st.elapsed?' · '+Math.floor(st.elapsed/60)+'m':'';return '<span class="rby">'+(st.handle||'claimed')+el+'</span>';}
+    if(st.s==='verified')return '<span class="rby"><span class="sig">◈</span> '+esc(st.handle||'—')+'</span>';
+    if(st.s==='claimed'){var el=st.elapsed?' · '+Math.floor(st.elapsed/60)+'m':'';return '<span class="rby">'+esc(st.handle||'claimed')+el+'</span>';}
     return '<span class="rby">claim '+(VIEW.mode==='single'?'this block':'this range')+' →</span>';
   }
   function pillOf(st){

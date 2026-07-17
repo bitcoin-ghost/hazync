@@ -326,12 +326,28 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let mut total_fee: i64 = 0;
     let mut all_ok = true;
 
+    // The header is the sole PoW/merkle/time/version source. check_pow hashes exactly 80 bytes while
+    // dsha256(&w.header) hashes the whole Vec, so a padded header would make the committed tip_hash
+    // diverge from the canonical block hash, and a <80 header is an out-of-bounds read in check_pow.
+    assert!(w.header.len() == 80, "block header must be exactly 80 bytes, got {}", w.header.len());
+
     let block_time = u32::from_le_bytes(w.header[68..72].try_into().unwrap());
     let block_hash = dsha256(&w.header); // this block's hash (internal order): flag exceptions + tip
     // Consensus script flags (Core GetBlockScriptFlags: always-on base + buried deployments + exceptions).
     let flags = block_script_flags(w.height, &block_hash);
     // BIP113: from CSV activation (419328), locktime uses median-time-past instead of block time.
     let lock_time = if w.height >= 419_328 { mtp } else { block_time };
+
+    // nVersion soft-fork rejection (Core ContextualCheckBlockHeader): once a version's soft fork is
+    // buried, a block below that version is invalid regardless of its scripts. Heights: BIP34 (v>=2 @
+    // 227931), BIP66 (v>=3 @363725), BIP65/CLTV (v>=4 @388381). The height-derived script flags already
+    // enforce the RULES; this rejects the stale header itself as Core does, closing an accept-invalid gap.
+    let version = i32::from_le_bytes(w.header[0..4].try_into().unwrap());
+    if (version < 2 && w.height >= 227_931)
+        || (version < 3 && w.height >= 363_725)
+        || (version < 4 && w.height >= 388_381) {
+        all_ok = false;
+    }
 
     // Recompute the block's created output leaves from the REAL tx bytes (coinbase + every tx), skipping
     // unspendable outputs (H3) — instead of trusting host-supplied w.new_outputs (soundness). Each tx's

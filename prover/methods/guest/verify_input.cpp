@@ -149,6 +149,9 @@ extern "C" int check_input_locks(const uint8_t* tx_bytes, unsigned tx_len, unsig
                  reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);
+    // Fail closed on an out-of-range input index (mirrors verify_input's -60 guard) — otherwise a
+    // malicious witness triggers an OOB std::vector access below rather than a clean rejection.
+    if (input_idx >= mtx.vin.size()) return -43;
     // Coinbase maturity: a coinbase output is unspendable for COINBASE_MATURITY (100) blocks.
     if (coin_is_coinbase && spend_height < coin_height + 100) return -40;
     // BIP68 relative locktime — only ENFORCED once CSV is active (Core sets LOCKTIME_VERIFY_SEQUENCE

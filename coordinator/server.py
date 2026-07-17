@@ -63,8 +63,12 @@ def rate_ok(ip):
         return True
 
 def clean_handle(h):
-    """A display handle: printable, trimmed, length-capped — no control chars/newlines in the ledger."""
-    h = "".join(ch for ch in str(h or "anon") if ch.isprintable()).strip()
+    """A display handle: printable, trimmed, length-capped, and stripped of HTML-significant characters
+    (< > & " ') so it is safe to render on the public dashboard. This is the single server-side choke
+    point (CLI, API, and any future consumer all pass through it); the dashboard also escapes at every
+    render sink, so the two layers are defence-in-depth against stored XSS."""
+    h = "".join(ch for ch in str(h or "anon")
+                if ch.isprintable() and ch not in "<>&\"'").strip()
     return (h[:MAX_HANDLE] or "anon")
 
 def is_hex(s, nbytes):
@@ -203,7 +207,8 @@ def verify_receipt(receipt: bytes, rng):
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = os.path.join(STATE_DIR, f"in_{rng['id']}.bin")
+    # unique per receipt+thread: verification now runs lock-free, so concurrent submits must not share a path
+    tmp = os.path.join(STATE_DIR, f"in_{rng['id']}_{hashlib.sha256(receipt).hexdigest()[:12]}_{threading.get_ident()}.bin")
     with open(tmp, "wb") as f:
         f.write(receipt)
     try:
@@ -242,10 +247,17 @@ def _frontier_chain():
     tip, hi, seen = GENESIS_TIP, 0, set()
     cum_work, leaves, tip_hash = 0, 0, GENESIS_TIP
     prev_bhash = None  # None at genesis: verify-any pinned that range's full in-boundary
+    prev_hi = 0        # H9: height cursor — the genesis-connecting range must be [1..], then contiguous
     while tip in by_in and tip not in seen:
         r = by_in[tip]
         if not r["in_bhash"]:
             break  # F3: no boundary digest (pre-migration / NULL) — not chainable
+        if r["lo"] != prev_hi + 1:
+            break  # H9: HEIGHT must be contiguous from genesis (lo==1 first, then hi(k)+1). boundary_digest
+                   # binds the UTXO/difficulty/MTP state but NOT height, so a block mined onto the real tip
+                   # yet labelled with a false (low) height — claiming a larger subsidy and weaker script
+                   # flags — has a valid tip/boundary and would otherwise splice in. The guest fold_range
+                   # enforces this same adjacency (l.hi+1==rr.lo); the coordinator seam must match it.
         if prev_bhash is not None and str(r["in_bhash"]) != str(prev_bhash):
             break  # S1/F1: full-boundary discontinuity (UTXO roots / difficulty / MTP) — do not chain
         seen.add(tip)
@@ -253,13 +265,31 @@ def _frontier_chain():
         try: cum_work += int(r["range_work"] or 0)
         except Exception: pass
         leaves = r["out_leaves"] or 0
-        prev_bhash = r["out_bhash"]
+        prev_bhash = r["out_bhash"]; prev_hi = r["hi"]
         tip = r["out_tip"]
     return hi, tip_hash, cum_work, leaves
 
 def frontier_hi():
     """Highest block covered by a contiguous, boundary-continuous chain of verified ranges from genesis."""
     return _frontier_chain()[0]
+
+def proven_count():
+    """Distinct blocks covered by any verified range. A single block can legitimately be verified both
+    inside an aligned range (e.g. 0-999) and as a standalone single-block range (500); a naive
+    SUM(hi-lo+1) would count it twice and inflate the headline number/percentage. Merge the intervals
+    so each height counts once. vranges are RANGE_SIZE-coarse (+ a few singles), so this stays cheap."""
+    c = db()
+    rows = c.execute("SELECT lo,hi FROM vranges").fetchall()
+    c.close()
+    total, cur_lo, cur_hi = 0, None, None
+    for lo, hi in sorted((r["lo"], r["hi"]) for r in rows):
+        if cur_hi is None or lo > cur_hi + 1:
+            if cur_hi is not None: total += cur_hi - cur_lo + 1
+            cur_lo, cur_hi = lo, hi
+        else:
+            cur_hi = max(cur_hi, hi)
+    if cur_hi is not None: total += cur_hi - cur_lo + 1
+    return total
 
 def frontier_proof():
     """The genesis-anchored frontier as a chain-state (the real committed proof output the hero panel
@@ -299,7 +329,7 @@ def state():
     reap()
     now = time.time()
     c = db()
-    proven = c.execute("SELECT COALESCE(SUM(hi-lo+1),0) FROM vranges").fetchone()[0]
+    proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
     # board window: all verified + claimed, then a few open around the frontier
     fr = frontier_hi()
@@ -412,14 +442,26 @@ def submit(body):
     try: receipt = base64.b64decode(receipt_b64)
     except Exception: return 400, {"error": "receipt must be base64"}
     sha = hashlib.sha256(receipt).hexdigest()
+    # 1. cheap pre-check under the lock, then RELEASE it — the STARK verification below can take up to
+    #    120s, and holding the global write lock across it would stall every claim/heartbeat/submit and
+    #    reap honest provers as stale. Verify lock-free; re-acquire only to commit.
     with _lock:
         c = db()
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
-        if not r: c.close(); return 404, {"error": "no such range"}
-        if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
-        sig_ok = verify_sig(pk, sig, receipt)
-        rcpt_ok, note, meta = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid", None)
-        ok = sig_ok and rcpt_ok
+        c.close()
+    if not r: return 404, {"error": "no such range"}
+    if r["status"] == "verified": return 409, {"error": "already proven"}
+    # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges now run in parallel)
+    sig_ok = verify_sig(pk, sig, receipt)
+    rcpt_ok, note, meta = verify_receipt(receipt, r) if sig_ok else (False, "signature invalid", None)
+    ok = sig_ok and rcpt_ok
+    # 3. commit under the lock, re-checking status so a racing submit for the same range can't double-credit
+    with _lock:
+        c = db()
+        r2 = c.execute("SELECT status FROM ranges WHERE id=?", (rid,)).fetchone()
+        if r2 and r2["status"] == "verified":
+            c.close()
+            return 409, {"error": "already proven"}   # another submit won the race while we were verifying
         c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
                   " VALUES(?,?,?,?,?,?,?,?)", (rid, pk, handle, sha, sig, int(ok), note, time.time()))
         if ok:
