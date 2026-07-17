@@ -1,5 +1,7 @@
 # Hazync — Bitcoin validity proofs from Bitcoin Core's *own* consensus code
 
+> New here and want to prove a block? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for a simple step-by-step. Live party: https://bitcoinghost.org/hazync
+
 Hazync proves that Bitcoin blocks are valid under Bitcoin Core's **real, unmodified** consensus code,
 inside a zero-knowledge VM (RISC0). A verifier checks one small proof instead of re-executing every
 script from genesis. The proofs are **recursive/foldable**, so a whole chain collapses into a single
