@@ -72,6 +72,22 @@ honest baseline that must still be accepted, so a rejection can't pass for the w
   assertion (bad-cb-length, per-output `MoneyRange`, value-sum range), which it previously skipped.
   Test: `host adversarial` (#4).
 
+A second pass (re-auditing the fixes above) found one more critical and a set of range/coordinator
+anchoring gaps:
+
+- **H5 — multi-input fee-prevouts (critical, inflation/theft).** Only each input's own `input_idx`
+  coin was authenticated, but `check_tx` sums the whole first-input prevouts blob into the fee, so a
+  phantom coin at another index inflated the fee (~21M BTC) or an omitted `BlockInput` skipped a script
+  + a deletion. Fixed by a pre-pass tying the flat input list to each tx's real `vin` (one shared blob,
+  sequential `input_idx`, exactly `tx_vin_count` inputs). Test: `host adversarial` (#5) + honest 2-input
+  baseline.
+- **H6 — genesis in-boundary (high).** `verify-range` now pins the FULL genesis boundary
+  (`assert_genesis_in_boundary`: `in_epoch_start`, `in_roots`, `in_recent`, `in_time`, not just
+  `in_tip`/`in_leaves`/`in_nbits`); `verify-any` applies the same pin whenever a range claims genesis.
+  Closes a forgeable first-retarget difficulty and a phantom-root UTXO seed.
+- **H7 (open, not live-exploitable) / H8 (speculative).** Coordinator cross-range difficulty continuity
+  and a cross-mode journal-laundering hardening — see `SECURITY.md`.
+
 ## 4. Scope of each proof type (audit S3 — be explicit)
 - **Single-block / segmented block proof** (`prove-full`, `prove-seg`): attests the block is
   *internally valid* (scripts, structure, no-inflation, PoW, retarget, merkle, subsidy, weight, sigops,

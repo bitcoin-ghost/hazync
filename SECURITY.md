@@ -31,6 +31,10 @@ full trust base and the two portability shims.
 | H2 | Segmented chunks bound neither flags nor spending witness | **critical** | **fixed + negative-tested** (per-input binding digest; `HAZYNC_H2_BADHEIGHT` prove-seg) |
 | H3 | In-block coin double-spend / ordering (inflation) | **high** | **fixed + negative-tested** (ordered multiplicity guard; `host adversarial` #3) |
 | H4 | Coinbase never run through `CheckTransaction` | med | **fixed + negative-tested** (`host adversarial` #4) |
+| H5 | Multi-input tx: non-`input_idx` fee-prevouts unbound to the accumulator (inflation/theft) | **critical** | **fixed + negative-tested** (per-tx input-list pre-pass; `host adversarial` #5) |
+| H6 | Range verifier under-pinned the genesis in-boundary (`in_epoch_start`/`in_roots`/`in_recent`) → forgeable first retarget / phantom UTXO seed | high | **fixed** (`assert_genesis_in_boundary` in `verify-range`; `verify-any` applies it when the range claims genesis) |
+| H7 | Coordinator chains ranges by tip-hash only — no cross-range difficulty/MTP continuity | medium | **partly closed** (genesis in-boundary now pinned in `verify-any`; `verify-any` exposes nbits/epoch for the coordinator to chain on) — **open: coordinator must enforce out==in on those fields.** Not live-exploitable (frontier below the first retarget, single prover) |
+| H8 | Cross-mode journal laundering: `block_proof` (mode 1) commits a self_id-free journal that never aborts | speculative | **open (recommended hardening)** — no exploit constructed; the type-mismatched `from_slice` decode already makes it very hard. Recommended fix: an explicit domain tag as the first committed field of each recursion-consumed journal |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -98,6 +102,41 @@ The coinbase reached only the subsidy/BIP34/witness-commitment checks, never `Ch
 malformed coinbase (bad-cb-length, out-of-range or overflowing output sum) could pass. **Fix:** run the
 coinbase through real Core `CheckTransaction` plus an `IsCoinBase` assertion. **Test:** `host
 adversarial` (#4).
+
+## Fixed 2026-07-17 (round 2) — re-audit of the patched code (H5–H8)
+
+A second adversarial pass (three reviewers) attacked the H1–H4 fixes and swept the rest. H2/H3/H4 held
+up; H1 held on the folded path. It found one more critical and a cluster of range/coordinator anchoring
+gaps.
+
+### H5 (critical) — multi-input fee-prevouts were not bound to the accumulator
+Each `BlockInput` carries its own `prevouts` blob, but only the entry at its `input_idx` is authenticated
+(folded into the leaf + `stump.delete`). `check_tx` runs once per tx on the first input's blob and sums
+**every** entry into the fee. So for a ≥2-input tx a prover puts a phantom high-value coin at another
+index of the first input's blob — never authenticated — inflating the fee to ~21M BTC and minting it via
+the coinbase (a sibling variant omits a `BlockInput` to skip a script check + a deletion → theft /
+double-spend). **Fix:** a pre-pass ties the flat input list to each tx's real `vin` — exactly
+`tx_vin_count` consecutive `BlockInput`s, sequential `input_idx`, one shared `raw_tx` + `prevouts` blob —
+so every entry `check_tx`/sigops read is an authenticated coin. **Test:** `host adversarial` (#5), with an
+honest 2-input baseline that must still pass.
+
+### H6 (high) — range verifier under-pinned the genesis in-boundary
+`verify-range` pinned `in_tip`/`in_leaves`/`in_nbits` but not `in_epoch_start` (feeds the block-2016
+retarget, propagates across fold seams → forgeable difficulty), `in_roots` (`in_leaves==0` alone permits
+phantom roots), or `in_recent`/`in_time`. **Fix:** `assert_genesis_in_boundary` pins the full genesis
+boundary; `verify-any` applies it whenever a range claims to connect to genesis.
+
+### H7 (medium, not live-exploitable) — coordinator cross-range continuity
+`server.py` chains verified ranges by tip-hash only, so `in_nbits`/`in_epoch_start` of range k+1 aren't
+checked against range k's `out_*`. Tip-chaining implies contiguity, and `verify-any` now rejects a
+fabricated genesis in-boundary; the remaining step is for the coordinator to also chain on the nbits/epoch
+fields `verify-any` now prints. Not exploitable at the current frontier (below block 2016, single prover).
+
+### H8 (speculative) — cross-mode journal laundering
+`block_proof` (mode 1) commits a self_id-free `BlockOutput` and never aborts; in principle a mode-1
+receipt could be laundered as a fake `prev` if its bytes decode as a `ChainState` with trailing
+`self_id == METHOD_ID`. No exploit was constructed (the type-mismatched decode makes it very hard).
+Recommended hardening: a domain tag as the first committed field of every recursion-consumed journal.
 
 ## Earlier findings (2026-07-15 self-audit) — status
 

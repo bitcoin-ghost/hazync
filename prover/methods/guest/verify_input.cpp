@@ -301,6 +301,17 @@ extern "C" int is_coinbase_tx(const uint8_t* tx_bytes, unsigned tx_len) {
     return tx.IsCoinBase() ? 1 : 0;
 }
 
+// Number of inputs (vin) of a transaction from its raw bytes — used to require exactly one
+// accumulator-authenticated BlockInput per real input, so the host cannot pad the fee/sigop prevouts
+// blob with phantom coins or omit an input.
+extern "C" uint32_t tx_vin_count(const uint8_t* tx_bytes, unsigned tx_len) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    return (uint32_t)mtx.vin.size();
+}
+
 // Per-tx weight + legacy sigop cost (real Core: GetSerializeSize + CScript::GetSigOpCount).
 // weight = base_size*(WITNESS_SCALE_FACTOR-1) + total_size; sigop cost = legacy count * WITNESS_SCALE_FACTOR.
 extern "C" void tx_wu_sigops(const uint8_t* tx_bytes, unsigned tx_len, int64_t* out_weight, int64_t* out_sigops) {

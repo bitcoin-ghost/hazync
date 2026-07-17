@@ -44,6 +44,8 @@ extern "C" {
     // Real Core CTransaction::IsCoinBase() on the raw tx bytes: 1 iff exactly one input with a null
     // prevout (#4 — assert the block's "coinbase" really is structurally a coinbase).
     fn is_coinbase_tx(tx: *const u8, tx_len: u32) -> i32;
+    // Number of inputs of a tx from its raw bytes (#5 — tie the flat BlockInput list to each tx's vin).
+    fn tx_vin_count(tx: *const u8, tx_len: u32) -> u32;
     // Sum of a coinbase tx's outputs, and the height's block subsidy (exact halving formula).
     fn coinbase_value(tx: *const u8, tx_len: u32) -> i64;
     fn block_subsidy(height: u32) -> i64;
@@ -329,6 +331,34 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     if tx_idx != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
     let mut spent_in_block: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut cur_tx: u32 = 0; // index of the tx currently being processed (increments on each tx_first)
+
+    // #5: tie the flat host-supplied input list to each transaction's real inputs. Each tx must have
+    // EXACTLY vin_count consecutive BlockInputs (input_idx 0..n-1 in order, tx_first only on the first),
+    // all carrying the identical raw_tx and prevouts blob. Each BlockInput authenticates its own
+    // prevouts[input_idx] against the accumulator, so requiring one shared blob per tx makes EVERY entry
+    // that check_tx (the fee sum) and the sigop counter read an authenticated coin. Without this a prover
+    // pads the first input's fee blob with a phantom high-value coin (fee inflation -> mint via the
+    // coinbase) or omits a BlockInput entirely (its script is never checked and its coin never deleted
+    // -> theft / double-spend).
+    {
+        let mut i = 0usize;
+        let mut group_ok = true;
+        while i < w.inputs.len() {
+            let head = &w.inputs[i];
+            let n = unsafe { tx_vin_count(head.raw_tx.as_ptr(), head.raw_tx.len() as u32) } as usize;
+            if head.tx_first != 1 || n == 0 || i + n > w.inputs.len() { group_ok = false; break; }
+            for j in 0..n {
+                let g = &w.inputs[i + j];
+                if g.raw_tx != head.raw_tx || g.prevouts != head.prevouts
+                    || g.input_idx as usize != j || (g.tx_first == 1) != (j == 0) {
+                    group_ok = false; break;
+                }
+            }
+            if !group_ok { break; }
+            i += n;
+        }
+        if !group_ok { all_ok = false; }
+    }
 
     for (idx, inp) in w.inputs.iter().enumerate() {
         if inp.tx_first == 1 { cur_tx += 1; } // this input begins a new tx (1 = first non-coinbase tx)

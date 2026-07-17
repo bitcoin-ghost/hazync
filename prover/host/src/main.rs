@@ -74,6 +74,12 @@ fn wire_proof(p: &hazync_utreexo::Proof) -> WireProof {
     WireProof { leaf: p.leaf, position: p.position, siblings: p.siblings.clone() }
 }
 fn wire_stump(f: &Forest) -> WireStump { WireStump { roots: f.roots(), num_leaves: f.leaves.len() as u64 } }
+// Strip trailing empty root slots (mirrors the guest `normalize`) so two representations of the same
+// accumulator (e.g. the empty genesis forest) compare equal regardless of padding.
+fn normalize_host(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
+    while v.last() == Some(&None) { v.pop(); }
+    v
+}
 // Core CScript::IsUnspendable(): OP_RETURN (0x6a) or script > MAX_SCRIPT_SIZE (10000). Unspendable
 // outputs never enter the UTXO set, so the accumulator (host + guest) must skip them (H3).
 fn out_spendable(spk: &[u8]) -> bool { !((!spk.is_empty() && spk[0] == 0x6a) || spk.len() > 10_000) }
@@ -890,6 +896,21 @@ fn fold_range_cmd(left: &str, right: &str, out: &str) {
     println!("folded -> range [{}..{}] in {:.1}s -> {out}", rs.lo, rs.hi, t.elapsed().as_secs_f64());
 }
 
+// Pin the FULL genesis in-boundary of a range proof. in_tip alone is not enough: in_epoch_start feeds
+// the first retarget (block 2016) via calc_next_bits and propagates unchanged across fold seams, so an
+// unpinned value forges that retarget's difficulty (up to 4x easier) and understates cum_work; in_roots
+// must be the empty accumulator (in_leaves==0 alone permits phantom roots); in_recent/in_time feed MTP.
+fn assert_genesis_in_boundary(rs: &RangeState) {
+    assert_eq!(rs.lo, 1, "genesis-connected range must start at block 1");
+    assert_eq!(rs.in_tip_hash, arr(rev(hx(GENESIS_HASH))), "in-boundary tip != genesis hash");
+    assert_eq!(rs.in_leaves, 0, "in-boundary UTXO set not empty");
+    assert_eq!(rs.in_nbits, GENESIS_BITS, "in-boundary nbits != genesis");
+    assert_eq!(rs.in_epoch_start, GENESIS_TIME, "in-boundary epoch_start != genesis time");
+    assert_eq!(normalize_host(rs.in_roots.clone()), normalize_host(Forest::new().roots()), "in-boundary UTXO roots != empty");
+    assert_eq!(rs.in_recent, vec![GENESIS_TIME], "in-boundary recent-times != [genesis time]");
+    assert_eq!(rs.in_time, GENESIS_TIME, "in-boundary prev-time != genesis time");
+}
+
 // `verify-range <bin>`: verify a range proof and PIN its leftmost boundary to the genesis anchor.
 fn verify_range_cmd(bin: &str) {
     let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
@@ -897,9 +918,7 @@ fn verify_range_cmd(bin: &str) {
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
     assert_eq!(rs.lo, 1, "range must start at block 1 (genesis-anchored)");
-    assert_eq!(rs.in_tip_hash, arr(rev(hx(GENESIS_HASH))), "in-boundary tip != genesis hash");
-    assert_eq!(rs.in_leaves, 0, "in-boundary UTXO set not empty");
-    assert_eq!(rs.in_nbits, GENESIS_BITS, "in-boundary nbits != genesis");
+    assert_genesis_in_boundary(&rs);
     let mut total = arr_u128(GENESIS_WORK);
     add256_host(&mut total, &rs.range_work);
     println!(">>> RANGE PROOF [1..{}] VERIFIED — genesis-anchored, one succinct receipt.", rs.hi);
@@ -916,8 +935,16 @@ fn verify_any_cmd(bin: &str) {
     r.verify(METHOD_ID).expect("verify"); // real STARK verification
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
-    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={}",
-        rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work));
+    // If this range CLAIMS to connect to genesis, its full genesis in-boundary must be pinned — else a
+    // prover fabricates the initial UTXO set / difficulty and the coordinator chains it into the frontier.
+    if rs.in_tip_hash == arr(rev(hx(GENESIS_HASH))) {
+        assert_genesis_in_boundary(&rs);
+    }
+    // Expose the difficulty/MTP boundary fields so a coordinator can enforce cross-range continuity
+    // (out_nbits/out_epoch of range k == in_nbits/in_epoch of range k+1), not just tip-hash equality.
+    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_nbits={} out_nbits={} in_epoch={} out_epoch={}",
+        rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work),
+        rs.in_nbits, rs.out_nbits, rs.in_epoch_start, rs.out_epoch_start);
 }
 
 // SEGMENTED proof: split the block's inputs into chunks, prove each chunk's scripts (mode 4), then
@@ -1211,6 +1238,63 @@ fn synth_txs() -> (Transaction, Transaction, Transaction, Transaction, Transacti
     (cb_ok, cb_bad, a, b, d)
 }
 
+// #5: a 2-input tx whose FIRST input's prevouts blob carries a phantom high-value coin (the fee blob
+// the host supplies is not, entry-for-entry, bound to accumulator-authenticated coins). `phantom=false`
+// is the honest baseline (both inputs share the real [C1,C2] blob); `phantom=true` puts a ~21M BTC
+// fake coin at position 1 of the first input's blob to inflate the fee -> mint via the coinbase. The
+// #5 pre-pass must reject it (the two inputs' blobs differ => group check fails => all_ok=false).
+fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
+    let optrue = || ScriptBuf::from_bytes(vec![0x51]);
+    let (v1, v2): (u64, u64) = (3_000_000_000, 2_000_000_000); // C1 + C2 = 50 BTC
+    let c1_txid = Txid::from_byte_array([0x21u8; 32]);
+    let c2_txid = Txid::from_byte_array([0x22u8; 32]);
+    let c1_leaf = coin_leaf(&[0x21u8; 32], 0, v1, &[0x51], 1, false, 0);
+    let c2_leaf = coin_leaf(&[0x22u8; 32], 0, v2, &[0x51], 1, false, 0);
+    // 2-input tx spending C1 and C2, one OP_TRUE output (fee 1000 sat).
+    let vin = |txid: Txid| TxIn { previous_output: OutPoint { txid, vout: 0 },
+        script_sig: ScriptBuf::new(), sequence: Sequence::MAX, witness: Witness::new() };
+    let t = Transaction { version: transaction::Version(1), lock_time: absolute::LockTime::ZERO,
+        input: vec![vin(c1_txid), vin(c2_txid)],
+        output: vec![TxOut { value: Amount::from_sat(v1 + v2 - 1000), script_pubkey: optrue() }] };
+    let t_raw = serialize(&t);
+    // coinbase: subsidy(1000)=50 BTC + 1000 sat fee.
+    let cb = Transaction { version: transaction::Version(1), lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn { previous_output: OutPoint { txid: Txid::all_zeros(), vout: 0xffff_ffff },
+            script_sig: ScriptBuf::from_bytes(vec![0x51, 0x51]), sequence: Sequence::MAX, witness: Witness::new() }],
+        output: vec![TxOut { value: Amount::from_sat(5_000_001_000), script_pubkey: optrue() }] };
+
+    let real_blob = serialize(&vec![
+        TxOut { value: Amount::from_sat(v1), script_pubkey: optrue() },
+        TxOut { value: Amount::from_sat(v2), script_pubkey: optrue() }]);
+    let phantom_blob = serialize(&vec![
+        TxOut { value: Amount::from_sat(v1), script_pubkey: optrue() },
+        TxOut { value: Amount::from_sat(2_100_000_000_000_000), script_pubkey: optrue() }]); // ~21M BTC fake
+
+    let mut forest = Forest::new();
+    for i in 0..4u64 { forest.add(hash_leaf(&[b"pre".as_slice(), &i.to_le_bytes()].concat())); }
+    forest.add(c1_leaf); forest.add(c2_leaf);
+    for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
+    let root_prev = wire_stump(&forest);
+
+    let mk_input = |forest: &mut Forest, idx: u32, leaf: Hash, blob: Vec<u8>| -> BlockInput {
+        let pos = forest.leaves.iter().position(|x| *x == leaf).expect("coin in accumulator");
+        let last = forest.leaves.len() - 1;
+        let bi = BlockInput { raw_tx: t_raw.clone(), input_idx: idx, prevouts: blob, flags: 0,
+            global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: (idx == 0) as u32,
+            proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) };
+        forest.delete(pos); bi
+    };
+    // input 0 carries the phantom blob (if requested); input 1 always carries the real blob.
+    let in0 = mk_input(&mut forest, 0, c1_leaf, if phantom { phantom_blob } else { real_blob.clone() });
+    let in1 = mk_input(&mut forest, 1, c2_leaf, real_blob.clone());
+
+    let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
+        txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
+        wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
+        root_prev, inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest) }
+}
+
 // #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
 // (its `w.height == prev.height+1` assert fires => execute Err).
 fn adv_height_rejected() -> bool {
@@ -1255,6 +1339,15 @@ fn adversarial() {
     let r4 = !block_all_ok(&synth_block(&cb_bad, &[&a, &b], &[false, true]));
     println!("#4 malformed coinbase (never CheckTransaction'd before) . {}", verdict(r4));
     pass &= r4;
+
+    // #5: unbound fee-prevouts on a 2-input tx. Baseline (honest shared blob) must pass; the phantom
+    // ~21M BTC coin in the first input's blob must be rejected.
+    let honest2 = block_all_ok(&synth_unbound_prevouts(false));
+    println!("[baseline] honest 2-input tx accepted ................... {}", if honest2 { "yes ✓" } else { "NO ✗ (baseline broken)" });
+    pass &= honest2;
+    let r5 = !block_all_ok(&synth_unbound_prevouts(true));
+    println!("#5 unbound fee-prevouts (phantom coin -> inflation) ..... {}", verdict(r5));
+    pass &= r5;
 
     println!("\n>>> ADVERSARIAL SUITE {}", if pass { "PASS ✓ — all holes closed" } else { "FAIL ✗ — a hole is OPEN" });
     if !pass { std::process::exit(1); }
