@@ -1,0 +1,36 @@
+[Unit]
+Description=Hazync Proof Party coordinator (verify-only, CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hazync
+Group=hazync
+WorkingDirectory=/opt/hazync/coordinator
+# The coordinator VERIFIES proofs on CPU (host verify-any) and serves the API + witnesses.
+# No GPU needed here — proving/folding happen on contributors' boxes.
+Environment=COORD_PORT=8899
+Environment=COORD_DB=/opt/hazync/coordinator.db
+Environment=COORD_STATE=/opt/hazync/coordinator-state
+Environment=WITNESS_DIR=/opt/hazync/witnesses
+Environment=HAZYNC_HOST=/opt/hazync/prover/target/release/host
+Environment=VERIFY_MODE=real
+Environment=TIP_HEIGHT=958301
+Environment=RANGE_SIZE=1000
+Environment=SEED_RANGES=0
+# Bind to localhost only — nginx on the web box reverse-proxies to it (single domain). If the web box
+# is a DIFFERENT machine, bind to the private-network interface instead and firewall :8899 to it.
+Environment=COORD_BIND=127.0.0.1
+ExecStart=/usr/bin/python3 /opt/hazync/coordinator/server.py
+Restart=always
+RestartSec=3
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/hazync
+
+[Install]
+WantedBy=multi-user.target

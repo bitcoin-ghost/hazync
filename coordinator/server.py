@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 PORT       = int(os.environ.get("COORD_PORT", "8899"))
+BIND       = os.environ.get("COORD_BIND", "0.0.0.0")   # set to 127.0.0.1 when behind a reverse proxy
 DB         = os.environ.get("COORD_DB", "coordinator.db")
 WEB        = os.environ.get("COORD_WEB", os.path.join(os.path.dirname(__file__), "web"))
 TIP        = int(os.environ.get("TIP_HEIGHT", "958301"))
@@ -447,4 +448,4 @@ if __name__ == "__main__":
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
     print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<range>")
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    ThreadingHTTPServer((BIND, PORT), H).serve_forever()
