@@ -95,7 +95,7 @@ def init_db():
       CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
       CREATE TABLE IF NOT EXISTS vranges(
         id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER, in_tip TEXT, out_tip TEXT,
-        pubkey TEXT, handle TEXT, ts REAL);
+        pubkey TEXT, handle TEXT, ts REAL, out_leaves INTEGER, range_work TEXT);
     """)
     n = c.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
     if n == 0:
@@ -108,6 +108,9 @@ def init_db():
         print(f"[seed] created {SEED} ranges of {RANGE_SIZE} blocks (0..{SEED*RANGE_SIZE-1})")
     try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
     except Exception: pass
+    for col in ("out_leaves INTEGER", "range_work TEXT"):
+        try: c.execute(f"ALTER TABLE vranges ADD COLUMN {col}")
+        except Exception: pass
     c.commit(); c.close()
 
 def reap():
@@ -191,7 +194,7 @@ def verify_receipt(receipt: bytes, rng):
     (ok, note, meta) where meta = {in_tip, out_tip}. 'mock' stubs the STARK step for GPU-less testing.
     """
     if VERIFY == "mock":
-        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"]}
+        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"], "out_leaves": 0, "range_work": "0"}
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -207,7 +210,8 @@ def verify_receipt(receipt: bytes, rng):
         lo, hi = int(kv["lo"]), int(kv["hi"])
         if lo != rng["lo"] or hi != rng["hi"]:
             return False, f"receipt proves [{lo}..{hi}], not the claimed [{rng['lo']}..{rng['hi']}]", None
-        return True, f"range [{lo}..{hi}] VERIFIED", {"in_tip": kv["in_tip"], "out_tip": kv["out_tip"]}
+        return True, f"range [{lo}..{hi}] VERIFIED", {"in_tip": kv["in_tip"], "out_tip": kv["out_tip"],
+                "out_leaves": int(kv.get("out_leaves", 0)), "range_work": kv.get("range_work", "0")}
     except Exception as e:
         return False, f"verify error: {e}", None
     finally:
@@ -226,6 +230,26 @@ def frontier_hi():
     while tip in by_in and tip not in seen:
         seen.add(tip); r = by_in[tip]; hi = r["hi"]; tip = r["out_tip"]
     return hi
+
+def frontier_proof():
+    """The genesis-anchored frontier as a chain-state: walk verified ranges by tip from genesis, summing
+    work and carrying the last range's tip hash + leaf count. This is the real committed proof output —
+    what the hero panel shows. Empty (height 0) until the first genesis-anchored proof lands."""
+    c = db()
+    rows = c.execute("SELECT lo,hi,in_tip,out_tip,out_leaves,range_work FROM vranges").fetchall()
+    c.close()
+    by_in = {}
+    for r in rows:
+        by_in.setdefault(r["in_tip"], r)
+    tip, hi, seen = GENESIS_TIP, 0, set()
+    cum_work, leaves, tip_hash = 0, 0, GENESIS_TIP
+    while tip in by_in and tip not in seen:
+        seen.add(tip); r = by_in[tip]
+        hi = r["hi"]; tip_hash = r["out_tip"]; tip = r["out_tip"]
+        try: cum_work += int(r["range_work"] or 0)
+        except Exception: pass
+        leaves = r["out_leaves"] or 0
+    return {"height": hi, "tip_hash": tip_hash, "cum_work": cum_work, "leaves": leaves}
 
 def timeline(fr, segs=240):
     """Whole-chain genesis→tip strip, bucketed into `segs` segments (bounded payload at any chain size).
@@ -305,6 +329,7 @@ def state():
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
+        "frontier_proof": frontier_proof(),
         "timeline": timeline(fr),
         "signatures": "ed25519" if HAVE_ED else "dev (no signature lib installed)",
         "verify_mode": VERIFY,
@@ -384,9 +409,10 @@ def submit(body):
         if ok:
             c.execute("UPDATE ranges SET status='verified', receipt_sha=?, verified_at=? WHERE id=?",
                       (sha, time.time(), rid))
-            c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts)"
-                      " VALUES(?,?,?,?,?,?,?,?)",
-                      (rid, r["lo"], r["hi"], meta["in_tip"], meta["out_tip"], pk, handle, time.time()))
+            c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work)"
+                      " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (rid, r["lo"], r["hi"], meta["in_tip"], meta["out_tip"], pk, handle, time.time(),
+                       meta.get("out_leaves", 0), str(meta.get("range_work", "0"))))
             c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",
