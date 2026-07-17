@@ -27,10 +27,17 @@ extern "C" int k256_ecdsa_verify(const uint8_t* msg, const uint8_t* sig, const u
 struct MiniReader {
     const std::byte* p;
     const std::byte* e;
+    // Fail closed (trap -> guest abort -> no proof) on any read/skip past the buffer end, so a truncated
+    // or malformed blob can never OOB-read adjacent guest heap (the zkVM has no memory protection). Every
+    // consensus value is recomputed + PoW-bound, so this is robustness, not a soundness fix — but it turns
+    // a wild read into a clean rejection.
     void read(Span<std::byte> dst) {
-        if (dst.size()) { std::memcpy(dst.data(), p, dst.size()); p += dst.size(); }
+        if (dst.size()) {
+            if (dst.size() > static_cast<size_t>(e - p)) __builtin_trap();
+            std::memcpy(dst.data(), p, dst.size()); p += dst.size();
+        }
     }
-    void ignore(size_t n) { p += n; }
+    void ignore(size_t n) { if (n > static_cast<size_t>(e - p)) __builtin_trap(); p += n; }
     template <typename T> MiniReader& operator>>(T&& obj) { ::Unserialize(*this, obj); return *this; }
 };
 
@@ -411,7 +418,12 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             unsigned flags,
                             uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp,
                             uint8_t* out_leaf /* 32 bytes, may be null for bench modes */) {
-    // BENCH: isolate one ECDSA verify — real libsecp256k1 (0xB0) vs accelerated k256 (0xB1).
+    // BENCH-ONLY: isolate one ECDSA verify — real libsecp256k1 (0xB0) vs accelerated k256 (0xB1). This
+    // path returns a fixed test-vector result and does NOT run VerifyScript, so it must never be present
+    // in a consensus build. It is already unreachable (block_script_flags never yields 0xB0/0xB1), but
+    // compiling it out under a bench-only define removes the "return valid" path from the binary entirely.
+    // Enable for benchmarking with:  cc::Build ... .define("HAZYNC_ECDSA_BENCH", None)
+#ifdef HAZYNC_ECDSA_BENCH
     if (flags == 0xB0) {
         secp256k1_pubkey pubkey;
         secp256k1_ecdsa_signature sig;
@@ -422,6 +434,7 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
     if (flags == 0xB1) {
         return k256_ecdsa_verify(ECV_MSG, ECV_SIG, ECV_PK, sizeof(ECV_PK));
     }
+#endif
 
     MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
                  reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};

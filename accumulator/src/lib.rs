@@ -5,9 +5,11 @@
 //! Two halves, deliberately separated:
 //!   * [`Forest`] — the full accumulator. Host-side "bridge" oracle: holds every node, generates
 //!     inclusion proofs. NEVER runs in the zkVM. This is our ground-truth reference.
-//!   * [`Stump`]  — roots only. The `verify`/`update` logic here is what gets ported into the
-//!     guest and proven. Given the roots + proofs it decides inclusion and derives the next root,
-//!     with no access to the full set.
+//!   * [`Stump`]  — roots only. The `verify`/`update` logic here is the MODEL for the guest's
+//!     `prover/methods/guest/src/utreexo.rs`, which adds the SEC-2 hardening the guest needs against a
+//!     malicious prover (pinning `proof_i.position == i - offset` and that `proof_last` is the true
+//!     rightmost) that this reference oracle does not — the host only ever builds honest proofs. The
+//!     proven guest is the authority; treat this `Stump` as the readable spec, not a byte-for-byte copy.
 //!
 //! A forest of `n` leaves is a set of perfect binary Merkle trees, one per set bit of `n`
 //! (n = 5 = 0b101 → a tree of 4 leaves and a tree of 1). Roots are indexed by tree *height*;

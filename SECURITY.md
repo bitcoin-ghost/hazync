@@ -181,6 +181,30 @@ Verified sound (attacked, no action): genesis constants (`GENESIS_WORK` etc. che
 retarget/MTP/PoW math, weight/sigop formulas, taproot/annex path, test-only env hooks (guest reads no env),
 `METHOD_ID` handling. `regress` + full `adversarial` suite + honest segmented composition pass on the round-3 guest.
 
+## Round 4 (2026-07-17) — no soundness break found; hardening only
+
+A fourth pass (three reviewers: C++/Core integration + patches, Utreexo accumulator + primitive math,
+whole-chain no-inflation + UTXO carry) found **no new soundness hole**. Confirmed sound: the `VerifyScript`
+invocation (correct precomputed data / amount / sigversion for legacy/segwit/taproot), ECDSA is real
+libsecp256k1 (k256 linked but off the consensus path), the SHA-256 accelerator is byte-identical, the
+serialize shim is consensus-neutral, static-ctor tagged-hash init covers all paths, the accumulator
+delete/proof handling and `num_leaves`/root recomputation, all primitive math (`check_pow`/`SetCompact`,
+`add_work`, `calc_next_bits` clamping, subsidy halving, merkle root), global no-inflation, and UTXO carry
+(no resurrection; `w.new_outputs`/`w.wtxids`/`inp.flags` confirmed dead/unused). Hardening applied:
+
+- **Bench backdoor fenced.** `verify_input` short-circuited to a fixed test-vector ECDSA result for two
+  magic flag values (`0xB0`/`0xB1`) — a "return valid" path, unreachable in consensus (`block_script_flags`
+  never yields those) but now compiled out unless `HAZYNC_ECDSA_BENCH` is defined.
+- **`MiniReader` fails closed.** `read`/`ignore` now trap on any read past the buffer end (was an unchecked
+  `memcpy` — OOB-read only, never accept-invalid, but now a clean rejection).
+- **Reference-spec doc corrected.** `accumulator/src/lib.rs` now states the guest `utreexo.rs` adds the
+  SEC-2 pinning the reference oracle lacks (the proven guest is the authority).
+
+Documented, not changed (non-exploitable, deliberately deferred to avoid churn/re-prove): a trailing-byte
+`r.p==r.e` parity assert (trailing bytes are inert — txid is PoW-bound); explicit leaf/internal-node hash
+domain tags (implicit separation already holds because every leaf preimage begins with an uncontrollable
+txid); and removing the dead `new_outputs`/`wtxids`/`inp.flags` witness fields.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call
