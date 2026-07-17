@@ -73,6 +73,11 @@ local witness data. It then proves each block in the range and folds them with t
 - `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<n>` — serve block `n`'s witness (accepts a block number or a `lo-hi` range id)
+- `GET /api/proof/<id>` — **download the verified proof receipt** for a block/range so anyone can
+  re-verify it themselves (`host verify-any proof_<id>.bin`). Retained on every successful submit;
+  the `vranges` list in `/api/state` carries a `proof` pointer for each. (Receipts are ~0.2–1.7 MB each,
+  so full-chain retention is archive-scale — a rolling window for launch; a `verify-anywhere` Groth16
+  wrap is the later upgrade so a proof checks with no RISC0 runtime.)
 
 **Claim-lock + auto-release:** a claim locks the range to one contributor. The prover heartbeats while
 working; if heartbeats stop for `CLAIM_TTL` (or the claim exceeds `CLAIM_MAX`), the coordinator

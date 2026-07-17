@@ -32,6 +32,7 @@ WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__
 HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
+PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file__), "proofs"))  # kept, downloadable
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
@@ -287,8 +288,12 @@ def state():
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
     # full verified + claimed lists so the client can browse/search/filter any block, not just the
     # frontier window (each is small: claims are few, verified ranges are RANGE_SIZE-coarse).
-    vranges = [dict(lo=r["lo"], hi=r["hi"], handle=r["handle"])
-               for r in c.execute("SELECT lo,hi,handle FROM vranges ORDER BY lo")]
+    vranges = []
+    for r in c.execute("SELECT id,lo,hi,handle FROM vranges ORDER BY lo"):
+        v = dict(lo=r["lo"], hi=r["hi"], handle=r["handle"])
+        if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")):
+            v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
+        vranges.append(v)
     claims = []
     for r in c.execute("SELECT lo,hi,handle,claimed_at,last_beat FROM ranges WHERE status='claimed' ORDER BY lo"):
         beat = int(now - (r["last_beat"] or r["claimed_at"] or now))
@@ -386,6 +391,12 @@ def submit(body):
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",
                       (r["hi"]-r["lo"]+1, handle, pk))
+            try:                                          # keep the receipt so anyone can re-verify it
+                os.makedirs(PROOFS_DIR, exist_ok=True)
+                with open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb") as pf:
+                    pf.write(receipt)
+            except Exception:
+                pass
         c.commit(); c.close()
     return (200 if ok else 422), {"ok": ok, "range": rid, "receipt_sha": sha,
                                   "signature": "valid" if sig_ok else "invalid", "note": note}
@@ -415,6 +426,13 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         if p == "/api/state": return self._send(200, state())
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
+        if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
+            rid = p.rsplit("/", 1)[-1]
+            if parse_range(rid):
+                f = os.path.join(PROOFS_DIR, f"proof_{rid}.bin")
+                if os.path.exists(f):
+                    return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
+            return self._send(404, {"error": "proof not available"})
         if p.startswith("/api/witness/"):
             seg = p.rsplit("/", 1)[-1]
             blk = int(seg) if seg.isdigit() else (parse_range(seg) or [None])[0]  # block number or range id
