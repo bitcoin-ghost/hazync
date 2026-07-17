@@ -236,6 +236,49 @@ documented gap, one false alarm, plus a large docs-currency pass.
   (402→394), added a working-notes banner to `HAZYNC_ARCHITECTURE.md`, and updated the live page's
   self-audit copy to the four-round history.
 
+## Round 6 (2026-07-18) — one MAJOR soundness finding (H9) + web/liveness + completeness
+
+Sixth pass (three reviewers: guest consensus, host witness-binding, coordinator seam). The soundness
+core held (H1–H8 / SEC / F1–F3 all survived concrete attack), but the host reviewer found one genuine
+MAJOR hole in the coordinator seam.
+
+- **H9 (MAJOR, over-issuance / weak-flags splice) — FIXED.** The coordinator chains independently-verified
+  ranges on tip-hash + full `boundary_digest` continuity, but the digest bound the UTXO set / difficulty /
+  MTP window and **not the block height**, and `prove_range` never tied `w.height` to the in-boundary's
+  chain position. So a block mined onto the *real* tip (real prev-hash, real UTXO root, real current
+  difficulty ⇒ real PoW) but **labelled a false low height** would have `block_subsidy(low)` = up to 50 BTC
+  (over-issuance) and `block_script_flags(low)` omitting DERSIG/CLTV/CSV/NULLDUMMY (a script invalid at the
+  true height validates) — a self-inconsistent `(height, boundary)` pair the guest never rejects standalone.
+  The guest `fold_range` rejects it (`hi+1==lo` adjacency); the coordinator's non-folding chain did not, so
+  it could splice into the genesis-anchored frontier composite. **Fix (defence-in-depth, two independent
+  layers):** (1) coordinator `_frontier_chain` enforces `lo==1` at genesis and `lo==prev_hi+1` at every seam;
+  (2) the host `boundary_digest` now binds height (out-boundary = `hi`, in-boundary = `lo-1`) from the
+  in-circuit-committed `RangeState.lo/hi`, so `out_bhash(k)==in_bhash(k+1)` chaining *structurally* requires
+  adjacency. Either layer alone closes it. Verified: a mislabeled-height range no longer advances the
+  frontier while honest contiguous + out-of-order gap-fill still do.
+- **Coordinator hardening (web/liveness).** Stored XSS via the contributor `handle` rendered into the public
+  dashboard through `innerHTML` — fixed at both layers (`clean_handle` strips `< > & " '`; the dashboard
+  escapes every render sink). Liveness DoS — the up-to-120 s `verify-any` ran inside the global write lock,
+  stalling every claim/heartbeat/submit — moved out of the lock (re-check status on commit; unique temp
+  paths). Stat double-count — `proven` summed overlapping ranges — replaced with an interval-merge.
+- **Completeness / robustness (guest + host).** Added the **nVersion soft-fork rejection** (Core
+  `ContextualCheckBlockHeader`: reject `v<2 @227931`, `v<3 @363725`, `v<4 @388381`) closing an accept-invalid
+  gap; asserted `header.len()==80`; bounds-guarded `check_input_locks`' `input_idx` (fail-closed `-43`).
+
+Validated in execute mode with **no regression**: `regress` (block 170 byte-exact), `adversarial` (all
+holes reject), `check-full` 741000 (byte-exact tip, UTXO 394), `check-bip30`, and an nVersion negative that
+rejects. `METHOD_ID` changed (guest changed) ⇒ prior proofs invalid, re-proven from genesis.
+
+## Round 7 (2026-07-18) — re-audit of the round-6 fixes; no new soundness hole
+
+Seventh pass (three reviewers over commit `a094ae5`: coordinator changes, guest/host changes, holistic
+H9-closure sweep). All three **clean on soundness**. The sweep confirmed H9 is closed on all five proof
+paths (`chain_step`, `aggregate`, `chunk_prove`, `prove_range`, `fold_range`) with the two fix layers each
+independently sufficient. One genuine new-in-round-6 **minor** was fixed: the lock-free `submit()` had no cap
+on concurrent `verify-any` subprocesses (fan-out DoS on the small box) — bounded with a `Semaphore(cpu_count)`.
+Two other observations (the `0-999` seed range is unprovable by design so blocks 1–999 are proven as
+single-block ranges; `by_in` first-wins can understate the frontier) are pre-existing and non-soundness.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call
