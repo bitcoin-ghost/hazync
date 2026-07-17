@@ -144,10 +144,13 @@ extern "C" int check_input_locks(const uint8_t* tx_bytes, unsigned tx_len, unsig
     r >> TX_WITH_WITNESS(mtx);
     // Coinbase maturity: a coinbase output is unspendable for COINBASE_MATURITY (100) blocks.
     if (coin_is_coinbase && spend_height < coin_height + 100) return -40;
-    // BIP68 relative locktime (only for tx version >= 2, and if the disable bit is clear).
+    // BIP68 relative locktime — only ENFORCED once CSV is active (Core sets LOCKTIME_VERIFY_SEQUENCE
+    // from CSVHeight 419328; below that CalculateSequenceLocks imposes no constraint), and only for tx
+    // version >= 2 with the disable bit clear. Gating on spend_height matches Core; without it the guest
+    // rejects pre-CSV v2 txs with unmet relative locks that Core accepts.
     uint32_t seq = mtx.vin[input_idx].nSequence;
     const uint32_t DISABLE = 1u << 31, TYPE = 1u << 22, MASK = 0x0000ffff, GRANULARITY = 9;
-    if (mtx.version >= 2 && !(seq & DISABLE)) {
+    if (spend_height >= 419328 && mtx.version >= 2 && !(seq & DISABLE)) {
         if (seq & TYPE) {
             // Time-based: coin's creation MTP + (value << 9) seconds must have elapsed by this block's MTP.
             uint64_t required = (uint64_t)coin_mtp + (((uint64_t)(seq & MASK)) << GRANULARITY);
@@ -252,10 +255,10 @@ extern "C" int check_witness_commitment(const uint8_t* cb, unsigned cb_len,
     return std::memcmp(&cs[6], h2, 32) == 0 ? 1 : -3;
 }
 
-// BIP34: from height 227836 the coinbase scriptSig must begin with a push of the block height.
+// BIP34: from height 227931 the coinbase scriptSig must begin with a push of the block height.
 // Compared against Core's own `CScript() << height` serialization (minimal push). 1 valid.
 extern "C" int check_bip34(const uint8_t* cb, unsigned cb_len, uint32_t height) {
-    if (height < 227836) return 1; // pre-activation
+    if (height < 227931) return 1; // pre-activation (Core mainnet consensus.BIP34Height = 227931)
     MiniReader r{reinterpret_cast<const std::byte*>(cb), reinterpret_cast<const std::byte*>(cb) + cb_len};
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);

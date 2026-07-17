@@ -48,7 +48,7 @@ extern "C" {
     fn merkle_root(txids: *const u8, n: u32, out_root: *mut u8, out_mutated: *mut u8);
     // BIP141 witness commitment check (coinbase commits to the witness merkle root over `wtxids`).
     fn check_witness_commitment(cb: *const u8, cb_len: u32, wtxids: *const u8, n: u32, has_witness: u32) -> i32;
-    // BIP34: coinbase scriptSig must encode the block height (from height 227836).
+    // BIP34: coinbase scriptSig must encode the block height (from height 227931).
     fn check_bip34(cb: *const u8, cb_len: u32, height: u32) -> i32;
     // Real Core CTransaction::IsCoinBase() on the raw tx bytes: 1 iff exactly one input with a null
     // prevout (#4 — assert the block's "coinbase" really is structurally a coinbase).
@@ -87,14 +87,30 @@ const RETARGET_INTERVAL: u32 = 2016;
 
 // Consensus VerifyScript flags active at a given mainnet height (soft-fork activation heights).
 // This is how BIP66/65/112(CSV)/147/segwit/taproot get enforced — through VerifyScript.
-fn block_script_flags(height: u32) -> u32 {
-    let mut f = 0u32;
-    if height >= 173_805 { f |= 1 << 0; }              // P2SH (BIP16)
-    if height >= 363_725 { f |= 1 << 2; }              // DERSIG (BIP66)
-    if height >= 388_381 { f |= 1 << 9; }              // CHECKLOCKTIMEVERIFY (BIP65)
-    if height >= 419_328 { f |= 1 << 10; }             // CHECKSEQUENCEVERIFY (BIP112)
-    if height >= 481_824 { f |= (1 << 11) | (1 << 4); } // WITNESS + NULLDUMMY (segwit, BIP141/147)
-    if height >= 709_632 { f |= 1 << 17; }             // TAPROOT (BIP341/342)
+// Core mainnet script_flag_exceptions (chainparams.cpp), in internal (dsha256(header)) byte order.
+// One historical block violated BIP16 (runs with NO script flags) and one violated Taproot (runs
+// without TAPROOT). Matching Core here is REQUIRED — otherwise the from-genesis prover stalls on these
+// canonical blocks (guest rejects a block Core accepts).
+const BIP16_EXCEPTION: [u8; 32] = [0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d, 0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0xd5, 0x85, 0xc5, 0xe8, 0x1d, 0x44, 0xb5, 0x6a, 0x98, 0x1e, 0x84, 0x2d, 0x5b, 0xc3, 0x14, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+// Consensus script flags for a block — replicates Core's GetBlockScriptFlags (validation.cpp) EXACTLY:
+// the base P2SH|WITNESS|TAPROOT is ALWAYS on (retroactive to genesis) except for the two exception
+// blocks above (which override it), then DERSIG/CLTV/CSV/NULLDUMMY are OR'd in at their buried-deployment
+// heights. `block_hash` is the guest-computed dsha256(header) (internal order), so the exception override
+// cannot be forged — a wrong hash fails PoW (monolithic) or the H2 bind digest (segmented). Height-gating
+// the base flags (the previous behaviour) was both too lenient below the gate (accept-invalid, H-S4) and
+// wrong on the exception blocks (reject-valid, H-S1).
+fn block_script_flags(height: u32, block_hash: &[u8; 32]) -> u32 {
+    const P2SH: u32 = 1 << 0; const DERSIG: u32 = 1 << 2; const NULLDUMMY: u32 = 1 << 4;
+    const CLTV: u32 = 1 << 9; const CSV: u32 = 1 << 10; const WITNESS: u32 = 1 << 11; const TAPROOT: u32 = 1 << 17;
+    let mut f = P2SH | WITNESS | TAPROOT;
+    if block_hash == &BIP16_EXCEPTION { f = 0; }
+    else if block_hash == &TAPROOT_EXCEPTION { f = P2SH | WITNESS; }
+    if height >= 363_725 { f |= DERSIG; }               // BIP66Height (DERSIG)
+    if height >= 388_381 { f |= CLTV; }                 // BIP65Height (CHECKLOCKTIMEVERIFY)
+    if height >= 419_328 { f |= CSV; }                  // CSVHeight (CHECKSEQUENCEVERIFY)
+    if height >= 481_824 { f |= NULLDUMMY; }            // SegwitHeight (BIP147 NULLDUMMY)
     f
 }
 
@@ -293,8 +309,9 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let mut all_ok = true;
 
     let block_time = u32::from_le_bytes(w.header[68..72].try_into().unwrap());
-    // Consensus script flags active at this block's height (BIP66/65/CSV/segwit/taproot).
-    let flags = block_script_flags(w.height);
+    let block_hash = dsha256(&w.header); // this block's hash (internal order): flag exceptions + tip
+    // Consensus script flags (Core GetBlockScriptFlags: always-on base + buried deployments + exceptions).
+    let flags = block_script_flags(w.height, &block_hash);
     // BIP113: from CSV activation (419328), locktime uses median-time-past instead of block time.
     let lock_time = if w.height >= 419_328 { mtp } else { block_time };
 
@@ -496,10 +513,10 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         check_witness_commitment(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32,
             flat_wtx.as_ptr(), rec_wtxids.len() as u32, has_witness as u32)
     } == 1;
-    // BIP34: coinbase encodes the block height (from 227836).
+    // BIP34: coinbase encodes the block height (from 227931).
     let bip34_ok = unsafe { check_bip34(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32, w.height) } == 1;
     // BIP30: no duplicate txids within the block. (Cross-block duplicate-txid — spending an already-
-    // existing unspent output — is structurally prevented post-227836 by BIP34, which we enforce; the
+    // existing unspent output — is structurally prevented post-227931 by BIP34, which we enforce; the
     // two historical pre-BIP34 exceptions are known.) Cheap O(n log n) distinctness over the txids.
     let bip30_ok = {
         let mut ids = w.txids.clone();
@@ -559,7 +576,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     BlockResult {
         script_results, tx_checks, coin_leaves, total_fee, pow_ok, merkle_ok,
         coinbase_val, subsidy, subsidy_ok, all_ok, root_matches, weight_ok, sigops_ok, witness_ok, bip34_ok, bip30_ok,
-        tip_hash: dsha256(&w.header),
+        tip_hash: block_hash,
         nbits: u32::from_le_bytes(w.header[72..76].try_into().unwrap()),
         block_time: u32::from_le_bytes(w.header[68..72].try_into().unwrap()),
         root_next_roots: stump.normalized(),
@@ -851,7 +868,7 @@ fn multi_check() {
     let mut out: Vec<SpendResult> = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let s: SpendCheck = env::read();
-        let flags = block_script_flags(s.block_height);
+        let flags = block_script_flags(s.block_height, &[0u8; 32]); // isolated spend check: no real block (non-exception)
         let mut leaf = [0u8; 32];
         let script = unsafe {
             verify_input(
@@ -905,7 +922,8 @@ struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 // block; commits the coin leaves it verified so the aggregation can bind them to the block's inputs.
 fn chunk_prove() {
     let height: u32 = env::read();
-    let flags = block_script_flags(height);
+    let block_hash: [u8; 32] = env::read(); // real block hash — needed for flag exceptions; a wrong
+    let flags = block_script_flags(height, &block_hash); // hash yields wrong flags -> aggregate bind mismatch
     let n: u32 = env::read();
     let mut binds: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
     let mut all_valid = true;

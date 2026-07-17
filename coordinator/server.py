@@ -109,7 +109,7 @@ def init_db():
     try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
     except Exception: pass
     for col in ("out_leaves INTEGER", "range_work TEXT",
-                "in_nbits INTEGER", "out_nbits INTEGER", "in_epoch INTEGER", "out_epoch INTEGER"):  # H7: continuity
+                "in_bhash TEXT", "out_bhash TEXT"):  # H7/S1: full-boundary continuity digest
         try: c.execute(f"ALTER TABLE vranges ADD COLUMN {col}")
         except Exception: pass
     c.commit(); c.close()
@@ -166,9 +166,11 @@ def pick(body):
     return 404, {"error": "no open range available"}
 
 def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
-    """ed25519 signature over the receipt bytes. Dev mode (no lib) accepts and flags."""
+    """ed25519 signature over the receipt bytes. Fails closed if the crypto lib is missing, unless
+    COORD_ALLOW_UNSIGNED=1 is explicitly set (dev/testing) — otherwise a missing lib would let anyone
+    spoof any pubkey on the public board."""
     if not HAVE_ED:
-        return True  # dev mode — see /api/state.signatures
+        return bool(os.environ.get("COORD_ALLOW_UNSIGNED"))  # fail closed on a public board
     try:
         pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
         pk.verify(bytes.fromhex(sig_hex), message)
@@ -195,7 +197,9 @@ def verify_receipt(receipt: bytes, rng):
     (ok, note, meta) where meta = {in_tip, out_tip}. 'mock' stubs the STARK step for GPU-less testing.
     """
     if VERIFY == "mock":
-        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"], "out_leaves": 0, "range_work": "0", "in_nbits": "0", "out_nbits": "0", "in_epoch": "0", "out_epoch": "0"}
+        if not os.environ.get("COORD_ALLOW_MOCK"):  # S2: fail closed — never silently accept-everything in prod
+            return False, "mock verification is disabled; set COORD_ALLOW_MOCK=1 to allow (GPU-less testing only)", None
+        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"], "out_leaves": 0, "range_work": "0", "in_bhash": "0", "out_bhash": "0"}
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -204,17 +208,18 @@ def verify_receipt(receipt: bytes, rng):
         f.write(receipt)
     try:
         r = subprocess.run([HOST_BIN, "verify-any", tmp], capture_output=True, timeout=120)
-        out = (r.stdout + r.stderr).decode(errors="replace")
-        if r.returncode != 0 or "RANGE-OK" not in out:
-            return False, "receipt rejected (not a valid proof): " + out[-160:], None
-        kv = dict(t.split("=", 1) for t in out.split("RANGE-OK", 1)[1].split() if "=" in t)
+        out = r.stdout.decode(errors="replace")  # S3: parse ONLY stdout, never fold stderr/RUST_LOG in
+        # take the single line the verifier prints (it starts with RANGE-OK) — no free-text can inject keys
+        line = next((l for l in out.splitlines() if l.startswith("RANGE-OK")), None)
+        if r.returncode != 0 or line is None:
+            return False, "receipt rejected (not a valid proof): " + (r.stdout + r.stderr).decode(errors="replace")[-160:], None
+        kv = dict(t.split("=", 1) for t in line[len("RANGE-OK"):].split() if "=" in t)
         lo, hi = int(kv["lo"]), int(kv["hi"])
         if lo != rng["lo"] or hi != rng["hi"]:
             return False, f"receipt proves [{lo}..{hi}], not the claimed [{rng['lo']}..{rng['hi']}]", None
         return True, f"range [{lo}..{hi}] VERIFIED", {"in_tip": kv["in_tip"], "out_tip": kv["out_tip"],
                 "out_leaves": int(kv.get("out_leaves", 0)), "range_work": kv.get("range_work", "0"),
-                "in_nbits": kv.get("in_nbits", "0"), "out_nbits": kv.get("out_nbits", "0"),
-                "in_epoch": kv.get("in_epoch", "0"), "out_epoch": kv.get("out_epoch", "0")}
+                "in_bhash": kv.get("in_bhash", ""), "out_bhash": kv.get("out_bhash", "")}
     except Exception as e:
         return False, f"verify error: {e}", None
     finally:
@@ -228,24 +233,27 @@ def _frontier_chain():
     in_nbits and be mined cheaper. The genesis-connecting range's in-boundary is pinned by `verify-any`
     (assert_genesis_in_boundary). Returns (hi, tip_hash, cum_work, leaves)."""
     c = db()
-    rows = c.execute("SELECT lo,hi,in_tip,out_tip,out_leaves,range_work,in_nbits,out_nbits,in_epoch,out_epoch FROM vranges").fetchall()
+    rows = c.execute("SELECT lo,hi,in_tip,out_tip,out_leaves,range_work,in_bhash,out_bhash "
+                     "FROM vranges ORDER BY lo, ts").fetchall()  # F2: deterministic order, not rowid
     c.close()
     by_in = {}
     for r in rows:
-        by_in.setdefault(r["in_tip"], r)
+        by_in.setdefault(r["in_tip"], r)  # first-wins is now safe: a chained range must match the full boundary digest
     tip, hi, seen = GENESIS_TIP, 0, set()
     cum_work, leaves, tip_hash = 0, 0, GENESIS_TIP
-    prev_nbits, prev_epoch = None, None  # None at genesis (verify-any pinned that in-boundary)
+    prev_bhash = None  # None at genesis: verify-any pinned that range's full in-boundary
     while tip in by_in and tip not in seen:
         r = by_in[tip]
-        if prev_nbits is not None and (str(r["in_nbits"]) != str(prev_nbits) or str(r["in_epoch"]) != str(prev_epoch)):
-            break  # difficulty/MTP discontinuity across the seam — do not chain
+        if not r["in_bhash"]:
+            break  # F3: no boundary digest (pre-migration / NULL) — not chainable
+        if prev_bhash is not None and str(r["in_bhash"]) != str(prev_bhash):
+            break  # S1/F1: full-boundary discontinuity (UTXO roots / difficulty / MTP) — do not chain
         seen.add(tip)
         hi = r["hi"]; tip_hash = r["out_tip"]
         try: cum_work += int(r["range_work"] or 0)
         except Exception: pass
         leaves = r["out_leaves"] or 0
-        prev_nbits, prev_epoch = r["out_nbits"], r["out_epoch"]
+        prev_bhash = r["out_bhash"]
         tip = r["out_tip"]
     return hi, tip_hash, cum_work, leaves
 
@@ -418,12 +426,11 @@ def submit(body):
             c.execute("UPDATE ranges SET status='verified', receipt_sha=?, verified_at=? WHERE id=?",
                       (sha, time.time(), rid))
             c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work,"
-                      "in_nbits,out_nbits,in_epoch,out_epoch)"
-                      " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      "in_bhash,out_bhash)"
+                      " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                       (rid, r["lo"], r["hi"], meta["in_tip"], meta["out_tip"], pk, handle, time.time(),
                        meta.get("out_leaves", 0), str(meta.get("range_work", "0")),
-                       str(meta.get("in_nbits", "0")), str(meta.get("out_nbits", "0")),
-                       str(meta.get("in_epoch", "0")), str(meta.get("out_epoch", "0"))))
+                       str(meta.get("in_bhash", "")), str(meta.get("out_bhash", ""))))
             c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",

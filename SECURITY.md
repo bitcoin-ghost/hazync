@@ -141,6 +141,46 @@ receipt could be laundered as a fake `prev` if its bytes decoded as a `ChainStat
 domain tag (`KIND_CHAIN`/`KIND_RANGE`/`KIND_CHUNK`) as its first field, and every consumer asserts it —
 so a journal of the wrong type can never be laundered across modes.
 
+## Fixed 2026-07-17 (round 3) — re-audit of the H1–H8 code
+
+A third pass (three reviewers: bypass H5–H8, consensus-flag surface, trust boundary). H5/H6/H8 and the
+genesis-catch were attacked and held. New findings, all fixed:
+
+### Script-flag / activation layer (guest — these were mostly *reject-valid*, i.e. the from-genesis prover would STALL on canonical blocks)
+- **H-S1 (high):** `block_script_flags` ignored Core's `script_flag_exceptions`. Core forces P2SH|WITNESS|TAPROOT
+  on for all blocks *except* two historical violating blocks (BIP16 → no flags; Taproot ~709632 → no TAPROOT).
+  The guest enforced TAPROOT everywhere and would permanently stall on the Taproot-exception block. **Fix:**
+  rewrote `block_script_flags` to match Core's `GetBlockScriptFlags` exactly — always-on base + a block-hash
+  exception table (hash passed to `chunk_prove` too, bound via the H2 digest) + buried deployments.
+- **H-S2 (high):** BIP34 enforced from 227836; Core's `BIP34Height` is 227931 → guest rejected valid blocks
+  in that 95-block window. **Fix:** 227931.
+- **H-S3 (medium):** BIP68 relative-locktime enforced with no CSV gate; Core only enforces it from 419328.
+  **Fix:** gate the relative-lock branch on `spend_height >= 419328`.
+- **H-S4 (low, accept-invalid):** the old height-gated P2SH/WITNESS/TAPROOT were *more lenient* than Core below
+  the gates (a proof there didn't imply Core-validity). Closed by the same always-on rewrite (H-S1).
+
+### Coordinator trust boundary (host + Python — no guest change)
+- **S1 / F1 (high):** the coordinator chained ranges on a WEAKER seam check than the guest fold — it matched
+  tip-hash (and, after H7, nbits/epoch) but **not the UTXO accumulator roots, `in_time`, or the MTP window**.
+  A mid-chain range could fabricate its in-boundary UTXO set (spend non-existent coins / double-spend) or its
+  `in_time` (forge a 4× easier retarget) with a valid STARK, and be spliced into the frontier. **Fix:**
+  `verify-any` computes a **full boundary digest** (`boundary_digest`: tip + normalized UTXO roots + leaves +
+  nBits + time + epoch + MTP window) — exactly what `fold_range` binds — and the coordinator's `_frontier_chain`
+  requires `out_bhash(k) == in_bhash(k+1)` across every seam. Not live-exploitable before (frontier below the
+  first retarget, single prover), now closed.
+- **F2 (low):** `_frontier_chain` used an unordered SELECT with first-wins; added `ORDER BY lo, ts` and the
+  full-boundary digest makes a preempting range have to match the real boundary anyway.
+- **F3 (low):** rows with no boundary digest (pre-migration NULL) are no longer chainable.
+- **S2 (medium foot-gun):** `VERIFY_MODE` defaulted to `mock` (accept-everything) when `HAZYNC_HOST` was unset.
+  **Fix:** mock now fails closed unless `COORD_ALLOW_MOCK=1`.
+- **S3 (low):** `verify-any` output was scraped from stdout+stderr; now only the single `RANGE-OK` stdout line.
+- **Signature fail-closed:** `verify_sig` accepted everything when the ed25519 lib was missing; now fails closed
+  unless `COORD_ALLOW_UNSIGNED=1`.
+
+Verified sound (attacked, no action): genesis constants (`GENESIS_WORK` etc. checked against real block 0),
+retarget/MTP/PoW math, weight/sigop formulas, taproot/annex path, test-only env hooks (guest reads no env),
+`METHOD_ID` handling. `regress` + full `adversarial` suite + honest segmented composition pass on the round-3 guest.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call

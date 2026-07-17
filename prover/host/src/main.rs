@@ -86,6 +86,29 @@ fn normalize_host(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
     while v.last() == Some(&None) { v.pop(); }
     v
 }
+// Block hash (internal/LE order) = double-SHA256 of the 80-byte header, matching the guest's dsha256.
+fn header_hash(header: &[u8]) -> [u8; 32] { bitcoin::hashes::sha256d::Hash::hash(header).to_byte_array() }
+
+// Digest of a range's FULL boundary — everything `fold_range` binds at a seam (tip, UTXO roots+leaves,
+// difficulty, and the MTP window). Chaining ranges on `out_bhash(k) == in_bhash(k+1)` reproduces the
+// guest fold's seam check that tip-hash equality alone does NOT (a mid-chain range could otherwise
+// fabricate its in-boundary UTXO set / in_time / MTP window). Roots are normalized so padding can't vary.
+fn boundary_digest(tip: &[u8; 32], roots: &[Option<[u8; 32]>], leaves: u64, nbits: u32, time: u32, epoch: u32, recent: &[u32]) -> [u8; 32] {
+    let mut m: Vec<u8> = Vec::new();
+    m.extend_from_slice(tip);
+    let nr = normalize_host(roots.to_vec());
+    m.extend_from_slice(&(nr.len() as u32).to_le_bytes());
+    for r in &nr {
+        match r { Some(h) => { m.push(1); m.extend_from_slice(h); } None => m.push(0) }
+    }
+    m.extend_from_slice(&leaves.to_le_bytes());
+    m.extend_from_slice(&nbits.to_le_bytes());
+    m.extend_from_slice(&time.to_le_bytes());
+    m.extend_from_slice(&epoch.to_le_bytes());
+    m.extend_from_slice(&(recent.len() as u32).to_le_bytes());
+    for t in recent { m.extend_from_slice(&t.to_le_bytes()); }
+    header_hash(&m)
+}
 // Core CScript::IsUnspendable(): OP_RETURN (0x6a) or script > MAX_SCRIPT_SIZE (10000). Unspendable
 // outputs never enter the UTXO set, so the accumulator (host + guest) must skip them (H3).
 fn out_spendable(spk: &[u8]) -> bool { !((!spk.is_empty() && spk[0] == 0x6a) || spk.len() > 10_000) }
@@ -952,11 +975,14 @@ fn verify_any_cmd(bin: &str) {
     if rs.in_tip_hash == arr(rev(hx(GENESIS_HASH))) {
         assert_genesis_in_boundary(&rs);
     }
-    // Expose the difficulty/MTP boundary fields so a coordinator can enforce cross-range continuity
-    // (out_nbits/out_epoch of range k == in_nbits/in_epoch of range k+1), not just tip-hash equality.
-    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_nbits={} out_nbits={} in_epoch={} out_epoch={}",
+    // Expose FULL-boundary digests so the coordinator chains on `out_bhash(k) == in_bhash(k+1)` — the
+    // complete seam check the guest fold does (tip + UTXO roots + leaves + difficulty + MTP window), not
+    // just tip-hash. Without this a mid-chain range can fabricate its in-boundary UTXO set / difficulty.
+    let in_bh = boundary_digest(&rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent);
+    let out_bh = boundary_digest(&rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent);
+    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_bhash={} out_bhash={}",
         rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work),
-        rs.in_nbits, rs.out_nbits, rs.in_epoch_start, rs.out_epoch_start);
+        hex(&in_bh), hex(&out_bh));
 }
 
 // SEGMENTED proof: split the block's inputs into chunks, prove each chunk's scripts (mode 4), then
@@ -986,6 +1012,7 @@ fn prove_seg() {
         let mut b = ExecutorEnv::builder();
         b.write(&4u32).unwrap();
         b.write(&chunk_height).unwrap();
+        b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
         b.write(&((hi - lo) as u32)).unwrap();
         for inp in &w.inputs[lo..hi] {
             b.write(&ChunkInput {
@@ -1044,6 +1071,7 @@ fn prove_chunk(idx: usize) {
     let mut b = ExecutorEnv::builder();
     b.write(&4u32).unwrap();
     b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
     b.write(&((hi - lo) as u32)).unwrap();
     for inp in &w.inputs[lo..hi] {
         b.write(&ChunkInput {
