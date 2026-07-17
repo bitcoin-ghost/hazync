@@ -58,13 +58,12 @@ sudo nginx -t && sudo systemctl reload nginx
 curl -s https://bitcoinghost.org/hazync/api/state | head -c 300   # now reachable via the domain
 ```
 
-## 3. Go-live page (one page)
+## 3. Go-live page (one page) — DONE
 
-Fold the live board into `hazync.html` (the story + the live Proof Party in one scroll) and point it at
-the proxied API — set `window.HAZYNC_STATE_URL = "/hazync/api/state"` and the board's API base to
-`/hazync/api`. Then `301` redirect the old `hazync-party.html` → `hazync.html`. Do this at go-live so the
-one page debuts with **real** data (not the sample-data preview). *(Merge not yet applied — see the note
-in the session plan.)*
+`hazync.html` already carries the live Proof Party (`#party` section) in one scroll, wired to the proxied
+API (`/hazync/api/...`), and `hazync-party.html` redirects to it. Until this proxy is live it shows a
+clearly-labelled **sample-data preview**; the moment `/hazync/api/state` returns real progress it flips to
+live data automatically. Nothing to do here except stand up steps 1–2.
 
 ## 4. Prove the loop as a downloader
 
