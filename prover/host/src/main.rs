@@ -6,6 +6,11 @@ use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use serde::{Deserialize, Serialize};
 
+// H8 domain tags — first committed field of each recursion-consumed journal (must match the guest).
+const KIND_CHAIN: u32 = 0xC4A1_0002;
+const KIND_RANGE: u32 = 0xC4A1_0006;
+const KIND_CHUNK: u32 = 0xC4A1_0004;
+
 // ---- Wire format: MUST match the guest structs field-for-field, in order. ----
 #[derive(Serialize, Deserialize)]
 struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
@@ -24,6 +29,7 @@ struct BlockWitness {
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct ChainState {
+    kind: u32, // H8: == KIND_CHAIN
     tip_hash: [u8; 32], utxo_roots: Vec<Option<[u8; 32]>>, utxo_leaves: u64,
     cum_work: [u8; 32], height: u32,
     prev_nbits: u32, prev_time: u32, epoch_start: u32, recent_times: Vec<u32>,
@@ -32,7 +38,7 @@ struct ChainState {
 #[derive(Serialize, Deserialize)]
 struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
 #[derive(Serialize, Deserialize)]
-struct ChunkOut { all_valid: bool, binds: Vec<[u8; 32]> }
+struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct SpendCheck { raw_tx: Vec<u8>, prevouts: Vec<u8>, block_height: u32 }
 #[derive(Serialize, Deserialize)]
@@ -193,6 +199,7 @@ fn seed_and_anchor() -> (Forest, ChainState) {
         forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat()));
     }
     let anchor = ChainState {
+        kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(HASH169))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: 169,
         prev_nbits: 0x1d00ffff, prev_time: 1_231_730_523, epoch_start: 1_231_006_505,
@@ -367,6 +374,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
 
     let mut anchor = ChainState {
+        kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
         prev_nbits: bits, prev_time: time.saturating_sub(600), epoch_start: time.saturating_sub(600 * 1000),
@@ -550,6 +558,7 @@ fn arr_u128(x: u128) -> [u8; 32] { let mut a = [0u8; 32]; a[..16].copy_from_slic
 // unspendable and (per Core) never enters the UTXO set, so the accumulator starts empty.
 fn genesis_anchor() -> ChainState {
     ChainState {
+        kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(GENESIS_HASH))), utxo_roots: Forest::new().roots(), utxo_leaves: 0,
         cum_work: arr_u128(GENESIS_WORK), height: 0,
         prev_nbits: GENESIS_BITS, prev_time: GENESIS_TIME, epoch_start: GENESIS_TIME,
@@ -807,6 +816,7 @@ fn prove_ibd() {
 // Host mirror of the guest RangeState (identical field order — journal decodes into this).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RangeState {
+    kind: u32, // H8: == KIND_RANGE
     lo: u32, hi: u32,
     in_tip_hash: [u8; 32], in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
@@ -917,6 +927,7 @@ fn verify_range_cmd(bin: &str) {
     r.verify(METHOD_ID).expect("verify");
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
     assert_eq!(rs.lo, 1, "range must start at block 1 (genesis-anchored)");
     assert_genesis_in_boundary(&rs);
     let mut total = arr_u128(GENESIS_WORK);
@@ -935,6 +946,7 @@ fn verify_any_cmd(bin: &str) {
     r.verify(METHOD_ID).expect("verify"); // real STARK verification
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
     // If this range CLAIMS to connect to genesis, its full genesis in-boundary must be pinned — else a
     // prover fabricates the initial UTXO set / difficulty and the coordinator chains it into the frontier.
     if rs.in_tip_hash == arr(rev(hx(GENESIS_HASH))) {
@@ -1442,6 +1454,7 @@ fn main() {
 
     // Anchor checkpoint = the trusted state at block 169 (interim: single-signer GHAST checkpoint).
     let anchor = ChainState {
+        kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(HASH169))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: 169,
         prev_nbits: 0x1d00ffff, prev_time: 1_231_730_523, // block 169 (difficulty-1 epoch)

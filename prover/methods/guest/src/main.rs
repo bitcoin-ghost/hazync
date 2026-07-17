@@ -6,6 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
 
+// H8: domain tags — the first committed field of every recursion-consumed journal. env::verify binds
+// (image_id, journal) but not the journal's TYPE, so without a tag a mode-1 BlockOutput (which never
+// aborts and commits no self_id) or a RangeState/ChunkOut could in principle be laundered in where a
+// ChainState is expected, if its bytes happened to decode as one. Committing a distinct constant first
+// and asserting it on every decode makes cross-mode confusion impossible.
+const KIND_CHAIN: u32 = 0xC4A1_0002;
+const KIND_RANGE: u32 = 0xC4A1_0006;
+const KIND_CHUNK: u32 = 0xC4A1_0004;
+
 extern "C" {
     // Runs C++ static/global constructors (e.g. Core's HASHER_TAPSIGHASH tagged-hash midstate).
     // The bare-metal guest never calls this on its own, so taproot sighashes would use an
@@ -583,6 +592,7 @@ fn block_proof() {
 // PoW is `cum_work`. Folding one block advances it.
 #[derive(Serialize, Deserialize, Clone)]
 struct ChainState {
+    kind: u32,          // H8: == KIND_CHAIN (domain tag; asserted by every consumer)
     tip_hash: [u8; 32],
     utxo_roots: Vec<Option<[u8; 32]>>,
     utxo_leaves: u64,
@@ -602,6 +612,7 @@ struct ChainState {
 // top-level verifier pins the leftmost in-boundary to the genesis anchor, binding the whole tree.
 #[derive(Serialize, Deserialize)]
 struct RangeState {
+    kind: u32,          // H8: == KIND_RANGE (domain tag)
     lo: u32, hi: u32,
     // "in" boundary — the chain state just before block lo (must equal the previous range's "out").
     in_tip_hash: [u8; 32],
@@ -663,6 +674,7 @@ fn chain_step() {
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let prev: ChainState = risc0_zkvm::serde::from_slice(&words).expect("decode prev chain state");
+    assert!(prev.kind == KIND_CHAIN, "chain step: prev journal is not a ChainState (domain tag)"); // H8
     // S1: chain the image-id constraint down — the prev proof must have recursed against the SAME id.
     // With the verifier asserting the FINAL self_id == METHOD_ID, this forces every level to METHOD_ID.
     if is_base == 0 {
@@ -722,6 +734,7 @@ fn chain_step() {
     }
 
     env::commit(&ChainState {
+        kind: KIND_CHAIN,
         tip_hash: r.tip_hash,
         utxo_roots: r.root_next_roots,
         utxo_leaves: r.root_next_leaves,
@@ -773,6 +786,7 @@ fn prove_range() {
     if out_recent.len() > 11 { let e = out_recent.len() - 11; out_recent.drain(0..e); }
 
     env::commit(&RangeState {
+        kind: KIND_RANGE,
         lo: height, hi: height,
         in_tip_hash, in_roots, in_leaves, in_nbits, in_time, in_epoch_start, in_recent,
         out_tip_hash: r.tip_hash, out_roots: r.root_next_roots, out_leaves: r.root_next_leaves,
@@ -793,6 +807,7 @@ fn fold_range() {
     env::verify(self_id, &r_journal).expect("right range proof invalid");
     let l: RangeState = decode_words(&l_journal);
     let rr: RangeState = decode_words(&r_journal);
+    assert!(l.kind == KIND_RANGE && rr.kind == KIND_RANGE, "fold: journal is not a RangeState (domain tag)"); // H8
 
     assert!(l.self_id == self_id && rr.self_id == self_id, "fold: image-id mismatch");
     assert!(l.hi + 1 == rr.lo, "fold: ranges [{}..{}] and [{}..{}] not adjacent", l.lo, l.hi, rr.lo, rr.hi);
@@ -806,6 +821,7 @@ fn fold_range() {
     let mut range_work = l.range_work;
     add256(&mut range_work, &rr.range_work);
     env::commit(&RangeState {
+        kind: KIND_RANGE,
         lo: l.lo, hi: rr.hi,
         in_tip_hash: l.in_tip_hash, in_roots: l.in_roots, in_leaves: l.in_leaves,
         in_nbits: l.in_nbits, in_time: l.in_time, in_epoch_start: l.in_epoch_start, in_recent: l.in_recent,
@@ -883,7 +899,7 @@ fn legacy() {
 #[derive(Deserialize)]
 struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
 #[derive(Serialize, Deserialize)]
-struct ChunkOut { all_valid: bool, binds: Vec<[u8; 32]> }
+struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 
 // Mode 4: prove a BATCH of inputs' scripts (the expensive VerifyScript). Parallelisable across a
 // block; commits the coin leaves it verified so the aggregation can bind them to the block's inputs.
@@ -908,7 +924,7 @@ fn chunk_prove() {
         // aggregation can prove the block's input is the one this chunk validated — see input_bind (#2).
         binds.push(input_bind(&c.raw_tx, c.input_idx, &c.prevouts, c.coin_height, c.coin_is_coinbase, c.coin_mtp, flags));
     }
-    env::commit(&ChunkOut { all_valid, binds });
+    env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds });
 }
 
 // Mode 5: aggregate K chunk proofs into a block/chain proof. env::verify each chunk (composition),
@@ -924,6 +940,7 @@ fn aggregate() {
         env::verify(self_id, &cj).expect("chunk proof invalid");
         let words: Vec<u32> = cj.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let out: ChunkOut = risc0_zkvm::serde::from_slice(&words).expect("decode chunk");
+        assert!(out.kind == KIND_CHUNK, "aggregate: assumption is not a ChunkOut (domain tag)"); // H8
         if !out.all_valid { chunks_ok = false; }
         all_binds.extend(out.binds);
     }
@@ -933,6 +950,7 @@ fn aggregate() {
     if is_base == 0 { env::verify(self_id, &prev_journal).expect("previous chain proof invalid"); }
     let words: Vec<u32> = prev_journal.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let prev: ChainState = risc0_zkvm::serde::from_slice(&words).expect("decode prev");
+    assert!(prev.kind == KIND_CHAIN, "aggregate: prev journal is not a ChainState (domain tag)"); // H8
     // S1: chunk verification above AND the prev-chain verification both used `self_id`; committing it
     // + asserting prev.self_id==self_id (below) + the verifier checking final==METHOD_ID forces every
     // recursion (chunks and chain) to the real guest.
@@ -962,6 +980,7 @@ fn aggregate() {
     recent_times.push(r.block_time);
     if recent_times.len() > 11 { let e = recent_times.len() - 11; recent_times.drain(0..e); }
     env::commit(&ChainState {
+        kind: KIND_CHAIN,
         tip_hash: r.tip_hash, utxo_roots: r.root_next_roots, utxo_leaves: r.root_next_leaves,
         cum_work: cum, height, prev_nbits: r.nbits, prev_time: r.block_time, epoch_start, recent_times, self_id,
     });

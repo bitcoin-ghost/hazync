@@ -33,8 +33,8 @@ full trust base and the two portability shims.
 | H4 | Coinbase never run through `CheckTransaction` | med | **fixed + negative-tested** (`host adversarial` #4) |
 | H5 | Multi-input tx: non-`input_idx` fee-prevouts unbound to the accumulator (inflation/theft) | **critical** | **fixed + negative-tested** (per-tx input-list pre-pass; `host adversarial` #5) |
 | H6 | Range verifier under-pinned the genesis in-boundary (`in_epoch_start`/`in_roots`/`in_recent`) → forgeable first retarget / phantom UTXO seed | high | **fixed** (`assert_genesis_in_boundary` in `verify-range`; `verify-any` applies it when the range claims genesis) |
-| H7 | Coordinator chains ranges by tip-hash only — no cross-range difficulty/MTP continuity | medium | **partly closed** (genesis in-boundary now pinned in `verify-any`; `verify-any` exposes nbits/epoch for the coordinator to chain on) — **open: coordinator must enforce out==in on those fields.** Not live-exploitable (frontier below the first retarget, single prover) |
-| H8 | Cross-mode journal laundering: `block_proof` (mode 1) commits a self_id-free journal that never aborts | speculative | **open (recommended hardening)** — no exploit constructed; the type-mismatched `from_slice` decode already makes it very hard. Recommended fix: an explicit domain tag as the first committed field of each recursion-consumed journal |
+| H7 | Coordinator chained ranges by tip-hash only — no cross-range difficulty/MTP continuity | medium | **fixed** (`verify-any` now pins the genesis in-boundary + exposes nbits/epoch; coordinator `_frontier_chain` requires `out_nbits/out_epoch(k) == in_nbits/in_epoch(k+1)` across every seam) |
+| H8 | Cross-mode journal laundering: `block_proof` (mode 1) commits a self_id-free journal that never aborts | speculative | **fixed** (domain tag `KIND_*` is the first committed field of every recursion-consumed journal — `ChainState`/`RangeState`/`ChunkOut` — and asserted on every decode) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -126,17 +126,20 @@ retarget, propagates across fold seams → forgeable difficulty), `in_roots` (`i
 phantom roots), or `in_recent`/`in_time`. **Fix:** `assert_genesis_in_boundary` pins the full genesis
 boundary; `verify-any` applies it whenever a range claims to connect to genesis.
 
-### H7 (medium, not live-exploitable) — coordinator cross-range continuity
-`server.py` chains verified ranges by tip-hash only, so `in_nbits`/`in_epoch_start` of range k+1 aren't
-checked against range k's `out_*`. Tip-chaining implies contiguity, and `verify-any` now rejects a
-fabricated genesis in-boundary; the remaining step is for the coordinator to also chain on the nbits/epoch
-fields `verify-any` now prints. Not exploitable at the current frontier (below block 2016, single prover).
+### H7 (medium) — coordinator cross-range continuity — FIXED
+`server.py` chained verified ranges by tip-hash only, so `in_nbits`/`in_epoch_start` of range k+1 weren't
+checked against range k's `out_*` (a range could claim an easier `in_nbits` and be mined cheaper).
+**Fix:** `verify-any` pins the genesis in-boundary and now prints `in_nbits/out_nbits/in_epoch/out_epoch`;
+the coordinator's `_frontier_chain` walks ranges from genesis requiring `out_nbits/out_epoch(k) ==
+in_nbits/in_epoch(k+1)` across every seam (deploy: `vranges` gains those columns + a redeploy).
 
-### H8 (speculative) — cross-mode journal laundering
+### H8 (speculative) — cross-mode journal laundering — FIXED
 `block_proof` (mode 1) commits a self_id-free `BlockOutput` and never aborts; in principle a mode-1
-receipt could be laundered as a fake `prev` if its bytes decode as a `ChainState` with trailing
+receipt could be laundered as a fake `prev` if its bytes decoded as a `ChainState` with trailing
 `self_id == METHOD_ID`. No exploit was constructed (the type-mismatched decode makes it very hard).
-Recommended hardening: a domain tag as the first committed field of every recursion-consumed journal.
+**Fix:** every recursion-consumed journal (`ChainState`, `RangeState`, `ChunkOut`) now commits a distinct
+domain tag (`KIND_CHAIN`/`KIND_RANGE`/`KIND_CHUNK`) as its first field, and every consumer asserts it —
+so a journal of the wrong type can never be laundered across modes.
 
 ## Earlier findings (2026-07-15 self-audit) — status
 

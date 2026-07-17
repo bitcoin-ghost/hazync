@@ -85,8 +85,10 @@ anchoring gaps:
   (`assert_genesis_in_boundary`: `in_epoch_start`, `in_roots`, `in_recent`, `in_time`, not just
   `in_tip`/`in_leaves`/`in_nbits`); `verify-any` applies the same pin whenever a range claims genesis.
   Closes a forgeable first-retarget difficulty and a phantom-root UTXO seed.
-- **H7 (open, not live-exploitable) / H8 (speculative).** Coordinator cross-range difficulty continuity
-  and a cross-mode journal-laundering hardening — see `SECURITY.md`.
+- **H7 (fixed).** Coordinator now chains ranges on difficulty/MTP continuity, not tip-hash alone
+  (`verify-any` exposes nbits/epoch; `_frontier_chain` enforces `out==in` across each seam).
+- **H8 (fixed).** Every recursion-consumed journal (`ChainState`/`RangeState`/`ChunkOut`) commits a
+  domain tag as its first field, asserted on decode — no cross-mode journal can be laundered in.
 
 ## 4. Scope of each proof type (audit S3 — be explicit)
 - **Single-block / segmented block proof** (`prove-full`, `prove-seg`): attests the block is
