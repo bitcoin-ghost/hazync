@@ -205,6 +205,34 @@ Documented, not changed (non-exploitable, deliberately deferred to avoid churn/r
 domain tags (implicit separation already holds because every leaf preimage begins with an uncontrollable
 txid); and removing the dead `new_outputs`/`wtxids`/`inp.flags` witness fields.
 
+## Round 5 (2026-07-17) — no new hole; one trivial fix + one documented gap
+
+Fifth pass (three reviewers: a regression-hunt inside the fixes, a fresh full-surface sweep, and a
+docs/web-page currency check). The regression hunt traced every H1–H8 + flag/coordinator fix against
+Core v28 and found **no regression** — the fixes are correct as written. Net: one trivial fix, one
+documented gap, one false alarm, plus a large docs-currency pass.
+
+- **F2 (low, accept-invalid) — FIXED.** Block weight omitted Core's `4*(80 + CompactSize(ntx))`
+  header + tx-count term, so a block could sit up to ~324 WU over `MAX_BLOCK_WEIGHT`. No inflation;
+  now matches Core's `GetBlockWeight`.
+- **F1 (flag always-on "diverges from Core") — NOT A BUG.** Two independent reviewers and Core's own
+  `GetBlockScriptFlags` (read on the box) confirm the base P2SH|WITNESS|TAPROOT is always-on with exactly
+  the two exception blocks — the exact code a from-genesis IBD runs (Core itself would stall otherwise).
+  Height-gating would be the accept-invalid behaviour already flagged as H-S4. No change.
+- **F3 (low, KNOWN GAP, not live-exploitable) — pre-BIP34 BIP30 duplicate-coinbase overwrite.** The two
+  historical duplicate-coinbase blocks (91842 / 91880, below the BIP34 height) have *distinct* accumulator
+  leaves — the leaf commits height, so there is no collision and the "collision-free" claim holds — but
+  Core **overwrites** the old outpoint whereas the guest keeps both, leaving one extra leaf Core discards.
+  A from-genesis prove only reaches this at height ~91842 (the live frontier is ~492), so it is not
+  currently exploitable; before a full-chain run the guest must special-case the overwrite (remove the old
+  leaf), exactly as Core hardcodes those two blocks. **Documented, not yet implemented** — a from-genesis
+  run must not cross height 91842 until it is.
+- **Docs currency:** rewrote the stale `PROVING.md` (it described recursion as unimplemented and handed
+  out a pre-hardening `chain_step`), corrected the README `ACCELERATION` repo-map line + status/audit
+  language, `HARDENING.md`'s BIP34 height (227836→227931), annotated the stale 741000 evidence log
+  (402→394), added a working-notes banner to `HAZYNC_ARCHITECTURE.md`, and updated the live page's
+  self-audit copy to the four-round history.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call

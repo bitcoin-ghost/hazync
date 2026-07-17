@@ -1,96 +1,98 @@
-# Hazync — real proving on the VPS
+# Hazync — proving, end to end
 
-Everything to date runs in RISC0 **execute** mode (cycle-accurate logic validation). This is the
-step to **prove** — turn a validated block into a STARK receipt any node can verify. Do it on the
-provisioned box (`provision-vps.sh`); proving is RAM-heavy (WSL2 11 GB can't).
+This is the operator's guide to the real proving commands. Everything below is implemented,
+hardened, and demonstrated on real mainnet data — single blocks, recursive chains, the parallel
+range-fold, and tip operation. (For *joining the live party* rather than driving the prover
+directly, see [`CONTRIBUTING.md`](CONTRIBUTING.md). For the soundness posture and the four rounds of
+adversarial hardening, see [`SECURITY.md`](SECURITY.md).)
 
-## 1. Single-block proof — turnkey (works with the current guest)
+Proving is RAM- and GPU-heavy. Build on a provisioned box (`provision-vps.sh`); a small WSL2 machine
+can run *execute-mode* validation but not proving. GPU proving needs CUDA **12.6** (the script
+installs it) and the `cuda` feature.
+
 ```
-cd hazync-zkvm/prover
-cargo run --release -- prove-block
-```
-Proves the **block-170 fold** (`chain_step`, `is_base=1`): a STARK receipt attesting block 170 is
-valid (real `VerifyScript` + `CheckTransaction` + no-inflation + PoW + merkle + subsidy + weight +
-sigops + maturity + locktime + BIP68) and advances the accumulator to `UTXO_root_next`, committing
-the `ChainState` journal. Then it **verifies the receipt** against `METHOD_ID` and prints time +
-receipt size.
-
-**Expect (CPU):** minutes for block 170 (~2.1M cycles). Bigger/witness-heavy blocks scale with
-cycles. GPU (below) is ~10-100×. The receipt is the first real Hazync proof artifact.
-
-## 2. GPU proving (recommended)
-RISC0 proves on CUDA GPUs. Add the feature and rebuild:
-```
-# host/Cargo.toml:  risc0-zkvm = { version = "^3.0.5", features = ["cuda"] }
-CUDA_VISIBLE_DEVICES=0 cargo run --release --features cuda -- prove-block
-```
-Needs an NVIDIA driver + CUDA 12.x. One high-end GPU ≈ 1-10M cycles/s. A busy block (billions of
-cycles) needs the block **segmented and proved in parallel** across GPUs, then tree-aggregated
-(§2.4) — that's the tip-prover cluster (`HAZYNC_ENGINE.md`), not the single-shot path here.
-
-## 3. Recursive chain proof (`prove-chain`) — enable, then test on the box
-The recursion binding (`env::verify(prev proof)` + host `add_assumption`) is the only piece not yet
-exercised (it can't be validated in execute — it needs real proving). Enable it as follows, then run
-`prove-chain`. **The one iteration point is the journal-byte encoding** — verify it once on the box.
-
-### Guest change (`prover/guest/main.rs`, `chain_step`)
-Read the prev proof's **authoritative journal bytes** (not a separate untrusted struct) + this
-guest's own image id, verify the assumption, and decode `prev` from those bytes:
-```rust
-fn chain_step() {
-    let prev_journal: Vec<u8> = env::read();   // the prev proof's committed journal bytes
-    let w: BlockWitness = env::read();
-    let is_base: u32 = env::read();
-    let self_id: [u32; 8] = env::read();       // host passes METHOD_ID
-
-    if is_base == 0 {
-        // Composition: a receipt with (self_id, prev_journal) must exist — the previous chain proof.
-        env::verify(self_id, &prev_journal).expect("prev chain proof invalid");
-    }
-    // Decode prev ChainState from the authoritative journal bytes (LE words):
-    let words: Vec<u32> = prev_journal.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-    let prev: ChainState = risc0_zkvm::serde::from_slice(&words).expect("decode prev");
-    /* ...rest unchanged: validate_block, linkage, carry, work, commit new ChainState... */
-}
+GPU=1 REPO_DIR=$PWD ./provision-vps.sh
+cd prover && cargo build --release --features cuda
 ```
 
-### Host change (`prover/host/main.rs`, a `prove_chain()` driver)
-```rust
-use risc0_zkvm::serde::to_vec;
-fn state_journal_bytes(s: &ChainState) -> Vec<u8> {
-    to_vec(s).unwrap().iter().flat_map(|w| w.to_le_bytes()).collect()   // == env::commit's journal bytes
-}
-fn prove_step(prev_journal: Vec<u8>, prev_receipt: Option<Receipt>, w: &BlockWitness, is_base: u32) -> Receipt {
-    let mut b = ExecutorEnv::builder();
-    if let Some(r) = prev_receipt { b.add_assumption(r); }   // discharge env::verify
-    b.write(&2u32).unwrap();
-    b.write(&prev_journal).unwrap();
-    b.write(w).unwrap();
-    b.write(&is_base).unwrap();
-    b.write(&METHOD_ID).unwrap();                            // self image id for env::verify
-    let receipt = default_prover().prove(b.build().unwrap(), METHOD_ELF).unwrap().receipt;
-    receipt.verify(METHOD_ID).unwrap();
-    receipt
-}
-// base 170: prove_step(state_journal_bytes(&anchor), None, &w170, 1)
-// fold 171: prove_step(receipt170.journal.bytes.clone(), Some(receipt170), &w171, 0)
-// fold 172: prove_step(receipt171.journal.bytes.clone(), Some(receipt171), &w172, 0)
-```
-`receipt172` is the **chain-tip proof** for 170→172. Verifying it (cheap) proves the whole range
-without the blocks. **Iteration point:** confirm `state_journal_bytes(&anchor)` and the guest's
-LE-word decode round-trip against a real `receipt.journal.bytes` — if RISC0's journal layout differs
-(alignment/padding), adjust the byte↔word conversion on both sides until `env::verify` resolves.
+## Fast validation (no proving, no GPU)
 
-## 4. SNARK wrap (final, for cheap universal verification)
-Wrap the tip STARK to Groth16 (~200-300 B, verifiable on a phone / on-chain):
-```rust
-let snark = default_prover().prove_with_opts(env, ELF, &ProverOpts::groth16()).unwrap().receipt;
-```
-Needs the RISC0 Groth16 prover deps (x86 Linux; the box qualifies). This receipt is what light
-clients / IBD verify.
+Execute mode runs the full consensus path (real `VerifyScript` + `CheckTransaction` + no-inflation +
+PoW + retarget + merkle + subsidy + weight + sigops + maturity + locktime + BIP68 + the accumulator
+transition) and panics on any violation — so a clean run == every rule passed. Use it as a cheap
+pre-flight and as the regression/soundness gate.
 
-## 5. Next after 2-3 blocks prove
-- Measure real prove time + receipt size per block; project full-block cost.
-- The tip-prover cluster: segment a full block, parallel-prove, tree-aggregate, serial fold
-  (`HAZYNC_ENGINE.md` §throughput). The EC accelerator (patch 0003 / bigint2-on-real-libsecp) is the
-  lever that makes holding the frontier near the tip feasible.
+```
+./target/release/host regress        # block-170 consensus regression (self-contained)
+./target/release/host adversarial    # adversarial soundness suite — every known hole must REJECT
+HAZYNC_BLOCK=block_741000.json ./target/release/host check-full   # one block, full consensus
+HAZYNC_WITNESS_DIR=/w HAZYNC_FROM=1 HAZYNC_TO=550 ./target/release/host check-ibd
+```
+
+`regress` and `adversarial` are also wired into CI (`.github/workflows/adversarial.yml`).
+
+## Single-block proof (real STARK receipt)
+
+```
+HAZYNC_BLOCK=block_741000.json ./target/release/host prove-full   # monolithic
+HAZYNC_BLOCK=block_741000.json HAZYNC_CHUNKS=16 ./target/release/host prove-seg   # segmented
+```
+
+`prove-full` validates the whole block in one guest run and commits a `ChainState`. `prove-seg`
+splits the block's inputs into chunks, proves each chunk's scripts in parallel (`chunk_prove`, mode
+4), then aggregates (`aggregate`, mode 5) — each chunk commits a per-input binding digest
+(`input_bind`) that the aggregation re-checks against the block's own input, so a chunk cannot
+substitute a different spend or weaker flags. Both verify the receipt against `METHOD_ID` and assert
+`self_id == METHOD_ID`.
+
+## Recursive chain + tip (implemented and hardened)
+
+The recursion is real: each step commits `self_id` into its journal, asserts the previous step
+recursed against the same id and that `w.height == prev.height + 1`, and tags the journal with a
+domain constant; the host verifier asserts the final `self_id == METHOD_ID`. The adversarial
+`prove-chain-bad` command folds a block against a corrupted `self_id` and confirms it is rejected.
+
+```
+./target/release/host prove-chain        # fold real blocks 170 -> 171 -> 172 (IVC), verify the tip
+./target/release/host prove-chain-bad     # adversarial: wrong self_id must be REJECTED
+HAZYNC_WITNESS_DIR=/w HAZYNC_FROM=1 HAZYNC_TO=170 HAZYNC_TIP=3 ./target/release/host prove-ibd
+```
+
+A verified chain-tip receipt attests every block from the genesis anchor to the tip without the
+blocks. See [`SOUNDNESS.md`](SOUNDNESS.md) §3 for the recursion argument (and the verifier's
+obligation to pin `self_id == METHOD_ID` and the genesis anchor).
+
+## Parallel range-fold (the backfill path)
+
+Genesis→tip is embarrassingly parallel: prove each block as a self-contained range, then merge
+adjacent ranges in a log-depth tree. A fold verifies two range receipts and checks the full seam
+(tip, UTXO roots+leaves, difficulty, and the MTP window) meets.
+
+```
+./target/release/host prove-range <n>                 # one block as range [n..n]
+./target/release/host fold-range <left.bin> <right.bin> <out.bin>
+./target/release/host verify-range <out.bin>          # verify + PIN the leftmost boundary to genesis
+./target/release/host verify-any <bin>                 # verify without the genesis pin (coordinator's per-range check)
+NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-out -> one genesis-anchored receipt
+```
+
+`verify-range` pins the full genesis in-boundary; `verify-any` (used by the coordinator on each
+submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
+invariant the guest fold enforces. See [`SCALING.md`](SCALING.md).
+
+## SNARK wrap (optional, for cheap universal verification)
+
+Wrap a tip/range STARK to Groth16 (~200–300 B, verifiable on a phone or on-chain). The capability is
+validated (block 170); applying it to the chain/range output is future work.
+
+```
+./target/release/host prove-snark
+```
+
+## Acceleration note
+
+In the sound build only SHA-256 is routed to the RISC0 accelerator (patch 0002); ECDSA and Schnorr
+run through the compiled, unmodified `libsecp256k1`, unaccelerated. Speeding up the EC verify is open
+work — the k256 substitution (`patches/0003`) is measured but reintroduces the reimplementation
+question and is **not** applied in the sound build; the bigint2 field-mul intercept was prototyped and
+disproven (~10% slower). See [`ACCELERATION.md`](ACCELERATION.md).

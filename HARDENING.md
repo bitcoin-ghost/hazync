@@ -48,7 +48,7 @@ the identical net root as add-then-delete.
 
 Pre-BIP34, blocks 91842/91880 carried coinbases with the same txid as 91812/91722. Our leaves commit
 the creation **height**, so a "duplicate" coinbase produces a DISTINCT leaf (different height) — no
-accumulator collision; the superseded coin becomes an unspent bloat leaf, sound. Post-BIP34 (227836)
+accumulator collision; the superseded coin becomes an unspent bloat leaf, sound. Post-BIP34 (227931)
 duplicate txids are impossible (height in coinbase scriptSig ⇒ unique coinbase txid), which the guest
 already enforces (`bip34_ok`). So H2 needs no code change for correctness; the two blocks validate.
 

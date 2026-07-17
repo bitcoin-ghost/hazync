@@ -21,7 +21,8 @@ question, because it runs Core.
 > Status: the **method** is built, sound, and demonstrated end-to-end on real mainnet data (single
 > blocks, IBD chains, tip operation, parallel backfill). It has **not** yet proven the entire ~900k-block
 > chain — that is a compute campaign, not new capability (see [Scope](#scope-what-is-and-isnt-proven)).
-> Nothing here has been externally reproduced or audited yet.
+> It has been through four rounds of internal adversarial self-audit (`SECURITY.md`), with a replayable
+> `host adversarial` suite; it has **not** yet been externally reproduced or independently audited.
 
 ## What a Hazync proof attests
 
@@ -31,17 +32,20 @@ as committed* — with no re-execution and no trust in peers. From the **genesis
 unconditional; from a mid-chain checkpoint the anchor is a trust input.
 
 ### Consensus surface enforced (real Core unless noted)
-- **Scripts, all types**, with per-height soft-fork flags (P2SH, DERSIG, CLTV, CSV, segwit, taproot) —
-  real `VerifyScript` + `SignatureHash` + `libsecp256k1`. Exercised on real P2PKH, P2SH, P2WPKH, P2WSH,
-  P2TR key-path and script-path spends.
+- **Scripts, all types** under Core's exact `GetBlockScriptFlags` — always-on P2SH/WITNESS/TAPROOT,
+  the buried DERSIG/CLTV/CSV/NULLDUMMY deployments at their real heights, and the two historical
+  script-flag exception blocks — via real `VerifyScript` + `SignatureHash` + `libsecp256k1`. Exercised
+  on real P2PKH, P2SH, P2WPKH, P2WSH, P2TR key-path and script-path spends.
 - **`CheckTransaction`** (structure, duplicate inputs, value bounds).
 - **No inflation**: Σin ≥ Σout per tx; coinbase ≤ subsidy(height) + Σfees (exact halving formula).
 - **Proof-of-work** (`CheckProofOfWorkImpl`, real `arith_uint256`) + **difficulty retarget**.
 - **Merkle root**; **BIP141 witness commitment**.
 - **Block weight** ≤ 4M; **full sigop cost** ≤ 80k (legacy + P2SH + witness).
 - **Coinbase maturity**; **absolute locktime** (`IsFinalTx`); **BIP68** relative locktime (height + time).
-- **BIP34** (coinbase height); **BIP30** (duplicate-txid; height-committed leaves make it collision-free,
-  the two historical exceptions verified).
+- **BIP34** (coinbase height); **BIP30** (duplicate-txid; the height-committed leaf keeps even the two
+  historical duplicate-coinbase blocks collision-free). One documented pre-full-run item: replicating
+  Core's outpoint *overwrite* for those two pre-BIP34 blocks (`SECURITY.md` F3) before a genesis→tip run
+  crosses height 91842.
 - **UTXO accumulator transition** (Utreexo): in-block-spend cancellation, unspendable-output skipping
   (`IsUnspendable`), so the committed root equals Core's UTXO set exactly. The guest **recomputes** the
   block's output set from the tx bytes (bound to the merkle root) — it does not trust the prover's list.
@@ -78,6 +82,12 @@ The proof rests on exactly four things, stated plainly:
 2. **RISC0 zkVM soundness** (standard STARK/SNARK assumption).
 3. **SHA-256** collision resistance (the accumulator + merkle/commitment checks).
 4. **The anchor** (genesis is unconditional; a checkpoint is a documented trust input).
+
+The binding between Core's code and the *specific block* being proven — the part most likely to hide a
+bug — has been hardened across four adversarial rounds and is checked by the replayable `host adversarial`
+suite: a mining-capable prover cannot downgrade the block height (soft-forks off + inflated subsidy),
+inflate fees via unbound prevouts, forge the difficulty across a seam, or launder a proof across
+recursion levels. Findings and fixes are in `SECURITY.md` — and breaking it is the most useful contribution.
 
 ## Reproduce
 
@@ -125,7 +135,8 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 
 **Not yet done (compute + review, not capability):**
 - The **full genesis→tip backfill** (all ~900k blocks) — a parallelizable GPU-compute campaign.
-- **External reproduction / adversarial audit**, and a formal audit of the accumulator (the one
+- **External reproduction and independent audit** (internally it has had four adversarial self-audit
+  rounds — `SECURITY.md` — but no outside review), including a formal audit of the accumulator (the one
   non-Core component).
 - **SNARK-wrapping the final chain proof** to ~200–300 bytes for trivial universal verification — the
   capability is validated (Groth16, block 170) but not yet applied to the chain/range output.
@@ -139,9 +150,11 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 | `HAZYNC_ENGINE.md` | Tip-operation protocol + the archive-node bridge (hazync-during-IBD). |
 | `SCALING.md` | Succinct receipts, tree fold, the parallel-backfill range-fold. |
 | `HARDENING.md` | In-block spends, output-recompute soundness, unspendable outputs, BIP30. |
-| `ACCELERATION.md` | **Open task:** accelerate libsecp256k1 modmul via the RISC0 bigint2 precompile (~5× per input, sound — the highest-leverage item before a full run). Contributors welcome. |
-| `AUDIT.md` | Independent review: findings and their resolutions. |
-| `patches/` | The two portability shims (auditable; no consensus-logic changes). |
+| `SECURITY.md` | The adversarial audit record — four self-audit rounds, every finding and its fix (H1–H8, the script-flag activation set, the coordinator seam), and the `host adversarial` suite. |
+| `CONTRIBUTING.md` | Join the live proof party in a few steps (build → identity → prove a range). |
+| `ACCELERATION.md` | **Open task:** a sound EC speed-up is an open field-backend rework — the naive bigint2 modmul intercept was prototyped and *disproven* (~10% slower); k256 (`patches/0003`) is a measured but opt-in reimplementation, not applied in the sound build. Pure-Core is the baseline. Contributors welcome. |
+| `PROVING.md` | The operator's guide to the real proving commands (single block, chain, range-fold, tip, SNARK-wrap). |
+| `patches/` | The portability shims (0001 serialize, 0002 SHA-256 accel; auditable, no consensus-logic changes). 0003 k256 is opt-in and not applied. |
 | `accumulator/` | The Utreexo UTXO accumulator crate + its exhaustive tests. |
 | `prover/` | Guest (real Core + engine), host (driver), `fetch_block.py`, `rangecluster.sh`. |
 | `provision-vps.sh` | Turnkey box setup. |

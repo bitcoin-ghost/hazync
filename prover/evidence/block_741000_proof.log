@@ -17,4 +17,4 @@ chunk 15 (40 inputs) proved in 194s -> chunk_15.bin
 chunk 14 (42 inputs) proved in 229s -> chunk_14.bin
 === AGGREGATING 16 chunk receipts for block 741000 ===
 >>> BLOCK 741000 AGGREGATED in 1645.2s — receipt VERIFIED.
-  tip_hash f0e89160dbdf8d2d7ffe2676f041390e11f308404ba101000000000000000000  cum_work 130067740078906534883430  UTXO leaves 402
+  tip_hash f0e89160dbdf8d2d7ffe2676f041390e11f308404ba101000000000000000000  cum_work 130067740078906534883430  UTXO leaves 402   [STALE: pre-H1/H3 output-recompute + IsUnspendable skip; current guest = 394]

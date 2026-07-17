@@ -1,5 +1,11 @@
 # Hazync engine — architecture & integration plan
 
+> **Historical working notes.** This is the original design/integration plan and reads as a changelog.
+> Some of it has been overtaken: recursion (listed here as a future item) is fully implemented,
+> hardened, and demonstrated; and k256/`patches/0003` (described here as "done & the lever we needed")
+> is an *opt-in* accelerator that is **not** applied in the sound build. For the current truth see
+> `SOUNDNESS.md`, `SECURITY.md`, `PROVING.md`, and `ACCELERATION.md`.
+
 *How the "real Core VerifyScript in a zkVM" result becomes the Hazync validity-proof engine: block
 proving, the UTXO accumulator, recursion, tip validation, node verification, IBD, and serving-layer
 integration. Efficiency is the through-line.*

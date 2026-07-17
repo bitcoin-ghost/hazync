@@ -159,9 +159,10 @@ pub extern "C" fn secp256k1_default_illegal_callback_fn(_msg: *const u8, _data: 
 #[no_mangle]
 pub extern "C" fn secp256k1_default_error_callback_fn(_msg: *const u8, _data: *mut core::ffi::c_void) {}
 
-// RISC0-accelerated secp256k1 ECDSA verify (k256, using the EC precompile). Called from Core's
-// pubkey.cpp (or the benchmark). msg = 32-byte prehash, sig = 64-byte compact (low-S), pk = SEC1.
-// Returns 1 valid, 0 invalid, negative on parse error.
+// RISC0-accelerated secp256k1 ECDSA verify (k256, using the EC precompile). NOT on the sound-build
+// consensus path: reachable only when patch 0003 is applied (it is not — provision applies 0001+0002
+// only) or from the compiled-out bench. Kept linked for the acceleration experiment (ACCELERATION.md).
+// msg = 32-byte prehash, sig = 64-byte compact (low-S), pk = SEC1. Returns 1 valid, 0 invalid, neg on parse error.
 #[no_mangle]
 pub extern "C" fn k256_ecdsa_verify(msg: *const u8, sig: *const u8, pk: *const u8, pk_len: usize) -> i32 {
     use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
@@ -562,6 +563,12 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
             tx_full_sigops(inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.prevouts.as_ptr(), inp.prevouts.len() as u32, flags)
         };
     }
+    // Core's GetBlockWeight also weighs the 80-byte header and the tx-count varint (non-witness data, so
+    // ×WITNESS_SCALE_FACTOR) — `4*(80 + CompactSize(ntx))` — on top of the per-tx weights. Without it a
+    // block could sit up to ~324 WU over the limit while Core rejects it (F2, round-5 audit).
+    let ntx = w.txids.len();
+    let cs: i64 = if ntx < 0xfd { 1 } else if ntx <= 0xffff { 3 } else if ntx <= 0xffff_ffff { 5 } else { 9 };
+    total_weight += 4 * (80 + cs);
     let weight_ok = total_weight <= MAX_BLOCK_WEIGHT;
     let sigops_ok = total_sigops <= MAX_BLOCK_SIGOPS_COST;
 
