@@ -19,7 +19,7 @@ Config (env):
   WITNESS_DIR where per-block witnesses live   (default ~/.hazync/witnesses)
 Identity + receipts live under ~/.hazync/.
 """
-import os, sys, json, base64, subprocess, urllib.request, pathlib, threading
+import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time
 
 HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
@@ -47,13 +47,31 @@ def identity():
     handle = HANDLE.read_text().strip() if HANDLE.exists() else ("ghost:" + pub[:6])
     return sk, pub, handle
 
+def _open(req, timeout, tries=4):
+    # Open a request with a timeout and retry on TRANSIENT network errors only — a real HTTP response
+    # (4xx/5xx, incl. 409 already-claimed / 404 no-witness) is returned to the caller, never retried.
+    # Without this a single flaky request hangs the whole CLI (the old no-timeout behaviour).
+    for k in range(tries):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise                                        # server answered — let the caller handle it
+        except (urllib.error.URLError, OSError) as e:    # connection refused / reset / timeout
+            if k + 1 >= tries:
+                raise SystemExit(f"coordinator {COORD} unreachable after {tries} tries: {e}")
+            time.sleep(2 * (k + 1))                       # 2s, 4s, 6s backoff
+
 def post(path, body):
-    r = urllib.request.urlopen(urllib.request.Request(COORD + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}))
-    return json.load(r)
+    req = urllib.request.Request(COORD + path, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"})
+    try:
+        return json.load(_open(req, timeout=180))        # submit triggers verification — allow time
+    except urllib.error.HTTPError as e:                  # coordinator returns JSON {"error": ...} with a 4xx/5xx
+        try: return json.loads(e.read().decode())
+        except Exception: raise SystemExit(f"coordinator error {e.code}: {e.reason}")
 
 def get(path):
-    return urllib.request.urlopen(urllib.request.Request(COORD + path)).read()
+    return _open(urllib.request.Request(COORD + path), timeout=60).read()
 
 def fetch_witnesses(lo, hi):
     # the prover replays blocks 1..hi to rebuild the accumulator, so it needs every witness up to hi.
@@ -86,7 +104,10 @@ def cmd_pick(args):
 
 def cmd_claim(args):
     rng = args[0]; _, pub, handle = identity()
-    print(post("/api/claim", {"range": rng, "pubkey": pub, "handle": handle}))
+    res = post("/api/claim", {"range": rng, "pubkey": pub, "handle": handle})
+    if res.get("ok"):
+        print(f"claimed {rng}"); return
+    print(f"could not claim {rng}: {res.get('error') or res}"); sys.exit(1)
 
 def _heartbeat(rng, pub, stop):
     # keep the claim alive while proving — ping the coordinator every 30s
