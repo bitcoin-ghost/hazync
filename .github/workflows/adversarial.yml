@@ -1,0 +1,47 @@
+name: adversarial
+
+# Builds the real prover (Bitcoin Core consensus code -> riscv32 guest) and runs the self-contained
+# soundness checks on every push: the block-170 consensus regression and the adversarial suite, which
+# asserts that a witness exploiting each known hole (host-controlled height, in-block double-spend /
+# ordering, malformed coinbase) is REJECTED, alongside an honest baseline that must be accepted.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  accumulator-tests:
+    # Fast, always-green: the pure-Rust Utreexo accumulator (single-delete vs a full-forest oracle).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup update --no-self-update stable && rustc --version
+      - name: Utreexo accumulator tests
+        run: cargo test --manifest-path accumulator/Cargo.toml --release
+
+  soundness-suite:
+    # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision (RISC0 toolchain, Bitcoin Core v28 source, patches, build)
+        env:
+          REPO_DIR: ${{ github.workspace }}
+        run: ./provision-vps.sh
+      - name: Block-170 consensus regression
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host regress
+      - name: Adversarial soundness suite (every hole must REJECT)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host adversarial
+      - name: BIP30 grandfathered overwrite (real block 91842)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host check-bip30
