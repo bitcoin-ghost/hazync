@@ -1,6 +1,6 @@
 .DS_Store
-Cargo.lock
-methods/guest/Cargo.lock
 target/
 __pycache__/
 *.pyc
+# Cargo.lock is COMMITTED (not ignored): the host/guest are binaries whose reproducible
+# build — and thus the guest image id (METHOD_ID) — requires a frozen dependency set.

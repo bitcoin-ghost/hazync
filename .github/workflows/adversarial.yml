@@ -29,6 +29,9 @@ jobs:
       - name: Provision (RISC0 toolchain, Bitcoin Core v28 source, patches, build)
         env:
           REPO_DIR: ${{ github.workspace }}
+          # rzup authenticates its GitHub API calls with this, avoiding the anonymous
+          # rate limit that otherwise flakes the toolchain install on shared CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./provision-vps.sh
       - name: Block-170 consensus regression
         run: |

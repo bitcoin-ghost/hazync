@@ -27,7 +27,13 @@ if ! command -v rzup >/dev/null; then
   curl -L https://risczero.com/install | bash
   export PATH="$HOME/.risc0/bin:$PATH"
 fi
-rzup install                                   # installs the pinned toolchain set (v3.0.5-era)
+# PINNED toolchain versions. With the risc0 crates (=3.0.5) these determine the guest image id
+# (METHOD_ID). Bare `rzup install` grabs whatever is *latest* — which drifts the METHOD_ID over time
+# and, unauthenticated, hits GitHub's API rate limit. rzup authenticates via $GITHUB_TOKEN when set.
+rzup install --force rust 1.94.1
+rzup install --force cpp 2024.1.5
+rzup install --force cargo-risczero 3.0.5
+rzup install --force r0vm 3.0.5
 export PATH="$HOME/.risc0/bin:$PATH"
 # the riscv g++/gcc + libstdc++/libgcc/newlib come with the rzup cpp toolchain extension.
 
