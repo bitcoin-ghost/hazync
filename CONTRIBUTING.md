@@ -86,6 +86,10 @@ curl https://bitcoinghost.org/hazync/api/proof/170 -o proof_170.bin
 
 If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the whole point of this project: every proof is public and anyone can check it, no trust required.
 
+The `.bin` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
+
+If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest/toolchain than made the proof, so their image ids differ. Run `./prover/target/release/host method-id` to see yours, and see the reproducibility note in [`docs/PROVING.md`](docs/PROVING.md).
+
 ## If something breaks
 
 - The build runs out of memory on a small box. It needs about 16 GB of RAM. Build on a bigger box and copy `prover/target/release/host` across to a smaller one, the built binary runs anywhere.

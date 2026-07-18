@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 serde_json = "1"
 methods = { path = "../methods" }
-risc0-zkvm = { version = "^3.0.5" }
+risc0-zkvm = { version = "=3.0.5" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 bitcoin = "0.32"

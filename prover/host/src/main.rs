@@ -73,6 +73,27 @@ fn hx(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
 fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
+
+// This host's guest image id (METHOD_ID) as the canonical RISC0 hex digest.
+fn method_id_hex() -> String { risc0_zkvm::Digest::from(METHOD_ID).to_string() }
+
+// Verify a receipt's STARK against THIS host's guest image id. On failure, explain the usual cause
+// instead of a raw panic: the host was built from a different guest/toolchain than produced the
+// proof, so the image ids (METHOD_ID) differ. That is a BUILD mismatch, not an invalid proof.
+fn verify_receipt(r: &risc0_zkvm::Receipt) {
+    if let Err(e) = r.verify(METHOD_ID) {
+        eprintln!("STARK verification FAILED.");
+        eprintln!("This is almost certainly a guest image-id (METHOD_ID) MISMATCH, not a bad proof:");
+        eprintln!("a RISC0 image id is a hash of the exact guest build (Bitcoin Core source + riscv");
+        eprintln!("toolchain + risc0 version), so a host built from different inputs cannot verify a");
+        eprintln!("proof produced elsewhere.");
+        eprintln!("  this host's METHOD_ID: {}", method_id_hex());
+        eprintln!("Build a host that matches the proof's guest, then retry. See PROVING.md ->");
+        eprintln!("\"the guest image id (METHOD_ID) & reproducibility\".");
+        eprintln!("Underlying verifier error: {e}");
+        std::process::exit(1);
+    }
+}
 fn rev(mut v: Vec<u8>) -> Vec<u8> { v.reverse(); v }
 fn arr(v: Vec<u8>) -> [u8; 32] { v.try_into().unwrap() }
 
@@ -965,7 +986,7 @@ fn assert_genesis_in_boundary(rs: &RangeState) {
 // `verify-range <bin>`: verify a range proof and PIN its leftmost boundary to the genesis anchor.
 fn verify_range_cmd(bin: &str) {
     let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
-    r.verify(METHOD_ID).expect("verify");
+    verify_receipt(&r);
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
     assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
@@ -984,7 +1005,7 @@ fn verify_range_cmd(bin: &str) {
 // frontier without doing any proving/folding itself.
 fn verify_any_cmd(bin: &str) {
     let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
-    r.verify(METHOD_ID).expect("verify"); // real STARK verification
+    verify_receipt(&r); // real STARK verification (friendly on image-id mismatch)
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
     assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
@@ -1532,6 +1553,12 @@ fn main() {
     }
     if let Some(p) = args.iter().position(|a| a == "verify-range") {
         verify_range_cmd(args.get(p + 1).expect("verify-range <bin>"));
+        return;
+    }
+    if args.iter().any(|a| a == "method-id") {
+        // Print THIS host's guest image id so a contributor can check it matches a proof's guest.
+        println!("METHOD_ID {}", method_id_hex());
+        println!("  u32x8   {:?}", METHOD_ID);
         return;
     }
     if let Some(p) = args.iter().position(|a| a == "verify-any") {

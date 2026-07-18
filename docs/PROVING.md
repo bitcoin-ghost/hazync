@@ -80,6 +80,42 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-
 submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
 invariant the guest fold enforces. See [`SCALING.md`](SCALING.md).
 
+## The guest image id (METHOD_ID) & reproducibility
+
+A proof is verified **against a guest image id** — `METHOD_ID`, a hash of the exact zkVM guest ELF.
+`verify-any`/`verify-range` call `r.verify(METHOD_ID)`: the receipt only checks out against the *same*
+guest that produced it.
+
+That id is a hash of the **whole guest build**, not just the source: Bitcoin Core's version, the
+riscv32 C/C++ toolchain, the RISC0 Rust toolchain, and the `risc0` crate versions all feed into it. So
+**two people who build the host from source can get different `METHOD_ID`s** — and a host whose id
+differs from the one that produced a published proof will report:
+
+```
+STARK verification FAILED.
+This is almost certainly a guest image-id (METHOD_ID) MISMATCH, not a bad proof:
+  this host's METHOD_ID: <hex>
+```
+
+**This is a build mismatch, not an invalid proof.** Print your host's id and compare:
+
+```
+./target/release/host method-id
+```
+
+To reduce the drift, the inputs are pinned: `risc0-zkvm`/`risc0-build` are pinned to `=3.0.5`, the
+riscv toolchain comes from `rzup` (v3.0.5-era), and Bitcoin Core is fetched at the tag `provision-vps.sh`
+uses. Building the host on those same pinned inputs (e.g. on the proving box, or the coordinator) yields
+a `METHOD_ID` that matches the published proofs.
+
+**Not yet done:** a fully hermetic, containerised build that lets *anyone* reproduce the published
+`METHOD_ID` bit-for-bit. Because the guest embeds external Bitcoin Core C++ and a custom cross-toolchain,
+the stock `RISC0_USE_DOCKER` reproducible path is not sufficient — it needs a custom build container
+pinning Core + the toolchains, plus a committed lockfile, and a published canonical `METHOD_ID`. Tracked
+in [`ROADMAP.md`](ROADMAP.md). Until then, the authoritative independent check is the **coordinator**,
+which re-verifies every submitted proof before recording it (a bad proof never lands on the board), and
+the whole point still holds: build a matching host and every published proof verifies for you locally.
+
 ## SNARK wrap (optional, for cheap universal verification)
 
 Wrap a tip/range STARK to Groth16 (~200–300 B, verifiable on a phone or on-chain). The capability is
