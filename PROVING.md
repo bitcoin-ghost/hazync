@@ -3,7 +3,7 @@
 This is the operator's guide to the real proving commands. Everything below is implemented,
 hardened, and demonstrated on real mainnet data — single blocks, recursive chains, the parallel
 range-fold, and tip operation. (For *joining the live party* rather than driving the prover
-directly, see [`CONTRIBUTING.md`](CONTRIBUTING.md). For the soundness posture and the four rounds of
+directly, see [`CONTRIBUTING.md`](CONTRIBUTING.md). For the soundness posture and the seven rounds of
 adversarial hardening, see [`SECURITY.md`](SECURITY.md).)
 
 Proving is RAM- and GPU-heavy. Build on a provisioned box (`provision-vps.sh`); a small WSL2 machine

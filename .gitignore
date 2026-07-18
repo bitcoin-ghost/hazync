@@ -2,3 +2,5 @@ target/
 *.log
 bitcoin-core/
 secp256k1/
+__pycache__/
+*.pyc

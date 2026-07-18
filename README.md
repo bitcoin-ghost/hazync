@@ -21,7 +21,7 @@ question, because it runs Core.
 > Status: the **method** is built, sound, and demonstrated end-to-end on real mainnet data (single
 > blocks, IBD chains, tip operation, parallel backfill). It has **not** yet proven the entire ~900k-block
 > chain — that is a compute campaign, not new capability (see [Scope](#scope-what-is-and-isnt-proven)).
-> It has been through four rounds of internal adversarial self-audit (`SECURITY.md`), with a replayable
+> It has been through seven rounds of internal adversarial self-audit (`SECURITY.md`), with a replayable
 > `host adversarial` suite; it has **not** yet been externally reproduced or independently audited.
 
 ## What a Hazync proof attests
@@ -83,7 +83,7 @@ The proof rests on exactly four things, stated plainly:
 4. **The anchor** (genesis is unconditional; a checkpoint is a documented trust input).
 
 The binding between Core's code and the *specific block* being proven — the part most likely to hide a
-bug — has been hardened across four adversarial rounds and is checked by the replayable `host adversarial`
+bug — has been hardened across seven adversarial rounds and is checked by the replayable `host adversarial`
 suite: a mining-capable prover cannot downgrade the block height (soft-forks off + inflated subsidy),
 inflate fees via unbound prevouts, forge the difficulty across a seam, or launder a proof across
 recursion levels. Findings and fixes are in `SECURITY.md` — and breaking it is the most useful contribution.
@@ -134,7 +134,7 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 
 **Not yet done (compute + review, not capability):**
 - The **full genesis→tip backfill** (all ~900k blocks) — a parallelizable GPU-compute campaign.
-- **External reproduction and independent audit** (internally it has had four adversarial self-audit
+- **External reproduction and independent audit** (internally it has had seven adversarial self-audit
   rounds — `SECURITY.md` — but no outside review), including a formal audit of the accumulator (the one
   non-Core component).
 - **SNARK-wrapping the final chain proof** to ~200–300 bytes for trivial universal verification — the
@@ -144,12 +144,14 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 
 | File | What |
 |------|------|
+| `EXPLAINER.md` | Plain-English, no-jargon intro — start here if you're new to zero-knowledge proofs. |
+| `WRITEUP.md` | The full technical narrative: novelty, coverage matrix, trust model, "try to break it". |
 | `SOUNDNESS.md` | Formal soundness & completeness statement; the recursion self-reference argument. |
 | `HAZYNC_ARCHITECTURE.md` | The engine design (leaf → block → chain), section by section. |
 | `HAZYNC_ENGINE.md` | Tip-operation protocol + the archive-node bridge (hazync-during-IBD). |
 | `SCALING.md` | Succinct receipts, tree fold, the parallel-backfill range-fold. |
 | `HARDENING.md` | In-block spends, output-recompute soundness, unspendable outputs, BIP30. |
-| `SECURITY.md` | The adversarial audit record — four self-audit rounds, every finding and its fix (H1–H8, the script-flag activation set, the coordinator seam), and the `host adversarial` suite. |
+| `SECURITY.md` | The adversarial audit record — seven self-audit rounds, every finding and its fix (H1–H9, the script-flag activation set, the coordinator seam), and the `host adversarial` suite. |
 | `CONTRIBUTING.md` | Join the live proof party in a few steps (build → identity → prove a range). |
 | `ACCELERATION.md` | **Open task:** a sound EC speed-up is an open field-backend rework — the naive bigint2 modmul intercept was prototyped and *disproven* (~10% slower); k256 (`patches/0003`) is a measured but opt-in reimplementation, not applied in the sound build. Pure-Core is the baseline. Contributors welcome. |
 | `PROVING.md` | The operator's guide to the real proving commands (single block, chain, range-fold, tip, SNARK-wrap). |
@@ -157,6 +159,7 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 | `accumulator/` | The Utreexo UTXO accumulator crate + its exhaustive tests. |
 | `prover/` | Guest (real Core + engine), host (driver), `fetch_block.py`, `rangecluster.sh`. |
 | `provision-vps.sh` | Turnkey box setup. |
+| `ROADMAP.md` | The state, the open work, and the order to do it in. |
 
 ---
 
