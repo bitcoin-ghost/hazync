@@ -33,6 +33,11 @@ jobs:
           # rate limit that otherwise flakes the toolchain install on shared CI runners.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./provision-vps.sh
+      - name: Guest image id (METHOD_ID) — for reproducibility tracking
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host method-id
       - name: Block-170 consensus regression
         run: |
           . "$HOME/.cargo/env"

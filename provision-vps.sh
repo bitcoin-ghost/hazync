@@ -40,7 +40,9 @@ export PATH="$HOME/.risc0/bin:$PATH"
 echo "== 4. real consensus source (re-fetchable; not vendored). Layout: \$HAZYNC_BASE/{bitcoin-core,secp256k1,coreshim} =="
 mkdir -p "$WORK"
 [ -d "$WORK/bitcoin-core" ] || git clone --depth 1 -b "$CORE_TAG" https://github.com/bitcoin/bitcoin.git "$WORK/bitcoin-core"
-[ -d "$WORK/secp256k1" ]    || git clone --depth 1 https://github.com/bitcoin-core/secp256k1.git "$WORK/secp256k1"
+# Pin secp256k1 to the version Bitcoin Core v28.0 bundles (0.5.1). The guest compiles this source, so
+# a floating master would drift the METHOD_ID — and diverge from the libsecp Core actually ships.
+[ -d "$WORK/secp256k1" ]    || git clone --depth 1 -b v0.5.1 https://github.com/bitcoin-core/secp256k1.git "$WORK/secp256k1"
 
 echo "== 5. apply the target shims (pure-Core build: patches 0001 + 0002 only; NOT 0003/k256) =="
 git -C "$WORK/bitcoin-core" checkout -- src/serialize.h src/crypto/sha256.cpp 2>/dev/null || true
