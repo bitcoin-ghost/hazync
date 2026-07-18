@@ -74,21 +74,23 @@ Proving a whole range takes a while (each block is proved, then the receipts are
 
 ## Just want to check a proof, not make one?
 
-You never have to trust the party. Every verified proof is public at `https://bitcoinghost.org/hazync/api/proof/<block>`, and you can also click any green block on the board to download it. Then check it yourself, no GPU needed:
+You never have to trust the party. Every verified proof is public — click any green range on the board to download it, or fetch it from `https://bitcoinghost.org/hazync/api/proof/<range>`. Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.39+ / Ubuntu 24.04+):
 
 ```
-# download block 170's proof receipt
-curl https://bitcoinghost.org/hazync/api/proof/170 -o proof_170.bin
+# 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
+curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-v0.4.0-x86_64-linux-gnu
+chmod +x host
 
-# verify it against the same real Bitcoin Core consensus code
-./prover/target/release/host verify-any proof_170.bin
+# 2. download a proof and verify it against real Bitcoin Core consensus code
+curl https://bitcoinghost.org/hazync/api/proof/0-999 -o proof.bin
+./host verify-any proof.bin
 ```
 
-If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the whole point of this project: every proof is public and anyone can check it, no trust required.
+If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
 
 The `.bin` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
 
-If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest than made the proof, so their image ids differ. Run `./prover/target/release/host method-id` to see yours. To get the canonical guest that matches the published proofs, build via the reproducible container (`docker build -f reproduce/Dockerfile .`) — its id is pinned in [`reproduce/METHOD_ID`](reproduce/METHOD_ID). See [`docs/PROVING.md`](docs/PROVING.md).
+If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest than made the proof, so their image ids differ. The prebuilt binary above avoids this (it's the canonical guest). If you built from source, run `host method-id` to see yours and reproduce the canonical id with the container (`docker build -f reproduce/Dockerfile .`) — it's pinned in [`reproduce/METHOD_ID`](reproduce/METHOD_ID). See [`docs/PROVING.md`](docs/PROVING.md).
 
 ## If something breaks
 
