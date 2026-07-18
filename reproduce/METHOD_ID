@@ -1,0 +1,10 @@
+# Canonical Hazync guest image id (METHOD_ID).
+#
+# `docker build -f reproduce/Dockerfile .` produces EXACTLY this id on any machine
+# (verified reproducible: local WSL2 == GitHub CI runner, bit-for-bit). Verifiers check proofs
+# against this id; a host that yields a different id was NOT built from the canonical guest and will
+# not verify the published proofs — see docs/PROVING.md.
+#
+# Inputs (all pinned): Bitcoin Core v28.0, secp256k1 v0.5.1, rzup rust 1.94.1 / cpp 2024.1.5 /
+# cargo-risczero 3.0.5 / r0vm 3.0.5, risc0 crates =3.0.5, committed Cargo.lock, built at fixed paths.
+d1fc40654d4817ad58bc8c0cde11f7a91ee72ed1084895451ced4385b312f292

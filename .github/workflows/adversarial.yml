@@ -55,8 +55,8 @@ jobs:
           ./prover/target/release/host check-bip30
 
   reproducible-image-id:
-    # Build the guest in the hermetic container (fixed paths) and print its METHOD_ID. This id must
-    # match a local container build — the cross-machine reproducibility check for the guest image id.
+    # Build the guest in the hermetic container (fixed paths) and assert its METHOD_ID equals the
+    # published canonical id in reproduce/METHOD_ID. Fails on any drift — the reproducibility guard.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,5 +64,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: docker build --secret id=gh_token,env=GITHUB_TOKEN -t hazync-repro -f reproduce/Dockerfile .
-      - name: Print reproducible METHOD_ID (must match a local container build)
-        run: docker run --rm hazync-repro
+      - name: Assert built METHOD_ID == canonical (reproduce/METHOD_ID)
+        run: |
+          BUILT=$(docker run --rm hazync-repro | grep -oE 'METHOD_ID [0-9a-f]{64}' | awk '{print $2}')
+          CANON=$(grep -oE '[0-9a-f]{64}' reproduce/METHOD_ID | head -1)
+          echo "built     = $BUILT"
+          echo "canonical = $CANON"
+          if [ -z "$BUILT" ] || [ "$BUILT" != "$CANON" ]; then
+            echo "::error::guest METHOD_ID drifted from the canonical id — reproducibility broken"
+            exit 1
+          fi
+          echo "reproducible METHOD_ID matches canonical ✓"

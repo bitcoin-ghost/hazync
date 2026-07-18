@@ -55,18 +55,18 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   cloned is itself disruptive; the leak is a username + a project codename, no secrets/keys). Low
   severity — flag for the user.
 - [ ] Later: consolidate the ~10 docs and normalise the voice (drop changelog/date/commit-hash style).
-- [~] **Reproducible guest build / canonical `METHOD_ID`.** A proof verifies only against the guest
-  image id it was made with, and that id is a hash of the *whole* build (Bitcoin Core source + riscv
-  cross-toolchain + risc0 versions). So a from-source host can get a different `METHOD_ID` and then
-  fail to verify genuine published proofs — a real onboarding trap (it looks like the proof is fake).
-  Done so far: `risc0-*` pinned to `=3.0.5`; `host method-id` prints the local id; `verify-any`/
-  `verify-range` now explain an id mismatch instead of panicking; PROVING.md documents it.
-  **Still open:** a hermetic, containerised build that reproduces the published id bit-for-bit —
-  stock `RISC0_USE_DOCKER` is insufficient because the guest embeds external Core C++ + a custom
-  cross-toolchain, so it needs a custom build container pinning Core (tag/commit) + toolchains, a
-  **committed lockfile** (the `Cargo.lock`s are currently git-ignored), and a published canonical
-  `METHOD_ID`. The next re-prove campaign should run on that reproducible guest so the published id
-  is one anyone can reproduce and check against.
+- [x] **Reproducible guest build / canonical `METHOD_ID`.** A proof verifies only against the guest
+  image id it was made with, and that id is a hash of the *whole* build (Core source + riscv
+  cross-toolchain + risc0 versions + **absolute build paths** baked into the ELF). So a from-source host
+  got a different `METHOD_ID` and failed to verify genuine proofs — an onboarding trap (looked fake).
+  DONE: pinned `risc0-*` `=3.0.5` + rzup toolchain + Core v28.0 + secp256k1 v0.5.1 + committed
+  `Cargo.lock`; `host method-id` + legible mismatch error in `verify-any`/`verify-range`; and a hermetic
+  container (`reproduce/Dockerfile`) that builds the guest at FIXED paths (stock `RISC0_USE_DOCKER` was
+  insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
+  bit-for-bit across machines** (local WSL2 == GitHub CI): canonical id `d1fc4065…` checked in at
+  `reproduce/METHOD_ID`, asserted by the `reproducible-image-id` CI job.
+  - [ ] **Re-prove** the chain on this reproducible guest (the current ~2796 proofs were made on the
+    old non-reproducible guest and will be superseded). Needs a fresh GPU box (`provision-vps.sh GPU=1`).
 
 ## 3. External review + writeup
 

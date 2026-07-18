@@ -103,18 +103,24 @@ This is almost certainly a guest image-id (METHOD_ID) MISMATCH, not a bad proof:
 ./target/release/host method-id
 ```
 
-To reduce the drift, the inputs are pinned: `risc0-zkvm`/`risc0-build` are pinned to `=3.0.5`, the
-riscv toolchain comes from `rzup` (v3.0.5-era), and Bitcoin Core is fetched at the tag `provision-vps.sh`
-uses. Building the host on those same pinned inputs (e.g. on the proving box, or the coordinator) yields
-a `METHOD_ID` that matches the published proofs.
+### Reproducing the canonical `METHOD_ID`
 
-**Not yet done:** a fully hermetic, containerised build that lets *anyone* reproduce the published
-`METHOD_ID` bit-for-bit. Because the guest embeds external Bitcoin Core C++ and a custom cross-toolchain,
-the stock `RISC0_USE_DOCKER` reproducible path is not sufficient — it needs a custom build container
-pinning Core + the toolchains, plus a committed lockfile, and a published canonical `METHOD_ID`. Tracked
-in [`ROADMAP.md`](ROADMAP.md). Until then, the authoritative independent check is the **coordinator**,
-which re-verifies every submitted proof before recording it (a bad proof never lands on the board), and
-the whole point still holds: build a matching host and every published proof verifies for you locally.
+The build is **reproducible**: everything that feeds the id is pinned (`risc0-zkvm`/`risc0-build` `=3.0.5`,
+the `rzup` toolchain `rust 1.94.1`/`cpp 2024.1.5`/`cargo-risczero`+`r0vm 3.0.5`, Bitcoin Core `v28.0`,
+secp256k1 `v0.5.1`, and a committed `Cargo.lock`) **and** the build runs at fixed paths inside a
+container, so the absolute build location can't leak into the ELF. Reproduce it on any machine:
+
+```
+docker build -f reproduce/Dockerfile -t hazync-repro .
+docker run --rm hazync-repro          # prints METHOD_ID — must equal reproduce/METHOD_ID
+```
+
+The canonical id is checked in at [`reproduce/METHOD_ID`](../reproduce/METHOD_ID) and verified
+reproducible bit-for-bit across machines (local + GitHub CI); the `reproducible-image-id` CI job asserts
+every build still matches it. A from-source host built **outside** the container may differ (absolute
+paths bake into the ELF) — that's the mismatch `verify-any` warns about; build via the container to get
+the canonical guest. The **coordinator** is also an independent check: it re-verifies every submitted
+proof before recording it, so a bad proof never lands on the board.
 
 ## SNARK wrap (optional, for cheap universal verification)
 

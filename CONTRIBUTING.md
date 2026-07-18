@@ -88,7 +88,7 @@ If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the 
 
 The `.bin` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
 
-If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest/toolchain than made the proof, so their image ids differ. Run `./prover/target/release/host method-id` to see yours, and see the reproducibility note in [`docs/PROVING.md`](docs/PROVING.md).
+If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest than made the proof, so their image ids differ. Run `./prover/target/release/host method-id` to see yours. To get the canonical guest that matches the published proofs, build via the reproducible container (`docker build -f reproduce/Dockerfile .`) — its id is pinned in [`reproduce/METHOD_ID`](reproduce/METHOD_ID). See [`docs/PROVING.md`](docs/PROVING.md).
 
 ## If something breaks
 
