@@ -27,10 +27,14 @@ COPY . /hazync-zkvm
 
 # provision-vps.sh (run as root; it detects that and skips sudo) installs the pinned toolchain, clones
 # Core v28.0 + secp256k1 v0.5.1, applies the shims, and builds the prover — all at the fixed paths above.
-# GITHUB_TOKEN is passed as an OPTIONAL BuildKit secret so rzup's GitHub calls are authenticated (avoids
-# the anonymous rate limit); it never lands in an image layer, and an empty token (local builds) is fine.
+# GITHUB_TOKEN may be passed as an OPTIONAL BuildKit secret so rzup's GitHub calls are authenticated
+# (avoids the anonymous rate limit); it never lands in an image layer. Without it, rzup runs
+# unauthenticated, which is fine for a one-off build — but only EXPORT the token when the secret is
+# actually present and non-empty: an empty GITHUB_TOKEN makes rzup send an empty credential and get a
+# 401. If you hit the rate limit locally, run: docker build --secret id=gh_token,env=GITHUB_TOKEN ...
 RUN --mount=type=secret,id=gh_token,required=false \
-    GITHUB_TOKEN="$(cat /run/secrets/gh_token 2>/dev/null || true)" ./provision-vps.sh
+    if [ -s /run/secrets/gh_token ]; then export GITHUB_TOKEN="$(cat /run/secrets/gh_token)"; fi && \
+    ./provision-vps.sh
 
 # Default: emit the guest image id. Run this container on any machine; the id must match.
 CMD ["/hazync-zkvm/prover/target/release/host", "method-id"]
