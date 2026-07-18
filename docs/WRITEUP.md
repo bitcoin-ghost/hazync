@@ -1,8 +1,8 @@
 # Proving Bitcoin's real consensus code in a zkVM
 
-*A technical writeup of Hazync. For the plain-English version, see [`EXPLAINER.md`](EXPLAINER.md); for
+*A technical writeup of Hazync. For the plain-English version, see [`EXPLAINER.md`](../EXPLAINER.md); for
 the exact security claim, [`SOUNDNESS.md`](SOUNDNESS.md); for the self-review and open items,
-[`SECURITY.md`](SECURITY.md).*
+[`SECURITY.md`](../SECURITY.md).*
 
 ## The claim
 

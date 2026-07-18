@@ -9,7 +9,7 @@ succinct receipt.
 
 > **New to zero-knowledge proofs?** Start with **[`EXPLAINER.md`](EXPLAINER.md)** — a plain-English,
 > no-jargon walkthrough of what this is, why it matters, and how to help. For the full technical
-> narrative (novelty, coverage matrix, trust model, "try to break it"), see **[`WRITEUP.md`](WRITEUP.md)**.
+> narrative (novelty, coverage matrix, trust model, "try to break it"), see **[`WRITEUP.md`](docs/WRITEUP.md)**.
 > This README is the quick technical overview.
 
 The distinguishing property: **it is not a reimplementation.** Bitcoin Core's actual
@@ -142,24 +142,28 @@ parallel-backfill levels, with the real-UTXO binding from the genesis anchor.
 
 ## Repo map
 
+Start here (repo root): this `README.md`, **`EXPLAINER.md`** (plain-English intro),
+**`CONTRIBUTING.md`** (prove a block), **`SECURITY.md`** (the audit record / "try to break it").
+Everything else is deep-dive reference under **`docs/`**.
+
 | File | What |
 |------|------|
 | `EXPLAINER.md` | Plain-English, no-jargon intro — start here if you're new to zero-knowledge proofs. |
-| `WRITEUP.md` | The full technical narrative: novelty, coverage matrix, trust model, "try to break it". |
-| `SOUNDNESS.md` | Formal soundness & completeness statement; the recursion self-reference argument. |
-| `HAZYNC_ARCHITECTURE.md` | The engine design (leaf → block → chain), section by section. |
-| `HAZYNC_ENGINE.md` | Tip-operation protocol + the archive-node bridge (hazync-during-IBD). |
-| `SCALING.md` | Succinct receipts, tree fold, the parallel-backfill range-fold. |
-| `HARDENING.md` | In-block spends, output-recompute soundness, unspendable outputs, BIP30. |
-| `SECURITY.md` | The adversarial audit record — seven self-audit rounds, every finding and its fix (H1–H9, the script-flag activation set, the coordinator seam), and the `host adversarial` suite. |
 | `CONTRIBUTING.md` | Join the live proof party in a few steps (build → identity → prove a range). |
-| `ACCELERATION.md` | **Open task:** a sound EC speed-up is an open field-backend rework — the naive bigint2 modmul intercept was prototyped and *disproven* (~10% slower); k256 (`patches/0003`) is a measured but opt-in reimplementation, not applied in the sound build. Pure-Core is the baseline. Contributors welcome. |
-| `PROVING.md` | The operator's guide to the real proving commands (single block, chain, range-fold, tip, SNARK-wrap). |
+| `SECURITY.md` | The adversarial audit record — seven self-audit rounds, every finding and its fix (H1–H9, the script-flag activation set, the coordinator seam), and the `host adversarial` suite. |
+| `docs/WRITEUP.md` | The full technical narrative: novelty, coverage matrix, trust model, "try to break it". |
+| `docs/SOUNDNESS.md` | Formal soundness & completeness statement; the recursion self-reference argument. |
+| `docs/HAZYNC_ARCHITECTURE.md` | The engine design (leaf → block → chain), section by section. |
+| `docs/HAZYNC_ENGINE.md` | Tip-operation protocol + the archive-node bridge (hazync-during-IBD). |
+| `docs/SCALING.md` | Succinct receipts, tree fold, the parallel-backfill range-fold. |
+| `docs/HARDENING.md` | In-block spends, output-recompute soundness, unspendable outputs, BIP30. |
+| `docs/ACCELERATION.md` | **Open task:** a sound EC speed-up is an open field-backend rework — the naive bigint2 modmul intercept was prototyped and *disproven* (~10% slower); k256 (`patches/0003`) is a measured but opt-in reimplementation, not applied in the sound build. Pure-Core is the baseline. Contributors welcome. |
+| `docs/PROVING.md` | The operator's guide to the real proving commands (single block, chain, range-fold, tip, SNARK-wrap). |
+| `docs/ROADMAP.md` | The state, the open work, and the order to do it in. |
 | `patches/` | The portability shims (0001 serialize, 0002 SHA-256 accel; auditable, no consensus-logic changes). 0003 k256 is opt-in and not applied. |
 | `accumulator/` | The Utreexo UTXO accumulator crate + its exhaustive tests. |
 | `prover/` | Guest (real Core + engine), host (driver), `fetch_block.py`, `rangecluster.sh`. |
 | `provision-vps.sh` | Turnkey box setup. |
-| `ROADMAP.md` | The state, the open work, and the order to do it in. |
 
 ---
 

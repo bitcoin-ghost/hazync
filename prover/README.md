@@ -7,7 +7,7 @@ verifies receipts), and the test scaffolding.
 
 > **Just want to prove a block?** Follow **[`../CONTRIBUTING.md`](../CONTRIBUTING.md)** — it takes you
 > from nothing to your first proof with one build command. This README is for driving the prover
-> directly. The full operator's guide is **[`../PROVING.md`](../PROVING.md)**.
+> directly. The full operator's guide is **[`PROVING.md`](../docs/PROVING.md)**.
 
 ## Layout
 
@@ -60,6 +60,6 @@ HAZYNC_BLOCK=741000 HAZYNC_WITNESS_DIR=/w ./target/release/host prove-full
 ./target/release/host adversarial
 ```
 
-See [`../PROVING.md`](../PROVING.md) for the complete command reference (SNARK-wrap, tip protocol,
-the archive-node witness bridge) and [`../SECURITY.md`](../SECURITY.md) for what the adversarial suite
+See [`PROVING.md`](../docs/PROVING.md) for the complete command reference (SNARK-wrap, tip protocol,
+the archive-node witness bridge) and [`SECURITY.md`](../SECURITY.md) for what the adversarial suite
 checks.
