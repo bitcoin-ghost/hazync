@@ -4,71 +4,57 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 
 ## What you need
 
-- A Linux machine, Ubuntu 22.04 or 24.04. A cloud GPU box works well.
-- An NVIDIA GPU if you can get one. It makes proving about twenty times faster. No GPU still works for the early blocks, it is just slower.
-- Roughly 16 GB of RAM and 80 GB of disk for the one-time build.
-- About 25 minutes for the build the first time. After that, an early block proves in seconds on a GPU; a full range of blocks takes proportionally longer.
+- A Linux machine (x86-64), Ubuntu 24.04+ (glibc 2.39+) for the prebuilt binaries. A cloud GPU box works well.
+- An NVIDIA GPU + the CUDA 12.6 runtime for fast proving. No GPU still works (the CPU binary proves the early blocks, just slower).
+- **No build.** Grab the prebuilt binary below — proving an early block takes seconds on a GPU.
 
 ## Minimum spec, by what you want to do
 
 | You want to | You need |
 |-------------|----------|
-| Verify a proof someone else made | Any Linux box, no GPU, a couple of GB of RAM |
-| Prove early or small blocks | 16 GB RAM to build, an NVIDIA GPU ideally, 80 GB disk |
+| Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done |
+| Prove early or small blocks | An NVIDIA GPU + CUDA 12.6 (or the CPU binary, slower) |
 | Prove big modern blocks (thousands of inputs) | 64 GB+ RAM and a serious GPU |
 | Run your own coordinator | A cheap 2-core, 4 GB box, no GPU |
 
-## Step 1: get the code
+## Step 1: get the prover (no build needed)
+
+Download the prebuilt prover — it's the **canonical guest**, so the coordinator accepts your proofs. Needs an NVIDIA GPU + the CUDA 12.6 runtime.
 
 ```
-git clone https://github.com/bitcoin-ghost/hazync
-cd hazync
-```
-
-## Step 2: build it, one command
-
-This installs everything it needs (the RISC0 toolchain, CUDA, Bitcoin Core) and compiles the prover. It takes about 25 minutes, so leave it running.
-
-```
-GPU=1 REPO_DIR=$PWD ./provision-vps.sh
-```
-
-No GPU? Drop the `GPU=1`:
-
-```
-REPO_DIR=$PWD ./provision-vps.sh
-```
-
-## Step 3: install the signing library
-
-```
+# the prover binary (canonical guest, GPU)
+curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-v0.4.0-x86_64-linux-gnu-cuda
+chmod +x host
+# the contributor CLI + signing library
+curl -L -o hazync https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/hazync
+chmod +x hazync
 sudo apt install -y python3-cryptography
 ```
 
-## Step 4: set your name and point at the party
+**No GPU?** Use the CPU binary instead (`hazync-host-v0.4.0-x86_64-linux-gnu`) — it proves too, just slower.
+
+> **Building from source instead?** You *must* build the **canonical guest** (via `reproduce/Dockerfile`, or the pinned inputs at fixed paths — see the repo README) so your `METHOD_ID` matches `reproduce/METHOD_ID`. If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
+
+## Step 2: set your name and point at the party
 
 ```
 export COORD_URL=https://bitcoinghost.org/hazync
-export HAZYNC_HOST=$PWD/prover/target/release/host
+export HAZYNC_HOST=$PWD/host
 export WITNESS_DIR=$PWD/w
-./coordinator/hazync id yourname
+./hazync id yourname
 ```
 
 Your name can be anything. It is tied to a signing key the tool makes for you and keeps in `~/.hazync`, so nobody else can claim your blocks. Back that folder up if you care about keeping the same identity.
 
-## Step 5: prove a range
+## Step 3: prove
 
 ```
-./coordinator/hazync run
+./hazync run              # picks the next open range near the frontier
+./hazync run 0-999        # or a specific range
+./hazync run 5            # or a single block
 ```
 
-That asks the coordinator for the next open range near the frontier, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a line starting with `✓`, your name is on the board at https://bitcoinghost.org/hazync.
-
-The party proves the chain forward from genesis, so you take a range near the current frontier. You can see the open ranges on the board. Want a specific one? Pass it:
-
-```
-./coordinator/hazync run 0-999
-```
+`run` claims the work, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
 
 Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block is not something a fresh contributor can prove: the coordinator serves witnesses for its window near the frontier, and proving needs the chain up to that point.
 

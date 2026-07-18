@@ -221,7 +221,12 @@ def verify_receipt(receipt: bytes, rng):
         # take the single line the verifier prints (it starts with RANGE-OK) — no free-text can inject keys
         line = next((l for l in out.splitlines() if l.startswith("RANGE-OK")), None)
         if r.returncode != 0 or line is None:
-            return False, "receipt rejected (not a valid proof): " + (r.stdout + r.stderr).decode(errors="replace")[-160:], None
+            both = (r.stdout + r.stderr).decode(errors="replace")
+            if "METHOD_ID" in both or "image id" in both:   # friendlier: the common contributor mistake
+                return False, ("receipt rejected: your prover's guest image id (METHOD_ID) does not match this "
+                               "coordinator's — you built a different guest. Use the prebuilt release binary, or "
+                               "the reproducible build (reproduce/Dockerfile); expected id is in reproduce/METHOD_ID."), None
+            return False, "receipt rejected (not a valid proof): " + both[-160:], None
         kv = dict(t.split("=", 1) for t in line[len("RANGE-OK"):].split() if "=" in t)
         lo, hi = int(kv["lo"]), int(kv["hi"])
         if lo != rng["lo"] or hi != rng["hi"]:
