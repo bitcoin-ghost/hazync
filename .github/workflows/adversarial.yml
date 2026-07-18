@@ -53,3 +53,16 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host check-bip30
+
+  reproducible-image-id:
+    # Build the guest in the hermetic container (fixed paths) and print its METHOD_ID. This id must
+    # match a local container build — the cross-machine reproducibility check for the guest image id.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build reproducible container (guest at fixed paths)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: docker build --secret id=gh_token,env=GITHUB_TOKEN -t hazync-repro -f reproduce/Dockerfile .
+      - name: Print reproducible METHOD_ID (must match a local container build)
+        run: docker run --rm hazync-repro

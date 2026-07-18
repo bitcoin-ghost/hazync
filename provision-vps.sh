@@ -8,13 +8,17 @@
 #         GPU=1 ./provision-vps.sh      # also set up CUDA proving (needs an NVIDIA GPU + driver)
 set -euo pipefail
 
+# Run privileged steps with sudo on a normal box; skip it when already root (e.g. in the
+# reproducible-build container), where sudo may be absent.
+SUDO="sudo"; { [ "$(id -u)" = "0" ] || ! command -v sudo >/dev/null; } && SUDO=""
+
 REPO_DIR="${REPO_DIR:-$HOME/hazync-zkvm}"      # where this repo is checked out on the box
 WORK="${WORK:-$HOME/hazync-build}"             # scratch for Core clones + the assembled project
 CORE_TAG="v28.0"
 
 echo "== 1. system packages =="
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git curl ca-certificates pkg-config libssl-dev clang lld python3 protobuf-compiler
+$SUDO apt-get update
+$SUDO apt-get install -y build-essential cmake git curl ca-certificates pkg-config libssl-dev clang lld python3 protobuf-compiler
 
 echo "== 2. Rust =="
 if ! command -v cargo >/dev/null; then
@@ -76,12 +80,12 @@ if [ "${GPU:-0}" = "1" ]; then
     tmp="$(mktemp -d)"
     curl -fsSL -o "$tmp/cuda-keyring.deb" \
       "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
-    sudo dpkg -i "$tmp/cuda-keyring.deb"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq cuda-toolkit-12-6
+    $SUDO dpkg -i "$tmp/cuda-keyring.deb"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq cuda-toolkit-12-6
     rm -rf "$tmp"
   fi
-  sudo ln -sfn /usr/local/cuda-12.6 /usr/local/cuda   # make the build pick 12.6, not a shipped 13.x
+  $SUDO ln -sfn /usr/local/cuda-12.6 /usr/local/cuda   # make the build pick 12.6, not a shipped 13.x
   export CUDA_PATH=/usr/local/cuda-12.6
   export PATH="/usr/local/cuda-12.6/bin:$PATH"
   export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"

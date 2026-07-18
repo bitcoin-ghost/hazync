@@ -1,0 +1,8 @@
+# Keep the build context small and the build hermetic: the container fetches its own pinned Core/secp
+# and builds fresh, so none of these belong in it.
+.git
+**/target
+**/__pycache__
+*.log
+coordinator/proofs
+coordinator/state

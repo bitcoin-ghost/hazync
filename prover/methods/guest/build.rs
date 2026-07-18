@@ -42,6 +42,11 @@ fn main() {
     let core = format!("{base}/bitcoin-core/src");
     let shim = format!("{base}/coreshim");
 
+    // Reproducible builds: remap the absolute source root to a fixed virtual path so __FILE__ and
+    // debug strings baked into the compiled Core/secp objects don't carry $HAZYNC_BASE / the build
+    // machine's home dir — which would otherwise change the guest image id (METHOD_ID) per machine.
+    let fpm = format!("-ffile-prefix-map={base}=/hazync");
+
     let bin = find_riscv_bin();
     let pfx = if bin.is_empty() { String::new() } else { format!("{bin}/") };
     let gcc = format!("{pfx}riscv32-unknown-elf-gcc");
@@ -52,6 +57,7 @@ fn main() {
     cc::Build::new()
         .compiler(&gcc).archiver(&ar)
         .flag("-march=rv32im").flag("-mabi=ilp32").opt_level(2).warnings(false)
+        .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
         .define("ECMULT_WINDOW_SIZE", "15").define("ECMULT_GEN_KB", "22")
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
@@ -77,6 +83,7 @@ fn main() {
     b.cpp(true).compiler(&gpp).archiver(&ar)
         .flag("-march=rv32im").flag("-mabi=ilp32").flag("-std=c++20")
         .flag("-fexceptions").flag("-fno-rtti").opt_level(2).warnings(false)
+        .flag(&fpm)
         .include(&core).include(&shim).include(format!("{secp}/include"));
     for tu in core_tus { b.file(format!("{core}/{tu}")); }
     b.file("verify_input.cpp");
