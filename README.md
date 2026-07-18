@@ -114,6 +114,23 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh
 Single-block proofs: `check-full` (execute-mode validation) / `prove-full` (STARK) with `HAZYNC_BLOCK`.
 Regression: `./target/release/host regress`.
 
+### Verifying a proof — and the reproducible image id
+
+A proof verifies against a **guest image id** (`METHOD_ID`) — the hash of the exact zkVM program. The
+verifier must pin the *real* id (never trust the id carried in a proof, or a forged rubber-stamp guest
+would verify itself). That id is only meaningful if anyone can reproduce it, so the guest builds
+**reproducibly**: pinned toolchain + Core v28 + secp256k1 v0.5.1 + committed lockfile, built at fixed
+paths in a container. The canonical id is checked in at [`reproduce/METHOD_ID`](reproduce/METHOD_ID)
+and verified bit-for-bit across machines (a CI job asserts it never drifts):
+
+```bash
+docker build -f reproduce/Dockerfile -t hazync-repro .   # → the canonical METHOD_ID, on any machine
+./target/release/host method-id                          # print your build's id
+./target/release/host verify-any proof.bin               # RANGE-OK, or a clear image-id-mismatch note
+```
+
+See `PROVING.md` → "the guest image id (METHOD_ID) & reproducibility" for the full story.
+
 ## Demonstrated (see `prover/evidence/`)
 
 - **Block 741000** — a real modern full block (670 inputs, segwit + taproot, witness commitment):
@@ -164,6 +181,7 @@ Everything else is deep-dive reference under **`docs/`**.
 | `accumulator/` | The Utreexo UTXO accumulator crate + its exhaustive tests. |
 | `prover/` | Guest (real Core + engine), host (driver), `fetch_block.py`, `rangecluster.sh`. |
 | `provision-vps.sh` | Turnkey box setup. |
+| `reproduce/` | Hermetic build container + the canonical `METHOD_ID` — reproduce the guest image id anywhere. |
 
 ---
 
