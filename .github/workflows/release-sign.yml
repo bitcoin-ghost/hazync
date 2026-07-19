@@ -1,0 +1,72 @@
+name: Sign release
+
+# PGP-sign a release's binaries so downloads are verifiable against the maintainer key
+# (fingerprint in SECURITY.md), mirroring the bitcoin-ghost/ghost release signing.
+#
+# Hazync binaries are built on a GPU box and uploaded to the release (not built in CI), so this
+# workflow does NOT build — it downloads the release assets, writes a SHA256SUMS manifest over the
+# binaries, PGP-signs it, and uploads SHA256SUMS + SHA256SUMS.asc back onto the release.
+#
+# Runs automatically when a release is published, and can be run manually against an existing tag
+# (Actions → Sign release → Run workflow → enter the tag) to sign or re-sign a past release.
+#
+# REQUIRES two repo secrets (same values as bitcoin-ghost/ghost): GPG_PRIVATE_KEY (armoured private
+# key) and GPG_PASSPHRASE. Until they are set the sign step fails with an actionable message.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sign (e.g. v0.5.2)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.release.tag_name || inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist && cd dist
+          gh release download "${{ steps.tag.outputs.tag }}" -R "${{ github.repository }}" \
+            -p 'hazync-host-x86_64-linux-gnu' -p 'hazync-host-x86_64-linux-gnu-cuda' --clobber
+          ls -la
+
+      - name: Write SHA256SUMS over the binaries
+        run: |
+          cd dist
+          sha256sum hazync-host-x86_64-linux-gnu hazync-host-x86_64-linux-gnu-cuda > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+
+      - name: PGP-sign SHA256SUMS
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::GPG_PRIVATE_KEY / GPG_PASSPHRASE secrets are not set on this repo."
+            echo "Add them once (same values as bitcoin-ghost/ghost) to enable signing — see SECURITY.md."
+            exit 1
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
+            --armor --detach-sign --output SHA256SUMS.txt.asc SHA256SUMS.txt
+          gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+
+      - name: Upload signed manifest to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" SHA256SUMS.txt SHA256SUMS.txt.asc \
+            -R "${{ github.repository }}" --clobber
+          echo "Signed SHA256SUMS + .asc uploaded to ${{ steps.tag.outputs.tag }}."
