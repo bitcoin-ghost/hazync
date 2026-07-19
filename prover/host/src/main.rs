@@ -457,7 +457,17 @@ fn build_full() -> (ChainState, BlockWitness) {
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
         prev_nbits: bits, prev_time: time.saturating_sub(600), epoch_start: time.saturating_sub(600 * 1000),
-        recent_times: (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect(), self_id: METHOD_ID,
+        // Real prev-11 block timestamps (median = MTP(height-1), the spend block's BIP68-time/BIP113
+        // window) when the fetcher/bridge supplies them; else the benign placeholder for pre-S2 vectors
+        // (130000/140000) that carry no `recent_times`. Lets `check-full` validate an isolated real
+        // time-locked block; the IBD/chain proving path derives this itself and never uses build_full.
+        recent_times: {
+            let rt: Vec<u32> = j["recent_times"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect())
+                .unwrap_or_default();
+            if rt.is_empty() { (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect() } else { rt }
+        },
+        self_id: METHOD_ID,
     };
     // COV-1 negative-test hook (test-only, inert unless HAZYNC_COV1_BADTIME set): make the previous 11
     // blocks' median-time-past equal THIS block's timestamp, so `time_ok = block_time > prev_mtp` is

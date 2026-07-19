@@ -111,9 +111,22 @@ def main():
             print(f"  meta {k}/{len(todo)}", flush=True)
     json.dump({p: meta[p] for p in meta if meta[p] is not None}, open(cache_path, "w"))
 
+    # Previous-11 block timestamps (blocks h-11..h-1); their median = MTP(h-1) — the spend block's
+    # BIP68-time / BIP113 window. Walk back via previousblockhash (<=11 block/<hash> requests). Fewer
+    # than 11 near genesis is fine (Core's GetMedianTimePast uses min(11, height); order-independent).
+    recent_times = []
+    ph = b.get("previousblockhash")
+    for _ in range(11):
+        if not ph: break
+        pj = json.loads(get("block/" + ph))
+        recent_times.append(pj["timestamp"])
+        ph = pj.get("previousblockhash")
+    recent_times.reverse()
+
     out = {"height": b["height"], "version": b["version"], "time": b["timestamp"],
            "bits": b["bits"], "nonce": b["nonce"], "prev": b["previousblockhash"],
-           "merkle": b["merkle_root"], "coinbase_hex": tx_bytes[0].hex(), "txs": []}
+           "merkle": b["merkle_root"], "coinbase_hex": tx_bytes[0].hex(),
+           "recent_times": recent_times, "txs": []}
     for idx in range(1, ntx):
         assert len(tx_json[idx]["vin"]) == _nin(tx_bytes[idx]), f"input-count misalignment at {idx}"
         prevs = []
