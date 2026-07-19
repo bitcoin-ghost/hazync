@@ -186,7 +186,7 @@ retarget/MTP/PoW math, weight/sigop formulas, taproot/annex path, test-only env 
 A fourth pass (three reviewers: C++/Core integration + patches, Utreexo accumulator + primitive math,
 whole-chain no-inflation + UTXO carry) found **no new soundness hole**. Confirmed sound: the `VerifyScript`
 invocation (correct precomputed data / amount / sigversion for legacy/segwit/taproot), ECDSA is real
-libsecp256k1 (k256 linked but off the consensus path), the SHA-256 accelerator is byte-identical, the
+libsecp256k1 (the k256 acceleration experiment has since been removed — the guest is pure Core), the SHA-256 accelerator is byte-identical, the
 serialize shim is consensus-neutral, static-ctor tagged-hash init covers all paths, the accumulator
 delete/proof handling and `num_leaves`/root recomputation, all primitive math (`check_pow`/`SetCompact`,
 `add_work`, `calc_next_bits` clamping, subsidy halving, merkle root), global no-inflation, and UTXO carry

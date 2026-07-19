@@ -2,8 +2,8 @@
 
 > **Historical working notes.** This is the original design/integration plan and reads as a changelog.
 > Some of it has been overtaken: recursion (listed here as a future item) is fully implemented,
-> hardened, and demonstrated; and k256/`patches/0003` (described here as "done & the lever we needed")
-> is an *opt-in* accelerator that is **not** applied in the sound build. For the current truth see
+> hardened, and demonstrated; and the k256/`patches/0003` accelerator (described here as "done & the
+> lever we needed") has been **removed from the guest** (2026-07-19) to keep it pure-Core. For the current truth see
 > `SOUNDNESS.md`, `SECURITY.md`, `PROVING.md`, and `ACCELERATION.md`.
 
 *How the "real Core VerifyScript in a zkVM" result becomes the Hazync validity-proof engine: block
@@ -351,10 +351,15 @@ Instrumented on the working spike. **The crypto dominates; batching and SHA do n
 Post-SHA-accel per-input: P2WPKH 2.19M→2.08M, taproot 2.19M→2.07M, tapscript 3.67M→3.55M
 (all still `result=[1]`). So **batching (fixed cost tiny) and SHA (5%) are NOT the levers — EC is.**
 
-### The EC-acceleration lever — DONE & MEASURED (2026-07-14, option B)
-Swapped Core's `CPubKey::Verify` ECDSA path to RISC0's accelerated `k256` (guest exposes
-`k256_ecdsa_verify`; `pubkey.cpp` keeps Core's lax-DER parse + low-S normalize, then calls it —
-patch `0003-pubkey-ecdsa-verify-via-k256-accel.patch`). **Head-to-head, same sig, in-guest:**
+### The EC-acceleration lever — MEASURED, but the accelerator was since REMOVED
+
+> **2026-07-19:** the k256 acceleration described below was **removed from the guest** to keep it
+> pure-Core (`k256_ecdsa_verify`, the k256 deps, and `patches/0003` are gone — see `ACCELERATION.md`).
+> The numbers are retained as the record of what EC acceleration would buy a future field-backend rework.
+
+Swapped Core's `CPubKey::Verify` ECDSA path to RISC0's accelerated `k256` (guest exposed
+`k256_ecdsa_verify`; `pubkey.cpp` kept Core's lax-DER parse + low-S normalize, then called it —
+former patch `0003-pubkey-ecdsa-verify-via-k256-accel.patch`). **Head-to-head, same sig, in-guest:**
 
 | ECDSA verify | cycles/verify |
 |---|---|

@@ -135,6 +135,6 @@ validated (block 170); applying it to the chain/range output is future work.
 
 In the sound build only SHA-256 is routed to the RISC0 accelerator (patch 0002); ECDSA and Schnorr
 run through the compiled, unmodified `libsecp256k1`, unaccelerated. Speeding up the EC verify is open
-work — the k256 substitution (`patches/0003`) is measured but reintroduces the reimplementation
-question and is **not** applied in the sound build; the bigint2 field-mul intercept was prototyped and
-disproven (~10% slower). See [`ACCELERATION.md`](ACCELERATION.md).
+work — the k256 substitution was **removed from the guest** (2026-07-19; it reintroduced the
+reimplementation question), and the bigint2 field-mul intercept was prototyped and disproven (~10%
+slower). The guest is pure Core; acceleration analysis in [`ACCELERATION.md`](ACCELERATION.md).

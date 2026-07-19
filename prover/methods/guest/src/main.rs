@@ -167,24 +167,6 @@ pub extern "C" fn secp256k1_default_illegal_callback_fn(_msg: *const u8, _data: 
 #[no_mangle]
 pub extern "C" fn secp256k1_default_error_callback_fn(_msg: *const u8, _data: *mut core::ffi::c_void) {}
 
-// RISC0-accelerated secp256k1 ECDSA verify (k256, using the EC precompile). NOT on the sound-build
-// consensus path: reachable only when patch 0003 is applied (it is not — provision applies 0001+0002
-// only) or from the compiled-out bench. Kept linked for the acceleration experiment (ACCELERATION.md).
-// msg = 32-byte prehash, sig = 64-byte compact (low-S), pk = SEC1. Returns 1 valid, 0 invalid, neg on parse error.
-#[no_mangle]
-pub extern "C" fn k256_ecdsa_verify(msg: *const u8, sig: *const u8, pk: *const u8, pk_len: usize) -> i32 {
-    use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
-    let msg = unsafe { core::slice::from_raw_parts(msg, 32) };
-    let sig = unsafe { core::slice::from_raw_parts(sig, 64) };
-    let pk = unsafe { core::slice::from_raw_parts(pk, pk_len) };
-    let vk = match VerifyingKey::from_sec1_bytes(pk) { Ok(v) => v, Err(_) => return -1 };
-    let s = match Signature::from_slice(sig) { Ok(s) => s, Err(_) => return -2 };
-    match vk.verify_prehash(msg, &s) {
-        Ok(_) => 1,
-        Err(_) => 0,
-    }
-}
-
 // ---- Block-proof wire format (matches the host structs) ----
 #[derive(Deserialize)]
 struct WireProof {
@@ -957,29 +939,6 @@ fn multi_check() {
     env::commit(&out);
 }
 
-// Legacy per-input batch (n inputs, no accumulator) — kept for single-spend cycle measurement.
-fn legacy() {
-    let n: u32 = env::read();
-    let mut results: Vec<i32> = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let raw_tx: Vec<u8> = env::read();
-        let input_idx: u32 = env::read();
-        let prevouts: Vec<u8> = env::read();
-        let flags: u32 = env::read();
-        let mut leaf = [0u8; 32];
-        let r: i32 = unsafe {
-            verify_input(
-                raw_tx.as_ptr(), raw_tx.len() as u32, input_idx,
-                prevouts.as_ptr(), prevouts.len() as u32, flags,
-                0, 0, 0,
-                leaf.as_mut_ptr(),
-            )
-        };
-        results.push(r);
-    }
-    env::commit(&results);
-}
-
 // ---- Segmentation: chunk (map) + aggregate (reduce) ----
 #[derive(Deserialize)]
 struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
@@ -1086,7 +1045,7 @@ fn main() {
         7 => fold_range(),
         8 => test_locks(),
         9 => test_merkle(),
-        _ => legacy(),
+        _ => panic!("unknown guest mode {mode}"),
     }
 }
 

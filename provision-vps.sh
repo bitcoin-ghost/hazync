@@ -48,7 +48,7 @@ mkdir -p "$WORK"
 # a floating master would drift the METHOD_ID — and diverge from the libsecp Core actually ships.
 [ -d "$WORK/secp256k1" ]    || git clone --depth 1 -b v0.5.1 https://github.com/bitcoin-core/secp256k1.git "$WORK/secp256k1"
 
-echo "== 5. apply the target shims (pure-Core build: patches 0001 + 0002 only; NOT 0003/k256) =="
+echo "== 5. apply the target shims (patches 0001 + 0002 — portability only, no consensus-logic change) =="
 git -C "$WORK/bitcoin-core" checkout -- src/serialize.h src/crypto/sha256.cpp 2>/dev/null || true
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0001-serialize-ilp32-int-overload.patch"
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0002-sha256-route-through-risc0-accelerator.patch"

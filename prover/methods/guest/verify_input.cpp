@@ -18,10 +18,6 @@
 #include <arith_uint256.h>
 #include <hash.h>
 #include <uint256.h>
-#include "ecdsa_vec.h"
-
-// RISC0-accelerated ECDSA verify (Rust k256, guest side).
-extern "C" int k256_ecdsa_verify(const uint8_t* msg, const uint8_t* sig, const uint8_t* pk, size_t pk_len);
 
 // Minimal byte reader satisfying the Stream interface Core's Unserialize needs (no streams.h).
 struct MiniReader {
@@ -420,25 +416,7 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             const uint8_t* prevouts, unsigned prevouts_len,
                             unsigned flags,
                             uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp,
-                            uint8_t* out_leaf /* 32 bytes, may be null for bench modes */) {
-    // BENCH-ONLY: isolate one ECDSA verify — real libsecp256k1 (0xB0) vs accelerated k256 (0xB1). This
-    // path returns a fixed test-vector result and does NOT run VerifyScript, so it must never be present
-    // in a consensus build. It is already unreachable (block_script_flags never yields 0xB0/0xB1), but
-    // compiling it out under a bench-only define removes the "return valid" path from the binary entirely.
-    // Enable for benchmarking with:  cc::Build ... .define("HAZYNC_ECDSA_BENCH", None)
-#ifdef HAZYNC_ECDSA_BENCH
-    if (flags == 0xB0) {
-        secp256k1_pubkey pubkey;
-        secp256k1_ecdsa_signature sig;
-        if (!secp256k1_ec_pubkey_parse(secp256k1_context_static, &pubkey, ECV_PK, sizeof(ECV_PK))) return -1;
-        if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_context_static, &sig, ECV_SIG)) return -2;
-        return secp256k1_ecdsa_verify(secp256k1_context_static, &sig, ECV_MSG, &pubkey);
-    }
-    if (flags == 0xB1) {
-        return k256_ecdsa_verify(ECV_MSG, ECV_SIG, ECV_PK, sizeof(ECV_PK));
-    }
-#endif
-
+                            uint8_t* out_leaf /* 32 bytes */) {
     MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
                  reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
     CMutableTransaction mtx;

@@ -102,7 +102,8 @@ experts (who verify) and everyone else (who spread the word, contribute compute,
 
 - **Acceleration** (`ACCELERATION.md`): the naive "route the multiply through the precompile" is
   disproven (byte-correct but ~10% *slower* — conversion overhead). Sound-and-fast needs a libsecp
-  field-backend rework (uncertain it beats k256). Decision: **stay pure-Core** for soundness; revisit
-  only if a full run's economics demand it. zk-ASICs / better hardware will lower cost over time.
+  field-backend rework. Decision: **stay pure-Core** for soundness — the k256 accelerator was removed
+  from the guest (2026-07-19). Revisit only if a full run's economics demand it; zk-ASICs / better
+  hardware will lower cost over time.
 - **Barebones validating node**: Hazync is the engine for a stateless full-security node — verify one
   proof, hold the accumulator, follow the tip — no archive, no re-execution. Natural downstream product.

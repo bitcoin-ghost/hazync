@@ -1,10 +1,16 @@
 # Task: accelerate libsecp256k1 modular multiplication via the RISC0 bigint2 precompile
 
+> **Update 2026-07-19 — the k256 experiment has been REMOVED from the guest.** `k256_ecdsa_verify`, the
+> `k256`/`crypto-bigint` dependencies, the `HAZYNC_ECDSA_BENCH` branch, and `patches/0003` are gone. The
+> sound guest is now **pure Core + the accumulator, nothing else** — no alternative EC implementation
+> linked in. This doc is kept as the acceleration *analysis*: why EC acceleration is hard, and why
+> pure-Core is the sound baseline. Any future accelerator starts from here.
+
 **Status:** PROTOTYPED end-to-end on WSL2 (no GPU needed — `sys_bigint` emulates in execute mode).
 **Result: the naive field-mul intercept is byte-correct but ~10% SLOWER** — see "Prototype result"
 below. The cheap version is disproven; the sound-and-fast path is a bigger job (a new libsecp field
-backend). **Priority downgraded** accordingly — k256 (`patches/0003`, proven 6×) remains the pragmatic
-accelerator, pure Core the sound baseline.
+backend). k256 was the measured 6× option but has been removed (it reintroduced the reimplementation
+question); pure Core is the sound baseline.
 
 ## Step 0 — recon findings (2026-07-15)
 
