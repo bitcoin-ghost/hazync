@@ -48,7 +48,7 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host adversarial
-      - name: Consensus reject-path negative tests (COV-1 time-too-old, COV-2 merkle CVE-2012-2459)
+      - name: Consensus reject-path negative tests (COV-1 time-too-old, COV-2 merkle CVE-2012-2459, SEC-2 forged accumulator inclusion)
         run: |
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"

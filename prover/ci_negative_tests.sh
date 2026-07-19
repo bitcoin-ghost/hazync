@@ -33,6 +33,16 @@ if HAZYNC_COV1_BADTIME=1 HAZYNC_BLOCK="$BLK" "$H" check-full >/dev/null 2>&1; th
 fi
 pass "COV-1 time-too-old rejected; honest accepted"
 
+# --- SEC-2: forged accumulator inclusion (position lie) -------------------------------------------
+# The Utreexo accumulator is the one non-Core trust component. HAZYNC_SEC2_BADPOS corrupts a spend's
+# claimed global position while leaving its inclusion proof honest — the exact inconsistency an honest
+# witness-builder cannot express. The guest's hardened `delete` must reject it (all_ok=false), so
+# check-full exits non-zero. (block_130000 has spends, so the first-spend corruption fires.)
+if HAZYNC_SEC2_BADPOS=1 HAZYNC_BLOCK="$BLK" "$H" check-full >/dev/null 2>&1; then
+  fail "SEC-2 attack: a forged accumulator position should be REJECTED (non-zero exit)"
+fi
+pass "SEC-2 forged accumulator inclusion rejected; honest accepted (COV-1 control above)"
+
 # --- SEC-1: BIP141 witness commitment (heavy: block 741000 in execute mode) -------------------------
 # Opt-in — the big block is slow to execute (per-input ECDSA emulation). Enable in a nightly/heavy job.
 if [ "${HAZYNC_CI_HEAVY:-0}" = "1" ]; then

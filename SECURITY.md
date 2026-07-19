@@ -300,8 +300,12 @@ single-block ranges; `by_in` first-wins can understate the frontier) are pre-exi
   `root_next(N−1) == root_prev(N)` from a trusted anchor; operationally the archive-node bridge drives
   the accumulator from the real coin set. Stated plainly so results aren't over-read.
 - **S4 — BIP34 / BIP30.** Both **added and validated on 741000** (`bip34_ok` / `bip30_ok`). BIP68-time
-  remains the one open **soundness** item (the placeholder `coin_mtp = 0` is a false-accept for that
-  rule, not conservative — needs real `coin_mtp`, free with the bridge).
+  is **fixed** too: the block-proving path commits the coin's real creation median-time-past (`coin_mtp`,
+  leaf-committed and unforgeable) and the relative-lock branch is gated on `spend_height >= 419328` +
+  `version >= 2` with the disable bit clear — matching Core's CSV activation (`check_input_locks` in
+  `verify_input.cpp`). The earlier `coin_mtp = 0` placeholder only ever existed in the standalone
+  `build_full` diagnostic harness (fabricated anchor), never the real IBD/chain proving path that
+  produces published proofs. Consistent with the S2/BIP68 rows in the table above.
 - **C1 — regression harness.** **Added:** `check-full` / `regress` run known blocks + the adversarial
   inflation case in execute mode (seconds, no proving) and assert the flags; standard pre-flight before
   any GPU prove.
