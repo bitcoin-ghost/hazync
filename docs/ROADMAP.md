@@ -65,10 +65,12 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   `Cargo.lock`; `host method-id` + legible mismatch error in `verify-any`/`verify-range`; and a hermetic
   container (`reproduce/Dockerfile`) that builds the guest at FIXED paths (stock `RISC0_USE_DOCKER` was
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
-  bit-for-bit across machines** (local WSL2 == GitHub CI): canonical id `d1fc4065…` checked in at
-  `reproduce/METHOD_ID`, asserted by the `reproducible-image-id` CI job.
-  - [ ] **Re-prove** the chain on this reproducible guest (the current ~2796 proofs were made on the
-    old non-reproducible guest and will be superseded). Needs a fresh GPU box (`provision-vps.sh GPU=1`).
+  bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
+  `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
+  `c029cee4…` (v0.5.0, minimal pure-Core guest); the earlier `d1fc4065…` was superseded when the k256
+  EC-accel experiment + unreachable `legacy()` mode were stripped.
+  - [x] **Re-prove** the chain on the reproducible guest (2026-07-19): the old `d1fc4065`-era proofs were
+    archived and the board is being re-proven on `c029cee4` (fresh GPU box, `provision-vps.sh GPU=1`).
 
 ## 3. External review + writeup
 

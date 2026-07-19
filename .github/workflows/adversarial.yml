@@ -48,6 +48,11 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host adversarial
+      - name: Consensus reject-path negative tests (COV-1 time-too-old, COV-2 merkle CVE-2012-2459)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && HAZYNC_HOST=./target/release/host ./ci_negative_tests.sh
       - name: BIP30 grandfathered overwrite (real block 91842)
         run: |
           . "$HOME/.cargo/env"

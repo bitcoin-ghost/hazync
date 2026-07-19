@@ -73,6 +73,14 @@ def post(path, body):
 def get(path):
     return _open(urllib.request.Request(COORD + path), timeout=60).read()
 
+def witness_in_window(blk):
+    # True if the coordinator currently serves the witness for `blk` (i.e. the block is inside the rolling
+    # window a fresh contributor can prove). A cheap pre-flight so `run` never claims a range it can't fetch.
+    try:
+        get(f"/api/witness/{blk}"); return True
+    except urllib.error.HTTPError:
+        return False
+
 def fetch_witnesses(lo, hi):
     # the prover replays blocks 1..hi to rebuild the accumulator, so it needs every witness up to hi.
     # pull any we don't already have from the coordinator's rolling window.
@@ -168,6 +176,16 @@ def cmd_run(args):
         rng = cmd_pick([])
         if not rng: sys.exit("nothing open to claim")
         args = [rng]
+    # Fail fast BEFORE claiming: proving replays blocks 1..hi, so the whole range must be inside the
+    # coordinator's served witness window. Probing the top block avoids claiming a range (locking it under
+    # the claim TTL) only to 404 mid-fetch. The window is contiguous from block 1, so hi is the binding edge.
+    try:
+        hi = [int(x) for x in args[0].split("-")][-1]
+    except Exception:
+        sys.exit(f"invalid range '{args[0]}' (use 'N' or 'lo-hi')")
+    if not witness_in_window(hi):
+        sys.exit(f"range {args[0]} is outside the coordinator's served witness window (block {hi} has no "
+                 f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
     cmd_claim(args); cmd_prove(args); cmd_submit(args)
 
 def main():

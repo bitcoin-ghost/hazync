@@ -2,18 +2,18 @@
 
 Verify the whole Bitcoin chain from one small proof, instead of re-executing every block from genesis. The groundwork for a full node that syncs in minutes.
 
-Hazync runs Bitcoin Core's **own, unmodified** consensus code — `interpreter.cpp`, `SignatureHash`, `libsecp256k1` — inside a zero-knowledge VM, and proves every block is valid. The proofs fold: genesis to tip collapses into one succinct receipt you can check in milliseconds. No re-execution, no trusting peers.
+Hazync runs Bitcoin Core's **own, unmodified** consensus code — `interpreter.cpp`, `SignatureHash`, `libsecp256k1` — inside a zero-knowledge VM, and proves every block is valid. The proofs fold: block by block, genesis to tip collapses into one succinct receipt you check in milliseconds. No re-execution, no trusting peers.
 
 It is **not a reimplementation.** Every other validity-proof effort rewrites consensus and inherits the question "does your rewrite match Core in every edge case, forever?" Hazync runs Core, so it doesn't.
 
 ## Verify a proof
 
-No GPU, no build, no clone. Linux x86-64:
+No GPU, no build, no clone. Linux x86-64, glibc 2.39+ (Ubuntu 24.04+; on older distros build from source or use `reproduce/Dockerfile`):
 
 ```bash
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
 curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
-./host verify-any proof.bin        # → RANGE-OK
+./host verify-any proof.bin        # → prints a line starting with RANGE-OK
 ```
 
 Every proof on the [board](https://bitcoinghost.org/hazync) is public. The binary is the canonical guest — rebuild it yourself (`reproduce/Dockerfile`) and you get the same image id, byte for byte (`reproduce/METHOD_ID`).
@@ -44,6 +44,9 @@ Not done yet: the full genesis→tip backfill (a GPU-compute campaign, not new c
 - Soundness and the audit record: [`SECURITY.md`](SECURITY.md)
 - How it's built: [`docs/`](docs/)
 
----
+## Licence
 
-*Bitcoin Core is BSD/MIT; the patches are portability-only and change no consensus logic.*
+MIT (see [`LICENSE`](LICENSE)). The guest compiles in Bitcoin Core and libsecp256k1 (both MIT); the
+patches are portability-only and change no consensus logic. `prover/` carries an additional Apache-2.0
+notice for the risc0-derived build scaffolding. Third-party components are attributed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

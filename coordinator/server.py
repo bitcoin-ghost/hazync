@@ -38,8 +38,20 @@ CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim 
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
 MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
 MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
-RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes per IP per window
+RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes (POST) per IP per window
+RATE_MAX_GET = int(os.environ.get("RATE_MAX_GET", "600"))    # max reads (GET /api/*) per IP per window
 RATE_WINDOW= int(os.environ.get("RATE_WINDOW", "60"))        # rate-limit window (seconds)
+RATE_MAP_MAX = int(os.environ.get("RATE_MAP_MAX", "50000"))  # bound the rate map (evict stale keys past this)
+STATE_TTL  = float(os.environ.get("STATE_CACHE_TTL", "1.5")) # coalesce /api/state recomputes under load
+# Only honour X-Forwarded-For when the direct peer is a known proxy — otherwise any client could spoof
+# it to bypass the per-IP rate limit and grow the rate map without bound.
+TRUSTED_PROXIES = set(x.strip() for x in os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if x.strip())
+# Reserved / impersonation handles that may not be registered on the public board (normalised: letters
+# and digits only, lowercased). A takedown list of pubkeys lives in MOD_BLOCK_FILE (see blocked_pubkeys).
+HANDLE_DENY = set(x.strip().lower() for x in os.environ.get("HANDLE_DENY",
+    "satoshi,satoshinakamoto,admin,administrator,official,bitcoinghost,bitcoinghostofficial,hazync,"
+    "moderator,mod,root,system,team,support,staff").split(",") if x.strip())
+MOD_BLOCK_FILE = os.environ.get("MOD_BLOCK_FILE", os.path.join(os.path.dirname(__file__), "mod_block.txt"))
 
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -48,23 +60,47 @@ except Exception:
     HAVE_ED = False
 
 _lock = threading.Lock()
-_rate = {}          # ip -> [timestamps] sliding window, guarded by _rate_lock
+_rate = {}          # (kind, ip) -> [timestamps] sliding window, guarded by _rate_lock
 _rate_lock = threading.Lock()
+_state_cache = {"t": 0.0, "v": None}   # short-TTL cache of the serialised /api/state, guarded by _state_lock
+_state_lock = threading.Lock()
 # Bound concurrent STARK verifications. submit() runs verify-any OUTSIDE _lock (so it can't stall
 # claims/heartbeats), but without a cap a burst of submits would spawn unlimited concurrent `host
 # verify-any` subprocesses (each up to 120s + a multi-MiB receipt) and exhaust this small box's CPU/RAM.
 _verify_sem = threading.Semaphore(int(os.environ.get("VERIFY_CONCURRENCY", str(max(1, (os.cpu_count() or 2))))))
 
-def rate_ok(ip):
-    """Sliding-window per-IP write limiter. True if this write is within budget."""
+def rate_ok(ip, kind="w", limit=RATE_MAX):
+    """Sliding-window per-IP limiter (kind 'w'=writes/POST, 'r'=reads/GET). True if within budget.
+    The map is bounded: once it grows past RATE_MAP_MAX we evict keys whose window has fully aged out,
+    so a spoofed/rotating source key can't grow it without limit."""
     now = time.time()
     with _rate_lock:
-        q = [t for t in _rate.get(ip, ()) if now - t < RATE_WINDOW]
-        if len(q) >= RATE_MAX:
-            _rate[ip] = q
+        if len(_rate) > RATE_MAP_MAX:
+            for k in [k for k, v in _rate.items() if not v or now - v[-1] >= RATE_WINDOW]:
+                _rate.pop(k, None)
+        key = (kind, ip)
+        q = [t for t in _rate.get(key, ()) if now - t < RATE_WINDOW]
+        if len(q) >= limit:
+            _rate[key] = q
             return False
-        q.append(now); _rate[ip] = q
+        q.append(now); _rate[key] = q
         return True
+
+def blocked_pubkeys():
+    """Takedown list: pubkeys (hex, lowercased) to hide from the public board. One per line in
+    MOD_BLOCK_FILE ('#' comments allowed). Re-read each call so a moderator edit takes effect without a
+    restart; the file is tiny. Missing file → empty set (no moderation)."""
+    try:
+        with open(MOD_BLOCK_FILE) as f:
+            return set(l.strip().lower() for l in f if l.strip() and not l.startswith("#"))
+    except Exception:
+        return set()
+
+def handle_reserved(h):
+    """True if a handle normalises (letters+digits, lowercased) to a reserved/impersonation name that
+    may not be registered — blocks 'Satoshi Nakamoto', 'bitcoinghost official', 'admin', etc."""
+    norm = "".join(ch for ch in str(h or "").lower() if ch.isalnum())
+    return norm in HANDLE_DENY
 
 def clean_handle(h):
     """A display handle: printable, trimmed, length-capped, and stripped of HTML-significant characters
@@ -222,11 +258,14 @@ def verify_receipt(receipt: bytes, rng):
         line = next((l for l in out.splitlines() if l.startswith("RANGE-OK")), None)
         if r.returncode != 0 or line is None:
             both = (r.stdout + r.stderr).decode(errors="replace")
-            if "METHOD_ID" in both or "image id" in both:   # friendlier: the common contributor mistake
+            # The host classifies the failure: "MISMATCH" == a different guest build (the common
+            # contributor mistake); otherwise a genuinely INVALID proof (forged/tampered/corrupt). Don't
+            # mask a real forgery as a benign build mismatch — report each as what it is.
+            if "MISMATCH" in both:
                 return False, ("receipt rejected: your prover's guest image id (METHOD_ID) does not match this "
                                "coordinator's — you built a different guest. Use the prebuilt release binary, or "
                                "the reproducible build (reproduce/Dockerfile); expected id is in reproduce/METHOD_ID."), None
-            return False, "receipt rejected (not a valid proof): " + both[-160:], None
+            return False, "receipt rejected — not a valid proof (forged/tampered/corrupt): " + both[-160:], None
         kv = dict(t.split("=", 1) for t in line[len("RANGE-OK"):].split() if "=" in t)
         lo, hi = int(kv["lo"]), int(kv["hi"])
         if lo != rng["lo"] or hi != rng["hi"]:
@@ -340,6 +379,7 @@ def state():
     c = db()
     proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
+    blk = blocked_pubkeys()   # moderation takedown list — hide these pubkeys from the public board
     # board window: all verified + claimed, then a few open around the frontier
     fr = frontier_hi()
     # rolling window around the frontier: a little behind, then open blocks ahead (synthesised so the
@@ -352,7 +392,8 @@ def state():
         if lo >= TIP: break
         rid = f"{lo}-{hi}"; r = existing.get(rid)
         if r and r["status"] in ("claimed", "verified"):
-            b = {"id": rid, "lo": lo, "hi": hi, "status": r["status"], "handle": r["handle"]}
+            _h = r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"
+            b = {"id": rid, "lo": lo, "hi": hi, "status": r["status"], "handle": _h}
             if r["status"] == "claimed":
                 b["elapsed"] = int(now - (r["claimed_at"] or now))
                 b["beat"] = int(now - (r["last_beat"] or r["claimed_at"] or now))
@@ -361,22 +402,25 @@ def state():
             b = {"id": rid, "lo": lo, "hi": hi, "status": "open", "handle": None}
         board.append(b)
     leaders = [dict(id=x["pubkey"][:10], handle=x["handle"], blocks=x["blocks"])
-               for x in c.execute("SELECT * FROM contributors ORDER BY blocks DESC LIMIT 8")]
-    recent = [dict(range=s["range_id"], handle=s["handle"], verified=bool(s["verified"]),
-                   ts=s["ts"], note=s["note"])
+               for x in c.execute("SELECT * FROM contributors ORDER BY blocks DESC LIMIT 40")
+               if x["pubkey"].lower() not in blk][:8]
+    recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
+                   verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
     # full verified + claimed lists so the client can browse/search/filter any block, not just the
     # frontier window (each is small: claims are few, verified ranges are RANGE_SIZE-coarse).
     vranges = []
-    for r in c.execute("SELECT id,lo,hi,handle FROM vranges ORDER BY lo"):
-        v = dict(lo=r["lo"], hi=r["hi"], handle=r["handle"])
+    for r in c.execute("SELECT id,lo,hi,handle,pubkey FROM vranges ORDER BY lo"):
+        v = dict(lo=r["lo"], hi=r["hi"],
+                 handle=(r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]"))
         if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")):
             v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
         vranges.append(v)
     claims = []
-    for r in c.execute("SELECT lo,hi,handle,claimed_at,last_beat FROM ranges WHERE status='claimed' ORDER BY lo"):
+    for r in c.execute("SELECT lo,hi,handle,assignee,claimed_at,last_beat FROM ranges WHERE status='claimed' ORDER BY lo"):
         beat = int(now - (r["last_beat"] or r["claimed_at"] or now))
-        claims.append(dict(lo=r["lo"], hi=r["hi"], handle=r["handle"],
+        claims.append(dict(lo=r["lo"], hi=r["hi"],
+                           handle=(r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"),
                            elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL // 2))
     c.close()
     return {
@@ -390,10 +434,24 @@ def state():
         "verify_mode": VERIFY,
     }
 
+def state_cached():
+    """Serialised /api/state with a short TTL. state() does full-table scans + a frontier walk on every
+    call, so under an anonymous GET flood recomputing it per request is the cheapest way to pin the box.
+    A ~1.5s cache collapses a burst into one recompute while keeping the board effectively live."""
+    now = time.time()
+    with _state_lock:
+        if _state_cache["v"] is not None and now - _state_cache["t"] < STATE_TTL:
+            return _state_cache["v"]
+    v = json.dumps(state()).encode()   # compute outside the lock; a rare cold-start double-compute is harmless
+    with _state_lock:
+        _state_cache["t"] = time.time(); _state_cache["v"] = v
+    return v
+
 def claim(body):
     rid, pk, handle = body.get("range"), body.get("pubkey", ""), clean_handle(body.get("handle"))
     if not rid or not pk: return 400, {"error": "range and pubkey required"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
     if not parse_range(rid): return 400, {"error": "invalid range id"}
     reap()
     now = time.time()
@@ -444,6 +502,7 @@ def submit(body):
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
     handle = clean_handle(body.get("handle"))
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
+    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
     if not parse_range(rid): return 400, {"error": "invalid range id"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
@@ -511,8 +570,13 @@ class H(BaseHTTPRequestHandler):
     def do_OPTIONS(self): self._send(204)
     def log_message(self, *a): pass
     def _client_ip(self):
+        # Trust X-Forwarded-For ONLY when the direct peer is a configured reverse proxy; otherwise a
+        # client could forge it to bypass the rate limit and bloat the rate map. Falls back to the peer.
+        peer = self.client_address[0]
         xff = self.headers.get("X-Forwarded-For")
-        return xff.split(",")[0].strip() if xff else self.client_address[0]
+        if xff and peer in TRUSTED_PROXIES:
+            return xff.split(",")[0].strip() or peer
+        return peer
     def _body(self):
         try: n = int(self.headers.get("Content-Length", 0))
         except Exception: n = 0
@@ -521,7 +585,12 @@ class H(BaseHTTPRequestHandler):
         except Exception: return {}
     def do_GET(self):
         p = urlparse(self.path).path
-        if p == "/api/state": return self._send(200, state())
+        # Read rate limit on the API (defence-in-depth with the nginx limit_req; the box may also be hit
+        # directly). Static assets are cheap and left unlimited.
+        if p.startswith("/api/") and not rate_ok(self._client_ip(), "r", RATE_MAX_GET):
+            return self._send(429, {"error": "rate limit — slow down"})
+        if p == "/api/state":
+            return self._send(200, raw=state_cached(), ctype="application/json")
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
@@ -560,6 +629,19 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    # Fail closed at startup: never serve on a public interface while the STARK check or signatures are
+    # in a permissive/dev mode — a misconfigured redeploy would otherwise credit the public board for
+    # unverified or unsigned receipts. Loopback (behind a trusted proxy) is always allowed.
+    insecure = []
+    if VERIFY != "real": insecure.append(f"VERIFY_MODE={VERIFY}")
+    if os.environ.get("COORD_ALLOW_MOCK"): insecure.append("COORD_ALLOW_MOCK set")
+    if not HAVE_ED: insecure.append("no ed25519 signature lib")
+    if os.environ.get("COORD_ALLOW_UNSIGNED"): insecure.append("COORD_ALLOW_UNSIGNED set")
+    public = BIND not in ("127.0.0.1", "::1", "localhost")
+    if public and insecure and not os.environ.get("COORD_ALLOW_PUBLIC_INSECURE"):
+        raise SystemExit(f"[hazync-coordinator] refusing to bind public interface {BIND}:{PORT} in an "
+                         f"insecure mode ({', '.join(insecure)}). Fix the config, bind 127.0.0.1 behind a "
+                         f"proxy, or set COORD_ALLOW_PUBLIC_INSECURE=1 to override (not for production).")
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
     print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<range>")

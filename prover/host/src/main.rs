@@ -80,16 +80,33 @@ fn method_id_hex() -> String { risc0_zkvm::Digest::from(METHOD_ID).to_string() }
 // Verify a receipt's STARK against THIS host's guest image id. On failure, explain the usual cause
 // instead of a raw panic: the host was built from a different guest/toolchain than produced the
 // proof, so the image ids (METHOD_ID) differ. That is a BUILD mismatch, not an invalid proof.
-fn verify_receipt(r: &risc0_zkvm::Receipt) {
+fn digest_hex(id: [u32; 8]) -> String { risc0_zkvm::Digest::from(id).to_string() }
+
+fn verify_receipt(r: &risc0_zkvm::Receipt) { verify_receipt_ex(r, None) }
+
+// Verify a receipt's STARK against THIS host's guest image id, distinguishing the two failure modes when
+// the caller can supply the proof's own committed guest id (`claimed_id`, the journal's self_id):
+//   - MISMATCH  — the proof was made by a DIFFERENT guest (claimed_id != METHOD_ID); a build mismatch,
+//                 the common onboarding trip, NOT evidence the proof is bad.
+//   - INVALID   — the proof claims THIS guest but the STARK does not verify; forged/tampered/corrupt.
+// Without a claimed_id (generic callers) we can't tell, so we assume the common build-mismatch cause.
+fn verify_receipt_ex(r: &risc0_zkvm::Receipt, claimed_id: Option<[u32; 8]>) {
     if let Err(e) = r.verify(METHOD_ID) {
-        eprintln!("STARK verification FAILED.");
-        eprintln!("This is almost certainly a guest image-id (METHOD_ID) MISMATCH, not a bad proof:");
-        eprintln!("a RISC0 image id is a hash of the exact guest build (Bitcoin Core source + riscv");
-        eprintln!("toolchain + risc0 version), so a host built from different inputs cannot verify a");
-        eprintln!("proof produced elsewhere.");
-        eprintln!("  this host's METHOD_ID: {}", method_id_hex());
-        eprintln!("Build a host that matches the proof's guest, then retry. See PROVING.md ->");
-        eprintln!("\"the guest image id (METHOD_ID) & reproducibility\".");
+        let mismatch = claimed_id.map_or(true, |id| id != METHOD_ID);
+        if mismatch {
+            eprintln!("STARK verification FAILED: guest image-id (METHOD_ID) MISMATCH.");
+            eprintln!("The proof was produced by a DIFFERENT guest build than this host (a RISC0 image id");
+            eprintln!("is a hash of the exact guest build), so the ids differ. This is a BUILD mismatch,");
+            eprintln!("not necessarily a bad proof.");
+            if let Some(id) = claimed_id { eprintln!("  proof's guest id:      {}", digest_hex(id)); }
+            eprintln!("  this host's METHOD_ID: {}", method_id_hex());
+            eprintln!("Build a host that matches the proof's guest (reproduce/Dockerfile), then retry.");
+            eprintln!("See PROVING.md -> \"the guest image id (METHOD_ID) & reproducibility\".");
+        } else {
+            eprintln!("STARK verification FAILED: PROOF INVALID (not a genuine proof for this guest).");
+            eprintln!("The receipt claims THIS guest (METHOD_ID {}) but the STARK did not", method_id_hex());
+            eprintln!("verify — the proof is forged, tampered, or corrupt. This is NOT a build mismatch.");
+        }
         eprintln!("Underlying verifier error: {e}");
         std::process::exit(1);
     }
@@ -1005,7 +1022,10 @@ fn verify_range_cmd(bin: &str) {
 // frontier without doing any proving/folding itself.
 fn verify_any_cmd(bin: &str) {
     let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
-    verify_receipt(&r); // real STARK verification (friendly on image-id mismatch)
+    // The journal (public output) decodes without verification — read the proof's own committed guest id
+    // first, so a verify failure can be classified as a build MISMATCH vs a genuinely INVALID proof.
+    let claimed = r.journal.decode::<RangeState>().ok().map(|rs| rs.self_id);
+    verify_receipt_ex(&r, claimed); // real STARK verification (distinguishes mismatch from forgery)
     let rs: RangeState = r.journal.decode().unwrap();
     assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
     assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8

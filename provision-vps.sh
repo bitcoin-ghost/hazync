@@ -14,7 +14,12 @@ SUDO="sudo"; { [ "$(id -u)" = "0" ] || ! command -v sudo >/dev/null; } && SUDO="
 
 REPO_DIR="${REPO_DIR:-$HOME/hazync-zkvm}"      # where this repo is checked out on the box
 WORK="${WORK:-$HOME/hazync-build}"             # scratch for Core clones + the assembled project
-CORE_TAG="v28.0"
+# The guest compiles this exact C/C++ source, so it is pinned by IMMUTABLE COMMIT HASH, not just the
+# (mutable) tag: if an upstream tag were ever re-pointed, the METHOD_ID would change while the repo still
+# claims the canonical id. We clone the tag (fast, shallow) then ASSERT HEAD == the pinned commit, so any
+# drift fails the build loudly instead of silently producing a different guest.
+CORE_TAG="v28.0";   CORE_COMMIT="2c78fb68be6e6d4ac8402d5265bae88ffe838a88"   # bitcoin/bitcoin v28.0
+SECP_TAG="v0.5.1";  SECP_COMMIT="ed4c4ad548e798b8612e01cf80770053f51f15b5"   # bitcoin-core/secp256k1 v0.5.1
 
 echo "== 1. system packages =="
 $SUDO apt-get update
@@ -46,7 +51,17 @@ mkdir -p "$WORK"
 [ -d "$WORK/bitcoin-core" ] || git clone --depth 1 -b "$CORE_TAG" https://github.com/bitcoin/bitcoin.git "$WORK/bitcoin-core"
 # Pin secp256k1 to the version Bitcoin Core v28.0 bundles (0.5.1). The guest compiles this source, so
 # a floating master would drift the METHOD_ID — and diverge from the libsecp Core actually ships.
-[ -d "$WORK/secp256k1" ]    || git clone --depth 1 -b v0.5.1 https://github.com/bitcoin-core/secp256k1.git "$WORK/secp256k1"
+[ -d "$WORK/secp256k1" ]    || git clone --depth 1 -b "$SECP_TAG" https://github.com/bitcoin-core/secp256k1.git "$WORK/secp256k1"
+# Reproducibility guard: the checked-out source MUST be the pinned commit. A mismatch means an upstream
+# tag moved (or a stale clone) — fail rather than silently build a different guest (a different METHOD_ID).
+for d_c in "bitcoin-core:$CORE_COMMIT" "secp256k1:$SECP_COMMIT"; do
+  d="${d_c%%:*}"; want="${d_c##*:}"; got="$(git -C "$WORK/$d" rev-parse HEAD)"
+  if [ "$got" != "$want" ]; then
+    echo "FATAL: $d is at $got but the pinned commit is $want — upstream tag moved or stale clone."
+    echo "       Re-clone $WORK/$d at the pinned commit; the guest METHOD_ID depends on this exact source." >&2
+    exit 1
+  fi
+done
 
 echo "== 5. apply the target shims (patches 0001 + 0002 — portability only, no consensus-logic change) =="
 git -C "$WORK/bitcoin-core" checkout -- src/serialize.h src/crypto/sha256.cpp 2>/dev/null || true

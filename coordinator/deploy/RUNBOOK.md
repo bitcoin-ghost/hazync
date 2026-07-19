@@ -90,9 +90,58 @@ Once the page feels right and the board shows real (even if small) frontier data
 
 ---
 
+## 7. Harden for a public launch
+
+Before opening submissions to the public (a Delving/HN post), do these — they close the DoS and
+data-durability gaps a public write endpoint exposes:
+
+- **nginx rate/conn limits + micro-cache.** Use the updated `coordinator/deploy/nginx-hazync.conf`: it
+  adds `limit_req`/`limit_conn` (an anonymous GET flood on `/api/state` is otherwise the cheapest
+  board-takedown), a 1-second cache on `/api/state`, and `client_max_body_size 8m` (else folded
+  multi-block receipts 413 at the proxy). Part A of that file goes in the `http { }` context — remember
+  `sudo mkdir -p /var/cache/nginx/hazync && sudo chown www-data: /var/cache/nginx/hazync`.
+- **Secure bind.** The unit binds `127.0.0.1` (behind the proxy). If the coordinator is a separate box,
+  set `COORD_BIND` to its **private-network IP** (not `0.0.0.0`) and firewall `:8899` to the web box.
+  The server now **refuses to bind a public interface** while verification/signatures are permissive
+  (`VERIFY_MODE=mock`, `COORD_ALLOW_MOCK`, missing sig lib, `COORD_ALLOW_UNSIGNED`) unless you set
+  `COORD_ALLOW_PUBLIC_INSECURE=1` — so a misconfigured redeploy fails loudly instead of crediting
+  unverified receipts.
+- **Trusted proxy.** The coordinator only honours `X-Forwarded-For` from `TRUSTED_PROXIES`
+  (default `127.0.0.1,::1`); set it to the proxy's address if the proxy is remote, else the rate limit
+  is bypassable.
+
+## Backup & restore
+
+The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (the re-verifiable STARK
+receipts — the artifacts the "you don't have to trust us" claim depends on) must **both** be backed up,
+offsite. A same-disk copy dies with the box.
+
+```bash
+# daily, offsite (rclone or rsync target); keeps 14 local snapshots
+17 3 * * *  BACKUP_REMOTE=rclone:hazync-backup:hazync /opt/hazync/coordinator/deploy/backup.sh >> /var/log/hazync-backup.log 2>&1
+```
+
+**Restore drill** (do this once so you know it works):
+
+```bash
+D=/opt/hazync/backups/<STAMP>            # or fetch the snapshot back from the offsite target
+cd "$D" && sha256sum -c SHA256SUMS       # verify integrity
+sudo systemctl stop hazync-coordinator
+cp "$D/coordinator.db" /opt/hazync/coordinator/coordinator.db
+tar -C /opt/hazync/coordinator -xzf "$D/proofs.tar.gz"
+sudo chown -R hazync:hazync /opt/hazync/coordinator
+sudo systemctl start hazync-coordinator
+curl -s localhost:8899/api/state | head -c 200   # frontier/proven should match pre-restore
+```
+
+## Moderation
+
+Handles are HTML-sanitised and reserved/impersonation names (`satoshi`, `admin`, `bitcoinghost`, …,
+env `HANDLE_DENY`) are rejected at claim/submit. To **take down** an abusive entry already on the board,
+add its pubkey (hex, one per line) to `MOD_BLOCK_FILE` (default `coordinator/mod_block.txt`) — it is
+re-read live, so the entry disappears from the leaderboard/board within the cache TTL (~1.5s), no restart.
+
 ### Notes
-- **Rate limiting** trusts `X-Forwarded-For` from the proxy (`RATE_MAX`/`RATE_WINDOW`).
 - **Witness window** = the claimable set. Blocks outside it 404 and the CLI says so; grow it with
   `gen-witness-window.sh` or co-locate an archive/bridge node (the archive decision) when it's worth the
   disk.
-- **Back up** `coordinator.db` (the signed ledger) — it's the record of who proved what.

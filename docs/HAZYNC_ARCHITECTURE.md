@@ -120,9 +120,10 @@ committed `UTXO_root_next`. Journal: `{script_results:[1,1,1], all_ok:true, root
   - **Adversarial (clean isolation):** lower the spent coin below its outputs — legacy P2PK sighash
     ignores the amount so the SCRIPT still passes `[1]`, but the no-inflation rule fires (`-23`) →
     REJECTED. Proves the amount rule is load-bearing.
-- **STILL TODO** (§2.2): PoW *retarget* correctness (nBits is the right difficulty — needs prev/epoch
-  context, comes with recursion), locktime/sequence (BIP68/112/113), sigops/weight; and larger/segwit
-  real blocks (multi-tx, all prevouts from the bridge). Carves are the same pattern.
+- **~~STILL TODO~~ (now DONE — see `SOUNDNESS.md` §5 and `SECURITY.md`)** (§2.2): PoW *retarget*
+  correctness, locktime/sequence (BIP68/112/113), sigops/weight — all implemented and validated; and
+  larger/segwit real blocks (multi-tx, all prevouts from the bridge), demonstrated on 741000. These were
+  open working notes at the time of writing; the carves followed the same pattern.
 
 ### (original plan) Block-proof guest interface
 One guest execution proves one whole block. Journal commits `(valid, block_hash, UTXO_root_prev,

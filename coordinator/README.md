@@ -111,6 +111,6 @@ wrong-range receipts rejected; ed25519 signed ledger enforced. **All five roadma
 of this MVP: **verify-and-chain**, **claim-lock + heartbeat auto-release**, **pick-any-block + witness
 serving** (the CLI auto-fetches the witnesses it needs), the **genesis→tip timeline UI** (frontier /
 ahead / in-progress / open), and **hardening** (per-IP rate limits, exact-length ed25519 input caps,
-body/handle caps) with the auth + archive decisions recorded in `ROADMAP.md`. What's left before the
+body/handle caps). What's left before the
 Delving post is operational, not code: host it on a cheap CPU VPS with a witness window, seed a few hours
 of real GPU proving, and confirm the contributor onboarding end-to-end.

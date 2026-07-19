@@ -309,8 +309,9 @@ single-block ranges; `by_in` first-wins can understate the frontier) are pre-exi
   conjunction drifted once). Low priority; a shared helper would prevent re-drift. **Open, cosmetic.**
 - **C3 — fabricated anchor timestamps/nbits** in standalone runs — resolved by real recursion (tied to
   S2/S3). **Open only for near-retarget standalone runs.**
-- **H1** — a committed `.pyc`; **H2** — `Cargo.lock` gitignored (consider committing for reproducible
-  builds); **H3** — README refresh. Housekeeping.
+- **H1** — a committed `.pyc`; **H2 — resolved:** all three `Cargo.lock` files (`accumulator/`,
+  `prover/`, `prover/methods/guest/`) are now committed for reproducible builds; **H3** — README
+  refresh. Housekeeping.
 
 ## Coverage audit (2026-07-16)
 
