@@ -8,5 +8,5 @@
 # Inputs (all pinned): Bitcoin Core v28.0, secp256k1 v0.5.1, rzup rust 1.94.1 / cpp 2024.1.5 /
 # cargo-risczero 3.0.5 / r0vm 3.0.5, risc0 crates =3.0.5, committed Cargo.lock, built at fixed paths.
 # 2026-07-19: guest minimised — k256 EC-accel experiment + unreachable legacy() mode stripped
-# (pure Core + accumulator). Previous id (with k256): d1fc40654d4817ad58bc8c0cde11f7a91ee72ed1084895451ced4385b312f292
+# (pure Core + accumulator). Superseded the earlier id d1fc4065… (with k256).
 c029cee4be0a0478af667b03d95112304e574beb93e23ffd97afb93d66742059

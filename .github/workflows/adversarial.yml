@@ -67,7 +67,7 @@ jobs:
       - name: Assert built METHOD_ID == canonical (reproduce/METHOD_ID)
         run: |
           BUILT=$(docker run --rm hazync-repro | grep -oE 'METHOD_ID [0-9a-f]{64}' | awk '{print $2}')
-          CANON=$(grep -oE '[0-9a-f]{64}' reproduce/METHOD_ID | head -1)
+          CANON=$(grep -vE '^[[:space:]]*#' reproduce/METHOD_ID | grep -oE '[0-9a-f]{64}' | head -1)
           echo "built     = $BUILT"
           echo "canonical = $CANON"
           if [ -z "$BUILT" ] || [ "$BUILT" != "$CANON" ]; then
