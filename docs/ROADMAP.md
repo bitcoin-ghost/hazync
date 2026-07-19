@@ -54,7 +54,9 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   public). Decide whether a history rewrite is worth it (force-pushing a public repo others may have
   cloned is itself disruptive; the leak is a username + a project codename, no secrets/keys). Low
   severity — flag for the user.
-- [ ] Later: consolidate the ~10 docs and normalise the voice (drop changelog/date/commit-hash style).
+- [x] Consolidate the docs (2026-07-19): 17 → 12 files. Lean value-first README; merged
+  ENGINE/SCALING/HARDENING into `HAZYNC_ARCHITECTURE.md`; dropped the redundant `WRITEUP.md` and the
+  internal `coordinator/ROADMAP.md`. Remaining voice/date-style normalisation is a later polish pass.
 - [x] **Reproducible guest build / canonical `METHOD_ID`.** A proof verifies only against the guest
   image id it was made with, and that id is a hash of the *whole* build (Core source + riscv
   cross-toolchain + risc0 versions + **absolute build paths** baked into the ELF). So a from-source host
