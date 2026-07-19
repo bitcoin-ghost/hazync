@@ -11,6 +11,29 @@ The property that makes this worth reviewing: the prover runs **real Bitcoin Cor
 accumulator. There is no consensus reimplementation to diverge from Core — see `SOUNDNESS.md` for the
 full trust base and the two portability shims.
 
+## Verifying releases
+
+Each release carries a PGP-signed `SHA256SUMS.txt` (signed in CI by the release-signing workflow). The
+maintainer key is:
+
+```
+defenwycke <defenwycke@icloud.com>
+777FE81F 8CC077FD 3D08055E 852C2B31 90F5B928
+```
+
+From a release's assets, download the binary plus `SHA256SUMS.txt` and `SHA256SUMS.txt.asc`, then:
+
+```bash
+gpg --recv-keys 852C2B3190F5B928            # import the key once (from a keyserver / trusted source)
+gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature from the key above
+sha256sum -c SHA256SUMS.txt                       # the downloaded binary must match
+```
+
+A good signature plus a matching checksum means the binary is the maintainer's published build. Note
+that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
+confirm its `METHOD_ID` is `c029cee4…` (see `reproduce/METHOD_ID`), and any proof verifies against that
+id regardless of who built the host. The signature adds provenance on top of that.
+
 ## Status at a glance
 
 | ID | Area | Severity | Status |
