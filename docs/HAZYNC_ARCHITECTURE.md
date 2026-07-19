@@ -551,8 +551,11 @@ Verify-only path first, then pruning, then the fast-IBD path:
 The explorer fetcher (`prover/fetch_block.py`) is a scaffold. In production the prover runs its own
 **full-validation archive node** and emits the prover witness *as each block connects during IBD* — the
 node already computes every spent coin's metadata, so the witness costs ~nothing and needs no network.
-This also closes **S3** (the accumulator is driven by the real coin set, not a fabricated `root_prev`)
-and **BIP68-time** (real `coin_mtp`, the last OPEN item in SOUNDNESS §5).
+This also underpins **S3** (the accumulator is driven by the real coin set, not a fabricated `root_prev`)
+and **BIP68-time** (real `coin_mtp`) — both already CLOSED for the IBD/chain proving path, where the host
+derives the values itself with no external dependency (see `SOUNDNESS.md` §5). The archive bridge is only
+what would additionally let the standalone `check-full` diagnostic validate an isolated real time-locked
+block; the proving/backfill path does not need it.
 
 The mechanism, in standard Bitcoin Core terms:
 - **Hook the connect-block spend loop.** As each block connects, `UpdateCoins` → `SpendCoin` hands
