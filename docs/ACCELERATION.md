@@ -172,7 +172,7 @@ differential gate, Step 2). Everything above the modmul stays literally libsecp'
 - bigint2 might expose only EC-level ops, not raw modmul — would push toward the blob-level variant.
 - Per-call overhead could make field-mul-level < 4×, needing blob-level (more work, slight purity cost).
 - Mod-n (scalar) support in bigint2 must be confirmed alongside mod-p.
-- Proving-memory impact on smaller-VRAM GPUs (relevant to the cheap-hardware plan in `SCALING.md`).
+- Proving-memory impact on smaller-VRAM GPUs (relevant to the cheap-hardware plan in `HAZYNC_ARCHITECTURE.md`).
 
 ## References in this repo
 - `patches/0003-pubkey-ecdsa-verify-via-k256-accel.patch` — the k256 substitution (the thing we're
@@ -180,4 +180,4 @@ differential gate, Step 2). Everything above the modmul stays literally libsecp'
 - `patches/0002-sha256-route-through-risc0-accelerator.patch` — precedent for a constrained accelerator
   swap (same soundness posture as this task).
 - `prover/methods/guest/build.rs` — how the Core C++ + libsecp256k1 TUs are compiled into the guest.
-- `SCALING.md` — the full-run cost model this speedup feeds into.
+- `HAZYNC_ARCHITECTURE.md` — the full-run cost model this speedup feeds into.

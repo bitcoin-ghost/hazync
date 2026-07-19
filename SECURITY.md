@@ -232,7 +232,7 @@ documented gap, one false alarm, plus a large docs-currency pass.
   skipping it rejected, wrong old-height rejected. In CI.
 - **Docs currency:** rewrote the stale `PROVING.md` (it described recursion as unimplemented and handed
   out a pre-hardening `chain_step`), corrected the README `ACCELERATION` repo-map line + status/audit
-  language, `HARDENING.md`'s BIP34 height (227836→227931), annotated the stale 741000 evidence log
+  language, `HAZYNC_ARCHITECTURE.md`'s BIP34 height (227836→227931), annotated the stale 741000 evidence log
   (402→394), added a working-notes banner to `HAZYNC_ARCHITECTURE.md`, and updated the live page's
   self-audit copy to the four-round history.
 

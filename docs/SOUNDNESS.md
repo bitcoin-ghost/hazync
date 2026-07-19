@@ -153,7 +153,7 @@ OPEN (none architectural):
    commitment, BIP34/BIP30, and real maturity/BIP68 for real. Also fixed a latent header bug: the
    header builder hardcoded version 1 (invisible on the version-1-era test vectors 100000/130000/140000);
    now threads the real versionbits value, so PoW is correct on modern blocks.
-6. **Next → SCALING.md**, reprioritised by the 741000 run: (a) **succinct chunk receipts** — the 1645s
+6. **Next → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) **succinct chunk receipts** — the 1645s
    aggregate was dominated by verifying 16 *composite* receipts in-guest; succinct receipts make that
    cheap and fixed-cost (biggest single win). (b) **Archive-node bridge** (hazync-during-IBD) — replaces
    the explorer fetcher, gives real coin metadata + MTP for free, and closes S3 (real-UTXO binding).

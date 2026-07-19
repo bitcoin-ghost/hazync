@@ -130,5 +130,5 @@ kind of thing you want to exist, here's how you can move it forward — pick wha
 
 *Want the deep version? `README.md` is the technical overview, `SOUNDNESS.md` is the exact security
 claim and trust assumptions, `SECURITY.md` is our own hole-poking (and an open invitation to poke
-harder), and `SCALING.md` is how the full run gets done. We keep the honest caveats in writing on
+harder), and `HAZYNC_ARCHITECTURE.md` is how the full run gets done. We keep the honest caveats in writing on
 purpose — a project like this is only worth anything if the claims are true.*

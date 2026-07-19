@@ -78,7 +78,7 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-
 
 `verify-range` pins the full genesis in-boundary; `verify-any` (used by the coordinator on each
 submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
-invariant the guest fold enforces. See [`SCALING.md`](SCALING.md).
+invariant the guest fold enforces. See [`HAZYNC_ARCHITECTURE.md`](HAZYNC_ARCHITECTURE.md).
 
 ## The guest image id (METHOD_ID) & reproducibility
 

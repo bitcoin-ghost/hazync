@@ -45,7 +45,7 @@ The repo went public fast and reads like working notes. Make it a curated artifa
 - [x] `AUDIT.md` → `SECURITY.md`: relabelled as a *self-review, no external audit yet*; SEC-1/2/3 +
   reconciled S1/S2/S4/C1 statuses added; open-items bounty list at the bottom.
 - [x] `SOUNDNESS.md`: added §7 "Known open issues (security)" pointing at `SECURITY.md`.
-- [x] `HAZYNC_ENGINE.md`: de-coupled from the private node — dropped the node-specific serving/quorum
+- [x] `HAZYNC_ARCHITECTURE.md`: de-coupled from the private node — dropped the node-specific serving/quorum
   codenames, the private fast-sync internals, and the private source line-numbers; node integration is
   now framed generically (any Bitcoin Core-derived full node).
 - [x] Scrub docs for local paths / internal codenames / memory `[[wikilinks]]` (ARCHITECTURE, README,

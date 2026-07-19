@@ -428,3 +428,372 @@ Every major script type validates through the ONE unmodified Core `VerifyScript`
 This is the complete script-validation surface that makes up ~all real mainnet inputs — done, on
 real data, through the actual Core code. The remaining block-proof pieces are the cheap non-script
 consensus (header/PoW, merkle, CheckTransaction, amounts) + the UTXO accumulator + recursion.
+
+
+---
+
+## Tip operation & node integration
+
+*Merged from the former `HAZYNC_ARCHITECTURE.md`.*
+
+
+How the proven validator (leaf→block→chain, `HAZYNC_ARCHITECTURE.md`) becomes a live protocol at the
+chain tip. The prover/verifier separation is the whole point: **validate ≠ prove ≠ verify**. Everything
+here is node-agnostic — it applies to any Bitcoin Core-derived full node.
+
+### Three roles (not one)
+- **Validator — every node, unchanged.** A new block is validated normally, in RAM, against the full
+  data, and accepted on the spot. This stays. Acceptance does NOT wait for a proof — that would stall
+  the chain. The proof is for *others*, not for the proposer.
+- **Prover — specialised (miner/pool/anyone with the hardware), NOT every node.** Proves `script
+  validity + Utreexo update + cumulative work` for a block and folds it into the running chain proof
+  (`chain_step`, recursion increment mode). Expensive; permissionless but not universal.
+- **Verifier — every node, cheap.** Verifies the one recursive proof (RISC0 receipt verify — no peers
+  consulted, no re-execution). This is what replaces "re-validate from data."
+
+### Three frontiers (they move at different speeds)
+1. **Tip** `H_tip` — latest validated block; full data (incl. witnesses) in RAM/disk.
+2. **Proof frontier** `H_proven` — latest block folded into the recursive chain proof.
+3. **Pruned frontier** `H_pruned` — blocks that are *proven AND* past the re-org window; witnesses dropped.
+
+Invariant: `H_pruned ≤ H_proven ≤ H_tip`, and `H_tip − H_pruned ≥ REORG_WINDOW` (≥100).
+
+**Why this matters:** proving lags the tip (a full block is billions of cycles — see throughput). So
+`H_proven < H_tip` in normal operation, and that's fine. The chain advances on validation; the proof
+catches up behind it. **A coin's witness is dropped only once the proof for its block exists** — the
+proof *is* the replacement for the witness.
+
+### Block lifecycle
+```
+mined → validated (full data, RAM) → [accepted, at H_tip]
+      → prover folds it into the chain proof         → now ≤ H_proven
+      → every node verifies the new chain proof (cheap)
+      → past REORG_WINDOW and proven                 → PRUNED: witness dropped, proof + UTXO root kept
+      → full block kept for the re-org window, then discarded
+```
+
+### Graceful degradation (a property, not an accident)
+If provers are slow or absent, `H_proven` stalls but `H_tip` keeps advancing (validation is
+independent). The only consequence: you can't prune unproven blocks, so witness retention grows →
+disk pressure, never a consensus break. Proving is a *liveness-optional* public good: the network is
+always safe, just less storage-efficient when under-proven.
+
+### The canary (monitoring, NOT security)
+Security comes from the proof (self-verifiable). The canary is a tripwire: nodes gossip the
+`ChainState.utxo_root` at their proof frontier; **any divergence at equal height ⇒ alarm + halt
+pruning** (stay in full-validation mode, retain witnesses, page operators). Divergence means a prover
+bug or a real split — either way you do NOT want to have dropped witnesses. Where a cohort of nodes
+independently proves the same height, quorum agreement on the ChainState *is* the canary; disagreement
+halts the pruned frontier.
+
+### Fork choice & re-orgs
+- `ChainState.cum_work` (real Core `GetBlockProof`, already committed) **is the fork-choice metric.**
+  Competing chain proofs → follow the higher `cum_work`. Fork choice becomes a property of the proof.
+- On a re-org: discard chain-proof segments above the fork point, re-fold the new branch (serial, but
+  the folds are cheap; the per-block validity proofs for the new branch are the cost).
+- `REORG_WINDOW` must exceed the deepest plausible re-org, because a re-org can never reach a pruned
+  block — its witnesses are gone. ≥100 (coinbase-maturity convention); deeper re-orgs are catastrophic
+  regardless.
+
+### IBD / sync — the killer app
+A new node: fetch headers → fetch the chain proof to `H_proven` → **verify it once (cheap)** ⇒ it now
+holds the exact UTXO root at `H_proven` with full validity assurance → validate only the short
+unproven suffix `H_proven..H_tip` normally. Sync collapses from "replay all history" to "verify one
+proof + validate a bounded tail." The tail length = the proving lag.
+
+### Throughput reality (the honest constraint)
+To hold `H_proven` near `H_tip`, average proving throughput must beat block production (~1/600 s).
+A busy block is ~thousands of inputs × ~2M cycles ≈ billions of cycles — too slow for one machine in
+10 min. So a tip-prover is a **cluster**: prove inputs/txs in parallel (segment the block), aggregate
+with the balanced-tree recursion, then a cheap serial fold into the chain proof. Within a block:
+parallel. Across blocks: serial (but the fold is small). This is why proving is a role, not a
+per-node duty. **EC acceleration is load-bearing here** — routing the libsecp verify through the
+accelerated EC path (4.7–5.3×) is a large part of the difference between feasible and not at the tip;
+further speedups are an open research line (see `ACCELERATION.md`, honest about what does and doesn't
+work).
+
+### Incentives (open design question)
+Proving is compute the proposer isn't paid for, so a deployment needs an answer for who runs provers.
+Options, none consensus-load-bearing (proving is defensive infrastructure, not a mining role):
+- **Altruistic / self-interest** — large nodes, exchanges, and pools prove because fast, trustless sync
+  and safe pruning benefit them directly.
+- **A funded validator cohort** — a deployment that already runs a trusted quorum can have that quorum
+  run the provers; "quorum-proved blocks" are canonical and permissionless external provers supplement.
+- **Community proving** — a coordinator hands out block ranges + witnesses, verifies submitted proofs,
+  and tree-folds them (the one-time genesis→tip backfill is embarrassingly parallel; see `HAZYNC_ARCHITECTURE.md`).
+
+### Maps onto what's built
+| Protocol step | Artifact |
+|---|---|
+| fold block into chain proof (increment) | `chain_step` (mode 2) — validates block + linkage + carry + work |
+| the proof's public output | `ChainState {tip_hash, utxo_root, cum_work, height, retarget+MTP state}` (committed journal) |
+| prover ties block N to N−1 | `env::verify(self_image_id, prev_ChainState)` + host `add_assumption(prev_receipt)` |
+| node verification | RISC0 receipt verify of the ChainState proof |
+| canary | gossip + compare `ChainState.utxo_root` |
+| fork choice | `ChainState.cum_work` |
+| pruning authorization | block ≤ `H_proven` and past `REORG_WINDOW` ⇒ drop witness |
+
+### Node integration (concrete, node-agnostic)
+Verify-only path first, then pruning, then the fast-IBD path:
+- Keep normal validation untouched. Add a **proof-frontier tracker** and a chain-proof gossip message
+  (the ChainState receipt); provers publish receipts, verifiers check them.
+- Gate witness pruning on `H_proven` + `REORG_WINDOW`, not just block age.
+- A **pruned-proof** node role is the natural light client: UTXO accumulator + re-org window + chain
+  proof only, no archive, no re-execution.
+
+### Archive-node bridge (hazync-during-IBD) — the production data path
+The explorer fetcher (`prover/fetch_block.py`) is a scaffold. In production the prover runs its own
+**full-validation archive node** and emits the prover witness *as each block connects during IBD* — the
+node already computes every spent coin's metadata, so the witness costs ~nothing and needs no network.
+This also closes **S3** (the accumulator is driven by the real coin set, not a fabricated `root_prev`)
+and **BIP68-time** (real `coin_mtp`, the last OPEN item in SOUNDNESS §5).
+
+The mechanism, in standard Bitcoin Core terms:
+- **Hook the connect-block spend loop.** As each block connects, `UpdateCoins` → `SpendCoin` hands
+  back the full spent `Coin` for every non-coinbase input. Per spent coin you get, for free: value,
+  scriptPubKey, creation height, and the coinbase flag (`Coin` packs `nHeight*2 + fCoinBase`).
+- **Derive creation-MTP** as the median-time-past of the block at `coin.nHeight` — that ancestor is
+  already connected during IBD, so it's a cheap lookup on the active chain. (Core stores no per-coin
+  MTP.)
+- Also capture the block header, coinbase, each tx's raw bytes, and wtxids for the witness/merkle
+  checks. Emit one witness record per block (same shape as the fetcher's JSON, or a binary feed to the
+  prover queue), gated behind a node option so it's **inert by default and consensus-inert**.
+- **Clean no-consensus-edit alternative:** subscribe to the `BlockConnected` validation-interface
+  signal and re-read spent coins from the block's **undo data** (`CBlockUndo` / `CTxUndo::vprevout` is
+  a `std::vector<Coin>`). Works for normally-connected blocks; still needs the height→MTP derivation.
+
+Net: a ~1-file, consensus-inert hook turns a full-validation archive node into a witness source —
+genesis→tip, no explorer, real metadata, and it's the same node that would run the proving cluster.
+
+> Note: any fast-sync mode that discards spent coins (ephemeral-UTXO schemes) is incompatible with
+> witness generation — run the witness-producing archive node in full-validation mode, which is what you
+> want when producing proofs anyway.
+
+### Build order to get to tip use
+1. Real STARK proving of one block + the 2-step recursive fold (256 GB box / GPU).
+2. SNARK-wrap the ChainState proof (STARK→Groth16, ~200–300 B) so verification is trivial everywhere.
+3. Chain-proof gossip + proof-frontier tracker in the node (verify-only path first).
+4. Gate pruning on the proof frontier; wire the divergence canary.
+5. Fast-IBD path: verify proof → validate unproven tail.
+6. The proving cluster (parallel block proving + tree aggregation) to hold the frontier near the tip.
+
+
+---
+
+## Scaling — fold cost & parallel backfill
+
+*Merged from the former `HAZYNC_ARCHITECTURE.md`.*
+
+
+Future-work record. Captures the scaling analysis and the two known fixes, surfaced *before* review,
+plus the GPU ceiling. Empirical core is done: per-input script cost linear ~2.7s/GPU-input (pure
+Core, L40S), fan-out ~2×/2 GPUs verified, fold cost measured (below).
+
+### 1. The fold cost is a COMPOSITE-RECEIPT problem (not flat per-chunk)
+Two data points don't fit "~10s/chunk":
+- block 130000: 2 chunks, 5 inputs/chunk → aggregate ~6.7s → **~3.4s/chunk**
+- block 140000: 8 chunks, ~26 inputs/chunk → aggregate ~81s → **~10.1s/chunk**
+
+Per-chunk verify scales with chunk *fatness*, not count. Cause: `default_prover().prove()` returns a
+**`CompositeReceipt`** = a list of ~1M-cycle segment receipts. A fat chunk has more segments, and the
+aggregation guest's `env::verify` verifies the whole list → cost grows with segment count. Not O(1).
+- **Diagnostic to confirm:** a 3rd data point at a different inputs-per-chunk ratio (e.g. rerun 140000
+  with `HAZYNC_CHUNKS` high → ~5 inputs/chunk; per-chunk verify should drop toward ~3.4s).
+
+### FIX A — succinct receipts (cheap, high value; probably beats the tree at current scale)  ✅ IMPLEMENTED
+Compress each chunk to a **`SuccinctReceipt`** BEFORE folding — `prove_with_opts(env, ELF,
+&ProverOpts::succinct())` (or `prover.compress(&ProverOpts::succinct(), &composite)`). RISC0's
+lift+join recursion runs **on the GPU** (parallel side), collapsing the segment list to one succinct
+STARK. Then every `env::verify` in the aggregation is genuinely **O(1)**, independent of chunk size.
+~one-line change to the chunk prover. Sequential fold goes flat + minimal.
+
+**Implemented 2026-07-15** (host `prove-chunk`, `prove-seg` loop, and the final `agg-chunks`/`prove-seg`
+aggregate all use `prove_with_opts(..., &ProverOpts::succinct())`). Rationale confirmed by the 741000
+run: the ~1645s aggregate was RISC0 lifting all 16 **composite** chunk receipts to succinct *sequentially*
+inside the aggregate's resolve step. Proving each chunk to succinct up front moves that lift into the
+parallel chunk phase (spread across the GPU fleet), so the aggregate only does a cheap resolve. The
+aggregate is now succinct too → each block proof is one fixed-size STARK, directly composable in the
+chain range-fold, and saved to `block_<h>.receipt`. Compiles clean (host-only build, cached guest ELF);
+**timing win to be measured on the next GPU box** (expected: aggregate collapses from ~1645s to ~tens of
+seconds; total wall-clock ~unchanged or slightly up in the chunk phase, but the sequential tail — the
+part that blocks the chain fold — goes flat).
+
+### 2. Tree aggregation — constant work, RESTORED parallelism, log tail
+Correction to earlier framing: a tree does NOT reduce fold *work* (still N−1 folds). It converts the
+fold from **sequential → parallelizable**: all nodes at one tree level fold concurrently across GPUs;
+only *depth* is sequential. log₂(140) ≈ 8 levels × ~10–20s ≈ **~2–3 min critical path** vs ~25 min
+flat. Combined with FIX A (each node verifies two O(1) receipts), the aggregation layer becomes a
+rounding error. This is §2.4's "balanced binary tree over ranges" at the block level.
+
+### 3. Chain-level fold — the 100-day sequential floor (load-bearing for the Bitcoin costing)
+The block→chain fold is **~10s of irreducibly-sequential recursion per block**.
+- **Tip-following:** nothing (10s / 600s interval).
+- **Historical backfill (rolling composition):** 900k blocks × ~10s ≈ **>100 days sequential**, no
+  matter how many GPUs chew the scripts. This is the caveat a murchandamus-calibre reviewer spots.
+The fix is §2.4's tree-over-ranges applied **at chain level** (below). Surface it in the post as a
+known design element, not a discovered flaw.
+
+### 4. Parallel backfill architecture (per-block proofs, then fold)
+Per-block proofs are **independent** — block N's proof attests it's internally valid AND transitions
+`root_prev(N) → root_next(N)`, depending only on N's data + inclusion proofs, not on other blocks'
+*proofs*. So all ~900k blocks prove concurrently across unlimited servers. Pipeline:
+
+1. **Bridge pass** — sequential but CHEAP (hashing only, no proving): replay the whole chain through
+   the Utreexo accumulator once (one machine, ~hours–1 day for all of Bitcoin), recording
+   `root_prev(N)` for every height + emitting each input's inclusion proof. This is what a Utreexo
+   bridge node already does. **The ONLY irreducibly-sequential step — and it's not the expensive one.**
+2. **Per-block proofs** — fully parallel, unlimited servers, the GPU-years bulk. Each proves one block
+   against its bridge-supplied `root_prev(N)`. Output: succinct per-block proof.
+3. **Fold** — **tree over ranges**, pairwise, parallel, log-depth. NOT the rolling chain we have now.
+
+Result: backfill is **parallel end-to-end**; sequential parts are only the bridge hashing pass + the
+log-depth fold tail, both small. "Hundreds of GPU-years, fully parallel" — no 100-day floor.
+
+### Code delta from what we have (modest)
+- **Per-block proof commits BOTH roots:** `(block_hash, prevhash, root_prev, root_next, cumwork)`.
+  Our `ChainState` already commits `root_next`; also commit `root_prev` so folds check adjacency.
+- **Pairwise range-fold mode** (variant of the existing `aggregate`): verify two succinct range
+  proofs + check boundary — left.`tip_hash` == right.`prevhash`, left.`root_next` == right.`root_prev`,
+  `cumwork` sums → emit combined range proof. Recurse in a tree → one `[genesis, tip]` proof, log depth.
+- A short chain history folds trivially either way; the Bitcoin-wide backfill needs exactly this.
+
+### 5. GPU ceiling — how far we can push proof-generation speed
+- **UpCloud max = 3× L40S** (144 GB VRAM, ~€4.86/hr) — only ~1.5× our current 2-GPU box.
+- **8× H100 SXM node** (Lambda / CoreWeave / RunPod / AWS p5) is the practical single-node ceiling,
+  and H100 is *much* better for this — RISC0 proving is FFT + Merkle-hash → **memory-bandwidth bound**;
+  H100 SXM ~3.35 TB/s vs L40S ~864 GB/s (~4×). So **~3–4×/GPU × 8 ≈ ~25–30× one L40S ≈ ~14× current.**
+  A full block: ~2h → single-digit minutes.
+- **Beyond one node: no ceiling.** Chunks are independent; the fan-out already writes receipts to
+  files → a multi-node version needs only shared receipt storage (S3/object store) + chunk
+  distribution. Backfill = hundreds–thousands of GPUs across many nodes.
+- **Single-block theoretical floor:** with up to one chunk per input + tree+succinct folding, critical
+  path ≈ `(one chunk's prove) + log(chunks)·O(1) fold` → a block proves in ~minutes regardless of size.
+
+### Status / next
+- Empirical core done (per-input cost, fan-out, fold cost + scaling story).
+- ✅ (a) Full **segwit+taproot** block done (741000, 670 inputs, proven end-to-end — the composite
+  aggregate cost 1645s, which *confirmed* the FIX-A diagnosis directly).
+- ✅ (c) **FIX A implemented** — succinct chunk + aggregate receipts (host, compiles; timing to measure
+  on next box).
+- ✅ (d)+(e) **Parallel range-fold DONE** (2026-07-15, commit `c3a5d2f`): guest mode 6 `prove_range`
+  (independent per-block proof) + mode 7 `fold_range` (pairwise adjacency-checked merge) + `RangeState`
+  committing both boundary contexts; host `bridge_pass`/`prove-range`/`fold-range`/`verify-range` +
+  `rangecluster.sh`. Validated on 2×L40S: blocks 1..8 → 8 parallel proofs (~1.2s) → tree fold 4→2→1 →
+  genesis-anchored [1..8] receipt VERIFIED in 13s, exact work/leaf counts, block-8 hash matches mainnet.
+  This is the parallel backfill: per-block proofs independent (parallel across the fleet), folds
+  log-depth. Wall-clock ≈ one block prove + log₂(N) folds, not N sequential steps.
+- ✅ **Archive-node bridge DONE** (hazync-during-IBD): a full node emits witnesses during ConnectBlock
+  via a guarded `-hazyncwitness`-style hook; validated genesis→199 on real mainnet, witnesses
+  byte-identical to the fetcher's, closes S3. (Implemented and validated locally.)
+- REMAINING: (b) measure the succinct monolithic aggregate on a box for a composite-vs-succinct number
+  (the range-fold already supersedes it for backfill).
+- Then the Delving post writes itself: architecture, receipts, honest economics, both scaling fixes
+  surfaced pre-emptively.
+
+
+---
+
+## Backfill hardening
+
+*Merged from the former `HAZYNC_ARCHITECTURE.md`.*
+
+
+Making the engine correct for a full genesis→tip run (beyond the early blocks tested). Three items;
+H1 is the one that BREAKS a run today, and closing it properly also closes a latent soundness gap.
+
+### H1 — in-block spends + output recomputation (correctness + soundness)  ★ core
+
+**The gap.** A block may contain a tx that spends an output created by an *earlier* tx in the **same
+block** (chained / CPFP). Today `build_block_carried` deletes all external inputs then adds all outputs,
+so an in-block spend panics on the host (the parent output isn't in the accumulator yet) and would fail
+the guest's `stump.delete`.
+
+**The latent soundness gap (found while scoping H1).** The guest adds the host-supplied
+`w.new_outputs` **without recomputing them from the block's transactions** (`validate_block`, the
+`for out_leaf in &w.new_outputs { stump.add }` loop). A malicious prover could therefore add fabricated
+output leaves (fake coins, spendable later) or omit real ones. The honest host always supplies correct
+outputs, so the demos are unaffected — but for "undeniable" the guest must derive the output set itself.
+
+**The fix (one change closes both).** The guest recomputes every output leaf from the block's txs and
+handles in-block coins by **ephemeral cancellation** (a coin created and spent in the same block never
+enters the accumulator):
+
+- Guest gathers all this-block txs: `coinbase_tx` + `{inp.raw_tx : inp.tx_first == 1}` (dedup).
+- New C helper `tx_out_leaves(raw_tx, height, is_coinbase, block_time, out[])`: parse tx, for each
+  vout emit `coin_leaf(txid,vout,value,spk,height,is_coinbase,block_time)`, **skipping provably-
+  unspendable outputs** (Core `CTxOut::scriptPubKey.IsUnspendable()` — OP_RETURN or > MAX_SCRIPT_SIZE).
+  This is also H3.
+- Build the this-block output set keyed by `(txid, vout)` → leaf.
+- Partition inputs: an input is **in-block** iff its `prevout.txid ∈ this-block txids`; else **external**.
+  - external: verify inclusion proof + `stump.delete` (as today).
+  - in-block: verify the referenced `(txid,vout)` is a real this-block output whose recomputed leaf
+    matches; mark that output "spent-in-block". NO stump op. Script still runs (VerifyScript is
+    independent of the accumulator).
+- Add to the stump exactly the **surviving** outputs (this-block outputs not spent-in-block), recomputed
+  — replacing the trusted `w.new_outputs`.
+
+**Wire change.** `BlockInput` gains `in_block: u32`. For in-block inputs `global_pos`/`proof_i`/
+`proof_last` are unused; `prevouts` still carries the parent output's (value, scriptPubKey) so the
+script check runs. Host `build_block_carried` builds the partition + surviving-output set to match.
+
+**Why sound.** The guest independently derives txids (bound by the merkle check), the output leaves
+(from the real tx bytes), and the in-block/external partition. A prover cannot mark an external spend
+in-block (the referenced txid wouldn't be in this block), cannot fake an output (leaves come from real
+tx bytes), and cannot omit a surviving output (the guest adds all of them). Ephemeral cancellation gives
+the identical net root as add-then-delete.
+
+### H2 — BIP30 duplicate-coinbase exception blocks (91842, 91880) — overwrite implemented (F3)
+
+Pre-BIP34, blocks 91842/91880 carried coinbases with the same txid as 91812/91722. Our leaves commit the
+creation **height**, so a "duplicate" coinbase produces a DISTINCT leaf — there is no accumulator
+*collision* (the collision-free property holds). BIP34 (enforced from 227931) makes coinbase txids unique
+thereafter, so no later duplicate can occur.
+
+But pre-enforcement Core does not merely tolerate the duplicate: it **overwrites** the old outpoint, so
+block 91812's coinbase output becomes permanently unspendable. Keeping both leaves (the earlier reasoning
+here — "an unspent bloat leaf, sound") would leave that superseded ~50 BTC coin spendable in the
+accumulator, a divergence a from-genesis prove crossing height 91842 could exploit. **This was F3, now
+fixed:** at exactly those two block hashes the guest deletes the superseded coinbase leaf, recomputed from
+*this* block's coinbase at the (host-supplied) old height/mtp — the duplicate coinbase is byte-identical,
+so the delete can only remove a genuine earlier duplicate of this coinbase's outpoint, and it is mandatory
+(a prover cannot skip it).
+
+**VERIFIED.** Blocks 91812 and 91842 carry the identical coinbase txid
+`d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599`; our coin leaf for that (identical)
+coinbase output at each height gives DIFFERENT leaves (the height commitment disambiguates). Test:
+`host check-bip30` on real block 91842 — the honest overwrite is accepted with a matching accumulator
+root (the 91812 leaf deleted, the 91842 leaf added, matching Core's UTXO set); skipping the overwrite, or
+claiming the wrong old height, is rejected. Wired into CI.
+
+### H3 — provably-unspendable outputs
+
+Core excludes `IsUnspendable()` outputs (OP_RETURN etc.) from the UTXO set. Folded into H1's
+`tx_out_leaves` (skip them). Makes the accumulator equal Core's UTXO set exactly, so the S3 claim
+("bound to the real UTXO set") is precise, not a superset.
+
+### Implementation status — WRITTEN, staged for box validation (2026-07-15)
+All three items implemented; **not yet compiled/run** (the guest change invalidates the cached ELF and
+needs a box). Files:
+- `prover/methods/guest/verify_input.cpp` — new `tx_out_leaves` (recompute a tx's spendable output
+  leaves; skips `IsUnspendable`).
+- `prover/methods/guest/src/main.rs` — `validate_block` now recomputes the output set from the real tx
+  bytes, **binds each tx's computed txid to the merkle-committed `w.txids`**, derives in-block spends by
+  leaf-membership (no wire change), cancels them (ephemeral), and adds the surviving outputs — replacing
+  the trusted `w.new_outputs`. (`extern tx_out_leaves`, `BTreeSet` import.)
+- `prover/host/src/main.rs` — `out_spendable` helper; `build_block_carried` handles in-block inputs
+  (dummy proof, no forest touch) + skips unspendable + excludes in-block-spent outputs; `build_block`
+  and `build_full` skip unspendable too (so their `root_next` still matches the recomputing guest).
+
+**Soundness note:** the guest no longer trusts `new_outputs`; it derives outputs from tx bytes bound to
+the merkle root, so a prover cannot fake/omit coins. In-block detection is leaf-membership, which is
+self-authenticating (a mislabelled spend fails either the output-set match or the inclusion proof).
+
+### Test plan (extensive test, needs a GPU box) — validates the above
+1. Build the guest hardening on the box (guest rebuild ~min).
+2. Re-run the KNOWN-GOOD vectors first (regression): `check-ibd` genesis→199, block 170/173/176 tips,
+   `prove-full` block 741000 — all must still verify with identical hashes (proves the recompute +
+   unspendable change didn't regress).
+3. `check-ibd` (execute) over a range with real **in-block spends** and block **91842** (BIP30 dup
+   coinbase) — confirm they validate and UTXO-leaf/tip match mainnet.
+4. `prove-ibd` a substantial contiguous range; `rangecluster.sh` across both GPUs.
+5. Any guest bug surfaces in step 2/3 in seconds (execute mode) — fix + rebuild in minutes.

@@ -1123,7 +1123,7 @@ fn prove_chunk(idx: usize) {
     // SCALING: prove the chunk to a SUCCINCT receipt (not the default composite). This runs the
     // STARK-to-STARK "lift" NOW, in parallel across the chunk fleet — so agg-chunks resolves each
     // assumption cheaply instead of lifting all N composite receipts sequentially (the dominant cost
-    // of the 741000 aggregate: ~1645s → expected to collapse to a cheap fold). See SCALING.md.
+    // of the 741000 aggregate: ~1645s → expected to collapse to a cheap fold). See HAZYNC_ARCHITECTURE.md.
     let receipt = default_prover()
         .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
     receipt.verify(METHOD_ID).unwrap();
