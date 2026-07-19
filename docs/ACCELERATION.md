@@ -24,8 +24,8 @@ the expensive path we're replacing. Intercept at `secp256k1_fe_impl_mul` / `secp
 **Precompile API (unknown #2) — resolved.** `sys_bigint(result, OP_MULTIPLY, x, y, modulus)` computes
 `(x*y) mod modulus` for **256-bit** operands (`[u32; 8]` little-endian) with an **arbitrary** modulus —
 a direct fit for both `fe_mul` (mod p) and `scalar_mul` (mod n). `OP_MULTIPLY = 0`, `WIDTH_WORDS = 8`.
-The accelerated `k256` crate uses this same primitive at the field-arithmetic level for its ~5–6×, which
-retires the worry that per-mul ecall overhead would negate field-level acceleration.
+The now-removed k256 experiment used this same primitive at the field-arithmetic level for its ~5–6×,
+which retires the worry that per-mul ecall overhead would negate field-level acceleration.
 
 **Conversion (the plumbing).** Reuse libsecp's own helpers — no manual 26-bit repacking:
 `secp256k1_fe_get_b32`/`set_b32_mod` and `secp256k1_scalar_get_b32`/`set_b32` convert to/from 32-byte
@@ -52,9 +52,9 @@ static void secp256k1_scalar_mul(secp256k1_scalar *r, const secp256k1_scalar *a,
     hazync_modmul_n(bo, ba, bb); secp256k1_scalar_set_b32(r, bo, &overflow);
 }
 ```
-The shim `bigint_accel.rs` provides `hazync_modmul_p` / `_n` (`#[no_mangle] extern "C"`); add
-`mod bigint_accel;` to the guest and it links against the patched C (build already uses
-`--allow-multiple-definition`).
+The shim `bigint_accel.rs` (kept in git history, not present in the tree) provided `hazync_modmul_p` /
+`_n` (`#[no_mangle] extern "C"`); adding `mod bigint_accel;` to the guest linked it against the patched C
+(build already uses `--allow-multiple-definition`).
 
 ## Prototype result — field-mul-level intercept is a NET LOSS (2026-07-15, measured on WSL2, execute mode)
 
@@ -67,36 +67,37 @@ matches a num-bigint reference). Applied the intercept above to a real guest and
 | pure Core (baseline) | 2,299,144 | correct |
 | libsecp modmul → `sys_bigint` (this patch) | **2,539,832 (+10%)** | **identical** |
 
-**Byte-correct but ~10% slower.** Diagnosis: `sys_bigint` itself is cheap (k256 does a whole verify in
-~328K cycles *using it*). The loss is the **per-multiply conversion overhead** this approach requires —
+**Byte-correct but ~10% slower.** Diagnosis: `sys_bigint` itself is cheap (the removed k256 experiment
+did a whole verify in ~328K cycles *using it*). The loss is the **per-multiply conversion overhead** this approach requires —
 each field mul does `normalize`×2 + `get_b32`×2 + BE↔LE swap + `set_b32_mod` (~80 net cycles × ~3000
 muls/verify ≈ the +240K). The conversion costs about as much as the emulated 10×26 multiply it replaces.
 
 **Conclusion:** you cannot get the speedup by swapping only the multiply while keeping libsecp's native
-10×26 field representation — the per-op conversion eats it. k256 wins because it keeps field elements in
-precompile-native `[u32;8]` form the *entire time* and never converts per-op. The sound-and-fast path is
+10×26 field representation — the per-op conversion eats it. The removed k256 experiment won because it kept
+field elements in precompile-native `[u32;8]` form the *entire time* and never converted per-op. The sound-and-fast path is
 therefore a **new libsecp field *backend*** (store `fe` as precompile-native, reimplement the field ops
 — add/negate/normalize/sqr — around `sys_bigint`), keeping the EC algorithm / GLV / ECDSA real. That is
 a real ~few-hundred-line reimplementation of the *field layer* (bigger than a mul swap, smaller and more
-sound than k256's full-EC substitution), and whether it beats k256's 6× is itself unproven.
+sound than a full-EC reimplementation), and whether it beats the removed experiment's measured 6× is itself unproven.
 
-**So the acceleration options today, honestly:** (a) pure Core — fully sound, ~$1M full run; (b) k256
-substitution (`patches/0003`) — proven 6×, soundness caveat, gated by a diff-fuzz test; (c) the field-
-backend rework above — more sound than (b), real work, uncertain it wins. The naive "route the multiply"
-idea (this file's original premise) is **disproven** as a cheap win.
+**So the acceleration options today, honestly:** (a) pure Core — fully sound, the current baseline,
+~$1M full run; (b) the bigint2 field-backend rework above — sound, real work, uncertain it wins. (The
+removed k256 EC-substitution experiment measured ~6× but reintroduced the reimplementation-equivalence
+question Hazync exists to avoid, so it is not an option.) The naive "route the multiply" idea (this
+file's original premise) is **disproven** as a cheap win.
 
-Artifacts (staged, not committed to the guest): the patch is applied to a *local* secp256k1 clone; the
-shim is `prover/methods/guest/src/bigint_accel.rs`; the exact C intercept is in the git history of this
-measurement. The shim + intercept remain a correct reference for the field-backend approach.
+Artifacts (staged, never committed to the guest, now in git history): the patch was applied to a *local*
+secp256k1 clone; the shim was `prover/methods/guest/src/bigint_accel.rs`; the exact C intercept lives in
+the git history of this measurement. The shim + intercept remain a correct reference for the field-backend approach.
 
 ## Why this matters
 
 EC signature verification is ~95% of the proving cost (~2.1M cycles/input for pure real Core). Cutting
 it ~5× takes a full-chain run from roughly **$1M → ~$200–400K** on well-chosen hardware. We have a
-*measured* precedent that the arithmetic can be accelerated ~5–6× (`patches/0003`, which routes ECDSA
-verify through the RISC0-accelerated `k256` crate). But `k256` **substitutes** libsecp's entire EC +
-ECDSA implementation — reintroducing exactly the reimplementation-equivalence question Hazync exists to
-avoid. This task gets the same speedup **without the substitution**.
+*measured* precedent that the arithmetic can be accelerated ~5–6× (the removed k256 experiment, which
+routed ECDSA verify through the RISC0-accelerated `k256` crate). But that **substituted** libsecp's entire
+EC + ECDSA implementation — reintroducing exactly the reimplementation-equivalence question Hazync exists
+to avoid. This task gets the same speedup **without the substitution**.
 
 ## The idea
 
@@ -106,15 +107,15 @@ multiplication primitive** (`secp256k1_fe_mul`/`_sqr` mod p, and `secp256k1_scal
 to RISC0's **bigint2** precompile. Add a new libsecp *field backend* that, instead of the limb-based C
 multiply, hands the operands to bigint2 and converts the result back.
 
-## Why this is sound (and *more* sound than k256 substitution)
+## Why this is sound (and *more* sound than a full-EC reimplementation)
 
 A zkVM precompile is **constrained, not trusted** — the circuit *proves* bigint2 computed `a·b mod p`
 correctly. So using it adds **no new trust assumption beyond RISC0's zkVM soundness**, which we already
 rely on. It is the *identical posture* to our existing SHA-256 accelerator (`patches/0002`), which we
 already treat as sound and byte-identical.
 
-The soundness surface shrinks from k256's "does an entire reimplementation match libsecp forever?" to
-just **"the limb ↔ bigint2 plumbing is correct"** — a small, mechanically-checkable property (see the
+The soundness surface shrinks from a full-EC substitution's "does an entire reimplementation match libsecp
+forever?" to just **"the limb ↔ bigint2 plumbing is correct"** — a small, mechanically-checkable property (see the
 differential gate, Step 2). Everything above the modmul stays literally libsecp's code.
 
 ## Task breakdown
@@ -181,8 +182,6 @@ differential gate, Step 2). Everything above the modmul stays literally libsecp'
 - Proving-memory impact on smaller-VRAM GPUs (relevant to the cheap-hardware plan in `HAZYNC_ARCHITECTURE.md`).
 
 ## References in this repo
-- `patches/0003-pubkey-ecdsa-verify-via-k256-accel.patch` — the k256 substitution (the thing we're
-  *replacing* with a sound version; useful as a plumbing reference for hooking the guest to a Rust accel).
 - `patches/0002-sha256-route-through-risc0-accelerator.patch` — precedent for a constrained accelerator
   swap (same soundness posture as this task).
 - `prover/methods/guest/build.rs` — how the Core C++ + libsecp256k1 TUs are compiled into the guest.

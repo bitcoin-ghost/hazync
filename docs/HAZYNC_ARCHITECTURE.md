@@ -352,48 +352,25 @@ Instrumented on the working spike. **The crypto dominates; batching and SHA do n
 Post-SHA-accel per-input: P2WPKH 2.19M→2.08M, taproot 2.19M→2.07M, tapscript 3.67M→3.55M
 (all still `result=[1]`). So **batching (fixed cost tiny) and SHA (5%) are NOT the levers — EC is.**
 
-### The EC-acceleration lever — MEASURED, but the accelerator was since REMOVED
+### The EC-acceleration lever — an earlier experiment measured it, then it was REMOVED
 
-> **2026-07-19:** the k256 acceleration described below was **removed from the guest** to keep it
-> pure-Core (`k256_ecdsa_verify`, the k256 deps, and `patches/0003` are gone — see `ACCELERATION.md`).
-> The numbers are retained as the record of what EC acceleration would buy a future field-backend rework.
+An earlier experiment swapped Core's `CPubKey::Verify` ECDSA path to RISC0's accelerated `k256` crate
+(~6× measured on ECDSA verify in-guest, ~4.7–5.3× end-to-end on real ECDSA spends, all outputs still
+`result=[1]`). It was **removed in v0.5.0** — it reintroduced the reimplementation-equivalence question
+Hazync exists to avoid, so the guest stays pure Core (real libsecp256k1); `k256_ecdsa_verify`, the k256
+deps, and `patches/0003` are gone. The measured numbers are retained here only as the record of what EC
+acceleration would buy a future field-backend rework.
 
-Swapped Core's `CPubKey::Verify` ECDSA path to RISC0's accelerated `k256` (guest exposed
-`k256_ecdsa_verify`; `pubkey.cpp` kept Core's lax-DER parse + low-S normalize, then called it —
-former patch `0003-pubkey-ecdsa-verify-via-k256-accel.patch`). **Head-to-head, same sig, in-guest:**
-
-| ECDSA verify | cycles/verify |
-|---|---|
-| real libsecp256k1 | **1,967,155** |
-| RISC0-accelerated k256 | **327,966** |
-| **speedup** | **6.0×** |
-
-**End-to-end on real mainnet spends (all still `result=[1]` — correct):**
-
-| spend | k256 cycles | libsecp256k1 | speedup |
-|---|---|---|---|
-| P2WPKH | 434,353 | ~2,030,000 | **4.7×** |
-| P2SH | 452,968 | ~2,070,000 | **4.6×** |
-| P2WSH 2-of-3 | 1,146,412 | ~6,030,000 | **5.3×** |
-| P2TR key-path (Schnorr — control) | 2,068,813 | 2,070,000 | unchanged ✓ |
-| P2TR script (Schnorr — control) | 3,545,806 | 3,550,000 | unchanged ✓ |
-
-The two Schnorr controls being unchanged to <0.1% proves the swap is surgical: only the ECDSA
-verify accelerated, sighash/script/taproot untouched. **Per-input for the common ECDSA types drops
-~4.7–5.3×** — this is the block-at-the-tip lever we needed.
-
-**Soundness posture (the one caveat):** k256 (RustCrypto) is a *different* ECDSA implementation than
-libsecp256k1. We now prove "real Core interpreter + sighash + DER-parse + low-S normalize, and the
-final r,s validity via k256" rather than 100% real Core crypto. ECDSA *verify* (unlike sign) is a
-deterministic valid/invalid decision on already-canonicalised inputs, and k256's RISC0 fork is the
-standard audited RustCrypto verifier — so consensus-agreement risk is low, but it IS a posture change
-kept behind patch 0003 so it can be toggled. Non-accelerated (pure real Core) build = drop patch 0003.
-
-**Still open — Schnorr/taproot:** k256 doesn't accelerate BIP340 here, so taproot key-path stays at
-~2.07M (real libsecp256k1 schnorrsig). Next lever if taproot volume matters: accelerated BIP340
-verify (k256 `schnorr` feature or a bigint2 blob) — same pattern, patch `XOnlyPubKey`'s verify.
+That experiment never touched Schnorr/taproot: it didn't accelerate BIP340, so the *acceleration* of
+taproot key-path stayed open. Soundness was never in question — Schnorr/taproot are, and remain, fully
+verified through real libsecp256k1 `schnorrsig`. The sound acceleration line now under study is the
+bigint2 field-mul backend — see `ACCELERATION.md`.
 
 ### (superseded) The EC-acceleration decision — original analysis
+> Historical: option (B) below was the path taken, measured (~6×), and then **removed in v0.5.0** to keep
+> the guest pure Core. Retained only as a record of the options weighed; the live path is bigint2 (A/C
+> family) in `ACCELERATION.md`.
+
 RISC0's crypto accelerators: `sys_sha_compress` (SHA, done), `sys_bigint` (one 256-bit
 `x·y mod m`), and `sys_bigint2` (programmable blob — the whole-scalar-mult EC precompile that
 RISC0's `k256` crate uses). Options, decreasing faithfulness:
