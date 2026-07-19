@@ -11,7 +11,7 @@ It is **not a reimplementation.** Every other validity-proof effort rewrites con
 No GPU, no build, no clone. Linux x86-64:
 
 ```bash
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-v0.4.0-x86_64-linux-gnu && chmod +x host
+curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
 curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin        # → RANGE-OK
 ```

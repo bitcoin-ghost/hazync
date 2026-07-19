@@ -23,7 +23,7 @@ Download the prebuilt prover — it's the **canonical guest**, so the coordinato
 
 ```
 # the prover binary (canonical guest, GPU)
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-v0.4.0-x86_64-linux-gnu-cuda
+curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
 chmod +x host
 # the contributor CLI + signing library
 curl -L -o hazync https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/hazync
@@ -31,7 +31,7 @@ chmod +x hazync
 sudo apt install -y python3-cryptography
 ```
 
-**No GPU?** Use the CPU binary instead (`hazync-host-v0.4.0-x86_64-linux-gnu`) — it proves too, just slower.
+**No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
 > **Building from source instead?** You *must* build the **canonical guest** (via `reproduce/Dockerfile`, or the pinned inputs at fixed paths — see the repo README) so your `METHOD_ID` matches `reproduce/METHOD_ID`. If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
 
@@ -64,7 +64,7 @@ You never have to trust the party. Every verified proof is public — fetch any 
 
 ```
 # 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-v0.4.0-x86_64-linux-gnu
+curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
 chmod +x host
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code
