@@ -4,3 +4,8 @@ bitcoin-core/
 secp256k1/
 __pycache__/
 *.pyc
+
+# never commit prover identity / key material
+.hazync/
+*.hex
+key.hex
