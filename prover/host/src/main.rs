@@ -1634,12 +1634,10 @@ fn main() {
         let (next, cycles) = chain_step(&state, &w, is_base);
 
         let hash_ok = next.tip_hash == arr(rev(hx(expect_hash)));
-        let linked = if i == 0 { true } else { true }; // enforced inside the guest (panics if not)
         println!("block {height:>3}: tip {} {}  height {}  cumwork {}  Δwork {}  ({} cyc){}",
             &hex(&next.tip_hash)[..16], if hash_ok { "✓" } else { "✗MISMATCH" }, next.height,
             work_u128(&next.cum_work), work_u128(&next.cum_work) - work_u128(&state.cum_work), cycles,
             if is_base == 1 { "  [base: anchored at 169]" } else { "  [recursion hook: prev is a chain proof]" });
-        let _ = linked;
         state = next;
     }
 
