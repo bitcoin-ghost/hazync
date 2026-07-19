@@ -18,8 +18,10 @@ WORK="${WORK:-$HOME/hazync-build}"             # scratch for Core clones + the a
 # (mutable) tag: if an upstream tag were ever re-pointed, the METHOD_ID would change while the repo still
 # claims the canonical id. We clone the tag (fast, shallow) then ASSERT HEAD == the pinned commit, so any
 # drift fails the build loudly instead of silently producing a different guest.
-CORE_TAG="v28.0";   CORE_COMMIT="2c78fb68be6e6d4ac8402d5265bae88ffe838a88"   # bitcoin/bitcoin v28.0
-SECP_TAG="v0.5.1";  SECP_COMMIT="ed4c4ad548e798b8612e01cf80770053f51f15b5"   # bitcoin-core/secp256k1 v0.5.1
+# NB: these are the DEREFERENCED commit shas (git rev-parse <tag>^{}) — both are annotated tags, so the
+# commit differs from the tag-object sha. `git clone -b <tag>` checks out the commit, so HEAD == these.
+CORE_TAG="v28.0";   CORE_COMMIT="110183746150428e6385880c79f8c5733b1361ba"   # bitcoin/bitcoin v28.0
+SECP_TAG="v0.5.1";  SECP_COMMIT="642c885b6102725e25623738529895a95addc4f4"   # bitcoin-core/secp256k1 v0.5.1
 
 echo "== 1. system packages =="
 $SUDO apt-get update
