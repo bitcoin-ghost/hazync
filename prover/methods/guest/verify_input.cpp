@@ -52,6 +52,9 @@ static void coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, 
     h.Write(reinterpret_cast<const unsigned char*>(op.hash.begin()), 32);
     le(b8, op.n, 4); h.Write(b8, 4);
     le(b8, (uint64_t)coin.nValue, 8); h.Write(b8, 8);
+    // N2: length-prefix the only variable-length field so the preimage stays injective even if a future
+    // change adds another variable field. MUST stay byte-identical to tx_out_leaves + the host coin_leaf.
+    le(b8, coin.scriptPubKey.size(), 4); h.Write(b8, 4);
     h.Write(reinterpret_cast<const unsigned char*>(coin.scriptPubKey.data()), coin.scriptPubKey.size());
     le(b8, coin_height, 4); h.Write(b8, 4);
     unsigned char cb = (unsigned char)(coin_is_coinbase ? 1 : 0); h.Write(&cb, 1);
@@ -98,6 +101,8 @@ extern "C" uint32_t tx_out_leaves(const uint8_t* tx_bytes, unsigned tx_len,
         h.Write(reinterpret_cast<const unsigned char*>(txid.begin()), 32);
         le(b8, v, 4); h.Write(b8, 4);
         le(b8, (uint64_t)o.nValue, 8); h.Write(b8, 8);
+        // N2: length-prefix scriptPubKey (see coin_leaf) — keep byte-identical to the spend-side leaf.
+        le(b8, o.scriptPubKey.size(), 4); h.Write(b8, 4);
         h.Write(reinterpret_cast<const unsigned char*>(o.scriptPubKey.data()), o.scriptPubKey.size());
         le(b8, height, 4); h.Write(b8, 4);
         unsigned char cb = (unsigned char)(is_coinbase ? 1 : 0); h.Write(&cb, 1);
@@ -357,7 +362,11 @@ extern "C" int64_t tx_full_sigops(const uint8_t* tx_bytes, unsigned tx_len,
                   reinterpret_cast<const std::byte*>(prevouts) + prevouts_len};
     std::vector<CTxOut> spent;
     pr >> spent;
-    if (spent.size() < tx.vin.size()) return cost; // SEC-3: short prevouts — block rejected via verify_input
+    // N3: a non-coinbase tx with fewer spent coins than inputs is malformed. Fail CLOSED with a poison
+    // sigop cost (>> MAX_BLOCK_SIGOPS_COST, but small enough that summing across a block can't overflow
+    // i64) so sigops_ok becomes false — instead of silently returning the legacy-only cost and leaning on
+    // verify_input's independent -60 rejection. (The coinbase / prevouts_len==0 case returned above.)
+    if (spent.size() < tx.vin.size()) return 1LL << 40;
     for (size_t i = 0; i < tx.vin.size(); i++) {
         const CScript& spk = spent[i].scriptPubKey;
         if (flags & SCRIPT_VERIFY_P2SH) {

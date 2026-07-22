@@ -56,11 +56,16 @@ domain constant; the host verifier asserts the final `self_id == METHOD_ID`. The
 ./target/release/host prove-chain        # fold real blocks 170 -> 171 -> 172 (IVC), verify the tip
 ./target/release/host prove-chain-bad     # adversarial: wrong self_id must be REJECTED
 HAZYNC_WITNESS_DIR=/w HAZYNC_FROM=1 HAZYNC_TO=170 HAZYNC_TIP=3 ./target/release/host prove-ibd
+./target/release/host verify-chain <chain.bin>   # verify a ChainState receipt + PIN its anchor to genesis
 ```
 
 A verified chain-tip receipt attests every block from the genesis anchor to the tip without the
-blocks. See [`SOUNDNESS.md`](SOUNDNESS.md) §3 for the recursion argument (and the verifier's
-obligation to pin `self_id == METHOD_ID` and the genesis anchor).
+blocks. `verify-chain` (round 8 / S5) is the chain-track analogue of `verify-range`'s genesis pin: it
+verifies the STARK, asserts `self_id == METHOD_ID` + the `KIND_CHAIN` tag, and pins the committed
+`anchor_id` to `dsha256(genesis_anchor)` — so a receipt built on a fabricated (non-genesis) anchor is
+rejected, and a checkpoint-anchored demo proof correctly fails it. See [`SOUNDNESS.md`](SOUNDNESS.md)
+§3/§3c for the recursion + anchor argument (and the verifier's obligation to pin `self_id == METHOD_ID`
+and the anchor).
 
 ## Parallel range-fold (the backfill path)
 

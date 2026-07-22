@@ -179,7 +179,9 @@ struct BlockInput {
     raw_tx: Vec<u8>,
     input_idx: u32,
     prevouts: Vec<u8>,
-    flags: u32,
+    // NOTE: consensus script flags are NOT taken from the host — they are derived in-guest by
+    // block_script_flags(height, block_hash). The field was removed (was dead/never read) so a future
+    // change cannot accidentally start honouring a host-chosen flag set. Do not re-add a host flags input.
     global_pos: u64,        // the spent coin's current position in the accumulator
     coin_height: u32,       // height the spent coin was created at (leaf-committed)
     coin_is_coinbase: u32,  // whether the spent coin is a coinbase output (leaf-committed)
@@ -541,9 +543,13 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 
     // BIP141 witness commitment (SEC-1): recompute the wtxids + has_witness from the REAL tx bytes —
     // NOT the host-supplied w.wtxids — so a prover cannot claim "no witness" to skip the commitment.
-    // Coinbase wtxid is committed as all-zeros (BIP141); has_witness = any non-coinbase carries witness.
-    let mut rec_wtxids: Vec<[u8; 32]> = vec![[0u8; 32]];
-    let mut has_witness = false;
+    // Coinbase wtxid is committed as all-zeros in the witness merkle (BIP141), but its OWN witness data
+    // (the reserved-value nonce) DOES count toward has_witness — Core's unexpected-witness loop runs over
+    // EVERY tx including the coinbase (G2: previously the coinbase was excluded from has_witness).
+    let mut cb_wt = [0u8; 32];
+    let cb_hw = unsafe { tx_wtxid_info(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32, cb_wt.as_mut_ptr()) };
+    let mut rec_wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase leaf = zeros in the witness merkle
+    let mut has_witness = cb_hw == 1;
     for inp in &w.inputs {
         if inp.tx_first == 1 {
             let mut wt = [0u8; 32];
@@ -553,15 +559,41 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         }
     }
     let flat_wtx: Vec<u8> = rec_wtxids.iter().flatten().copied().collect();
-    let witness_ok = unsafe {
-        check_witness_commitment(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32,
-            flat_wtx.as_ptr(), rec_wtxids.len() as u32, has_witness as u32)
-    } == 1;
+    // G3: segwit activates at mainnet SegwitHeight 481824 (Core GetBlockScriptFlags / DeploymentActiveAfter).
+    // BELOW activation Core never looks for a commitment and REJECTS any block carrying witness data
+    // (unexpected-witness) — so witness_ok = "no witness present". FROM activation the BIP141 commitment is
+    // enforced by check_witness_commitment, which also rejects a witness-carrying block that lacks the
+    // commitment output (its own has_witness gate). Running the commitment check at ALL heights (the previous
+    // behaviour) rejected the canonical pre-activation blocks that already carried an early commitment output
+    // yet have a witness-free coinbase — a reject-valid liveness bug in the 433k–481823 range.
+    let witness_ok = if w.height >= 481_824 {
+        let rc = unsafe {
+            check_witness_commitment(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32,
+                flat_wtx.as_ptr(), rec_wtxids.len() as u32, has_witness as u32)
+        };
+        rc == 1
+    } else {
+        !has_witness // pre-segwit: no witness data permitted (Core unexpected-witness)
+    };
     // BIP34: coinbase encodes the block height (from 227931).
     let bip34_ok = unsafe { check_bip34(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32, w.height) } == 1;
-    // BIP30: no duplicate txids within the block. (Cross-block duplicate-txid — spending an already-
-    // existing unspent output — is structurally prevented post-227931 by BIP34, which we enforce; the
-    // two historical pre-BIP34 exceptions are known.) Cheap O(n log n) distinctness over the txids.
+    // BIP30 (no tx may create an outpoint duplicating an existing UNSPENT coin). A utreexo Stump cannot
+    // prove NON-membership, so the general HaveCoin lookup Core does is replaced by a complete structural
+    // argument, enforced here as a gated invariant:
+    //   • in-block: all txids must be distinct (the O(n log n) check below) — else two txs in this block
+    //     share an outpoint.
+    //   • cross-block, height ≥ 227931: BIP34 (asserted via `bip34_ok`, which is in every proving mode's
+    //     conjunction) forces the coinbase scriptSig to encode the height, so a coinbase's txid is unique
+    //     across heights; a non-coinbase txid can never equal a coinbase's (null vs non-null prevout), and
+    //     a non-coinbase duplicate outpoint would require re-creating an existing txid = identical inputs =
+    //     a double-spend the accumulator already rejects. So no created outpoint can collide with an
+    //     existing unspent coin.
+    //   • cross-block, height < 227931: the ONLY real duplicates in mainnet history are blocks 91842/91880
+    //     (handled above by the F3 overwrite/delete). This is exhaustive for the pre-BIP34 range.
+    // BOUND: this argument holds for every mainnet block up to the first height where a BIP34 height-push
+    // could reproduce a pre-BIP34 coinbase scriptSig (~1,983,702, ≈2046). A validator run at/after that
+    // height needs a real membership/overwrite mechanism (utreexo non-membership) — tracked, out of scope
+    // for the current chain. Cheap distinctness over the merkle-committed txids:
     let bip30_ok = {
         let mut ids = w.txids.clone();
         ids.sort_unstable();
@@ -584,7 +616,17 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 
     let coinbase_val = unsafe { coinbase_value(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32) };
     let subsidy = unsafe { block_subsidy(w.height) };
-    let subsidy_ok = coinbase_val <= subsidy + total_fee;
+    // G5: block-level MoneyRange on the accumulated fees + no-overflow on subsidy+fees (Core's
+    // bad-txns-accumulated-fee-outofrange / the CheckTransaction MoneyRange applied block-wide). Each
+    // per-tx fee is already ≥0 and MoneyRange-bounded in check_tx, but assert the block total explicitly
+    // rather than relying on anchor-integrity induction, and compute the coinbase bound in i128 so a
+    // maliciously large fee sum cannot overflow the i64 `subsidy + total_fee`.
+    const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
+    let money_ok = (0..=MAX_MONEY).contains(&total_fee)
+        && (0..=MAX_MONEY).contains(&subsidy)
+        && coinbase_val >= 0
+        && (subsidy as i128 + total_fee as i128) <= MAX_MONEY as i128;
+    let subsidy_ok = money_ok && coinbase_val <= subsidy + total_fee;
 
     // Block weight (from tx serialization) + FULL sigop cost (legacy + P2SH + witness, real Core).
     let mut total_weight: i64 = 0;
@@ -669,6 +711,12 @@ struct ChainState {
     prev_time: u32,     // timestamp of the tip block
     epoch_start: u32,   // timestamp of the first block in the current retarget epoch
     recent_times: Vec<u32>, // timestamps of the last ≤11 blocks (for median-time-past)
+    // S5: dsha256 of the base-anchor journal this chain bottomed out at (set once in the is_base==1 step,
+    // then carried forward unchanged). Makes a ChainState receipt self-authenticating: the verifier pins
+    // it to the genesis-anchor digest, exactly as the range track pins RangeState's in-boundary to genesis.
+    // Without it a mode-2/5 receipt built on a FABRICATED anchor (arbitrary height/UTXO/work/easy nbits)
+    // is journal-indistinguishable from a genesis-anchored one.
+    anchor_id: [u8; 32],
     self_id: [u32; 8],  // S1: the guest image id this proof recursed against (verifier asserts ==METHOD_ID)
 }
 
@@ -754,6 +802,11 @@ fn chain_step() {
     // inflate the subsidy to 50 BTC, while the journal still commits the true height. Bind them.
     assert!(w.height == prev.height + 1, "chain step: block height {} != chain height {}", w.height, prev.height + 1);
 
+    // S5: record the anchor this chain bottomed out at. In the base step the anchor IS `prev_journal`
+    // (trusted, un-verified) — commit its digest so the verifier can pin it to genesis. In a recursive
+    // step carry the verified prev's anchor_id forward unchanged (prev is a real receipt of this guest).
+    let anchor_id = if is_base == 1 { dsha256(&prev_journal) } else { prev.anchor_id };
+
     // BIP113/BIP68 use the PREVIOUS block's median-time-past (median of the last ≤11 timestamps).
     let prev_mtp = median_time_past(&prev.recent_times);
     let r = validate_block(&w, prev_mtp, None);
@@ -811,6 +864,7 @@ fn chain_step() {
         prev_time: r.block_time,
         epoch_start,
         recent_times,
+        anchor_id,
         self_id,
     });
 }
@@ -1006,6 +1060,9 @@ fn aggregate() {
     // segmented path validates flags/subsidy at an attacker-chosen height). Also closes half of #2: the
     // per-input binding digest folds in `flags = block_script_flags(w.height)`, now pinned to the height.
     assert!(w.height == prev.height + 1, "aggregate: block height {} != chain height {}", w.height, prev.height + 1);
+    // S5: same anchor binding as chain_step — base step commits the trusted anchor's digest, recursive
+    // step carries the verified prev's anchor_id forward.
+    let anchor_id = if is_base == 1 { dsha256(&prev_journal) } else { prev.anchor_id };
     let prev_mtp = median_time_past(&prev.recent_times);
 
     let r = validate_block(&w, prev_mtp, Some((&all_binds, chunks_ok)));
@@ -1027,7 +1084,7 @@ fn aggregate() {
     env::commit(&ChainState {
         kind: KIND_CHAIN,
         tip_hash: r.tip_hash, utxo_roots: r.root_next_roots, utxo_leaves: r.root_next_leaves,
-        cum_work: cum, height, prev_nbits: r.nbits, prev_time: r.block_time, epoch_start, recent_times, self_id,
+        cum_work: cum, height, prev_nbits: r.nbits, prev_time: r.block_time, epoch_start, recent_times, anchor_id, self_id,
     });
 }
 

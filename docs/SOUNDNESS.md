@@ -90,6 +90,35 @@ anchoring gaps:
 - **H8 (fixed).** Every recursion-consumed journal (`ChainState`/`RangeState`/`ChunkOut`) commits a
   domain tag as its first field, asserted on decode — no cross-mode journal can be laundered in.
 
+## 3c. Anchor identity + completeness (2026-07-22 audit, round 8)
+
+A five-reviewer completeness+verifier audit (full write-up: `../AUDIT_2026-07.md`). The soundness core
+held — accumulator, FFI/VerifyScript boundary, and enforcement gating all came back sound. One
+verifier-hole and five completeness deviations were found; all fixed except the one unprovable rule.
+
+- **A1 / S5 — anchor identity (verifier-hole, FIXED).** A bare `ChainState` receipt committed no record
+  of the anchor it started from, so an `is_base=1` receipt built on a *fabricated* anchor was
+  journal-indistinguishable from a genesis-anchored one — not reachable through any shipped verifier
+  (`verify-range`/`verify-any` take only `RangeState` and pin genesis) but a foot-gun for a raw chain
+  receipt. **Fix:** the guest commits `anchor_id = dsha256(base-anchor journal)` (set at `is_base==1`,
+  carried forward), and the new **`verify-chain`** command pins `anchor_id == dsha256(genesis_anchor)`.
+  This makes `ChainState` self-authenticating to its anchor, exactly as `RangeState` is (H6). The
+  **verifier obligation in §3 now has a chain-track form:** a chain receipt must be checked with
+  `verify-chain` (or the anchor pinned equivalently); a checkpoint-anchored proof correctly fails it.
+- **G3 — witness commitment now activation-gated** at segwit height 481824 (was unconditional → a
+  reject-valid stall on canonical pre-activation blocks); below activation, `unexpected-witness` forbids
+  any witness data (now including the coinbase — G2).
+- **G5 — block-level `MoneyRange(nFees)`** now asserted explicitly (+ i128-safe `subsidy+fees`), not left
+  to anchor-integrity induction.
+- **G1 — BIP30** is a utreexo non-membership limitation; the structural argument is now an explicit,
+  gated, bounded invariant (sound to ~1,983,702; see the matrix below).
+- **N1/N2/N3 — hardening:** removed the dead host-flags field, length-prefixed the leaf `scriptPubKey`,
+  and made `tx_full_sigops` fail closed on a short blob.
+- **G4 — 2h future-time** stays deliberately unenforced (verifier-local wall-clock, unprovable).
+
+Validated in execute mode with no regression (170→172 byte-exact; 130000/741000 VALID with byte-exact
+tips; 741000_badwit rejected; check-bip30 PASS). `METHOD_ID` + leaf format changed ⇒ re-prove from genesis.
+
 ## 4. Scope of each proof type (audit S3 — be explicit)
 - **Single-block / segmented block proof** (`prove-full`, `prove-seg`): attests the block is
   *internally valid* (scripts, structure, no-inflation, PoW, retarget, merkle, subsidy, weight, sigops,
@@ -109,7 +138,10 @@ ENFORCED (real Core unless noted):
 - No inflation: Σin ≥ Σout per tx; coinbase ≤ subsidy(height)+Σfees (subsidy = exact halving formula).
 - PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget rule.
 - Merkle root, **including the CVE-2012-2459 mutation check** (duplicate-txid malleability — Core's
-  `mutated` flag is captured and rejected); **BIP141 witness commitment**.
+  `mutated` flag is captured and rejected); **BIP141 witness commitment** (activation-gated at segwit
+  height 481824, round 8 / G3) + **`unexpected-witness`** below activation (incl. the coinbase).
+- **Block-level `MoneyRange(nFees)`** and an overflow-safe `coinbase ≤ subsidy(height) + Σfees` bound
+  (round 8 / G5), on top of the per-tx `CheckTransaction` value ranges.
 - Block weight ≤ 4M; full sigop cost ≤ 80k (legacy + P2SH + witness).
 - **`time-too-old`**: a block's timestamp must exceed the median-time-past of the previous 11 blocks.
   (The 2-hour future-time limit is node-local wall-clock — not a provable consensus rule; see §6.)
@@ -127,8 +159,13 @@ ENFORCED (real Core unless noted):
   (`prover/test_bip68_real.sh`). Height-based BIP68 + maturity + absolute locktime are live too.
 - **BIP34** (coinbase scriptSig encodes height) — CLOSED (S4a). `check_bip34` parses coinbase vin[0]
   scriptSig and compares the pushed height to the block height. Validated on 741000 (`bip34_ok=true`).
-- **BIP30** (no duplicate txid overwriting an unspent output) — CLOSED (S4b). Explicit sorted-txid
-  duplicate check in the guest. Validated on 741000 (`bip30_ok=true`).
+- **BIP30** (no duplicate txid overwriting an unspent output) — in-block distinctness is an explicit
+  sorted-txid check (validated on 741000, `bip30_ok=true`); the general cross-block `HaveCoin` rule is a
+  **bounded gated invariant**, not a lookup, because a utreexo `Stump` has no non-membership proof.
+  Coverage (now explicit in-code, round 8 / G1): BIP34 (asserted ≥227931) forces coinbase-txid
+  uniqueness; the two pre-BIP34 duplicates (91842/91880) are handled by the F3 overwrite; a non-coinbase
+  duplicate outpoint is a double-spend the accumulator rejects. Sound for every mainnet block to
+  ~1,983,702 (≈2046), where a real membership/overwrite mechanism would be needed.
 
 - **BIP68 time-based** — CLOSED. The IBD/chain proving path commits real `MTP(coinHeight−1)` (host
   derives it from the chain, mirroring an archive node; see the §5-ENFORCED note). The one residual is

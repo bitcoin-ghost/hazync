@@ -16,7 +16,8 @@ const KIND_CHUNK: u32 = 0xC4A1_0004;
 struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct BlockInput {
-    raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, flags: u32,
+    // flags removed: script flags are guest-derived (block_script_flags), never host-supplied.
+    raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>,
     global_pos: u64, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32, tx_first: u32,
     proof_i: WireProof, proof_last: WireProof,
 }
@@ -38,6 +39,7 @@ struct ChainState {
     tip_hash: [u8; 32], utxo_roots: Vec<Option<[u8; 32]>>, utxo_leaves: u64,
     cum_work: [u8; 32], height: u32,
     prev_nbits: u32, prev_time: u32, epoch_start: u32, recent_times: Vec<u32>,
+    anchor_id: [u8; 32], // S5: dsha256 of the base anchor; verifier pins == dsha256(genesis_anchor)
     self_id: [u32; 8],  // S1: image id recursed against; verifier asserts == METHOD_ID
 }
 #[derive(Serialize, Deserialize)]
@@ -115,10 +117,12 @@ fn rev(mut v: Vec<u8>) -> Vec<u8> { v.reverse(); v }
 fn arr(v: Vec<u8>) -> [u8; 32] { v.try_into().unwrap() }
 
 fn coin_leaf(txid_internal: &[u8; 32], vout: u32, value_sat: u64, spk: &[u8], height: u32, is_coinbase: bool, coin_mtp: u32) -> Hash {
-    let mut b = Vec::with_capacity(53 + spk.len());
+    let mut b = Vec::with_capacity(57 + spk.len());
     b.extend_from_slice(txid_internal);
     b.extend_from_slice(&vout.to_le_bytes());
     b.extend_from_slice(&value_sat.to_le_bytes());
+    // N2: length-prefix scriptPubKey — MUST match the guest C++ coin_leaf / tx_out_leaves byte-for-byte.
+    b.extend_from_slice(&(spk.len() as u32).to_le_bytes());
     b.extend_from_slice(spk);
     b.extend_from_slice(&height.to_le_bytes());
     b.push(is_coinbase as u8);
@@ -188,7 +192,7 @@ fn build_header_v(version: i32, prev_disp: &str, merkle_internal: &[u8; 32], tim
 }
 
 // One non-coinbase spend to fold into a block.
-struct Spend { raw: Vec<u8>, prev_value: u64, prev_spk: Vec<u8>, flags: u32, coin_height: u32, coin_is_coinbase: bool, coin_mtp: u32 }
+struct Spend { raw: Vec<u8>, prev_value: u64, prev_spk: Vec<u8>, coin_height: u32, coin_is_coinbase: bool, coin_mtp: u32 }
 
 /// Build a block witness against (and advancing) the running accumulator `forest`.
 fn build_block(
@@ -210,7 +214,7 @@ fn build_block(
         let pos = forest.leaves.iter().position(|x| *x == coin).expect("spent coin in accumulator");
         let last = forest.leaves.len() - 1;
         inputs.push(BlockInput {
-            raw_tx: sp.raw.clone(), input_idx: 0, prevouts, flags: sp.flags,
+            raw_tx: sp.raw.clone(), input_idx: 0, prevouts,
             global_pos: pos as u64, coin_height: sp.coin_height, coin_is_coinbase: sp.coin_is_coinbase as u32, coin_mtp: sp.coin_mtp, tx_first: 1,
             proof_i: wire_proof(&forest.prove(pos)),
             proof_last: wire_proof(&forest.prove(last)),
@@ -282,7 +286,8 @@ fn seed_and_anchor() -> (Forest, ChainState) {
         tip_hash: arr(rev(hx(HASH169))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: 169,
         prev_nbits: 0x1d00ffff, prev_time: 1_231_730_523, epoch_start: 1_231_006_505,
-        recent_times: (0..11).map(|i| 1_231_729_000u32 + i * 140).collect(), self_id: METHOD_ID,
+        recent_times: (0..11).map(|i| 1_231_729_000u32 + i * 140).collect(),
+        anchor_id: [0u8; 32], self_id: METHOD_ID,
     };
     (forest, anchor)
 }
@@ -291,7 +296,7 @@ fn header_170() -> Vec<u8> {
     build_header(HASH169, &arr(rev(hx(MERKLE170))), 1_231_731_025, 0x1d00ffff, 1_889_418_792)
 }
 fn spend_170() -> Spend {
-    Spend { raw: hx(SPEND170), prev_value: SPEND170_PREV_VALUE, prev_spk: hx(SPEND170_PREV_SPK), flags: 0, coin_height: 9, coin_is_coinbase: true, coin_mtp: 1_231_473_279 }
+    Spend { raw: hx(SPEND170), prev_value: SPEND170_PREV_VALUE, prev_spk: hx(SPEND170_PREV_SPK), coin_height: 9, coin_is_coinbase: true, coin_mtp: 1_231_473_279 }
 }
 
 // PROVE (not execute) the block-170 fold: a real STARK receipt attesting the block is valid and
@@ -467,7 +472,7 @@ fn build_full() -> (ChainState, BlockWitness) {
                 .unwrap_or_default();
             if rt.is_empty() { (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect() } else { rt }
         },
-        self_id: METHOD_ID,
+        anchor_id: [0u8; 32], self_id: METHOD_ID,
     };
     // COV-1 negative-test hook (test-only, inert unless HAZYNC_COV1_BADTIME set): make the previous 11
     // blocks' median-time-past equal THIS block's timestamp, so `time_ok = block_time > prev_mtp` is
@@ -502,7 +507,7 @@ fn build_full() -> (ChainState, BlockWitness) {
                 eprintln!("[SEC2-TEST] corrupting first spend global_pos {} -> {} (proof_i left honest)", pos, global_pos);
             }
             inputs.push(BlockInput {
-                raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(), flags: 0,
+                raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
                 global_pos, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
                 proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
             });
@@ -651,7 +656,7 @@ fn genesis_anchor() -> ChainState {
         tip_hash: arr(rev(hx(GENESIS_HASH))), utxo_roots: Forest::new().roots(), utxo_leaves: 0,
         cum_work: arr_u128(GENESIS_WORK), height: 0,
         prev_nbits: GENESIS_BITS, prev_time: GENESIS_TIME, epoch_start: GENESIS_TIME,
-        recent_times: vec![GENESIS_TIME], self_id: METHOD_ID,
+        recent_times: vec![GENESIS_TIME], anchor_id: [0u8; 32], self_id: METHOD_ID,
     }
 }
 
@@ -754,7 +759,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                 // from leaf membership and skips the accumulator delete. Script still verifies.
                 spent_in_block.insert((op.txid.to_byte_array(), op.vout));
                 inputs.push(BlockInput {
-                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(), flags: 0,
+                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
                     global_pos: 0, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
                     proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
                     proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
@@ -765,7 +770,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                     .expect("spent coin not in carried accumulator (bad metadata)");
                 let last = forest.leaves.len() - 1;
                 inputs.push(BlockInput {
-                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(), flags: 0,
+                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
                     global_pos: pos as u64, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
                     proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
                 });
@@ -1055,6 +1060,24 @@ fn verify_any_cmd(bin: &str) {
         hex(&in_bh), hex(&out_bh));
 }
 
+// `verify-chain <bin>`: verify a bare ChainState (mode-2/mode-5) receipt and PIN its committed anchor to
+// the genesis anchor (S5). This is the chain-track analogue of verify-range's genesis in-boundary pin:
+// without it an is_base=1 receipt built on a FABRICATED anchor (arbitrary height/UTXO/work/easy nbits) is
+// journal-indistinguishable from a genuine genesis-anchored one. The expected anchor_id is the double-
+// SHA256 of the canonical genesis-anchor journal — exactly what the guest commits in the base step.
+fn verify_chain_cmd(bin: &str) {
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
+    let claimed = r.journal.decode::<ChainState>().ok().map(|cs| cs.self_id);
+    verify_receipt_ex(&r, claimed); // real STARK verification (distinguishes build-mismatch from forgery)
+    let cs: ChainState = r.journal.decode().unwrap();
+    assert!(cs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    assert!(cs.kind == KIND_CHAIN, "receipt is not a ChainState (domain tag)"); // H8
+    let expected_anchor = bitcoin::hashes::sha256d::Hash::hash(&state_journal_bytes(&genesis_anchor())).to_byte_array();
+    assert_eq!(cs.anchor_id, expected_anchor, "chain NOT anchored at genesis (S5): anchor_id mismatch");
+    println!(">>> CHAIN PROOF [genesis..{}] VERIFIED — genesis-anchored, self-authenticating.", cs.height);
+    println!("  tip_hash {}  cum_work {}  UTXO leaves {}", hex(&cs.tip_hash), work_u128(&cs.cum_work), cs.utxo_leaves);
+}
+
 // SEGMENTED proof: split the block's inputs into chunks, prove each chunk's scripts (mode 4), then
 // aggregate (mode 5) — env::verify the chunks + do the cheap accumulator transition + block checks.
 fn prove_seg() {
@@ -1304,7 +1327,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             // accumulator proof needed — the guest skips the delete for in-block coins.
             let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_000_000), script_pubkey: optrue() }]);
             inputs.push(BlockInput {
-                raw_tx: serialize(*tx), input_idx: 0, prevouts, flags: 0,
+                raw_tx: serialize(*tx), input_idx: 0, prevouts,
                 global_pos: 0, coin_height: SYNTH_H, coin_is_coinbase: 0, coin_mtp: SYNTH_T, tx_first: 1,
                 proof_i: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
                 proof_last: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
@@ -1315,7 +1338,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             let pos = forest.leaves.iter().position(|x| *x == c_leaf).expect("C in accumulator");
             let last = forest.leaves.len() - 1;
             inputs.push(BlockInput {
-                raw_tx: serialize(*tx), input_idx: 0, prevouts, flags: 0,
+                raw_tx: serialize(*tx), input_idx: 0, prevouts,
                 global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: 1,
                 proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
             });
@@ -1389,7 +1412,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let mk_input = |forest: &mut Forest, idx: u32, leaf: Hash, blob: Vec<u8>| -> BlockInput {
         let pos = forest.leaves.iter().position(|x| *x == leaf).expect("coin in accumulator");
         let last = forest.leaves.len() - 1;
-        let bi = BlockInput { raw_tx: t_raw.clone(), input_idx: idx, prevouts: blob, flags: 0,
+        let bi = BlockInput { raw_tx: t_raw.clone(), input_idx: idx, prevouts: blob,
             global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: (idx == 0) as u32,
             proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) };
         forest.delete(pos); bi
@@ -1595,6 +1618,10 @@ fn main() {
         verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
         return;
     }
+    if let Some(p) = args.iter().position(|a| a == "verify-chain") {
+        verify_chain_cmd(args.get(p + 1).expect("verify-chain <bin>"));
+        return;
+    }
     if args.iter().any(|a| a == "prove-full") {
         prove_full();
         return;
@@ -1631,13 +1658,14 @@ fn main() {
         prev_nbits: 0x1d00ffff, prev_time: 1_231_730_523, // block 169 (difficulty-1 epoch)
         epoch_start: 1_231_006_505, // epoch 0's first block = genesis timestamp
         // last 11 block timestamps up to 169 (approx; MTP unused pre-BIP113 at heights 170-172).
-        recent_times: (0..11).map(|i| 1_231_729_000u32 + i * 140).collect(), self_id: METHOD_ID,
+        recent_times: (0..11).map(|i| 1_231_729_000u32 + i * 140).collect(),
+        anchor_id: [0u8; 32], self_id: METHOD_ID,
     };
 
     // Fold each real block. (170 has the P2PK spend; 171/172 are coinbase-only.)
     let blocks: Vec<(u32, Vec<u8>, &str, Vec<Spend>, &str)> = vec![
         (170, build_header(HASH169, &arr(rev(hx(MERKLE170))), 1_231_731_025, 0x1d00ffff, 1_889_418_792), CB170,
-            vec![Spend { raw: hx(SPEND170), prev_value: SPEND170_PREV_VALUE, prev_spk: hx(SPEND170_PREV_SPK), flags: 0, coin_height: 9, coin_is_coinbase: true, coin_mtp: 1_231_473_279 }], HASH170),
+            vec![Spend { raw: hx(SPEND170), prev_value: SPEND170_PREV_VALUE, prev_spk: hx(SPEND170_PREV_SPK), coin_height: 9, coin_is_coinbase: true, coin_mtp: 1_231_473_279 }], HASH170),
         (171, vec![], CB171, vec![], HASH171), // header built below (merkle = coinbase txid)
         (172, vec![], CB172, vec![], HASH172),
     ];

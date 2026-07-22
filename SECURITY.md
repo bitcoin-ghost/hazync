@@ -31,8 +31,11 @@ sha256sum -c SHA256SUMS.txt                       # the downloaded binary must m
 
 A good signature plus a matching checksum means the binary is the maintainer's published build. Note
 that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
-confirm its `METHOD_ID` is `c029cee4…` (see `reproduce/METHOD_ID`), and any proof verifies against that
-id regardless of who built the host. The signature adds provenance on top of that.
+confirm its `METHOD_ID` matches the canonical id in `reproduce/METHOD_ID`, and any proof verifies against
+that id regardless of who built the host. The signature adds provenance on top of that. (The canonical id
+is re-pinned whenever the guest changes — most recently by the 2026-07-22 audit, `AUDIT_2026-07.md`; the
+reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 v0.5.1, `Cargo.lock`,
+`reproduce/Dockerfile` — is unchanged, so the id stays reproducible, it is just a new value.)
 
 ## Status at a glance
 
@@ -58,6 +61,15 @@ id regardless of who built the host. The signature adds provenance on top of tha
 | H6 | Range verifier under-pinned the genesis in-boundary (`in_epoch_start`/`in_roots`/`in_recent`) → forgeable first retarget / phantom UTXO seed | high | **fixed** (`assert_genesis_in_boundary` in `verify-range`; `verify-any` applies it when the range claims genesis) |
 | H7 | Coordinator chained ranges by tip-hash only — no cross-range difficulty/MTP continuity | medium | **fixed** (`verify-any` now pins the genesis in-boundary + exposes nbits/epoch; coordinator `_frontier_chain` requires `out_nbits/out_epoch(k) == in_nbits/in_epoch(k+1)` across every seam) |
 | H8 | Cross-mode journal laundering: `block_proof` (mode 1) commits a self_id-free journal that never aborts | speculative | **fixed** (domain tag `KIND_*` is the first committed field of every recursion-consumed journal — `ChainState`/`RangeState`/`ChunkOut` — and asserted on every decode) |
+| A1 | Bare `ChainState` (mode-2/5) receipt did not commit its anchor → a fabricated-anchor receipt is journal-indistinguishable from a genesis-anchored one | verifier-hole | **fixed** (S5: `anchor_id = dsha256(base anchor)` committed + carried; new `verify-chain` pins it to genesis. Not exploitable via shipped verifiers before — they take only `KIND_RANGE`) |
+| G3 | BIP141 witness-commitment check ran at all heights (Core gates on segwit ≥481824) → reject-valid stall in 433k–481823 | med (reject-valid) | **fixed** (gate at 481824; below, `witness_ok=!has_witness` = Core `unexpected-witness`) |
+| G2 | `unexpected-witness` excluded the coinbase from `has_witness` | low | **fixed** (coinbase now counted) |
+| G5 | Block-level `MoneyRange(nFees)` implicit; `subsidy+fee` unguarded i64 add | low | **fixed** (explicit MoneyRange + i128-safe bound, folded into `subsidy_ok`) |
+| G1 | General BIP30 `HaveCoin` replaced by a structural argument (utreexo has no non-membership proof) | low (bounded) | **documented + gated invariant** (BIP34≥227931 + 2 grandfathered; sound to height ~1,983,702; full HaveCoin needs utreexo non-membership) |
+| G4 | 2-hour future-time limit | (not a bug) | **intentionally not enforced** (verifier-local wall-clock, unprovable in a zkVM) |
+| N1 | Dead `BlockInput.flags` wire field (flags are guest-derived) | hygiene | **removed** (guest+host+all sites, incl. host `Spend.flags`) |
+| N2 | `scriptPubKey` not length-prefixed in the UTXO leaf | fragility | **fixed** (length-prefixed in all 3 byte-identical leaf sites — changes every leaf hash/root) |
+| N3 | `tx_full_sigops` returned legacy-only cost on a short prevouts blob | fragility | **fixed** (fails closed: poison cost → `sigops_ok=false`) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -301,6 +313,54 @@ independently sufficient. One genuine new-in-round-6 **minor** was fixed: the lo
 on concurrent `verify-any` subprocesses (fan-out DoS on the small box) — bounded with a `Semaphore(cpu_count)`.
 Two other observations (the `0-999` seed range is unprovable by design so blocks 1–999 are proven as
 single-block ranges; `by_in` first-wins can understate the frontier) are pre-existing and non-soundness.
+
+## Round 8 (2026-07-22) — completeness + verifier audit; full write-up in `AUDIT_2026-07.md`
+
+Eighth pass (five reviewers, one dimension each, each told to break it: consensus completeness,
+enforcement gating, accumulator soundness, the FFI/VerifyScript boundary, and the end-to-end trust
+scope). Four dimensions came back **sound** — the accumulator (no inclusion-forgery / skipped-delete /
+double-spend), the FFI boundary (script runs against exactly the leaf-committed coin with the full
+prevout set force-computed, `MissingDataBehavior::FAIL`), enforcement gating (every proving-mode check on
+an asserted panic path; mode 1 confirmed debug-only + tag-un-launderable), and consensus completeness (all
+Core block-connection rules bar the deviations below, comments verified against the code). One
+verifier-hole and five completeness deviations were found; none allowed minting, theft, or double-spend on
+the real chain today. All fixed except G4 (unprovable — left documented). See the status table above and
+the finding-by-finding detail + verification in **`AUDIT_2026-07.md`**.
+
+- **A1 (verifier-hole) — FIXED.** A bare `ChainState` receipt (mode 2 `chain_step` / mode 5 `aggregate`)
+  committed no record of the anchor it bottomed out at, so an `is_base=1` receipt built on a *fabricated*
+  anchor (arbitrary height/UTXO/work/easy nBits) was journal-indistinguishable from a genesis-anchored
+  one. Not reachable through any shipped verifier — `verify-range`/`verify-any` decode only `RangeState`
+  and pin the full genesis in-boundary — but a standing foot-gun for anyone handed a raw chain receipt.
+  **Fix (S5):** the guest commits `anchor_id = dsha256(base-anchor journal)` in the base step and carries
+  it forward unchanged; new host command **`verify-chain`** verifies the STARK, asserts
+  `self_id==METHOD_ID` + the `KIND_CHAIN` tag, and pins `anchor_id == dsha256(genesis_anchor)` — the
+  chain-track analogue of `verify-range`'s genesis pin. A checkpoint-anchored proof correctly fails it.
+- **G3 (medium, reject-valid/liveness) — FIXED.** The BIP141 witness-commitment check ran unconditionally;
+  Core enforces it only from segwit activation (481824). A canonical pre-activation block carrying an
+  early commitment output but a witness-free coinbase would be wrongly rejected — a from-genesis stall in
+  433k–481823. **Fix:** gate the commitment at 481824; below activation `witness_ok = !has_witness`
+  (Core's `unexpected-witness`, which now also covers the coinbase — **G2**).
+- **G5 (low) — FIXED.** Added the explicit block-level `MoneyRange(total_fee)` + an i128-safe
+  `subsidy + fees ≤ MAX_MONEY` bound (Core's `bad-txns-accumulated-fee-outofrange`), folded into the
+  already-gated `subsidy_ok`, rather than relying on anchor-integrity induction.
+- **G1 (low, bounded) — DOCUMENTED as a gated invariant.** A utreexo `Stump` cannot prove non-membership,
+  so Core's general BIP30 `HaveCoin` lookup is replaced by a structural argument, now written in-code as an
+  explicit, gated, bounded invariant: BIP34 (asserted, ≥227931) forces coinbase-txid uniqueness, the two
+  pre-BIP34 duplicates are handled by F3, and a non-coinbase duplicate is a double-spend the accumulator
+  rejects — sound for every mainnet block up to ~1,983,702 (≈2046), where a real membership mechanism
+  would be needed.
+- **N1/N2/N3 (hardening).** Removed the dead `BlockInput.flags` (guest+host; flags are guest-derived — a
+  refactor trap); length-prefixed `scriptPubKey` in all three byte-identical UTXO-leaf sites (future-proofs
+  the preimage — **changes every leaf hash/root**); and `tx_full_sigops` now fails closed on a short
+  prevouts blob instead of under-counting.
+
+Validated in execute mode with **no regression** (real Core code in the zkVM): `regress` (block 170
+byte-exact tip), `check-full` 130000 (pre-segwit G3 branch, VALID) and 741000 (active G3 branch + taproot +
+~670 inputs, VALID, tip byte-exact to the pre-change value — proving N2 is consensus-neutral),
+741000_badwit correctly REJECTED (`witness_ok=false` only), and `check-bip30` PASS. `METHOD_ID` changed
+(guest + leaf format changed) ⇒ all prior proofs invalid, re-proven from genesis. `cargo fmt` clean; the
+prove-based `adversarial` suite + `clippy` are re-run on the GPU box as part of the re-prove.
 
 ## Earlier findings (2026-07-15 self-audit) — status
 

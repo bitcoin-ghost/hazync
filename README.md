@@ -33,7 +33,7 @@ Prove each block with real Core in the zkVM, fold blocks recursively into one re
 
 ## Status
 
-Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **seven rounds** of adversarial self-audit.
+Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **eight rounds** of adversarial self-audit — the latest a five-reviewer completeness+verifier pass ([`AUDIT_2026-07.md`](AUDIT_2026-07.md)).
 
 Not done yet: the full genesis→tip backfill (a GPU-compute campaign, not new capability) and an external audit. This is early-stage research, shared for review. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
 
@@ -41,7 +41,7 @@ Not done yet: the full genesis→tip backfill (a GPU-compute campaign, not new c
 
 - New to zero-knowledge proofs? [`EXPLAINER.md`](EXPLAINER.md) — plain English.
 - Prove blocks, join the party: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Soundness and the audit record: [`SECURITY.md`](SECURITY.md)
+- Soundness and the audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](AUDIT_2026-07.md)
 - How it's built: [`docs/`](docs/)
 
 ## Licence
