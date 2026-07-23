@@ -4,11 +4,11 @@
 
 The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
-**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and audited ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) — the rest is the compute campaign to prove the chain forward.
+**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and hardened across eight rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) — no external audit yet. The rest is the compute campaign to prove the chain forward: a **long-horizon, GPU-intensive** effort (proving real Core crypto is deliberately expensive — that's the moat), which is exactly why it's an open, distributed proof-party rather than something we finish alone.
 
 ## Verify a proof
 
-No GPU, no build, no clone. Linux x86-64, glibc 2.39+ (Ubuntu 24.04+; on older distros build from source — see [`docs/PROVING.md`](docs/PROVING.md) — or run the binary inside `reproduce/Dockerfile`):
+No GPU, no build, no clone. The prebuilt binary needs Linux x86-64, glibc 2.39+ (Ubuntu 24.04+):
 
 ```bash
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
@@ -16,11 +16,19 @@ curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin        # → prints a line starting with RANGE-OK
 ```
 
-Every proof on the [board](https://bitcoinghost.org/hazync) is public. The binary is the canonical guest — rebuild it yourself (`reproduce/Dockerfile`) and you get the same image id, byte for byte (`reproduce/METHOD_ID`).
+**On an older distro** (Ubuntu 22.04, Debian 12 — older glibc), run the *same* binary in a container, no rebuild:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w ubuntu:24.04 ./host verify-any proof.bin
+```
+
+(Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).)
+
+`RANGE-OK` means the STARK checks out and the receipt is a valid proof that block *n* is a correct consensus transition between its stated boundaries. **Genesis-anchoring** — that those boundaries chain all the way back to the real genesis — is what the connected chain establishes (the board's frontier, or `host verify-chain` on a folded chain proof, which pins the genesis anchor); a single isolated proof attests its own step, not the whole history. Every proof on the [board](https://bitcoinghost.org/hazync) is public. The binary is the canonical guest — rebuild it yourself (`reproduce/Dockerfile`) and you get the same image id, byte for byte (`reproduce/METHOD_ID`).
 
 ## What it proves
 
-A verified chain proof attests: **every block from genesis to the tip is valid under Core consensus, the UTXO set equals the committed root, and the work is as committed** — with no re-execution. That covers scripts of every type, real ECDSA and Schnorr through `libsecp256k1`, no inflation, proof-of-work and difficulty, merkle and witness commitments, weight, sigops, and the locktime/BIP rules, under Core's exact flags. The one non-Core piece is the Utreexo UTXO accumulator (`accumulator/`) — our code, exhaustively tested.
+A verified chain proof attests: **every block from genesis to the tip is valid under Core consensus, the UTXO set equals the committed root, and the work is as committed** — with no re-execution. That covers scripts of every type, real ECDSA and Schnorr through `libsecp256k1`, no inflation, proof-of-work and difficulty, merkle and witness commitments, weight, sigops, and the locktime/BIP rules, under Core's exact flags. The one non-Core piece is the Utreexo UTXO accumulator — our own code (the proven version is the guest's `prover/methods/guest/src/utreexo.rs`), differentially fuzzed ~900k executions against a reference model (`audit-fuzz/`). It has not yet had an external audit — it's the most likely place for a hidden bug, and the thing we most want outside eyes on.
 
 ## How it works
 

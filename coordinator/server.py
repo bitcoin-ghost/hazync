@@ -344,6 +344,32 @@ def proven_count():
     if cur_hi is not None: total += cur_hi - cur_lo + 1
     return total
 
+def distinct_blocks_by_pubkey():
+    """Per-contributor DISTINCT blocks proven, computed the SAME way as proven_count (interval-merge) so
+    the leaderboard always reconciles with the headline 'proven' number. A stored per-submit counter can
+    drift (e.g. a block proved both as a single and inside an overlapping range double-counts); deriving
+    from vranges makes that impossible. Cheap: vranges are RANGE_SIZE-coarse + a few singles."""
+    c = db()
+    rows = c.execute("SELECT pubkey,lo,hi FROM vranges ORDER BY pubkey,lo,hi").fetchall()
+    c.close()
+    out, cur_pk, cur_lo, cur_hi, tot = {}, None, None, None, 0
+    def flush():
+        if cur_pk is not None:
+            out[cur_pk] = out.get(cur_pk, 0) + tot
+    for r in rows:
+        pk = r["pubkey"]
+        if pk != cur_pk:
+            if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
+            cur_pk, cur_lo, cur_hi = pk, r["lo"], r["hi"]
+            continue
+        if r["lo"] > cur_hi + 1:
+            out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
+            cur_lo, cur_hi = r["lo"], r["hi"]
+        else:
+            cur_hi = max(cur_hi, r["hi"])
+    if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
+    return out
+
 def frontier_proof():
     """The genesis-anchored frontier as a chain-state (the real committed proof output the hero panel
     shows). Empty (height 0) until the first genesis-anchored proof lands."""
@@ -406,9 +432,14 @@ def state():
         else:
             b = {"id": rid, "lo": lo, "hi": hi, "status": "open", "handle": None}
         board.append(b)
-    leaders = [dict(id=x["pubkey"][:10], handle=x["handle"], blocks=x["blocks"])
-               for x in c.execute("SELECT * FROM contributors ORDER BY blocks DESC LIMIT 40")
-               if x["pubkey"].lower() not in blk][:8]
+    # DISTINCT blocks per contributor (interval-merge) — reconciles with the headline 'proven' by
+    # construction; a stored per-submit counter can drift on overlapping submissions.
+    _dbp = distinct_blocks_by_pubkey()
+    leaders = sorted(
+        (dict(id=x["pubkey"][:10], handle=x["handle"], blocks=_dbp.get(x["pubkey"], 0))
+         for x in c.execute("SELECT * FROM contributors")
+         if x["pubkey"].lower() not in blk and _dbp.get(x["pubkey"], 0) > 0),
+        key=lambda d: d["blocks"], reverse=True)[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]

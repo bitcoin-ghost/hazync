@@ -21,13 +21,18 @@ defenwycke <defenwycke@icloud.com>
 777FE81F 8CC077FD 3D08055E 852C2B31 90F5B928
 ```
 
-From a release's assets, download the binary plus `SHA256SUMS.txt` and `SHA256SUMS.txt.asc`, then:
+From a release's assets, download the binary **keeping its asset filename** (`hazync-host-x86_64-linux-gnu`) plus `SHA256SUMS.txt` and `SHA256SUMS.txt.asc`, then:
 
 ```bash
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt.asc
 gpg --recv-keys 852C2B3190F5B928            # import the key once (from a keyserver / trusted source)
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature from the key above
-sha256sum -c SHA256SUMS.txt                       # the downloaded binary must match
+sha256sum -c SHA256SUMS.txt                       # → hazync-host-x86_64-linux-gnu: OK
 ```
+
+(If you saved the binary as `host` per the quick-start, `sha256sum -c` won't find it by name — either keep the asset filename as above, or run `sha256sum host` and compare the digest to the matching line in `SHA256SUMS.txt` by eye.)
 
 A good signature plus a matching checksum means the binary is the maintainer's published build. Note
 that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
