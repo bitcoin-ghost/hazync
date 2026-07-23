@@ -38,14 +38,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p dist && cd dist
+          # Sign whatever host binaries the release actually carries (CPU-only, or CPU+CUDA) — a release
+          # may ship the CUDA build later than the CPU build, so glob rather than hardcode both names.
           gh release download "${{ steps.tag.outputs.tag }}" -R "${{ github.repository }}" \
-            -p 'hazync-host-x86_64-linux-gnu' -p 'hazync-host-x86_64-linux-gnu-cuda' --clobber
+            -p 'hazync-host-*' --clobber
           ls -la
 
       - name: Write SHA256SUMS over the binaries
         run: |
           cd dist
-          sha256sum hazync-host-x86_64-linux-gnu hazync-host-x86_64-linux-gnu-cuda > ../SHA256SUMS.txt
+          # every host binary present, deterministic order; fail if there are none to sign
+          bins=$(ls hazync-host-* 2>/dev/null | sort)
+          if [ -z "$bins" ]; then echo "::error::no hazync-host-* binaries on the release to sign"; exit 1; fi
+          sha256sum $bins > ../SHA256SUMS.txt
           cat ../SHA256SUMS.txt
 
       - name: PGP-sign SHA256SUMS
