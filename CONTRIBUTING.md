@@ -15,7 +15,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 | Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done |
 | Prove early or small blocks | An NVIDIA GPU + CUDA 12.6 (or the CPU binary, slower) |
 | Prove big modern blocks (thousands of inputs) | 64 GB+ RAM and a serious GPU |
-| Run your own coordinator | A cheap 2-core, 4 GB box, no GPU |
+| Run your own party (coordinator + archive bridge) | An always-on box with a full `bitcoind` — ~8-core, 32 GB, 1 TB+ NVMe |
 
 ## Step 1: get the prover (no build needed)
 
@@ -56,7 +56,7 @@ Your name can be anything. It is tied to a signing key the tool makes for you an
 
 `run` claims the work, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
 
-Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block is not something a fresh contributor can prove: the coordinator serves witnesses for its window near the frontier, and proving needs the chain up to that point.
+Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block (past the coordinator's served window) is not something a fresh contributor can prove yet: the coordinator's archive bridge serves a ready-made witness for each block in its window near the frontier, and you prove a block directly from that witness — no node of your own, no chain replay.
 
 ## Just want to check a proof, not make one?
 

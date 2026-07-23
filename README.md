@@ -2,13 +2,13 @@
 
 **Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* `interpreter.cpp`, `SignatureHash`, and `libsecp256k1` — not a reimplementation — inside a zkVM, and proves each block valid under real consensus. Every other validity-proof effort rewrites consensus and inherits the question "does your rewrite match Core in every edge case, forever?" Hazync runs Core, so it doesn't.
 
-The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in milliseconds — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
+The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
 **Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and audited ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) — the rest is the compute campaign to prove the chain forward.
 
 ## Verify a proof
 
-No GPU, no build, no clone. Linux x86-64, glibc 2.39+ (Ubuntu 24.04+; on older distros build from source or use `reproduce/Dockerfile`):
+No GPU, no build, no clone. Linux x86-64, glibc 2.39+ (Ubuntu 24.04+; on older distros build from source — see [`docs/PROVING.md`](docs/PROVING.md) — or run the binary inside `reproduce/Dockerfile`):
 
 ```bash
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
@@ -29,7 +29,7 @@ per-input script proof ── block proof ── chain fold ── tip / range p
  (real VerifyScript)     (all rules)    (recursion)   (one receipt)
 ```
 
-Prove each block with real Core in the zkVM, fold blocks recursively into one receipt, verify the receipt. Witnesses come from a full node during its own sync. Details in [`docs/`](docs/).
+Prove each block with real Core in the zkVM, fold blocks recursively into one receipt, verify the receipt. Witnesses are served ready-made by an archive-node bridge (a full node that drives the UTXO accumulator forward once and emits each block's witness), so a prover needs no node of its own and no chain replay. Details in [`docs/`](docs/).
 
 ## Status
 

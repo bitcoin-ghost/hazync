@@ -4,8 +4,8 @@ name: Sign release
 # (fingerprint in SECURITY.md), mirroring the bitcoin-ghost/ghost release signing.
 #
 # Hazync binaries are built on a GPU box and uploaded to the release (not built in CI), so this
-# workflow does NOT build — it downloads the release assets, writes a SHA256SUMS manifest over the
-# binaries, PGP-signs it, and uploads SHA256SUMS + SHA256SUMS.asc back onto the release.
+# workflow does NOT build — it downloads the release assets, writes a SHA256SUMS.txt manifest over the
+# binaries, PGP-signs it, and uploads SHA256SUMS.txt + SHA256SUMS.txt.asc back onto the release.
 #
 # Runs automatically when a release is published, and can be run manually against an existing tag
 # (Actions → Sign release → Run workflow → enter the tag) to sign or re-sign a past release.

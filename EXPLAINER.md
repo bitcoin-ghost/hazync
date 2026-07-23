@@ -65,7 +65,7 @@ translation. This is the part everyone else got stuck on, and it's the part we c
 
 *(For the technically curious: we compile Bitcoin Core v28's real script interpreter, signature-hashing,
 and its cryptography library and run them, unmodified, inside a zero-knowledge virtual machine. The
-full details, and an honest list of what's proven vs still open, are in `SOUNDNESS.md` and
+full details, and an honest list of what's proven vs still open, are in `docs/SOUNDNESS.md` and
 `SECURITY.md`.)*
 
 ## What actually works today (and what doesn't — honestly)
@@ -128,7 +128,7 @@ kind of thing you want to exist, here's how you can move it forward — pick wha
 
 ---
 
-*Want the deep version? `README.md` is the technical overview, `SOUNDNESS.md` is the exact security
+*Want the deep version? `README.md` is the technical overview, `docs/SOUNDNESS.md` is the exact security
 claim and trust assumptions, `SECURITY.md` is our own hole-poking (and an open invitation to poke
-harder), and `HAZYNC_ARCHITECTURE.md` is how the full run gets done. We keep the honest caveats in writing on
+harder), and `docs/HAZYNC_ARCHITECTURE.md` is how the full run gets done. We keep the honest caveats in writing on
 purpose — a project like this is only worth anything if the claims are true.*

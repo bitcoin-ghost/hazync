@@ -10,16 +10,20 @@ hazync — Proof Party contributor CLI.
   hazync run [id]           # claim + prove + submit, end to end (id optional: picks the next open range)
 
 The party proves the chain forward from genesis, so you take a range near the current
-frontier. Proving a range needs the witnesses up to it (the coordinator serves them for
-its window); an arbitrary far-future block is not something a fresh contributor can prove.
+frontier. The coordinator serves a ready-made witness bundle for each block in its window,
+so you prove a block directly — no need to run your own node or replay the chain. An
+arbitrary far-future block (past the served window) is not something a fresh contributor
+can prove yet.
 
 Config (env):
-  COORD_URL   coordinator base URL            (default http://localhost:8899)
-  HAZYNC_HOST path to the prover `host` binary (for `prove`)
-  WITNESS_DIR where per-block witnesses live   (default ~/.hazync/witnesses)
+  COORD_URL   coordinator base URL   (default http://localhost:8899;
+              the public party is https://bitcoinghost.org/hazync)
+  HAZYNC_HOST path to the prover `host` binary (required for `prove`/`run`)
+  BUNDLE_DIR  where fetched archive bundles live (default ~/.hazync/bundles)
+  WITNESS_DIR legacy per-block witnesses, replay fallback (default ~/.hazync/witnesses)
 Identity + receipts live under ~/.hazync/.
 """
-import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time
+import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil
 
 HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
@@ -31,8 +35,13 @@ WITNESS = os.environ.get("WITNESS_DIR", str(HOME / "witnesses"))
 BUNDLES = os.environ.get("BUNDLE_DIR", str(HOME / "bundles"))   # archive-node bundles fetched from the coordinator
 
 def _ed():
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        sys.exit("missing the signing library `cryptography`. Install it:\n"
+                 "  sudo apt install python3-cryptography      # Debian/Ubuntu\n"
+                 "  or:  pip install cryptography")
     return Ed25519PrivateKey, serialization
 
 def identity():
@@ -117,6 +126,18 @@ def fetch_bundles(lo, hi):
             fh.write(data)
     return True
 
+def parse_range(rng):
+    # "N" -> (N, N); "lo-hi" -> (lo, hi). Exits with a clear message on anything else.
+    try:
+        p = [int(x) for x in rng.split("-")]
+    except ValueError:
+        p = []
+    if len(p) == 1:
+        return p[0], p[0]
+    if len(p) == 2 and p[1] >= p[0]:
+        return p[0], p[1]
+    sys.exit(f"invalid range '{rng}' — use 'N' (one block) or 'lo-hi' (e.g. 1000-1999)")
+
 def cmd_id(args):
     _, pub, handle = identity()
     if args: HANDLE.write_text(args[0]); handle = args[0]
@@ -149,10 +170,14 @@ def cmd_prove(args):
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
     _, pub, _ = identity()
-    parts = [int(x) for x in rng.split("-")]            # "n" (single block) or "lo-hi" (range)
-    lo, hi = (parts[0], parts[0]) if len(parts) == 1 else (parts[0], parts[1])
+    lo, hi = parse_range(rng)                            # "n" (single block) or "lo-hi" (range)
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
+    # Prove + fold in a dedicated per-range work dir (under ~/.hazync) so the host's range_*.bin /
+    # fold_*.bin intermediates never litter the CWD, never collide with a concurrent prove, and the final
+    # os.replace stays on one filesystem (no EXDEV).
+    work = RCPTDIR / f".work-{rng}"
+    shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True, exist_ok=True)
     # Block 0 is the genesis anchor and is unprovable, so we start at max(lo, 1). The genesis-seed slot
     # 0-999 is thus proved as blocks 1..999; the coordinator (which pins the genesis in-boundary) accepts
     # a [1..hi] receipt for a [0..hi] claim. Starting at 1 also means a bad manual `run 0-...` no longer
@@ -177,24 +202,32 @@ def cmd_prove(args):
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
-            subprocess.run([HOSTBIN, prove_cmd, str(h)], env=env, check=True)
+            subprocess.run([HOSTBIN, prove_cmd, str(h)], env=env, check=True, cwd=work)
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
-        _fold_and_save(parts, out)
+        _fold_and_save(parts, out, work)
         print("receipt:", out)
     finally:
         stop.set()
+        shutil.rmtree(work, ignore_errors=True)          # drop the range_*/fold_* intermediates
 
-def _fold_and_save(parts, out):
+def _fold_and_save(parts, out, work):
+    # Recursively fold the per-block receipts into one; all I/O is inside `work` (cwd=work).
+    rnd = 0
     while len(parts) > 1:
+        rnd += 1
         nxt = []
         for i in range(0, len(parts), 2):
             if i + 1 < len(parts):
-                m = f"fold_{i}.bin"; subprocess.run([HOSTBIN, "fold-range", parts[i], parts[i+1], m], check=True); nxt.append(m)
-            else: nxt.append(parts[i])
+                m = f"fold_r{rnd}_{i}.bin"
+                subprocess.run([HOSTBIN, "fold-range", parts[i], parts[i + 1], m], check=True, cwd=work)
+                nxt.append(m)
+            else:
+                nxt.append(parts[i])
+        print(f"  …folding into one receipt: {len(parts)} → {len(nxt)}", flush=True)
         parts = nxt
-    os.replace(parts[0], out)
+    os.replace(os.path.join(work, parts[0]), out)
 
 def cmd_submit(args):
     rng = args[0]; sk, pub, handle = identity()
@@ -211,28 +244,35 @@ def cmd_submit(args):
     sys.exit(0 if res.get("ok") else 1)
 
 def cmd_run(args):
+    # Check the prover binary FIRST — `run` claims a range (locking it under the claim TTL), so we must
+    # not claim only to bail later because HAZYNC_HOST is unset. (cmd_prove re-checks; this is the gate.)
+    if not HOSTBIN or not os.path.exists(HOSTBIN):
+        sys.exit("set HAZYNC_HOST to the prover `host` binary before `run` — download it from "
+                 "https://github.com/bitcoin-ghost/hazync/releases/latest and `export HAZYNC_HOST=/path/to/host`.")
     if not args:                                     # no range given — let the coordinator pick one
         rng = cmd_pick([])
         if not rng: sys.exit("nothing open to claim")
         args = [rng]
-    # Fail fast BEFORE claiming: proving replays blocks 1..hi, so the whole range must be inside the
-    # coordinator's served witness window. Probing the top block avoids claiming a range (locking it under
-    # the claim TTL) only to 404 mid-fetch. The window is contiguous from block 1, so hi is the binding edge.
-    try:
-        hi = [int(x) for x in args[0].split("-")][-1]
-    except Exception:
-        sys.exit(f"invalid range '{args[0]}' (use 'N' or 'lo-hi')")
-    if not witness_in_window(hi):
-        sys.exit(f"range {args[0]} is outside the coordinator's served witness window (block {hi} has no "
-                 f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
+    # Fail fast BEFORE claiming: the whole range must be inside the coordinator's served window. Probe both
+    # ends (block 0 is unprovable, so clamp to 1) so a claim never locks a range we then can't fetch.
+    lo, hi = parse_range(args[0])
+    for probe in sorted({max(lo, 1), hi}):
+        if not witness_in_window(probe):
+            sys.exit(f"range {args[0]} is outside the coordinator's served window (block {probe} has no "
+                     f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
     cmd_claim(args); cmd_prove(args); cmd_submit(args)
 
 def main():
-    if len(sys.argv) < 2: print(__doc__); sys.exit(1)
-    c = sys.argv[1]; a = sys.argv[2:]
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
+    c, a = argv[0], argv[1:]
     fn = {"id": cmd_id, "pick": cmd_pick, "claim": cmd_claim, "prove": cmd_prove,
           "submit": cmd_submit, "run": cmd_run}.get(c)
-    if not fn: print(__doc__); sys.exit(1)
+    if not fn:
+        print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
+    if c in ("claim", "prove", "submit") and not a:  # these require a range; don't traceback on a bare call
+        sys.exit(f"usage: hazync {c} <range>   (e.g. hazync {c} 1000-1999)")
     fn(a)
 
 if __name__ == "__main__":

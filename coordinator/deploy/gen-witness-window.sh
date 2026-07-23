@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Generate the witness window the coordinator serves: block_1.json .. block_N.json.
-# These are what contributors' provers replay to rebuild the accumulator. Idempotent (skips existing).
+# LEGACY / FALLBACK ONLY. The live party is served by the archive-node bridge (`host bridge`), which emits
+# per-block *bundles* the coordinator serves from HAZYNC_BRIDGE_OUT — provers no longer replay the chain.
+# This script generates the OLD per-block witness window (block_1.json .. block_N.json) that the replay
+# path (`host prove-range`) consumes; keep it only for a bridge-less test deploy. Idempotent (skips existing).
 #
 #   usage:  gen-witness-window.sh <up-to-height> [witness-dir]
 #   e.g.:   ./gen-witness-window.sh 1000 /opt/hazync/witnesses

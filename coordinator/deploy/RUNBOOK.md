@@ -1,16 +1,20 @@
 # Hazync Proof Party — coordinator deploy runbook
 
-Stand up the coordinator on a cheap CPU box and wire it under **one domain** (`bitcoinghost.org/hazync`).
-No subdomain, no second website: the box is invisible backend infrastructure, reached through an nginx
-proxy — exactly like the existing `/api/pool/vmN/` proxies.
+Stand up the coordinator **co-located with the archive-node bridge and a full `bitcoind`** on one box, and
+wire it under **one domain** (`bitcoinghost.org/hazync`) through an nginx proxy — the box is invisible
+backend infrastructure, like the existing `/api/pool/vmN/` proxies.
 
 ```
   bitcoinghost.org/hazync          the page (story + live board), served from the web root
-  bitcoinghost.org/hazync/api/…    proxied to the coordinator box (state / claim / submit / witness)
+  bitcoinghost.org/hazync/api/…    proxied to the bridge box (state / claim / submit / witness)
         one URL for people · one box for data
 ```
 
-The coordinator is **verify-only (CPU, no GPU)**. Proving + folding happen on contributors' GPU boxes.
+**Architecture (current — post-cutover 2026-07-23):** `bitcoind` (full node) → `hazync-bridge.service`
+(drives one resident Utreexo forest forward and writes per-block bundles to `HAZYNC_BRIDGE_OUT`) →
+coordinator (serves those bundles via `/api/witness/<n>` as a local read, and **verifies** submitted
+receipts on CPU — no GPU). Proving + folding happen on contributors' GPU boxes. The older separate
+cheap-CPU box with a pre-generated per-block-witness window is **retired** (see the note at the end).
 
 ---
 
@@ -31,16 +35,20 @@ Verifying is light, so the cheap coordinator box runs the binary fine — only t
 
 ```bash
 sudo useradd -r -m -d /opt/hazync -s /usr/sbin/nologin hazync   # or reuse an existing user
-sudo mkdir -p /opt/hazync/witnesses /opt/hazync/coordinator-state
+sudo mkdir -p /opt/hazync/coordinator-state
 # place the repo at /opt/hazync (host binary at /opt/hazync/prover/target/release/host)
 
-# witness window: the blocks people can prove right now (rolling window; start small)
-./coordinator/deploy/gen-witness-window.sh 1000 /opt/hazync/witnesses
+# Run a full bitcoind on this box (no-prune). Then start the archive bridge: it drives the accumulator
+# forward and writes per-block bundles the coordinator serves — there is NO witness window to pre-generate.
+sudo cp coordinator/deploy/hazync-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hazync-bridge     # emits bundles into HAZYNC_BRIDGE_OUT
 
 sudo chown -R hazync:hazync /opt/hazync
-sudo cp coordinator/deploy/hazync-coordinator.service /etc/systemd/system/
+sudo cp coordinator/deploy/hazync-coordinator.service /etc/systemd/system/    # HAZYNC_BRIDGE_OUT must point at the bridge's bundle dir
 sudo systemctl daemon-reload && sudo systemctl enable --now hazync-coordinator
 curl -s localhost:8899/api/state | head -c 300      # smoke test
+# Migrating an EXISTING coordinator onto this box? Use coordinator/deploy/migrate-coordinator.sh
+# (WAL-safe DB + receipts, old→new) BEFORE repointing the nginx proxy; decommission the old box only after.
 ```
 
 Set `TIP_HEIGHT` in the unit to the real chain tip. `RANGE_SIZE=1000`. The unit binds `127.0.0.1`
@@ -142,6 +150,8 @@ add its pubkey (hex, one per line) to `MOD_BLOCK_FILE` (default `coordinator/mod
 re-read live, so the entry disappears from the leaderboard/board within the cache TTL (~1.5s), no restart.
 
 ### Notes
-- **Witness window** = the claimable set. Blocks outside it 404 and the CLI says so; grow it with
-  `gen-witness-window.sh` or co-locate an archive/bridge node (the archive decision) when it's worth the
-  disk.
+- **Served window** = the claimable set = the blocks the archive bridge has emitted bundles for (up to
+  `tip - HAZYNC_BRIDGE_FINALITY`, default 100). Blocks outside it 404 and the CLI says so; the window grows
+  automatically as the bridge follows the chain — nothing to pre-generate. (The legacy
+  `gen-witness-window.sh` per-block-witness path still works as a fallback when no bridge is configured,
+  but is retired for the live party.)

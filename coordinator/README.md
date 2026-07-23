@@ -33,8 +33,9 @@ clearly flagged in `/api/state` and on the dashboard). Install it for the real s
 | `TIP_HEIGHT` | `958301` | chain tip (denominator for % complete) |
 | `RANGE_SIZE` | `1000` | blocks per claimable range |
 | `SEED_RANGES` | `60` | ranges to create on first run |
-| `WITNESS_DIR` | `./witnesses` | per-block witness files: `block_<n>.json` (served via `/api/witness/<n>`) |
-| `HAZYNC_HOST` | — | path to the prover `host` binary (for real verification) |
+| `HAZYNC_BRIDGE_OUT` | — | archive-bridge bundle dir; `/api/witness/<n>` serves `bundle_<n>.json` from here |
+| `WITNESS_DIR` | `./witnesses` | legacy per-block witnesses (`block_<n>.json`), replay fallback |
+| `HAZYNC_HOST` | — | path to the canonical prover `host` binary (for real verification) |
 | `VERIFY_MODE` | `real` if `HAZYNC_HOST` set, else `mock` | `mock` stubs the STARK check for testing |
 | `CLAIM_TTL` | `1800` | auto-release a claim after this many seconds without a heartbeat |
 | `CLAIM_MAX` | `86400` | hard cap: release a claim after this long regardless of heartbeats |
@@ -56,11 +57,12 @@ export WITNESS_DIR=/path/to/witnesses
 ./hazync run                    # no range → picks the next open one for you
 ```
 
-Identity (`~/.hazync/key.hex`) and receipts (`~/.hazync/receipts/`) are local. `prove` **auto-fetches**
-every witness it's missing (blocks `1..hi`, which the prover replays to rebuild the accumulator) from
-the coordinator's `/api/witness/` endpoint into `WITNESS_DIR` before it starts — so you don't need any
-local witness data. It then proves each block in the range and folds them with the existing
-`prove-range` / `fold-range` commands.
+Identity (`~/.hazync/key.hex`) and receipts (`~/.hazync/receipts/`) are local. `prove` **auto-fetches** a
+ready-made archive **bundle** for each block in the range from the coordinator's `/api/witness/` endpoint
+and proves each block directly with `prove-range-bridge` — **no chain replay** (O(1) per block). If the
+coordinator serves no bundle for a block (no bridge configured), it transparently falls back to the legacy
+replay path (`prove-range`, fetching every witness `1..hi`). Either way it folds the per-block receipts
+into one with `fold-range`. You need no node of your own and no local witness data.
 
 ## API
 
@@ -72,7 +74,7 @@ local witness data. It then proves each block in the range and folds them with t
   ranges are the only shapes, so two claim ids can never partially overlap
 - `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
-- `GET /api/witness/<n>` — serve block `n`'s witness (accepts a block number or a `lo-hi` range id)
+- `GET /api/witness/<n>` — serve block `n`'s archive **bundle** (in-boundary + the real accumulator root + inclusion proofs) from the bridge; falls back to a legacy per-block witness. Accepts a block number or a `lo-hi` range id
 - `GET /api/proof/<id>` — **download the verified proof receipt** for a block/range so anyone can
   re-verify it themselves (`host verify-any proof_<id>.bin`). Retained on every successful submit;
   the `vranges` list in `/api/state` carries a `proof` pointer for each. (Receipts are ~0.2–1.7 MB each,
@@ -97,9 +99,13 @@ neither credits anything. The dashboard shows **two numbers**: *verified* blocks
 
 ## Deploy
 
-Run on a box that has the prover `host` binary (verification needs it — no GPU required to *verify*).
-Put it behind a reverse proxy (nginx/caddy) with TLS. The dashboard can be served from here, or the
-public `bitcoinghost.org/hazync` page can point its board at this API (CORS is open by default).
+Deployed **co-located with the archive bridge and a full `bitcoind`** on one box: `bitcoind` feeds the
+bridge (`hazync-bridge.service`), which writes bundles the coordinator serves via `HAZYNC_BRIDGE_OUT` (a
+local read — no cross-box copy); the coordinator verifies receipts on CPU with the canonical `host`
+binary (no GPU required to *verify*). Put it behind a reverse proxy (nginx) with TLS; the public
+`bitcoinghost.org/hazync` page points its board at this API (CORS is open by default). Units + cutover:
+`deploy/hazync-bridge.service`, `deploy/hazync-coordinator.service`, `deploy/migrate-coordinator.sh` —
+see `deploy/RUNBOOK.md`.
 
 ## Status — honest
 
@@ -111,6 +117,7 @@ wrong-range receipts rejected; ed25519 signed ledger enforced. **All five roadma
 of this MVP: **verify-and-chain**, **claim-lock + heartbeat auto-release**, **pick-any-block + witness
 serving** (the CLI auto-fetches the witnesses it needs), the **genesis→tip timeline UI** (frontier /
 ahead / in-progress / open), and **hardening** (per-IP rate limits, exact-length ed25519 input caps,
-body/handle caps). What's left before the
-Delving post is operational, not code: host it on a cheap CPU VPS with a witness window, seed a few hours
-of real GPU proving, and confirm the contributor onboarding end-to-end.
+body/handle caps). It now runs **co-located with the archive-node bridge + `bitcoind`**, so witness
+bundles are served from local disk (`HAZYNC_BRIDGE_OUT`) with no replay. What's left before a public push
+is operational, not code: the genesis→tip GPU seeding campaign (now O(1) per block via the bridge) and
+independent adversarial review.

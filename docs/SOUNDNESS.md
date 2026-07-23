@@ -190,14 +190,17 @@ OPEN (none architectural):
    commitment, BIP34/BIP30, and real maturity/BIP68 for real. Also fixed a latent header bug: the
    header builder hardcoded version 1 (invisible on the version-1-era test vectors 100000/130000/140000);
    now threads the real versionbits value, so PoW is correct on modern blocks.
-6. **Next → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) **succinct chunk receipts** — the 1645s
+6. **Scaling → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) **succinct chunk receipts** — the 1645s
    aggregate was dominated by verifying 16 *composite* receipts in-guest; succinct receipts make that
-   cheap and fixed-cost (biggest single win). (b) **Archive-node bridge** (hazync-during-IBD) — replaces
-   the explorer fetcher, gives real coin metadata + MTP for free, and closes S3 (real-UTXO binding).
-   (c) **Parallel backfill** across a GPU fleet → tree fold.
+   cheap and fixed-cost (biggest single win). (b) **Archive-node bridge** (hazync-during-IBD) — **BUILT +
+   running as of 2026-07-23**: it drives one resident Utreexo forest over the real chain and emits each
+   block's witness with the real `root_prev` + inclusion proofs, replacing the explorer fetcher, giving
+   real coin metadata + MTP for free, and closing S3 operationally (real-UTXO binding) — the receipt is
+   byte-identical to the replay path, so the trust base is unchanged. (c) **Parallel backfill** across a
+   GPU fleet → tree fold.
 
 The §2 trust base is untouched — the hard part (real Core code proving) is done and unimpeachable.
-Items 1-5 are complete; item 6 is the scaling roadmap.
+Items 1-5 are complete; item 6 is the scaling work (the bridge, 6b, is now built and running).
 
 ## 7. Known open issues (security)
 This is a self-review, not an external audit. The living security status — including three findings

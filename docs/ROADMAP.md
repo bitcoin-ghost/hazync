@@ -67,10 +67,11 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `c029cee4…` (v0.5.0, minimal pure-Core guest); the earlier `d1fc4065…` was superseded when the k256
-  EC-accel experiment + unreachable `legacy()` mode were stripped.
-  - [x] **Re-prove** the chain on the reproducible guest (2026-07-19): the old `d1fc4065`-era proofs were
-    archived and the board is being re-proven on `c029cee4` (fresh GPU box, `provision-vps.sh GPU=1`).
+  `601d7ca2…` (v0.6.0, round-8 audit; see `reproduce/METHOD_ID` — authoritative). Superseded history:
+  `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
+  hardening). Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
+  - [x] **Re-prove** the chain on the reproducible guest: the old proofs were archived and the board is
+    re-proven on the current `601d7ca2` guest (`provision-vps.sh GPU=1`).
 
 ## 3. External review + writeup
 

@@ -459,5 +459,5 @@ adversarial negative tests** (`prover/test_cov_negatives.sh`, evidence `prover/e
 The hard part — proving the *real* Core consensus code, not a reimplementation — is done and is the
 thing that removes the soundness gap every prior effort carried. The findings so far are around the
 edges (a host-controllable witness flag, an under-constrained accumulator index, placeholder metadata,
-a couple of missing rules) and are all fixed and regression-checked. What remains is negative tests,
-one time-lock input from the bridge, and — the real ask — independent adversarial review.
+a couple of missing rules) and are all fixed and regression-checked. What remains is one time-lock input
+from the bridge and — the real ask — independent adversarial review.
