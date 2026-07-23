@@ -29,6 +29,7 @@ TIP        = int(os.environ.get("TIP_HEIGHT", "958301"))
 RANGE_SIZE = int(os.environ.get("RANGE_SIZE", "1000"))
 SEED       = int(os.environ.get("SEED_RANGES", "60"))
 WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__), "witnesses"))
+BRIDGE_DIR = os.environ.get("HAZYNC_BRIDGE_OUT", "")   # archive-node bundle dir (co-located); serves bundle_<n>.json
 HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
@@ -268,9 +269,13 @@ def verify_receipt(receipt: bytes, rng):
             return False, "receipt rejected — not a valid proof (forged/tampered/corrupt): " + both[-160:], None
         kv = dict(t.split("=", 1) for t in line[len("RANGE-OK"):].split() if "=" in t)
         lo, hi = int(kv["lo"]), int(kv["hi"])
-        if lo != rng["lo"] or hi != rng["hi"]:
+        # Genesis seed: block 0 is unprovable (its in-boundary IS the genesis anchor), so a claimed
+        # [0..hi] range is satisfied by a [1..hi] receipt whose in_tip verify-any pins to GENESIS_TIP.
+        # Accept it and report the PROVEN [1..hi] so the frontier chains from prev_hi=0 -> lo=1.
+        genesis_seed = (rng["lo"] == 0 and lo == 1 and hi == rng["hi"])
+        if not genesis_seed and (lo != rng["lo"] or hi != rng["hi"]):
             return False, f"receipt proves [{lo}..{hi}], not the claimed [{rng['lo']}..{rng['hi']}]", None
-        return True, f"range [{lo}..{hi}] VERIFIED", {"in_tip": kv["in_tip"], "out_tip": kv["out_tip"],
+        return True, f"range [{lo}..{hi}] VERIFIED", {"lo": lo, "hi": hi, "in_tip": kv["in_tip"], "out_tip": kv["out_tip"],
                 "out_leaves": int(kv.get("out_leaves", 0)), "range_work": kv.get("range_work", "0"),
                 "in_bhash": kv.get("in_bhash", ""), "out_bhash": kv.get("out_bhash", "")}
     except Exception as e:
@@ -537,16 +542,19 @@ def submit(body):
         if ok:
             c.execute("UPDATE ranges SET status='verified', receipt_sha=?, verified_at=? WHERE id=?",
                       (sha, time.time(), rid))
+            # Record the PROVEN [lo..hi] (from the receipt), not the claimed range: for the genesis seed
+            # the claim is [0..999] but the receipt proves [1..999], and the frontier chain needs lo==1.
+            v_lo, v_hi = int(meta.get("lo", r["lo"])), int(meta.get("hi", r["hi"]))
             c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work,"
                       "in_bhash,out_bhash)"
                       " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                      (rid, r["lo"], r["hi"], meta["in_tip"], meta["out_tip"], pk, handle, time.time(),
+                      (rid, v_lo, v_hi, meta["in_tip"], meta["out_tip"], pk, handle, time.time(),
                        meta.get("out_leaves", 0), str(meta.get("range_work", "0")),
                        str(meta.get("in_bhash", "")), str(meta.get("out_bhash", ""))))
             c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",
-                      (r["hi"]-r["lo"]+1, handle, pk))
+                      (v_hi-v_lo+1, handle, pk))
             try:                                          # keep the receipt so anyone can re-verify it
                 os.makedirs(PROOFS_DIR, exist_ok=True)
                 with open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb") as pf:
@@ -603,9 +611,12 @@ class H(BaseHTTPRequestHandler):
             seg = p.rsplit("/", 1)[-1]
             blk = int(seg) if seg.isdigit() else (parse_range(seg) or [None])[0]  # block number or range id
             if blk is not None:
-                f = os.path.join(WITNESS, f"block_{blk}.json")     # per-block witness (bridge output)
-                if os.path.exists(f):
-                    return self._send(200, raw=open(f, "rb").read())
+                # Prefer the archive-node bridge bundle (in-boundary + real root_prev + inclusion proofs,
+                # provable with NO replay); fall back to the legacy per-block witness for old provers.
+                for f in ([os.path.join(BRIDGE_DIR, f"bundle_{blk}.json")] if BRIDGE_DIR else []) \
+                         + [os.path.join(WITNESS, f"block_{blk}.json")]:
+                    if os.path.exists(f):
+                        return self._send(200, raw=open(f, "rb").read())
             return self._send(404, {"error": "witness not available"})
         # static frontend
         rel = "index.html" if p in ("/", "") else p.lstrip("/")

@@ -14,6 +14,9 @@ Environment=COORD_PORT=8899
 Environment=COORD_DB=/opt/hazync/coordinator.db
 Environment=COORD_STATE=/opt/hazync/coordinator-state
 Environment=WITNESS_DIR=/opt/hazync/witnesses
+# Co-located archive-node bridge: serve /api/witness/<n> straight from the bridge's bundle dir (local
+# read, no cross-box copy). Leave unset to fall back to the legacy per-block witness window.
+Environment=HAZYNC_BRIDGE_OUT=/root/bridge_bundles
 Environment=HAZYNC_HOST=/opt/hazync/prover/target/release/host
 Environment=VERIFY_MODE=real
 Environment=TIP_HEIGHT=958301

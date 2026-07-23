@@ -1629,37 +1629,99 @@ fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) {
     }
 }
 
+// The resident forest + UTXO-metadata map + MTP/difficulty carry, checkpointed so the bridge resumes
+// mid-chain instead of rebuilding from genesis. `leaves` is the live UTXO set (swap-and-pop), so at the
+// tip it is ~the UTXO count, not the full history. Borrowed on save (no clone of the multi-GB state),
+// owned on load; field order MUST match between the two (bincode is positional).
+#[derive(Serialize)]
+struct BridgeStateRef<'a> {
+    height: u32, leaves: &'a Vec<[u8; 32]>, utxo: &'a Utxo,
+    win: &'a Vec<u32>, block_mtp: &'a Vec<u32>, nbits: u32, time: u32, epoch_start: u32,
+}
+#[derive(Deserialize)]
+struct BridgeState {
+    height: u32, leaves: Vec<[u8; 32]>, utxo: Utxo,
+    win: Vec<u32>, block_mtp: Vec<u32>, nbits: u32, time: u32, epoch_start: u32,
+}
+
+fn bridge_load_state(dir: &str) -> Option<BridgeState> {
+    std::fs::read(format!("{dir}/state.bin")).ok().and_then(|b| bincode::deserialize(&b).ok())
+}
+fn bridge_save_state(dir: &str, st: &BridgeStateRef) {
+    let tmp = format!("{dir}/state.bin.tmp");
+    std::fs::write(&tmp, bincode::serialize(st).unwrap()).expect("write checkpoint");
+    std::fs::rename(&tmp, format!("{dir}/state.bin")).expect("commit checkpoint"); // atomic: never a torn state.bin
+}
+
 fn cmd_bridge() {
     let out_dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
     std::fs::create_dir_all(&out_dir).unwrap();
-    let tip: u32 = bcli(&["getblockcount"]).parse().expect("getblockcount");
-    let to: u32 = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse().ok()).unwrap_or(tip).min(tip);
-    println!("bridge: driving forest 1..={to} (node tip {tip}) -> {out_dir}");
-    let mut forest = Forest::new();
-    let mut utxo: Utxo = Utxo::new();
-    let mut win: Vec<u32> = vec![GENESIS_TIME];
-    let mut block_mtp: Vec<u32> = vec![GENESIS_TIME];
-    let (mut nbits, mut time, mut epoch_start) = (GENESIS_BITS, GENESIS_TIME, GENESIS_TIME);
-    for h in 1..=to {
-        let hash = bcli(&["getblockhash", &h.to_string()]);
-        let raw = bcli(&["getblock", &hash, "0"]);
-        let block: bitcoin::Block = deserialize(&hx(&raw)).expect("parse block");
-        let j = bridge_block_json(&block, h, &utxo);
-        let s = wire_stump(&forest);
-        let in_recent = win.clone();
-        let (in_nbits, in_time, in_epoch_start) = (nbits, time, epoch_start);
-        let in_tip = block.header.prev_blockhash.to_byte_array(); // internal order = tip of h-1
-        push_mtp(&j, &mut win, &mut block_mtp);
-        let w = build_block_carried(&mut forest, &j, &block_mtp);
-        bridge_update_utxo(&mut utxo, &block, h);
-        let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
-            in_nbits, in_time, in_epoch_start, in_recent, witness: w };
-        std::fs::write(format!("{out_dir}/bundle_{h}.json"), serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let bt = block.header.time; nbits = block.header.bits.to_consensus(); time = bt;
-        if h % 2016 == 0 { epoch_start = bt; }
-        if h % 5000 == 0 { println!("bridge: emitted through {h}/{to}"); }
+    // Only advance/emit up to tip-FINALITY: the resident forest never enters the re-org zone, so any
+    // shallower-than-FINALITY reorg leaves it untouched and every emitted bundle is on the final chain.
+    let finality: u32 = std::env::var("HAZYNC_BRIDGE_FINALITY").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    let ckpt_every: u32 = std::env::var("HAZYNC_BRIDGE_CKPT").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
+    let poll: u64 = std::env::var("HAZYNC_BRIDGE_POLL").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let once = std::env::var("HAZYNC_BRIDGE_ONCE").is_ok();     // exit after catching up once (seeding / tests)
+    let cap = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse::<u32>().ok()); // optional hard height cap
+
+    // Resume from the last checkpoint, or start fresh at genesis.
+    let (mut forest, mut utxo, mut win, mut block_mtp, mut nbits, mut time, mut epoch_start, mut done) =
+        if let Some(st) = bridge_load_state(&out_dir) {
+            println!("bridge: resuming from checkpoint @ height {} ({} utxos, {} leaves)",
+                st.height, st.utxo.len(), st.leaves.len());
+            (Forest { leaves: st.leaves }, st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
+        } else {
+            println!("bridge: no checkpoint — starting from genesis");
+            (Forest::new(), Utxo::new(), vec![GENESIS_TIME], vec![GENESIS_TIME],
+             GENESIS_BITS, GENESIS_TIME, GENESIS_TIME, 0u32)
+        };
+    let mut last_ckpt = done;
+    loop {
+        let tip: u32 = bcli(&["getblockcount"]).parse().expect("getblockcount");
+        let mut target = tip.saturating_sub(finality);
+        if let Some(c) = cap { target = target.min(c); }
+        if target > done {
+            println!("bridge: advancing {}..={target} (node tip {tip}, finality {finality}) -> {out_dir}", done + 1);
+            for h in (done + 1)..=target {
+                let hash = bcli(&["getblockhash", &h.to_string()]);
+                let raw = bcli(&["getblock", &hash, "0"]);
+                let block: bitcoin::Block = deserialize(&hx(&raw)).expect("parse block");
+                let j = bridge_block_json(&block, h, &utxo);
+                let s = wire_stump(&forest);
+                let in_recent = win.clone();
+                let (in_nbits, in_time, in_epoch_start) = (nbits, time, epoch_start);
+                let in_tip = block.header.prev_blockhash.to_byte_array(); // internal order = tip of h-1
+                push_mtp(&j, &mut win, &mut block_mtp);
+                let w = build_block_carried(&mut forest, &j, &block_mtp);
+                bridge_update_utxo(&mut utxo, &block, h);
+                let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
+                    in_nbits, in_time, in_epoch_start, in_recent, witness: w };
+                // atomic bundle write too — a prover polling the dir never reads a half-written bundle
+                let bp = format!("{out_dir}/bundle_{h}.json");
+                std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
+                std::fs::rename(format!("{bp}.tmp"), &bp).unwrap();
+                let bt = block.header.time; nbits = block.header.bits.to_consensus(); time = bt;
+                if h % 2016 == 0 { epoch_start = bt; }
+                done = h;
+                if done - last_ckpt >= ckpt_every {
+                    bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
+                        utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start });
+                    last_ckpt = done;
+                    println!("bridge: checkpoint @ {done} ({} utxos, {} leaves)", utxo.len(), forest.leaves.len());
+                }
+                if h % 5000 == 0 { println!("bridge: emitted through {h}/{target}"); }
+            }
+            // checkpoint on catch-up so a one-shot run and each tip-follow cycle persist their progress
+            if done > last_ckpt {
+                bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
+                    utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start });
+                last_ckpt = done;
+            }
+            println!("bridge: caught up to {done} (node tip {tip})");
+        }
+        if once { break; }
+        std::thread::sleep(std::time::Duration::from_secs(poll)); // follow the tip
     }
-    println!("bridge: done -- {to} bundles in {out_dir}");
 }
 
 // `host prove-range-bridge <n>`: prove block n from its bridge bundle (mode 6), NO replay. Same output as

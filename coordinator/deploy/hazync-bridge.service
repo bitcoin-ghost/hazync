@@ -1,0 +1,28 @@
+[Unit]
+Description=Hazync archive-node bridge (resident forest, emits per-block bundles)
+After=network-online.target bitcoind.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The bridge drives ONE resident Utreexo forest forward over the chain from the local bitcoind and writes
+# a per-block bundle (in-boundary + real root_prev + inclusion proofs) that provers prove with NO replay.
+# It only EMITS witness data — it never proves — so its guest METHOD_ID is irrelevant (provers use the
+# canonical release binary). CPU-only, no GPU.
+Environment=HAZYNC_BITCOIN_DATADIR=/root/.bitcoin
+Environment=HAZYNC_BRIDGE_OUT=/root/bridge_bundles
+Environment=HAZYNC_BRIDGE_FINALITY=100
+Environment=HAZYNC_BRIDGE_CKPT=2000
+Environment=HAZYNC_BRIDGE_POLL=30
+# Wait for the node to answer before starting (bridge panics -> restarts if bitcoind is down; this avoids
+# a noisy restart loop during the node's own startup).
+ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/root/.bitcoin getblockcount >/dev/null 2>&1; do sleep 5; done'
+ExecStart=/root/host bridge
+Restart=always
+RestartSec=10
+# generous startup: the first genesis->tip pass runs inside the process (checkpoints along the way)
+TimeoutStartSec=0
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

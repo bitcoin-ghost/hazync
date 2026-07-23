@@ -28,6 +28,7 @@ RCPTDIR = HOME / "receipts"
 COORD   = os.environ.get("COORD_URL", "http://localhost:8899").rstrip("/")
 HOSTBIN = os.environ.get("HAZYNC_HOST", "")
 WITNESS = os.environ.get("WITNESS_DIR", str(HOME / "witnesses"))
+BUNDLES = os.environ.get("BUNDLE_DIR", str(HOME / "bundles"))   # archive-node bundles fetched from the coordinator
 
 def _ed():
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -96,6 +97,26 @@ def fetch_witnesses(lo, hi):
         with open(wf, "wb") as fh:
             fh.write(data)
 
+def fetch_bundles(lo, hi):
+    # Fetch an archive-node bundle for every block in [lo..hi]. Returns True iff all are available (the
+    # bridge path — prove with NO replay); False if any block is missing or only a legacy per-block witness
+    # exists, in which case the caller falls back to the replay path. A bundle carries in_roots + witness.
+    os.makedirs(BUNDLES, exist_ok=True)
+    for h in range(lo, hi + 1):
+        bf = os.path.join(BUNDLES, f"bundle_{h}.json")
+        if os.path.exists(bf):
+            continue
+        try:
+            data = get(f"/api/witness/{h}")
+            j = json.loads(data)
+        except Exception:
+            return False
+        if "in_roots" not in j or "witness" not in j:
+            return False                       # legacy per-block witness, not a bridge bundle
+        with open(bf, "wb") as fh:
+            fh.write(data)
+    return True
+
 def cmd_id(args):
     _, pub, handle = identity()
     if args: HANDLE.write_text(args[0]); handle = args[0]
@@ -137,8 +158,18 @@ def cmd_prove(args):
     # a [1..hi] receipt for a [0..hi] claim. Starting at 1 also means a bad manual `run 0-...` no longer
     # crashes on `prove-range 0`.
     start = max(lo, 1)
-    fetch_witnesses(start, hi)                        # pull any witnesses we're missing from the coordinator
-    env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
+    # Prefer the archive-node bridge: if the coordinator serves a ready-made bundle for every block in the
+    # range, prove each with NO replay (O(1)/block). Otherwise fall back to the replay path, which rebuilds
+    # the accumulator from genesis and so needs every witness up to hi.
+    if fetch_bundles(start, hi):
+        env = dict(os.environ, HAZYNC_BRIDGE_OUT=BUNDLES)
+        prove_cmd = "prove-range-bridge"
+        print(f"using archive-node bundles (no replay) for blocks {start}..{hi}")
+    else:
+        fetch_witnesses(start, hi)                    # pull any witnesses we're missing from the coordinator
+        env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
+        prove_cmd = "prove-range"
+        print(f"archive bundles unavailable — replaying from genesis for blocks {start}..{hi}")
     stop = threading.Event()
     threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
     try:
@@ -146,7 +177,7 @@ def cmd_prove(args):
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
-            subprocess.run([HOSTBIN, "prove-range", str(h)], env=env, check=True)
+            subprocess.run([HOSTBIN, prove_cmd, str(h)], env=env, check=True)
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
