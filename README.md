@@ -1,10 +1,10 @@
 # Hazync
 
-Verify the whole Bitcoin chain from one small proof, instead of re-executing every block from genesis. The groundwork for a full node that syncs in minutes.
+**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* `interpreter.cpp`, `SignatureHash`, and `libsecp256k1` — not a reimplementation — inside a zkVM, and proves each block valid under real consensus. Every other validity-proof effort rewrites consensus and inherits the question "does your rewrite match Core in every edge case, forever?" Hazync runs Core, so it doesn't.
 
-Hazync runs Bitcoin Core's **own, unmodified** consensus code — `interpreter.cpp`, `SignatureHash`, `libsecp256k1` — inside a zero-knowledge VM, and proves every block is valid. The proofs fold: block by block, genesis to tip collapses into one succinct receipt you check in milliseconds. No re-execution, no trusting peers.
+The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in milliseconds — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
-It is **not a reimplementation.** Every other validity-proof effort rewrites consensus and inherits the question "does your rewrite match Core in every edge case, forever?" Hazync runs Core, so it doesn't.
+**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and audited ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) — the rest is the compute campaign to prove the chain forward.
 
 ## Verify a proof
 
@@ -35,7 +35,7 @@ Prove each block with real Core in the zkVM, fold blocks recursively into one re
 
 Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **eight rounds** of adversarial self-audit — the latest a five-reviewer completeness+verifier pass ([`AUDIT_2026-07.md`](AUDIT_2026-07.md)).
 
-Not done yet: the full genesis→tip backfill (a GPU-compute campaign, not new capability) and an external audit. This is early-stage research, shared for review. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
+Still to come: the full genesis→tip proving campaign and an external audit. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
 
 ## More
 
