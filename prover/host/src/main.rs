@@ -1552,6 +1552,143 @@ fn check_bip30() {
     if !pass { std::process::exit(1); }
 }
 
+// ============ ARCHIVE-NODE BRIDGE — persistent forest driver over a local bitcoind ============
+// `host bridge`: drive ONE resident Forest forward over the chain from a local bitcoind, emitting per
+// block a bundle {in-boundary, witness} with the REAL root_prev + inclusion proofs — so a prover can
+// prove [n..n] with NO bridge_pass replay (kills the quadratic; closes S3). Reuses build_block_carried +
+// push_mtp exactly; a parallel UTXO-metadata map (outpoint -> value,spk,creation-height,coinbase) supplies
+// the prevouts build_block_carried needs.
+#[derive(Serialize, Deserialize)]
+struct Bundle {
+    height: u32, in_tip: [u8; 32],
+    in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
+    in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
+    witness: BlockWitness,
+}
+
+fn bcli(args: &[&str]) -> String {
+    let dd = std::env::var("HAZYNC_BITCOIN_DATADIR").unwrap_or_else(|_| "/root/.bitcoin".into());
+    let o = std::process::Command::new("bitcoin-cli").arg(format!("-datadir={dd}")).args(args)
+        .output().expect("run bitcoin-cli");
+    if !o.status.success() { panic!("bitcoin-cli {args:?}: {}", String::from_utf8_lossy(&o.stderr)); }
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+type Utxo = std::collections::HashMap<([u8; 32], u32), (u64, Vec<u8>, u32, bool)>; // op -> value,spk,height,coinbase
+
+// The block-JSON build_block_carried expects, sourcing prevouts from the UTXO map (external spends) or
+// this block's own outputs (in-block spends).
+fn bridge_block_json(block: &bitcoin::Block, height: u32, utxo: &Utxo) -> serde_json::Value {
+    let hdr = &block.header;
+    let mut cur: std::collections::HashMap<([u8; 32], u32), (u64, Vec<u8>)> = std::collections::HashMap::new();
+    for t in &block.txdata {
+        let txid = t.compute_txid().to_byte_array();
+        for (v, o) in t.output.iter().enumerate() {
+            cur.insert((txid, v as u32), (o.value.to_sat(), o.script_pubkey.as_bytes().to_vec()));
+        }
+    }
+    let coinbase = &block.txdata[0];
+    let txs: Vec<serde_json::Value> = block.txdata[1..].iter().map(|t| {
+        let prevouts: Vec<serde_json::Value> = t.input.iter().map(|inp| {
+            let op = inp.previous_output;
+            let key = (op.txid.to_byte_array(), op.vout);
+            if let Some((value, spk, ch, cb)) = utxo.get(&key) {
+                serde_json::json!({ "value": value, "spk": hex(spk), "coin_height": ch, "coin_is_coinbase": *cb as u32 })
+            } else {
+                let (value, spk) = cur.get(&key).expect("prevout in neither UTXO map nor this block");
+                serde_json::json!({ "value": value, "spk": hex(spk), "coin_height": height, "coin_is_coinbase": 0 })
+            }
+        }).collect();
+        serde_json::json!({ "raw": hex(&serialize(t)), "prevouts": prevouts })
+    }).collect();
+    let mut prev = hdr.prev_blockhash.to_byte_array(); prev.reverse();  // -> DISPLAY order
+    let mut mrk = hdr.merkle_root.to_byte_array(); mrk.reverse();
+    serde_json::json!({
+        "height": height, "bits": hdr.bits.to_consensus(), "time": hdr.time, "nonce": hdr.nonce,
+        "version": hdr.version.to_consensus(), "prev": hex(&prev), "merkle": hex(&mrk),
+        "coinbase_hex": hex(&serialize(coinbase)), "txs": txs,
+    })
+}
+
+// Advance the UTXO map to mirror build_block_carried's forest transition (remove external spends, add new
+// spendable outputs not spent within this block).
+fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) {
+    let mut spent: std::collections::HashSet<([u8; 32], u32)> = std::collections::HashSet::new();
+    for t in block.txdata.iter().skip(1) {
+        for inp in &t.input { spent.insert((inp.previous_output.txid.to_byte_array(), inp.previous_output.vout)); }
+    }
+    for k in &spent { utxo.remove(k); }
+    for (ti, t) in block.txdata.iter().enumerate() {
+        let txid = t.compute_txid().to_byte_array();
+        let is_cb = ti == 0;
+        for (v, o) in t.output.iter().enumerate() {
+            if !out_spendable(o.script_pubkey.as_bytes()) { continue; }
+            if spent.contains(&(txid, v as u32)) { continue; }
+            utxo.insert((txid, v as u32), (o.value.to_sat(), o.script_pubkey.as_bytes().to_vec(), height, is_cb));
+        }
+    }
+}
+
+fn cmd_bridge() {
+    let out_dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let tip: u32 = bcli(&["getblockcount"]).parse().expect("getblockcount");
+    let to: u32 = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse().ok()).unwrap_or(tip).min(tip);
+    println!("bridge: driving forest 1..={to} (node tip {tip}) -> {out_dir}");
+    let mut forest = Forest::new();
+    let mut utxo: Utxo = Utxo::new();
+    let mut win: Vec<u32> = vec![GENESIS_TIME];
+    let mut block_mtp: Vec<u32> = vec![GENESIS_TIME];
+    let (mut nbits, mut time, mut epoch_start) = (GENESIS_BITS, GENESIS_TIME, GENESIS_TIME);
+    for h in 1..=to {
+        let hash = bcli(&["getblockhash", &h.to_string()]);
+        let raw = bcli(&["getblock", &hash, "0"]);
+        let block: bitcoin::Block = deserialize(&hx(&raw)).expect("parse block");
+        let j = bridge_block_json(&block, h, &utxo);
+        let s = wire_stump(&forest);
+        let in_recent = win.clone();
+        let (in_nbits, in_time, in_epoch_start) = (nbits, time, epoch_start);
+        let in_tip = block.header.prev_blockhash.to_byte_array(); // internal order = tip of h-1
+        push_mtp(&j, &mut win, &mut block_mtp);
+        let w = build_block_carried(&mut forest, &j, &block_mtp);
+        bridge_update_utxo(&mut utxo, &block, h);
+        let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
+            in_nbits, in_time, in_epoch_start, in_recent, witness: w };
+        std::fs::write(format!("{out_dir}/bundle_{h}.json"), serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let bt = block.header.time; nbits = block.header.bits.to_consensus(); time = bt;
+        if h % 2016 == 0 { epoch_start = bt; }
+        if h % 5000 == 0 { println!("bridge: emitted through {h}/{to}"); }
+    }
+    println!("bridge: done -- {to} bundles in {out_dir}");
+}
+
+// `host prove-range-bridge <n>`: prove block n from its bridge bundle (mode 6), NO replay. Same output as
+// prove-range (range_n.bin), so fold-range / verify-range / submit are unchanged.
+fn cmd_prove_range_bridge(n: u32) {
+    use std::time::Instant;
+    let dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
+    let raw = std::fs::read(format!("{dir}/bundle_{n}.json")).expect("read bundle");
+    let bd: Bundle = serde_json::from_slice(&raw).expect("parse bundle");
+    let mut b = ExecutorEnv::builder();
+    b.write(&6u32).unwrap();
+    b.write(&bd.in_tip).unwrap();
+    b.write(&bd.in_roots).unwrap();
+    b.write(&bd.in_leaves).unwrap();
+    b.write(&bd.in_nbits).unwrap();
+    b.write(&bd.in_time).unwrap();
+    b.write(&bd.in_epoch_start).unwrap();
+    b.write(&bd.in_recent).unwrap();
+    b.write(&bd.witness).unwrap();
+    b.write(&METHOD_ID).unwrap();
+    let t = Instant::now();
+    let receipt = default_prover().prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
+        .expect("prove range (bridge)").receipt;
+    receipt.verify(METHOD_ID).expect("verify");
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.bin"));
+    std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
+    println!("proved range [{n}..{n}] from bridge bundle in {:.1}s -> {out}", t.elapsed().as_secs_f64());
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -1620,6 +1757,15 @@ fn main() {
     }
     if let Some(p) = args.iter().position(|a| a == "verify-chain") {
         verify_chain_cmd(args.get(p + 1).expect("verify-chain <bin>"));
+        return;
+    }
+    if args.iter().any(|a| a == "bridge") {
+        cmd_bridge();
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "prove-range-bridge") {
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).expect("prove-range-bridge <n>");
+        cmd_prove_range_bridge(n);
         return;
     }
     if args.iter().any(|a| a == "prove-full") {

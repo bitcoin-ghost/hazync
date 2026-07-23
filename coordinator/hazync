@@ -132,16 +132,24 @@ def cmd_prove(args):
     lo, hi = (parts[0], parts[0]) if len(parts) == 1 else (parts[0], parts[1])
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
-    fetch_witnesses(lo, hi)                          # pull any witnesses we're missing from the coordinator
+    # Block 0 is the genesis anchor and is unprovable, so we start at max(lo, 1). The genesis-seed slot
+    # 0-999 is thus proved as blocks 1..999; the coordinator (which pins the genesis in-boundary) accepts
+    # a [1..hi] receipt for a [0..hi] claim. Starting at 1 also means a bad manual `run 0-...` no longer
+    # crashes on `prove-range 0`.
+    start = max(lo, 1)
+    fetch_witnesses(start, hi)                        # pull any witnesses we're missing from the coordinator
     env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
     stop = threading.Event()
     threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
     try:
-        print(f"proving range {rng} on your GPU (this is the expensive step; heartbeating the claim)…")
+        total = hi - start + 1
+        print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
         parts = []
-        for h in range(lo, hi + 1):
+        for i, h in enumerate(range(start, hi + 1), 1):
             subprocess.run([HOSTBIN, "prove-range", str(h)], env=env, check=True)
             parts.append(f"range_{h}.bin")
+            if total > 1 and (i % 50 == 0 or i == total):
+                print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
         _fold_and_save(parts, out)
         print("receipt:", out)
     finally:

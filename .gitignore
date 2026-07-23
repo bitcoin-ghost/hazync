@@ -9,3 +9,8 @@ __pycache__/
 .hazync/
 *.hex
 key.hex
+
+# private launch-readiness roadmap (never push)
+roadmap.md
+bridge-design.md
+README.reframe-draft.md
