@@ -11,11 +11,27 @@ fn find_riscv_bin() -> String {
     let home = std::env::var("RISC0_HOME")
         .unwrap_or_else(|_| format!("{}/.risc0", std::env::var("HOME").unwrap_or_default()));
     if let Ok(rd) = std::fs::read_dir(format!("{home}/toolchains")) {
-        for e in rd.flatten() {
-            let cand = e.path().join("riscv32im-linux-x86_64/bin");
-            if cand.join("riscv32-unknown-elf-gcc").exists() {
-                return cand.to_string_lossy().into_owned();
-            }
+        // Collect ALL matching cpp toolchains and pick deterministically (sorted) rather than taking the
+        // first read_dir entry — filesystem/inode iteration order is not stable, so on a machine with more
+        // than one cpp toolchain installed "first wins" would compile the guest with a source-dependent
+        // toolchain and yield a NONDETERMINISTIC METHOD_ID. The sanctioned path (Docker reproduce/ image,
+        // provision-vps.sh --force) installs exactly one; warn loudly if that invariant is ever broken.
+        let mut cands: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path().join("riscv32im-linux-x86_64/bin"))
+            .filter(|c| c.join("riscv32-unknown-elf-gcc").exists())
+            .collect();
+        cands.sort();
+        if cands.len() > 1 {
+            println!(
+                "cargo:warning=multiple riscv cpp toolchains under {home}/toolchains; using {} (sorted) — \
+                 remove the others to guarantee a reproducible METHOD_ID: {:?}",
+                cands[0].display(),
+                cands
+            );
+        }
+        if let Some(c) = cands.first() {
+            return c.to_string_lossy().into_owned();
         }
     }
     String::new() // fall back to PATH
