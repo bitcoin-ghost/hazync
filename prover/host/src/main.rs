@@ -76,6 +76,14 @@ fn hx(s: &str) -> Vec<u8> {
 }
 fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 
+// Proving segment size (2^n cycles). risc0 4.0.5 has a preflight bug: for ~10% of blocks a segment packs
+// right to its 2^po2 boundary and the assertion `cycles <= 1 << segment.po2` overflows -> the prove panics
+// (on CPU AND cuda — shared witgen). It's a liveness bug, never a wrong proof. Smaller segments repartition
+// the work and clear the boundary, so the caller retries a failed prove with a decremented HAZYNC_SEG_PO2.
+// EVERY prove path calls this so the retry is honoured everywhere. Default 20 = the risc0 default (normal
+// blocks unaffected). Host-side executor config only — the guest is untouched, so METHOD_ID is unchanged.
+fn seg_po2() -> u32 { std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok()).unwrap_or(20) }
+
 // This host's guest image id (METHOD_ID) as the canonical RISC0 hex digest.
 fn method_id_hex() -> String { risc0_zkvm::Digest::from(METHOD_ID).to_string() }
 
@@ -383,6 +391,7 @@ fn prove_snark() {
     let (mut forest, anchor) = seed_and_anchor();
     let w = build_block(&mut forest, header_170(), 170, CB170, &[spend_170()], median_u32(&anchor.recent_times));
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.write(&2u32).unwrap();
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
@@ -805,6 +814,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
 fn prove_step_succinct(prev_journal: Vec<u8>, prev_receipt: Option<risc0_zkvm::Receipt>, w: &BlockWitness, is_base: u32) -> risc0_zkvm::Receipt {
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     if let Some(r) = prev_receipt { b.add_assumption(r); }
     b.write(&2u32).unwrap();
     b.write(&prev_journal).unwrap();
@@ -958,6 +968,7 @@ fn prove_range_cmd(n: u32) {
     let w = build_block_carried(&mut forest, &jn, &block_mtp);
     let in_tip_hash = arr(rev(hx(jn["prev"].as_str().unwrap())));
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.write(&6u32).unwrap();
     b.write(&in_tip_hash).unwrap();
     b.write(&ctx.roots).unwrap();
@@ -985,6 +996,7 @@ fn fold_range_cmd(left: &str, right: &str, out: &str) {
     lr.verify(METHOD_ID).expect("left verify");
     rr.verify(METHOD_ID).expect("right verify");
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.add_assumption(lr.clone());
     b.add_assumption(rr.clone());
     b.write(&7u32).unwrap();
@@ -1103,6 +1115,7 @@ fn prove_seg() {
         let hi = ((c + 1) * sz).min(n);
         if lo >= hi { break; }
         let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
         b.write(&4u32).unwrap();
         b.write(&chunk_height).unwrap();
         b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
@@ -1121,6 +1134,7 @@ fn prove_seg() {
     }
 
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     for r in &chunk_receipts { b.add_assumption(r.clone()); }
     b.write(&5u32).unwrap();
     b.write(&METHOD_ID).unwrap();
@@ -1162,6 +1176,7 @@ fn prove_chunk(idx: usize) {
     let nchunks = nchunks_env().min(n.max(1));
     let (lo, hi) = chunk_range(n, nchunks, idx);
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.write(&4u32).unwrap();
     b.write(&w.height).unwrap();
     b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
@@ -1200,6 +1215,7 @@ fn agg_chunks() {
     println!("=== AGGREGATING {} chunk receipts for block {} ===", receipts.len(), w.height);
     let t = Instant::now();
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     for r in &receipts { b.add_assumption(r.clone()); }
     b.write(&5u32).unwrap();
     b.write(&METHOD_ID).unwrap();
@@ -1732,13 +1748,7 @@ fn cmd_prove_range_bridge(n: u32) {
     let raw = std::fs::read(format!("{dir}/bundle_{n}.json")).expect("read bundle");
     let bd: Bundle = serde_json::from_slice(&raw).expect("parse bundle");
     let mut b = ExecutorEnv::builder();
-    // risc0 4.0.5 has a preflight segment-sizing bug: for ~10% of blocks a segment packs right to its
-    // 2^po2 boundary and the assertion `cycles <= 1 << segment.po2` overflows (on CPU AND cuda), so the
-    // prove panics. SMALLER segments repartition the work and clear the boundary — the caller retries a
-    // failed block with a decremented HAZYNC_SEG_PO2 (see the CLI). Default = the risc0 default (20), so
-    // normal blocks are unaffected. Host-side executor config only — the guest is untouched, METHOD_ID
-    // stays 601d7ca2.
-    b.segment_limit_po2(std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok()).unwrap_or(20));
+    b.segment_limit_po2(seg_po2());
     b.write(&6u32).unwrap();
     b.write(&bd.in_tip).unwrap();
     b.write(&bd.in_roots).unwrap();

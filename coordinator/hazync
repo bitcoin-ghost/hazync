@@ -165,6 +165,17 @@ def _heartbeat(rng, pub, stop):
         try: post("/api/heartbeat", {"range": rng, "pubkey": pub})
         except Exception: pass
 
+def _run_with_seg_retry(argv, env, work, label):
+    # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
+    # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
+    # proving segments (HAZYNC_SEG_PO2 20->19->18); smaller segments repartition the work and clear the
+    # boundary, and the receipt is identical (guest unchanged, METHOD_ID unchanged), so it's transparent.
+    for _po2 in (20, 19, 18):
+        if subprocess.run([HOSTBIN, *argv],
+                          env=dict(env, HAZYNC_SEG_PO2=str(_po2)), cwd=work).returncode == 0:
+            return
+    sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18)")
+
 def cmd_prove(args):
     rng = args[0]
     if not HOSTBIN or not os.path.exists(HOSTBIN):
@@ -202,26 +213,19 @@ def cmd_prove(args):
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
-            # risc0 4.0.5 panics on ~10% of blocks (a preflight segment-boundary bug). Retry the block
-            # with progressively smaller proving segments (HAZYNC_SEG_PO2 20->19->18); smaller segments
-            # clear the boundary and the receipt is identical (guest unchanged), so it's transparent.
-            for _po2 in (20, 19, 18):
-                if subprocess.run([HOSTBIN, prove_cmd, str(h)],
-                                  env=dict(env, HAZYNC_SEG_PO2=str(_po2)), cwd=work).returncode == 0:
-                    break
-            else:
-                sys.exit(f"block {h} failed to prove even at reduced segment size (SEG_PO2=18)")
+            _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}")
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
-        _fold_and_save(parts, out, work)
+        _fold_and_save(parts, out, work, env)
         print("receipt:", out)
     finally:
         stop.set()
         shutil.rmtree(work, ignore_errors=True)          # drop the range_*/fold_* intermediates
 
-def _fold_and_save(parts, out, work):
-    # Recursively fold the per-block receipts into one; all I/O is inside `work` (cwd=work).
+def _fold_and_save(parts, out, work, env):
+    # Recursively fold the per-block receipts into one; all I/O is inside `work` (cwd=work). fold-range hits
+    # the same risc0 segment-boundary bug as the block prove, so it goes through the same seg-retry path.
     rnd = 0
     while len(parts) > 1:
         rnd += 1
@@ -229,7 +233,7 @@ def _fold_and_save(parts, out, work):
         for i in range(0, len(parts), 2):
             if i + 1 < len(parts):
                 m = f"fold_r{rnd}_{i}.bin"
-                subprocess.run([HOSTBIN, "fold-range", parts[i], parts[i + 1], m], check=True, cwd=work)
+                _run_with_seg_retry(["fold-range", parts[i], parts[i + 1], m], env, work, f"fold {parts[i]}+{parts[i + 1]}")
                 nxt.append(m)
             else:
                 nxt.append(parts[i])
