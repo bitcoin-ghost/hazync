@@ -157,7 +157,7 @@
     var p=d.progress;
     $('metrics').innerHTML=metric('Blocks proven',fmt(p.proven))+metric('Of chain tip',fmt(p.tip))+metric('Complete','<span class="a">'+p.pct+'%</span>')+metric('Contributors',fmt(p.contributors))+metric('Signatures',d.signatures.indexOf('ed25519')>=0?'ed25519':'dev');
     $('pct').textContent=p.pct+'% of '+fmt(p.tip);$('fill').style.width=Math.max(0.5,p.pct)+'%';
-    $('frontier').textContent='proven to '+fmt(p.proven)+' →';$('tip').textContent='tip · '+fmt(p.tip);
+    $('frontier').textContent='chained to '+fmt(p.frontier)+' →';$('tip').textContent='tip · '+fmt(p.tip);
     $('sigmode').textContent=d.signatures.indexOf('ed25519')>=0?'signed ledger':'dev mode';
     // timeline strip (genesis → tip)
     var tl=d.timeline;
