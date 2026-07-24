@@ -93,11 +93,14 @@ so the prove **panics** — on CPU *and* CUDA (it's the shared witgen, not backe
 liveness bug only: it never produces a wrong proof, it just fails to produce one for those blocks.
 
 The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_PO2` for the executor's
-`segment_limit_po2` (default 20 = the risc0 default), and the CLI retries a failed block with
-progressively **smaller** segments (`HAZYNC_SEG_PO2` 20→19→18) — smaller segments repartition the work
-and clear the boundary. Normal blocks prove at the default; only the affected ~10% fall back, and the
-receipt is identical either way. **Note:** the released v0.6.1 binaries predate this — they still panic
-on the affected blocks; the corrected binaries ship in the next release (a rebuild, no id change). A
+`segment_limit_po2` (default 20 = the risc0 default) on **every** prove path — single-block
+`prove-range`/`prove-range-bridge`, `fold-range`, `prove-chunk`, chunk-aggregate, the replay path, the
+IVC chain step, and the SNARK wrap — and the CLI retries a failed prove *or fold* with progressively
+**smaller** segments (`HAZYNC_SEG_PO2` 20→19→18), which repartition the work and clear the boundary.
+Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
+either way. **Releases:** the **v0.6.2 CPU** binary (`hazync-host-x86_64-linux-gnu`) carries this fix
+across all prove paths; the **v0.6.2 CUDA** binary is still v0.6.1's and predates it (it panics on the
+affected workloads on the GPU path) — the corrected CUDA build ships next (a rebuild, no id change). A
 deeper fix (patching risc0's segment reservation so no retry is needed) is future work.
 
 ## The guest image id (METHOD_ID) & reproducibility
