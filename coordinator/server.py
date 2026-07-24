@@ -294,9 +294,19 @@ def _frontier_chain():
     rows = c.execute("SELECT lo,hi,in_tip,out_tip,out_leaves,range_work,in_bhash,out_bhash "
                      "FROM vranges ORDER BY lo, ts").fetchall()  # F2: deterministic order, not rowid
     c.close()
+    # Index verified ranges by their in-boundary tip. When several verified ranges share the SAME
+    # in-boundary — e.g. a legit single-block proof of block k*RANGE_SIZE and the aligned range
+    # [k*RANGE_SIZE .. +RANGE_SIZE-1] both start after block k*RANGE_SIZE-1 — keep the one that reaches
+    # FURTHEST (greatest hi). First-wins here was a real frontier-stall bug: if the single won the key,
+    # the walk advanced one block and then dead-ended (nothing has in_tip == the post-single boundary),
+    # freezing the whole genesis frontier at that boundary. Greatest-hi always subsumes a shorter range
+    # from the same boundary (ranges are contiguous), so it can't skip a block, and it can't splice a
+    # forgery in — every chained range still has to match the full boundary digest at :314.
     by_in = {}
     for r in rows:
-        by_in.setdefault(r["in_tip"], r)  # first-wins is now safe: a chained range must match the full boundary digest
+        cur = by_in.get(r["in_tip"])
+        if cur is None or r["hi"] > cur["hi"]:
+            by_in[r["in_tip"]] = r
     tip, hi, seen = GENESIS_TIP, 0, set()
     cum_work, leaves, tip_hash = 0, 0, GENESIS_TIP
     prev_bhash = None  # None at genesis: verify-any pinned that range's full in-boundary
@@ -651,8 +661,11 @@ class H(BaseHTTPRequestHandler):
             return self._send(404, {"error": "witness not available"})
         # static frontend
         rel = "index.html" if p in ("/", "") else p.lstrip("/")
-        fp = os.path.normpath(os.path.join(WEB, rel))
-        if fp.startswith(os.path.abspath(WEB)) and os.path.isfile(fp):
+        webroot = os.path.abspath(WEB)
+        fp = os.path.abspath(os.path.join(WEB, rel))
+        # Contain to WEB with a separator boundary — a bare startswith(webroot) would also accept a
+        # sibling like <web>XYZ/secret whose path merely shares the "web" prefix.
+        if (fp == webroot or fp.startswith(webroot + os.sep)) and os.path.isfile(fp):
             ct = "text/html" if fp.endswith(".html") else "text/plain"
             return self._send(200, raw=open(fp, "rb").read(), ctype=ct)
         return self._send(404, {"error": "not found"})
