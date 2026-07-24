@@ -1732,6 +1732,13 @@ fn cmd_prove_range_bridge(n: u32) {
     let raw = std::fs::read(format!("{dir}/bundle_{n}.json")).expect("read bundle");
     let bd: Bundle = serde_json::from_slice(&raw).expect("parse bundle");
     let mut b = ExecutorEnv::builder();
+    // risc0 4.0.5 has a preflight segment-sizing bug: for ~10% of blocks a segment packs right to its
+    // 2^po2 boundary and the assertion `cycles <= 1 << segment.po2` overflows (on CPU AND cuda), so the
+    // prove panics. SMALLER segments repartition the work and clear the boundary — the caller retries a
+    // failed block with a decremented HAZYNC_SEG_PO2 (see the CLI). Default = the risc0 default (20), so
+    // normal blocks are unaffected. Host-side executor config only — the guest is untouched, METHOD_ID
+    // stays 601d7ca2.
+    b.segment_limit_po2(std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok()).unwrap_or(20));
     b.write(&6u32).unwrap();
     b.write(&bd.in_tip).unwrap();
     b.write(&bd.in_roots).unwrap();

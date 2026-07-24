@@ -85,6 +85,21 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-
 submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
 invariant the guest fold enforces. See [`HAZYNC_ARCHITECTURE.md`](HAZYNC_ARCHITECTURE.md).
 
+## Prover reliability: the risc0 segment-boundary retry
+
+The pinned prover (`risc0-circuit-rv32im` 4.0.5) has a preflight bug: for ~10% of blocks a proving
+segment packs right up to its `2^po2` boundary and the assertion `cycles <= 1 << segment.po2` overflows,
+so the prove **panics** — on CPU *and* CUDA (it's the shared witgen, not backend-specific). This is a
+liveness bug only: it never produces a wrong proof, it just fails to produce one for those blocks.
+
+The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_PO2` for the executor's
+`segment_limit_po2` (default 20 = the risc0 default), and the CLI retries a failed block with
+progressively **smaller** segments (`HAZYNC_SEG_PO2` 20→19→18) — smaller segments repartition the work
+and clear the boundary. Normal blocks prove at the default; only the affected ~10% fall back, and the
+receipt is identical either way. **Note:** the released v0.6.1 binaries predate this — they still panic
+on the affected blocks; the corrected binaries ship in the next release (a rebuild, no id change). A
+deeper fix (patching risc0's segment reservation so no retry is needed) is future work.
+
 ## The guest image id (METHOD_ID) & reproducibility
 
 A proof is verified **against a guest image id** — `METHOD_ID`, a hash of the exact zkVM guest ELF.

@@ -202,7 +202,15 @@ def cmd_prove(args):
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
-            subprocess.run([HOSTBIN, prove_cmd, str(h)], env=env, check=True, cwd=work)
+            # risc0 4.0.5 panics on ~10% of blocks (a preflight segment-boundary bug). Retry the block
+            # with progressively smaller proving segments (HAZYNC_SEG_PO2 20->19->18); smaller segments
+            # clear the boundary and the receipt is identical (guest unchanged), so it's transparent.
+            for _po2 in (20, 19, 18):
+                if subprocess.run([HOSTBIN, prove_cmd, str(h)],
+                                  env=dict(env, HAZYNC_SEG_PO2=str(_po2)), cwd=work).returncode == 0:
+                    break
+            else:
+                sys.exit(f"block {h} failed to prove even at reduced segment size (SEG_PO2=18)")
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
