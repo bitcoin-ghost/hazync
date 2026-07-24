@@ -67,11 +67,12 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `601d7ca2…` (round-8 guest; ships unchanged in v0.6.0 **and v0.6.1** — see `reproduce/METHOD_ID`, authoritative). Superseded history:
+  `36a0415d…` (round-8 guest + the P2SH sigop-count fix #1 — see `reproduce/METHOD_ID`, authoritative). Superseded history:
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
-  hardening). Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
-  - [x] **Re-prove** the chain on the reproducible guest: the old proofs were archived and the board is
-    re-proven on the current `601d7ca2` guest (`provision-vps.sh GPU=1`).
+  hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard). Each supersession changed only the guest
+  source; the reproducible-build mechanism is unchanged.
+  - [~] **Re-prove** the chain on the reproducible guest: pending the `36a0415d` re-baseline (the sigop
+    fix changed the id, so the `601d7ca2` board must be re-proven on the new guest — GPU box).
 
 ## 3. External review + writeup
 
