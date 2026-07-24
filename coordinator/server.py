@@ -285,52 +285,59 @@ def verify_receipt(receipt: bytes, rng):
         except Exception: pass
 
 def _frontier_chain():
-    """Walk verified ranges from genesis, chaining on the FULL boundary — tip-hash AND difficulty/MTP
-    continuity (H7: out_nbits/out_epoch of range k must equal in_nbits/in_epoch of range k+1). Tip-hash
-    equality alone does not bind difficulty across a seam, so a range could otherwise claim an easier
-    in_nbits and be mined cheaper. The genesis-connecting range's in-boundary is pinned by `verify-any`
-    (assert_genesis_in_boundary). Returns (hi, tip_hash, cum_work, leaves)."""
+    """Select the MOST-WORK genesis-anchored chain (Bitcoin's rule), not merely the tallest one.
+
+    Verified ranges form a DAG — a valid seam requires `b.lo == a.hi + 1`, so `lo` strictly increases —
+    and among EVERY genesis-anchored, seam-continuous, height-contiguous chain we pick the one with the
+    greatest cumulative `range_work`. This is what stops a party who can *prove* a longer LOW-difficulty
+    genesis fork from shadowing the real chain: a taller fork with less total work loses, exactly as in
+    Bitcoin. (Greatest-hi — the previous rule, itself the fix for the single-block-at-a-boundary stall —
+    is subsumed: on the honest chain more blocks means more work; only a fork makes the two rules differ.)
+
+    A seam binds the FULL boundary — tip-hash linkage (`b.in_tip == a.out_tip`) AND UTXO/difficulty/MTP
+    continuity (`b.in_bhash == a.out_bhash`, S1/F1) AND height contiguity (`b.lo == a.hi + 1`, H9). The
+    genesis-connecting range's in-boundary is pinned by `verify-any` (assert_genesis_in_boundary), so a
+    genesis anchor means `in_tip == GENESIS_TIP` and `lo == 1`. Returns (hi, tip_hash, cum_work, leaves).
+    """
     c = db()
-    rows = c.execute("SELECT lo,hi,in_tip,out_tip,out_leaves,range_work,in_bhash,out_bhash "
-                     "FROM vranges ORDER BY lo, ts").fetchall()  # F2: deterministic order, not rowid
+    rows = [dict(r) for r in c.execute(
+        "SELECT lo,hi,in_tip,out_tip,out_leaves,range_work,in_bhash,out_bhash "
+        "FROM vranges ORDER BY lo, ts").fetchall()]  # F2: deterministic order; lo-asc is a topo order
     c.close()
-    # Index verified ranges by their in-boundary tip. When several verified ranges share the SAME
-    # in-boundary — e.g. a legit single-block proof of block k*RANGE_SIZE and the aligned range
-    # [k*RANGE_SIZE .. +RANGE_SIZE-1] both start after block k*RANGE_SIZE-1 — keep the one that reaches
-    # FURTHEST (greatest hi). First-wins here was a real frontier-stall bug: if the single won the key,
-    # the walk advanced one block and then dead-ended (nothing has in_tip == the post-single boundary),
-    # freezing the whole genesis frontier at that boundary. Greatest-hi always subsumes a shorter range
-    # from the same boundary (ranges are contiguous), so it can't skip a block, and it can't splice a
-    # forgery in — every chained range still has to match the full boundary digest at :314.
-    by_in = {}
+    def rwork(r):
+        try: return int(r["range_work"] or 0)
+        except Exception: return 0
+    # predecessors indexed by their out-boundary tip, for O(1) seam lookup
+    by_out = {}
+    for i, r in enumerate(rows):
+        r["_i"] = i
+        by_out.setdefault(r["out_tip"], []).append(r)
+    # DP in lo order (a seam strictly increases lo, so predecessors are processed first): best[_i] = the
+    # max cumulative range_work of any genesis-anchored seam-chain ending at that range (absent => the
+    # range is not reachable from genesis and can never be the frontier).
+    best = {}
+    frontier = (0, GENESIS_TIP, 0, 0)   # (hi, tip_hash, cum_work, leaves) — empty until a genesis chain lands
     for r in rows:
-        cur = by_in.get(r["in_tip"])
-        if cur is None or r["hi"] > cur["hi"]:
-            by_in[r["in_tip"]] = r
-    tip, hi, seen = GENESIS_TIP, 0, set()
-    cum_work, leaves, tip_hash = 0, 0, GENESIS_TIP
-    prev_bhash = None  # None at genesis: verify-any pinned that range's full in-boundary
-    prev_hi = 0        # H9: height cursor — the genesis-connecting range must be [1..], then contiguous
-    while tip in by_in and tip not in seen:
-        r = by_in[tip]
         if not r["in_bhash"]:
-            break  # F3: no boundary digest (pre-migration / NULL) — not chainable
-        if r["lo"] != prev_hi + 1:
-            break  # H9: HEIGHT must be contiguous from genesis (lo==1 first, then hi(k)+1). boundary_digest
-                   # binds the UTXO/difficulty/MTP state but NOT height, so a block mined onto the real tip
-                   # yet labelled with a false (low) height — claiming a larger subsidy and weaker script
-                   # flags — has a valid tip/boundary and would otherwise splice in. The guest fold_range
-                   # enforces this same adjacency (l.hi+1==rr.lo); the coordinator seam must match it.
-        if prev_bhash is not None and str(r["in_bhash"]) != str(prev_bhash):
-            break  # S1/F1: full-boundary discontinuity (UTXO roots / difficulty / MTP) — do not chain
-        seen.add(tip)
-        hi = r["hi"]; tip_hash = r["out_tip"]
-        try: cum_work += int(r["range_work"] or 0)
-        except Exception: pass
-        leaves = r["out_leaves"] or 0
-        prev_bhash = r["out_bhash"]; prev_hi = r["hi"]
-        tip = r["out_tip"]
-    return hi, tip_hash, cum_work, leaves
+            continue  # F3: no boundary digest (pre-migration / NULL) — not chainable
+        if r["in_tip"] == GENESIS_TIP and r["lo"] == 1:
+            cw = rwork(r)                      # genesis-anchored: verify-any pinned its full in-boundary (H9 lo==1)
+        else:
+            best_pred = None
+            for p in by_out.get(r["in_tip"], ()):            # tip-hash linkage
+                if (str(p["out_bhash"]) == str(r["in_bhash"])  # S1/F1: full-boundary continuity
+                        and p["hi"] + 1 == r["lo"]             # H9: height contiguity
+                        and p["_i"] in best):                 # predecessor reachable from genesis
+                    pw = best[p["_i"]]
+                    if best_pred is None or pw > best_pred:
+                        best_pred = pw
+            if best_pred is None:
+                continue  # no genesis-anchored seam-chain reaches this range
+            cw = best_pred + rwork(r)
+        best[r["_i"]] = cw
+        if cw > frontier[2] or (cw == frontier[2] and r["hi"] > frontier[0]):
+            frontier = (r["hi"], r["out_tip"], cw, r["out_leaves"] or 0)
+    return frontier
 
 def frontier_hi():
     """Highest block covered by a contiguous, boundary-continuous chain of verified ranges from genesis."""
