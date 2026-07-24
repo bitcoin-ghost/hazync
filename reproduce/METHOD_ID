@@ -14,8 +14,12 @@
 # hardening (incl. the length-prefixed leaf scriptPubKey, which changes every leaf hash). The
 # reproducible-build MECHANISM is unchanged — only the guest source did — so the id stays reproducible;
 # it is re-pinned below. Superseded the earlier id c029cee4…
+# 2026-07-24: sigop over-count fix (#1) — tx_full_sigops now guards the P2SH redeemScript sigop count
+# with IsPayToScriptHash(), matching Core's GetP2SHSigOpCount; the previous code over-counted every
+# non-P2SH (legacy) input and could reject Core-valid blocks. Guest logic change → new id (build
+# mechanism unchanged, still reproducible). Superseded the earlier id 601d7ca2…
 #
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-601d7ca298f32c54137fdb395d0debd31e95e4f084615fa710e5db5c785f05e6
+36a0415d5763ed62e71c44915d36caa34ae840cfd1051587bce1de27be0dd7f5
