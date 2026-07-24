@@ -369,7 +369,11 @@ extern "C" int64_t tx_full_sigops(const uint8_t* tx_bytes, unsigned tx_len,
     if (spent.size() < tx.vin.size()) return 1LL << 40;
     for (size_t i = 0; i < tx.vin.size(); i++) {
         const CScript& spk = spent[i].scriptPubKey;
-        if (flags & SCRIPT_VERIFY_P2SH) {
+        // Match Core's GetP2SHSigOpCount: the redeemScript sigops are added ONLY for P2SH prevouts.
+        // Without the IsPayToScriptHash() guard, spk.GetSigOpCount(scriptSig) falls through to
+        // GetSigOpCount(true) for a non-P2SH prevout — the scriptPubKey's own sigops, which Core never
+        // folds into the block total — over-counting every legacy input and rejecting valid blocks.
+        if ((flags & SCRIPT_VERIFY_P2SH) && spk.IsPayToScriptHash()) {
             cost += spk.GetSigOpCount(tx.vin[i].scriptSig) * WITNESS_SCALE_FACTOR; // P2SH redeemScript
         }
         cost += CountWitnessSigOps(tx.vin[i].scriptSig, spk, &tx.vin[i].scriptWitness, flags);
