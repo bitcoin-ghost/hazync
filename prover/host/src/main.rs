@@ -316,6 +316,7 @@ fn prove_block() {
 
     println!("=== PROVING block 170 chain_step (real STARK receipt) ===");
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.write(&2u32).unwrap();
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
@@ -340,6 +341,7 @@ fn prove_block() {
 // Prove one chain step, discharging the env::verify recursion assumption with the previous receipt.
 fn prove_step(prev_journal: Vec<u8>, prev_receipt: Option<risc0_zkvm::Receipt>, w: &BlockWitness, is_base: u32) -> risc0_zkvm::Receipt {
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     if let Some(r) = prev_receipt {
         b.add_assumption(r); // discharge env::verify(self_id, prev_journal)
     }
@@ -1252,6 +1254,7 @@ fn prove_chain_bad() {
     bad_id[0] ^= 1; // corrupt the image id
     println!("=== ADVERSARIAL S1: folding block 171 with a WRONG self_id (must be rejected) ===");
     let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
     b.add_assumption(r170.clone());
     b.write(&2u32).unwrap();
     b.write(&r170.journal.bytes).unwrap();

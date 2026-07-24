@@ -20,6 +20,8 @@ jobs:
         run: rustup update --no-self-update stable && rustc --version
       - name: Utreexo accumulator tests
         run: cargo test --manifest-path accumulator/Cargo.toml --release
+      - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
+        run: ./prover/check_seg_guards.sh
 
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
