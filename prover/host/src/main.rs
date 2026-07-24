@@ -805,12 +805,38 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
             no.push(l);
         }
     };
+    // F3: BIP30 grandfathered duplicate-coinbase overwrite. Blocks 91842 (dup of 91812) and 91880 (dup
+    // of 91722) re-use an earlier still-unspent coinbase's outpoint; Core OVERWRITES the old coin. Delete
+    // the superseded coinbase output leaf(s) — this same coinbase's spendable outputs committed at the OLD
+    // height/MTP — from the carried forest BEFORE add_out re-adds them at the current height, and hand the
+    // guest the deletion witness. Without this the bridge emits bip30:None and the guest (which MANDATES
+    // the overwrite at these two hashes) rejects the block, making 91842/91880 unprovable via the bridge.
+    // old_mtp = block_mtp[old_height] = MTP(old_height-1) = exactly what the superseded leaf committed at
+    // creation, so the leaf is found. Height-gated here; the guest cross-checks the block HASH
+    // (BIP30_OVERWRITE_A/B), so a spurious height hit on a non-matching block is still rejected there.
+    let bip30 = if height == 91842 || height == 91880 {
+        let old_height: u32 = if height == 91842 { 91812 } else { 91722 };
+        let old_mtp = block_mtp.get(old_height as usize).copied().unwrap_or(0);
+        let mut dels: Vec<Bip30Del> = Vec::new();
+        for v in 0..coinbase.output.len() {
+            if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
+            let l = out_leaf_of(&coinbase, &cb_txid, v, old_height, true, old_mtp);
+            let pos = forest.leaves.iter().position(|x| *x == l)
+                .expect("BIP30 superseded coinbase leaf not in carried accumulator");
+            let last = forest.leaves.len() - 1;
+            dels.push(Bip30Del { global_pos: pos as u64, proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) });
+            forest.delete(pos);
+        }
+        Some(Bip30Overwrite { old_height, old_mtp, dels })
+    } else {
+        None
+    };
     add_out(&coinbase, &cb_txid, true, forest, &mut new_outputs);
     for p in &ptxs {
         add_out(&p.tx, &p.txid, false, forest, &mut new_outputs);
     }
     let root_next = wire_stump(forest);
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30 }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
