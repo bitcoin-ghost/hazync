@@ -99,7 +99,7 @@
   <nav><a href="https://bitcoinghost.org/hazync.html">About</a><a href="https://github.com/bitcoin-ghost/hazync">Repo ↗</a>
     <button class="tt" id="tt" aria-label="Toggle theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg></button></nav>
 </div></header>
-<div class="preview-bar" id="preview-bar"><div class="wrap"><span class="dot"></span><span><b>Preview · sample data.</b> The live proof party begins once the prover network is running — this is a look at how it works: claim a range, prove it on your GPU, and put your name on Bitcoin's history.</span></div></div>
+<div class="preview-bar" id="preview-bar"><div class="wrap"><span class="dot"></span><span><b>Board data unavailable.</b> Can't reach the coordinator right now — reconnecting automatically. The figures below are placeholders (zero), not live data.</span></div></div>
 <main><div class="wrap">
   <p class="eyebrow">Proof party · genesis → tip</p>
   <h1>Prove Bitcoin's history, <span class="a">together.</span></h1>
@@ -236,43 +236,21 @@
   // API base: same-origin by default; set window.HAZYNC_API to point at the coordinator when it's live.
   var API=(typeof window!=='undefined'&&window.HAZYNC_API)||'';
   function showBanner(on){var b=$('preview-bar');if(b)b.classList.toggle('show',!!on);}
-  function sampleData(){
-    var now=Math.floor(Date.now()/1000);
-    var per=new Array(240).fill(0);
-    per[0]=3;                 // genesis frontier (proven & chained)
-    per[1]=2;per[5]=2;        // out-of-order ranges already verified
-    per[2]=1;per[8]=1;        // ranges being proved right now (pick-any-block)
+  // Honest empty state shown when the coordinator can't be reached — zeros + empty lists, NEVER
+  // fabricated handles/ranges. Presenting invented board data as if real (even behind a banner) is
+  // exactly the trust problem we removed; an unreachable board should look empty, not busy.
+  function emptyData(){
     return {
-      progress:{proven:4000,frontier:2000,tip:958301,pct:0.209,contributors:3},
-      timeline:{segs:240,per_seg:per,frontier_seg:0},
-      range_size:1000,
-      vranges:[
-        {lo:0,hi:1999,handle:"earlybird"},
-        {lo:5000,hi:5999,handle:"aria"},
-        {lo:20000,hi:20999,handle:"ghostnode"}
-      ],
-      claims:[
-        {lo:2000,hi:2999,handle:"coldboot",elapsed:1320,stale:false},
-        {lo:3000,hi:3999,handle:"driftwood",elapsed:480,stale:true},
-        {lo:764321,hi:764321,handle:"solo",elapsed:210,stale:false}
-      ],
-      leaderboard:[
-        {id:"9f2a7c1b3d",handle:"earlybird",blocks:2000},
-        {id:"4d8e0a2f91",handle:"aria",blocks:1000},
-        {id:"1a2b3c4d5e",handle:"ghostnode",blocks:1000}
-      ],
-      recent:[
-        {range:"20000-20999",handle:"ghostnode",verified:true,ts:now-240,note:"verified"},
-        {range:"764321",handle:"solo",verified:false,ts:now-210,note:"proving one block"},
-        {range:"0-1999",handle:"earlybird",verified:true,ts:now-1500,note:"verified"}
-      ],
-      signatures:"ed25519",verify_mode:"real"
+      progress:{proven:0,frontier:0,tip:958301,pct:0,contributors:0},
+      timeline:{segs:240,per_seg:new Array(240).fill(0),frontier_seg:0},
+      range_size:1000, vranges:[], claims:[], leaderboard:[], recent:[],
+      signatures:"ed25519", verify_mode:"real"
     };
   }
   function poll(){
     fetch(API+'/api/state').then(function(r){if(!r.ok)throw 0;return r.json()})
       .then(function(d){showBanner(false);render(d);})
-      .catch(function(){showBanner(true);render(sampleData());});   // no backend yet → show the preview
+      .catch(function(){showBanner(true);render(emptyData());});   // unreachable → honest empty state, not fake data
   }
   poll();setInterval(poll,10000);
 </script></body></html>
