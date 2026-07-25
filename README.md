@@ -8,7 +8,7 @@ The proofs fold: verified block by block, a stretch of the chain collapses into 
 
 ## Verify a proof
 
-No GPU, no build, no clone. The prebuilt binary needs Linux x86-64, glibc 2.39+ (Ubuntu 24.04+):
+No GPU, no build, no clone. The prebuilt binary needs Linux x86-64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+):
 
 ```bash
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
@@ -16,7 +16,7 @@ curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin        # → prints a line starting with RANGE-OK
 ```
 
-**On an older distro** (Ubuntu 22.04, Debian 12 — older glibc), run the *same* binary in a container, no rebuild:
+**On an older distro** (Ubuntu 20.04, Debian 11 — glibc < 2.34), run the *same* binary in a container, no rebuild:
 
 ```bash
 docker run --rm -v "$PWD":/w -w /w ubuntu:24.04 ./host verify-any proof.bin
