@@ -205,7 +205,7 @@ def pick(body):
         rid = f"{lo}-{hi}"
         if hi >= TIP:
             break
-        if lo >= 1 and rid not in taken:
+        if rid not in taken:   # incl. the genesis window [0-999] (lo=0), proven as [1..999]
             return 200, {"range": rid, "lo": lo, "hi": hi, "cmd": f"hazync run {rid}"}
         k = hi + 1
     return 404, {"error": "no open range available"}
@@ -502,14 +502,30 @@ def state_cached():
 
 def claim(body):
     rid, pk, handle = body.get("range"), body.get("pubkey", ""), clean_handle(body.get("handle"))
-    if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    if not pk: return 400, {"error": "pubkey required"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
-    if not parse_range(rid): return 400, {"error": "invalid range id"}
+    want_next = (not rid) or rid == "next"
+    if not want_next and not parse_range(rid): return 400, {"error": "invalid range id"}
     reap()
     now = time.time()
     with _lock:
         c = db()
+        if want_next:
+            # Atomic claim-next: pick the next open window (incl the genesis window [0-999]) AND claim it,
+            # all under the lock — so two parallel `hazync run` workers can never grab the same range (the
+            # old client-side pick-then-claim left a window where both did). Genesis-inclusive: k starts at
+            # fr+1 so a fresh contributor (frontier 0) claims [0-999] first.
+            fr = frontier_hi()
+            taken = set(row["id"] for row in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
+            k = max(1, fr + 1); rid = None
+            for _ in range(200000):
+                lo = (k // RANGE_SIZE) * RANGE_SIZE; hi = lo + RANGE_SIZE - 1
+                if hi >= TIP: break
+                cand = f"{lo}-{hi}"
+                if cand not in taken: rid = cand; break
+                k = hi + 1
+            if rid is None: c.close(); return 404, {"error": "no open range available"}
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if not r:
             pr = parse_range(rid)                       # pick-any: auto-create a valid range on demand
