@@ -679,6 +679,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 // Mode 1: commit the full per-block report (used for standalone block validation + debugging).
 fn block_proof() {
     let w: BlockWitness = env::read();
+    assert!(w.header.len() == 80, "block header must be 80 bytes"); // guard before slicing header[68..72]
     let block_time = u32::from_le_bytes(w.header[68..72].try_into().unwrap());
     let r = validate_block(&w, block_time, None); // standalone: MTP fallback = block time
     env::commit(&BlockOutput {

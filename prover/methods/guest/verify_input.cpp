@@ -248,7 +248,11 @@ extern "C" int check_witness_commitment(const uint8_t* cb, unsigned cb_len,
             s[2] == 0xaa && s[3] == 0x21 && s[4] == 0xa9 && s[5] == 0xed) found = (int)i;
     }
     if (found < 0) return has_witness ? -1 : 1; // segwit block with witness MUST carry a commitment
-    // reserved value = the coinbase input's single 32-byte witness element.
+    // reserved value = the coinbase input's single 32-byte witness element. Guard the malformed empty-vin
+    // case: a 0-input "coinbase" parses fine (CompactSize 0) but would read tx.vin[0] out of bounds — UB in a
+    // zkVM with no memory protection. Such a block is rejected anyway (is_coinbase / CheckTransaction
+    // bad-txns-vin-empty), but never compute a consensus flag from a wild read.
+    if (tx.vin.empty()) return -2;
     const auto& stack = tx.vin[0].scriptWitness.stack;
     if (stack.size() != 1 || stack[0].size() != 32) return -2;
     // witness merkle root over the wtxids.
@@ -274,6 +278,7 @@ extern "C" int check_bip34(const uint8_t* cb, unsigned cb_len, uint32_t height) 
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);
     CScript expect = CScript() << (int64_t)height;
+    if (mtx.vin.empty()) return -50; // empty-vin "coinbase": rejected elsewhere; don't read vin[0] out of bounds
     const CScript& ss = mtx.vin[0].scriptSig;
     if (ss.size() < expect.size()) return -50;
     if (!std::equal(expect.begin(), expect.end(), ss.begin())) return -51;
