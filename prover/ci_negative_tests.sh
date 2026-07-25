@@ -55,7 +55,27 @@ else
   echo "skip: SEC-1 badwit (set HAZYNC_CI_HEAVY=1 to run the heavy block-741000 execute test)"
 fi
 
-# NOTE: retarget / block-weight / sigops reject-paths are enforced in the guest (see SOUNDNESS.md §5) but
-# lack execute-mode test hooks; adding negative hooks for them is tracked follow-up (host-side, no guest
-# change) so they too become continuously enforced.
+# --- RETARGET: a block whose nBits doesn't match the required difficulty is rejected -----------------
+# HAZYNC_TEST_BADNBITS corrupts the anchor's prev_nbits so the guest's retarget rule (non-boundary block:
+# nBits must equal prev_nbits) drives retarget_ok=false. Honest baseline (the COV-1 control) validates.
+out="$(HAZYNC_TEST_BADNBITS=1 HAZYNC_BLOCK="$BLK" "$H" check-full 2>&1)"
+[ $? -eq 0 ] && fail "RETARGET attack: a wrong-difficulty (nBits) block should be REJECTED"
+echo "$out" | grep -q "retarget_ok=false" || fail "RETARGET: retarget_ok was not driven false"
+pass "retarget/nBits mismatch rejected (retarget_ok=false); honest accepted"
+
+# --- WEIGHT: a block exceeding MAX_BLOCK_WEIGHT (4,000,000 WU) is rejected -----------------------------
+out="$(HAZYNC_TEST_BADWEIGHT=1 HAZYNC_BLOCK="$BLK" "$H" check-full 2>&1)"
+[ $? -eq 0 ] && fail "WEIGHT attack: an over-weight block should be REJECTED"
+echo "$out" | grep -q "weight_ok=false" || fail "WEIGHT: weight_ok was not driven false"
+pass "over-weight block rejected (weight_ok=false); honest accepted"
+
+# --- SIGOPS: a block over the 80,000 sigop-cost cap is rejected ----------------------------------------
+# Guards the accept-invalid direction of the sigop cap (incl. the #4 P2SH-guard: an under-count would let
+# an over-cap block slip through). The P2SH sigop path itself is additionally exercised by the era
+# validation of real P2SH/segwit/taproot blocks (500000/741000/750000).
+out="$(HAZYNC_TEST_BADSIGOPS=1 HAZYNC_BLOCK="$BLK" "$H" check-full 2>&1)"
+[ $? -eq 0 ] && fail "SIGOPS attack: an over-sigop-cap block should be REJECTED"
+echo "$out" | grep -q "sigops_ok=false" || fail "SIGOPS: sigops_ok was not driven false"
+pass "over-sigop-cost block rejected (sigops_ok=false); honest accepted"
+
 echo "ALL NEGATIVE TESTS PASSED"

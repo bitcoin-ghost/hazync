@@ -498,7 +498,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     }
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
 
-    let anchor = ChainState {
+    let mut anchor = ChainState {
         kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
@@ -562,7 +562,26 @@ fn build_full() -> (ChainState, BlockWitness) {
     for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); }
     for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
-    let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
+    // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
+    // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
+    // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
+    if std::env::var("HAZYNC_TEST_BADNBITS").is_ok() {
+        // Non-boundary block: retarget_ok requires nBits == prev_nbits. Corrupt prev_nbits → retarget_ok=false.
+        anchor.prev_nbits = anchor.prev_nbits.wrapping_add(0x1000);
+    }
+    if std::env::var("HAZYNC_TEST_BADWEIGHT").is_ok() {
+        // Append a ~1.1 MB OP_RETURN output to the coinbase → block weight > MAX_BLOCK_WEIGHT → weight_ok=false.
+        let mut cb: Transaction = deserialize(&hx(cb_hex)).unwrap();
+        cb.output.push(TxOut { value: Amount::from_sat(0), script_pubkey: ScriptBuf::from_bytes(vec![0x6au8; 1_100_000]) });
+        w.coinbase_tx = serialize(&cb);
+    }
+    if std::env::var("HAZYNC_TEST_BADSIGOPS").is_ok() {
+        // Append an output of 30001 OP_CHECKSIG → sigop cost 30001*4 = 120004 > 80000 → sigops_ok=false.
+        let mut cb: Transaction = deserialize(&hx(cb_hex)).unwrap();
+        cb.output.push(TxOut { value: Amount::from_sat(0), script_pubkey: ScriptBuf::from_bytes(vec![0xacu8; 30_001]) });
+        w.coinbase_tx = serialize(&cb);
+    }
     (anchor, w)
 }
 
