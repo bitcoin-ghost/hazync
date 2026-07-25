@@ -458,38 +458,57 @@ fn build_full() -> (ChainState, BlockWitness) {
     }
     let leaf_of = |op: &bitcoin::OutPoint, o: &TxOut, h: u32, cb: bool, mtp: u32| coin_leaf(&op.txid.to_byte_array(), op.vout, o.value.to_sat(), o.script_pubkey.as_bytes(), h, cb, mtp);
 
-    // Seed the accumulator: filler + EVERY input's spent coin (real height/coinbase/creation-MTP) + filler.
+    // recent_times (prev-11) + this block's creation-MTP — needed EARLY: the guest detects in-block
+    // spends (H1) by LEAF membership in this block's created-output set (main.rs `created_at`), and the
+    // leaf commits the creation-MTP. Keying on txid instead would false-positive a spend of an earlier
+    // coin whose funding tx shares a txid with a tx in this block (pre-BIP34 coinbase-txid collisions).
+    let mut recent_times: Vec<u32> = {
+        let rt: Vec<u32> = j["recent_times"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect())
+            .unwrap_or_default();
+        if rt.is_empty() { (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect() } else { rt }
+    };
+    // COV-1 negative-test hook (test-only, inert unless HAZYNC_COV1_BADTIME): prev-11 MTP == this block's
+    // time so `time_ok` fails. Applied to recent_times so cmtp stays consistent host↔guest. NEVER in prod.
+    if std::env::var("HAZYNC_COV1_BADTIME").is_ok() { recent_times = vec![time; 11]; }
+    let cmtp = median_u32(&recent_times);
+    // This block's created output leaves (coinbase + every tx, unspendable skipped) — the guest's in-block
+    // set, keyed by LEAF (height-bearing, so a colliding old coinbase's leaf differs and stays external).
+    let mut created: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    for v in 0..coinbase.output.len() {
+        if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
+        created.insert(out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp));
+    }
+    for p in &ptxs {
+        for v in 0..p.tx.output.len() {
+            if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; }
+            created.insert(out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp));
+        }
+    }
+    let mut spent_in_block: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    // Seed the accumulator: filler + every EXTERNAL input's spent coin (in-block coins never entered it) + filler.
     let mut forest = Forest::new();
     for i in 0..4u64 { forest.add(hash_leaf(&[b"pre".as_slice(), &i.to_le_bytes()].concat())); }
     for p in &ptxs {
         for (i, o) in p.prevouts.iter().enumerate() {
-            forest.add(leaf_of(&p.tx.input[i].previous_output, o, p.meta[i].0, p.meta[i].1, p.meta[i].2));
+            let coin = leaf_of(&p.tx.input[i].previous_output, o, p.meta[i].0, p.meta[i].1, p.meta[i].2);
+            if created.contains(&coin) { continue; } // in-block: ephemeral, never in the accumulator
+            forest.add(coin);
         }
     }
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
 
-    let mut anchor = ChainState {
+    let anchor = ChainState {
         kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
         prev_nbits: bits, prev_time: time.saturating_sub(600), epoch_start: time.saturating_sub(600 * 1000),
         // Real prev-11 block timestamps (median = MTP(height-1), the spend block's BIP68-time/BIP113
         // window) when the fetcher/bridge supplies them; else the benign placeholder for pre-S2 vectors
-        // (130000/140000) that carry no `recent_times`. Lets `check-full` validate an isolated real
-        // time-locked block; the IBD/chain proving path derives this itself and never uses build_full.
-        recent_times: {
-            let rt: Vec<u32> = j["recent_times"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect())
-                .unwrap_or_default();
-            if rt.is_empty() { (0..11).map(|i| time.saturating_sub(2000) + i * 100).collect() } else { rt }
-        },
+        // (130000/140000) that carry no `recent_times` — computed above (with the COV-1 hook applied).
+        recent_times: recent_times.clone(),
         anchor_id: [0u8; 32], self_id: METHOD_ID,
     };
-    // COV-1 negative-test hook (test-only, inert unless HAZYNC_COV1_BADTIME set): make the previous 11
-    // blocks' median-time-past equal THIS block's timestamp, so `time_ok = block_time > prev_mtp` is
-    // false — the "time-too-old" rejection. create_mtp stays median(recent_times) so host↔guest remain
-    // consistent; only time_ok fails. NEVER set in production.
-    if std::env::var("HAZYNC_COV1_BADTIME").is_ok() { anchor.recent_times = vec![time; 11]; }
 
     // Build the witness: per tx a shared full-prevouts blob; per input a BlockInput (tx_first on input 0).
     let root_prev = wire_stump(&forest);
@@ -509,6 +528,18 @@ fn build_full() -> (ChainState, BlockWitness) {
         for i in 0..p.tx.input.len() {
             let (ch_i, cb_i, mtp_i) = p.meta[i];
             let coin = leaf_of(&p.tx.input[i].previous_output, &p.prevouts[i], ch_i, cb_i, mtp_i);
+            if created.contains(&coin) {
+                // IN-BLOCK spend (H1): leaf matches a coin created earlier in this block (the guest's exact
+                // rule) — it never entered the accumulator: dummy proof, no delete. Script still verifies.
+                spent_in_block.insert(coin);
+                inputs.push(BlockInput {
+                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                    global_pos: 0, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
+                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                });
+                continue;
+            }
             let pos = forest.leaves.iter().position(|x| *x == coin).expect("input coin in accumulator");
             let last = forest.leaves.len() - 1;
             let mut global_pos = pos as u64;
@@ -525,12 +556,11 @@ fn build_full() -> (ChainState, BlockWitness) {
             forest.delete(pos);
         }
     }
-    // Created-output creation-MTP = median(anchor.recent_times) — the same MTP(height-1) the guest
-    // computes (median of prev.recent_times) and now commits on created outputs. Consistent host↔guest.
-    let cmtp = median_u32(&anchor.recent_times);
+    // Add the SURVIVING created outputs (cmtp computed above) — unspendable skipped AND in-block-spent
+    // cancelled (leaf ∈ spent_in_block), matching the guest's surviving set exactly.
     let mut new_outputs: Vec<[u8; 32]> = Vec::new();
-    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); forest.add(l); new_outputs.push(l); }
-    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); forest.add(l); new_outputs.push(l); } }
+    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); }
+    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
     let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
     (anchor, w)
@@ -750,11 +780,24 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         ptxs.push(P { raw, tx: t, prevouts, meta, txid });
     }
 
-    // This block's txids — an input spending one of these is an IN-BLOCK spend (H1): the coin was
-    // created earlier in this same block, so it never entered the accumulator (ephemeral cancellation).
-    let this_txids: std::collections::HashSet<[u8; 32]> =
-        std::iter::once(cb_txid).chain(ptxs.iter().map(|p| p.txid)).collect();
-    let mut spent_in_block: std::collections::HashSet<([u8; 32], u32)> = std::collections::HashSet::new();
+    // This block's created output leaves (coinbase + every tx, unspendable skipped) — the guest detects
+    // in-block spends (H1) by LEAF membership here (main.rs `created_at`), NOT by txid. A leaf carries the
+    // coin's height, so a spend of an earlier coin whose funding tx shares a txid with a tx in this block
+    // (pre-BIP34 coinbase-txid collision) has a DIFFERENT leaf and stays correctly external — keying on
+    // txid would false-positive it, diverge from the guest, and stall the frontier at that block.
+    let self_mtp = block_mtp.get(height as usize).copied().unwrap_or(time);
+    let mut created: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+    for v in 0..coinbase.output.len() {
+        if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
+        created.insert(out_leaf_of(&coinbase, &cb_txid, v, height, true, self_mtp));
+    }
+    for p in &ptxs {
+        for v in 0..p.tx.output.len() {
+            if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; }
+            created.insert(out_leaf_of(&p.tx, &p.txid, v, height, false, self_mtp));
+        }
+    }
+    let mut spent_in_block: std::collections::HashSet<Hash> = std::collections::HashSet::new();
 
     for p in &ptxs {
         txids.push(p.txid);
@@ -765,10 +808,10 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
             let o = &p.prevouts[i];
             let op = p.tx.input[i].previous_output;
             let coin = coin_leaf(&op.txid.to_byte_array(), op.vout, o.value.to_sat(), o.script_pubkey.as_bytes(), ch, cb, mtp);
-            if this_txids.contains(&op.txid.to_byte_array()) {
-                // IN-BLOCK: coin never entered the accumulator. Dummy proof; the guest derives in-block
-                // from leaf membership and skips the accumulator delete. Script still verifies.
-                spent_in_block.insert((op.txid.to_byte_array(), op.vout));
+            if created.contains(&coin) {
+                // IN-BLOCK (H1): leaf matches a coin created earlier in this block (the guest's exact
+                // rule) — never entered the accumulator: dummy proof, no delete. Script still verifies.
+                spent_in_block.insert(coin);
                 inputs.push(BlockInput {
                     raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
                     global_pos: 0, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
@@ -794,13 +837,14 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     // outputs (H3) and coins spent within this same block (H1). Must match the guest's surviving set.
     // This block's creation-MTP (committed on every output leaf); a later block spending these coins
     // looks up the identical value by height, so the leaves match.
-    let self_mtp = block_mtp.get(height as usize).copied().unwrap_or(time);
+    // self_mtp computed above (with `created`). SURVIVING outputs only: unspendable skipped AND
+    // in-block-spent cancelled (leaf ∈ spent_in_block), matching the guest's surviving set exactly.
     let mut new_outputs = Vec::new();
     let add_out = |tx: &Transaction, txid: &[u8; 32], is_cb: bool, forest: &mut Forest, no: &mut Vec<Hash>| {
         for v in 0..tx.output.len() {
             if !out_spendable(tx.output[v].script_pubkey.as_bytes()) { continue; }
-            if spent_in_block.contains(&(*txid, v as u32)) { continue; }
             let l = out_leaf_of(tx, txid, v, height, is_cb, self_mtp);
+            if spent_in_block.contains(&l) { continue; }
             forest.add(l);
             no.push(l);
         }
