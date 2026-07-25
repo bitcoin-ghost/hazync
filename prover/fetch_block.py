@@ -82,18 +82,32 @@ def main():
         print(f"  prevouts {len(tx_json)}/{ntx}", flush=True)
     assert len(tx_json) == ntx, f"txs {len(tx_json)} != {ntx}"
 
-    # S2: real per-coin metadata (creating height + coinbase flag + creating-block timestamp) so
-    # maturity + BIP68-height fire on real data, and so the accumulator leaf (which commits coin_mtp)
-    # matches between a coin's creation and its spend. coin_mtp = the CREATING block's timestamp — the
-    # same value the prover's build path uses when it adds the output (must match, or the spent coin is
-    # not found in the accumulator). One /tx lookup per UNIQUE funding txid (deduped); block_time is in
-    # the tx status, so no extra request. The real bridge sources all of this from its own block index.
+    # S2: real per-coin metadata (creating height + coinbase flag + creation median-time-past) so
+    # maturity + BIP68 (height AND time) fire on real data, and so the accumulator leaf (which commits
+    # coin_mtp) matches between a coin's creation and its spend. coin_mtp = MTP(coin_height-1) — the
+    # median-time-past of the block BEFORE the coin's block — which is exactly what the prover's build
+    # path commits (median of the prev-11 window = Core's GetMedianTimePast) and what the guest's BIP68
+    # time check consumes (Core's nCoinTime = GetMedianTimePast(coinHeight-1)). Using the coin block's
+    # header nTime here was a bug: nTime >= MTP(h-1), so it over-shot the guest's threshold and
+    # false-rejected boundary-tight BIP68 time locks. mediantime is one block/<hash> lookup per unique
+    # coin height, cached below. (The real archive-node bridge sources this from its own block index.)
     meta = {}
     for idx in range(1, ntx):
         for v in tx_json[idx]["vin"]:
             meta.setdefault(v["txid"], None)
-    # Resume from an on-disk cache so a rate-limit death never re-fetches what we already have.
-    cache_path = out_path + ".meta.json"
+    # MTP(h) = block(h).mediantime (Esplora/mempool expose it directly), cached by height since many
+    # funding txs share a creation block. coin_mtp for a coin at height ch is MTP(ch-1).
+    mtp_at = {}
+    def block_mtp(h):
+        if h < 0: return 0
+        if h not in mtp_at:
+            bh = get("block-height/" + str(h)).decode()
+            mtp_at[h] = json.loads(get("block/" + bh)).get("mediantime", 0)
+        return mtp_at[h]
+    # Resume from an on-disk cache so a rate-limit death never re-fetches what we already have. The cache
+    # key is bumped (.meta2.json) because the stored coin_mtp semantics changed (nTime -> MTP(h-1)); an
+    # old .meta.json would otherwise poison the run with header timestamps.
+    cache_path = out_path + ".meta2.json"
     try:
         cached = json.load(open(cache_path))
         for k, v in cached.items():
@@ -105,7 +119,10 @@ def main():
     for k, pt in enumerate(todo):
         j = json.loads(get("tx/" + pt))
         st = j["status"]
-        meta[pt] = (st.get("block_height", 0), 1 if j["vin"][0].get("is_coinbase") else 0, st.get("block_time", 0))
+        ch = st.get("block_height", 0)
+        # coin_mtp = MTP(coin_height-1), NOT the coin block's header nTime — matches the prover build
+        # path + the guest BIP68 time check (Core nCoinTime = GetMedianTimePast(coinHeight-1)).
+        meta[pt] = (ch, 1 if j["vin"][0].get("is_coinbase") else 0, block_mtp(ch - 1))
         if k % 100 == 0:
             json.dump({p: meta[p] for p in meta if meta[p] is not None}, open(cache_path, "w"))
             print(f"  meta {k}/{len(todo)}", flush=True)
