@@ -458,12 +458,26 @@ fn build_full() -> (ChainState, BlockWitness) {
     }
     let leaf_of = |op: &bitcoin::OutPoint, o: &TxOut, h: u32, cb: bool, mtp: u32| coin_leaf(&op.txid.to_byte_array(), op.vout, o.value.to_sat(), o.script_pubkey.as_bytes(), h, cb, mtp);
 
-    // Seed the accumulator: filler + EVERY input's spent coin (real height/coinbase/creation-MTP) + filler.
+    // In-block spends (H1): a coin created AND spent within this same block never entered the accumulator,
+    // so the guest cancels it (skips both the delete and the output-add). build_full must mirror that or
+    // its root_next diverges from the guest on any busy block (thousands of in-block spends in 2017+).
+    let this_txids: std::collections::HashSet<[u8; 32]> =
+        std::iter::once(cb_txid).chain(ptxs.iter().map(|p| p.txid)).collect();
+    let mut spent_in_block: std::collections::HashSet<([u8; 32], u32)> = std::collections::HashSet::new();
+    for p in &ptxs {
+        for inp in &p.tx.input {
+            let op = inp.previous_output;
+            if this_txids.contains(&op.txid.to_byte_array()) { spent_in_block.insert((op.txid.to_byte_array(), op.vout)); }
+        }
+    }
+    // Seed the accumulator: filler + every EXTERNAL input's spent coin (in-block coins are ephemeral) + filler.
     let mut forest = Forest::new();
     for i in 0..4u64 { forest.add(hash_leaf(&[b"pre".as_slice(), &i.to_le_bytes()].concat())); }
     for p in &ptxs {
         for (i, o) in p.prevouts.iter().enumerate() {
-            forest.add(leaf_of(&p.tx.input[i].previous_output, o, p.meta[i].0, p.meta[i].1, p.meta[i].2));
+            let op = p.tx.input[i].previous_output;
+            if this_txids.contains(&op.txid.to_byte_array()) { continue; } // in-block: never in the accumulator
+            forest.add(leaf_of(&op, o, p.meta[i].0, p.meta[i].1, p.meta[i].2));
         }
     }
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
@@ -508,7 +522,19 @@ fn build_full() -> (ChainState, BlockWitness) {
         let prevouts_blob = serialize(&p.prevouts);
         for i in 0..p.tx.input.len() {
             let (ch_i, cb_i, mtp_i) = p.meta[i];
-            let coin = leaf_of(&p.tx.input[i].previous_output, &p.prevouts[i], ch_i, cb_i, mtp_i);
+            let op = p.tx.input[i].previous_output;
+            let coin = leaf_of(&op, &p.prevouts[i], ch_i, cb_i, mtp_i);
+            if this_txids.contains(&op.txid.to_byte_array()) {
+                // IN-BLOCK spend: dummy proof; the guest derives in-block from leaf membership and skips
+                // the accumulator delete (the coin never entered it). Script still verifies against the leaf.
+                inputs.push(BlockInput {
+                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                    global_pos: 0, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
+                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                });
+                continue;
+            }
             let pos = forest.leaves.iter().position(|x| *x == coin).expect("input coin in accumulator");
             let last = forest.leaves.len() - 1;
             let mut global_pos = pos as u64;
@@ -529,8 +555,8 @@ fn build_full() -> (ChainState, BlockWitness) {
     // computes (median of prev.recent_times) and now commits on created outputs. Consistent host↔guest.
     let cmtp = median_u32(&anchor.recent_times);
     let mut new_outputs: Vec<[u8; 32]> = Vec::new();
-    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); forest.add(l); new_outputs.push(l); }
-    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); forest.add(l); new_outputs.push(l); } }
+    for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } if spent_in_block.contains(&(cb_txid, v as u32)) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); forest.add(l); new_outputs.push(l); }
+    for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } if spent_in_block.contains(&(p.txid, v as u32)) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
     let w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
     (anchor, w)
