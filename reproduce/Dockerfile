@@ -12,7 +12,7 @@
 #   docker run --rm hazync-repro          # prints the canonical METHOD_ID
 #
 # Two independent builds (different machines) that print the same id == reproducibility proven.
-FROM ubuntu:24.04
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \

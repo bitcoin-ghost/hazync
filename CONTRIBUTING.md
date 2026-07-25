@@ -4,7 +4,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 
 ## What you need
 
-- A Linux machine (x86-64), Ubuntu 24.04+ (glibc 2.39+) for the prebuilt binaries. A cloud GPU box works well.
+- A Linux machine (x86-64), Ubuntu 22.04+ (glibc 2.34+) for the prebuilt binaries. A cloud GPU box works well.
 - An NVIDIA GPU + the CUDA 12.6 runtime for fast proving. No GPU still works (the CPU binary proves the early blocks, just slower).
 - **No build.** Grab the prebuilt binary below — proving an early block takes seconds on a GPU.
 
@@ -60,7 +60,7 @@ Proving a whole range takes a while (each block is proved, then the receipts are
 
 ## Just want to check a proof, not make one?
 
-You never have to trust the party. Every verified proof is public — fetch any proven block from `https://bitcoinghost.org/hazync/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.39+ / Ubuntu 24.04+):
+You never have to trust the party. Every verified proof is public — fetch any proven block from `https://bitcoinghost.org/hazync/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.34+ / Ubuntu 22.04+):
 
 ```
 # 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
@@ -80,7 +80,7 @@ If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instea
 
 ## If something breaks
 
-- `./host: cannot execute` or a `GLIBC` error — the prebuilt binaries need glibc 2.39+ (Ubuntu 24.04+). On an older distro, build from source (canonical guest — see the repo README) or run in the reproducible container.
+- `./host: cannot execute` or a `GLIBC` error — the prebuilt binaries need glibc 2.34+ (Ubuntu 22.04+). On an older distro (pre-22.04, e.g. Ubuntu 20.04 / Debian 11), build from source (canonical guest — see the repo README) or run in the reproducible container.
 - The CUDA prover needs the **CUDA 12.6 runtime**. If proving fails to find CUDA, install it (`cuda-toolkit-12-6`) or use the CPU binary (slower, no CUDA).
 - The coordinator rejects your proof with a `METHOD_ID` mismatch — you're proving with a non-canonical guest. Use the prebuilt binary, or reproduce the canonical id with `reproduce/Dockerfile`.
 - Anything else, open an issue on the repo.
