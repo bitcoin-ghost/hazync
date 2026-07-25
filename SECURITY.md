@@ -367,6 +367,40 @@ byte-exact tip), `check-full` 130000 (pre-segwit G3 branch, VALID) and 741000 (a
 (guest + leaf format changed) ⇒ all prior proofs invalid, re-proven from genesis. `cargo fmt` clean; the
 prove-based `adversarial` suite + `clippy` are re-run on the GPU box as part of the re-prove.
 
+## Round 9 (2026-07-24/25) — post-audit fixes + empirical era validation
+
+Three fixes after round 8, then an empirical pass over the chain's era transitions on a real archive node.
+
+### Guest — P2SH sigop over-count (reject-valid)
+`tx_full_sigops` counted redeemScript sigops for *every* input, not just P2SH ones — over-counting legacy
+inputs versus Core's `GetP2SHSigOpCount`, so a from-genesis prover could reject a Core-valid block near
+the sigop limit. **Fix:** guard the redeemScript count with `IsPayToScriptHash()`. Guest change →
+`METHOD_ID` re-baselined `601d7ca2…` → `36a0415d…`. (#4)
+
+### Guest/bridge — BIP30 grandfathered duplicate coinbases (91842 / 91880)
+The two pre-BIP30 blocks whose coinbase duplicates an earlier still-unspent coinbase require Core's
+overwrite. The guest now *mandates* the overwrite witness at exactly those two block hashes and the bridge
+emits it; validated end-to-end (91842 proved, `RANGE-OK`). (#6)
+
+### Host — in-block spend detection keyed on txid, not the coin leaf (liveness)
+Both host witness builders (`build_full` for `check-full`, and `build_block_carried`, the production
+bridge) cancelled in-block-created coins (H1) by **txid** membership. The guest cancels by **leaf**
+membership — and the leaf carries the coin's creation *height*. They diverge on a **pre-BIP34 coinbase-txid
+collision**: a block spending an older coin whose funding tx shares a txid with a tx in the spending block.
+The guest keeps that coin external (its leaf has the older height); the txid heuristic falsely cancelled
+it. Effect: `check-full` false-failed on busy blocks with in-block spends, and — the real bug — the bridge
+would emit a witness the guest rejects, **stalling a genesis→tip proof at the first colliding-txid block**.
+**Fix:** both builders now detect in-block spends by `created.contains(&coin_leaf)` — the guest's exact
+rule. Host-only; guest unchanged → `METHOD_ID` still `36a0415d`. Note this is a case where the *guest was
+already correct* and the host builder was wrong: it is a liveness bug (a valid block made unprovable), not
+a soundness one (no invalid block could be accepted). (#8, v0.7.2)
+
+### Empirical era validation
+On a real archive node, every representative era block validates at `36a0415d` with all consensus flags
+true: **segwit** (500000), **taproot** (750000), **big-block** (741000, ~6.4k inputs), and the **pre-BIP34
+collision** case (130000), plus the COV/SEC reject-path suite. The in-block-leaf bug above is the only
+defect the pass surfaced.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call

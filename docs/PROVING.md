@@ -98,10 +98,12 @@ The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_
 IVC chain step, and the SNARK wrap — and the CLI retries a failed prove *or fold* with progressively
 **smaller** segments (`HAZYNC_SEG_PO2` 20→19→18), which repartition the work and clear the boundary.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the **v0.6.2 CPU** binary (`hazync-host-x86_64-linux-gnu`) carries this fix
-across all prove paths; the **v0.6.2 CUDA** binary is still v0.6.1's and predates it (it panics on the
-affected workloads on the GPU path) — the corrected CUDA build ships next (a rebuild, no id change). A
-deeper fix (patching risc0's segment reservation so no retry is needed) is future work.
+either way. **Releases:** the current release is **v0.7.2** at `METHOD_ID 36a0415d`. Its
+**`hazync-host-x86_64-linux-gnu`** CPU binary carries the segment-retry across all prove paths plus the
+later fixes (P2SH sigop count, BIP30 bridge handling, and the in-block-spend leaf fix). The corrected
+**CUDA** binary — which also carries the segment-retry — shipped from `v0.7.0`; the `v0.7.2` CUDA build is
+a follow-up rebuild (host-only, no id change). A deeper fix (patching risc0's segment reservation so no
+retry is needed) is future work.
 
 ## The guest image id (METHOD_ID) & reproducibility
 

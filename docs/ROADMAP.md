@@ -71,8 +71,14 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard). Each supersession changed only the guest
   source; the reproducible-build mechanism is unchanged.
-  - [~] **Re-prove** the chain on the reproducible guest: pending the `36a0415d` re-baseline (the sigop
-    fix changed the id, so the `601d7ca2` board must be re-proven on the new guest — GPU box).
+  - [x] **Re-prove** the chain on the reproducible guest: the `601d7ca2` board was re-proven on the
+    `36a0415d` guest (the sigop fix changed the id). Board re-baselined; releases + docs consistent.
+  - [x] **Empirical era validation** (2026-07-25): every representative era block validates at `36a0415d`
+    on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
+    (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one
+    real defect — a host witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would
+    have stalled the bridge at the first colliding-txid block — fixed in `v0.7.2` (host-only, id unchanged;
+    see `SECURITY.md`).
 
 ## 3. External review + writeup
 
