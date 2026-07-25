@@ -4,7 +4,7 @@
 
 The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
-**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and hardened across eight rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) — no external audit yet. The rest is the compute campaign to prove the chain forward: a **long-horizon, GPU-intensive** effort (proving real Core crypto is deliberately expensive — that's the moat), which is exactly why it's an open, distributed proof-party rather than something we finish alone.
+**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and hardened across nine rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](AUDIT_2026-07.md)) and empirically validated across the segwit, taproot, big-block, and pre-BIP34 eras on real mainnet data — no external audit yet. The rest is the compute campaign to prove the chain forward: a **long-horizon, GPU-intensive** effort (proving real Core crypto is deliberately expensive — that's the moat), which is exactly why it's an open, distributed proof-party rather than something we finish alone.
 
 ## Verify a proof
 
@@ -41,7 +41,7 @@ Prove each block with real Core in the zkVM, fold blocks recursively into one re
 
 ## Status
 
-Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **eight rounds** of adversarial self-audit — the latest a five-reviewer completeness+verifier pass ([`AUDIT_2026-07.md`](AUDIT_2026-07.md)).
+Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **nine rounds** of adversarial self-audit ([`AUDIT_2026-07.md`](AUDIT_2026-07.md)) and empirically validated across the segwit, taproot, big-block, and pre-BIP34 eras on real mainnet data.
 
 Still to come: the full genesis→tip proving campaign and an external audit. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
 
