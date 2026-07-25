@@ -38,7 +38,8 @@ A good signature plus a matching checksum means the binary is the maintainer's p
 that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
 confirm its `METHOD_ID` matches the canonical id in `reproduce/METHOD_ID`, and any proof verifies against
 that id regardless of who built the host. The signature adds provenance on top of that. (The canonical id
-is re-pinned whenever the guest changes — most recently by the 2026-07-22 audit, `AUDIT_2026-07.md`; the
+is re-pinned whenever the guest changes — most recently by the round-9 post-audit hardening (the P2SH
+sigop over-count fix #4 and the R-1 coinbase `vin[0]` empty-guard — see the round-9 section below); the
 reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 v0.5.1, `Cargo.lock`,
 `reproduce/Dockerfile` — is unchanged, so the id stays reproducible, it is just a new value.)
 
@@ -53,7 +54,7 @@ reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 
 | S2 | Coinbase maturity / BIP68-height fed placeholder metadata | soundness | **fixed** (real coin metadata; validated on 741000) |
 | S4a/b | BIP34 (height in coinbase), BIP30 (duplicate txid) | completeness | **fixed** (validated on 741000) |
 | C1 | No automated regression harness | quality | **fixed** (`check-full` / `regress` execute-mode) |
-| SEC-neg | Negative regression tests for SEC-1/2 | quality | **done** — SEC-1 witness test (corrupted-witness block rejected on `witness_ok`) + SEC-2 position test (inconsistent-position spend rejected on `all_ok`/`root_matches`) |
+| SEC-neg | Negative regression tests (reject-path coverage) | quality | **done + continuously CI-enforced** (`prover/ci_negative_tests.sh`): SEC-1 witness (`witness_ok`), SEC-2 position (`all_ok`/`root_matches`), COV-1 time-too-old, COV-2 merkle mutation, and the **retarget / block-weight / sigop-cost** reject-paths — each asserts the malicious input REJECTS and an honest baseline ACCEPTS, so a future guest change can't silently regress one |
 | S3 | Standalone block proofs don't bind to the real UTXO set | inherent | **by design** — real binding comes from the chain recursion; closed operationally by the archive-node bridge |
 | BIP68-time | Block-proving path now commits real `MTP(coinHeight−1)` | **soundness** | **fixed** (validated; check also proven on a real mainnet tx) |
 | COV-1 | `time-too-old`: block timestamp must exceed MTP(prev 11) — was unchecked | **soundness** | **fixed + negative-tested** (asserted in chain_step/aggregate/prove_range) |
@@ -75,6 +76,10 @@ reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 
 | N1 | Dead `BlockInput.flags` wire field (flags are guest-derived) | hygiene | **removed** (guest+host+all sites, incl. host `Spend.flags`) |
 | N2 | `scriptPubKey` not length-prefixed in the UTXO leaf | fragility | **fixed** (length-prefixed in all 3 byte-identical leaf sites — changes every leaf hash/root) |
 | N3 | `tx_full_sigops` returned legacy-only cost on a short prevouts blob | fragility | **fixed** (fails closed: poison cost → `sigops_ok=false`) |
+| #4 | P2SH sigop over-count: `tx_full_sigops` counted redeemScript sigops for every input (reject-valid near the sigop cap) | med (reject-valid) | **fixed** (round 9: guard the redeemScript count with `IsPayToScriptHash()`, matching Core's `GetP2SHSigOpCount`; guest change → id re-baselined) |
+| #6 | BIP30 grandfathered duplicate coinbases (91842 / 91880) require Core's overwrite | completeness | **fixed** (round 9: guest *mandates* the overwrite witness at exactly those two block hashes; the bridge emits it; 91842 proved end-to-end, `RANGE-OK`) |
+| #8 | In-block-spend detection keyed on txid, not the coin leaf (pre-BIP34 coinbase-txid collision) | liveness (host-side) | **fixed** (round 9: both host witness-builders detect in-block spends by `created.contains(&coin_leaf)` — the guest's exact rule; guest unchanged, `v0.7.2`. A valid block was made unprovable — no invalid block was ever accepted) |
+| R-1 | Coinbase `vin[0]` empty-guard | robustness | **fixed** (soundness audit: empty-guard hardening against UB — a robustness fix, **not** a soundness hole) |
 | — | External audit | — | **open / wanted** |
 
 ## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
@@ -462,8 +467,13 @@ adversarial negative tests** (`prover/test_cov_negatives.sh`, evidence `prover/e
 
 ## Open items (the review bounty list)
 
-1. **SEC-neg — DONE.** Negative regression tests proving the fixes *reject* the malicious cases (not
-   just that valid blocks still pass). Both halves below now demonstrate rejection.
+1. **SEC-neg — DONE and continuously CI-enforced.** Negative regression tests proving the fixes
+   *reject* the malicious cases (not just that valid blocks still pass). Both halves below demonstrate
+   rejection, and — beyond SEC-1/SEC-2 — the **retarget, block-weight, and sigop-cost reject-paths are
+   now covered too**: `prover/ci_negative_tests.sh` drives each of `retarget_ok` / `weight_ok` /
+   `sigops_ok` false on a crafted malicious block (with an honest baseline that must still pass) and runs
+   in CI, so a future guest change cannot silently regress one. Anything earlier that framed those three
+   reject-paths as untested or a follow-up is stale.
    - **SEC-1 (witness) — done.** `prover/make_negative_tests.py` produces `block_741000_badwit.json`
      (one byte flipped inside a transaction's witness → wtxid changes, txid does not). `check-full`
      reports `merkle_ok=true, witness_ok=false, all_ok=false` — the block is rejected specifically on
@@ -499,4 +509,6 @@ The hard part — proving the *real* Core consensus code, not a reimplementation
 thing that removes the soundness gap every prior effort carried. The findings so far are around the
 edges (a host-controllable witness flag, an under-constrained accumulator index, placeholder metadata,
 a couple of missing rules) and are all fixed and regression-checked. What remains is one time-lock input
-from the bridge and — the real ask — independent adversarial review.
+from the bridge and — the real ask — independent adversarial review. Plainly: the **Utreexo accumulator
+is the single most likely location of any remaining soundness bug** — it is the one non-Core component,
+differentially fuzzed but **not** externally audited, and it is where we most want outside eyes.

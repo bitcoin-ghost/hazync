@@ -1,6 +1,6 @@
 # Hazync
 
-**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* `interpreter.cpp`, `SignatureHash`, and `libsecp256k1` — not a reimplementation — inside a zkVM, and proves each block valid under real consensus. Every other validity-proof effort rewrites consensus and inherits the question "does your rewrite match Core in every edge case, forever?" Hazync runs Core, so it doesn't.
+**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* Core code for the hard, edge-case-heavy part of validation — the script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`, and `libsecp256k1` — inside a zkVM, not a reimplementation, and proves each block valid under real consensus. That's where prior validity-proof efforts inherit the question "does your rewrite match Core in every edge case, forever?" — and where Hazync doesn't. The thin block-connection glue (difficulty retarget, subsidy schedule, activation heights) is reimplemented and differentially checked against Core.
 
 The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
@@ -19,7 +19,7 @@ curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 **On an older distro** (Ubuntu 20.04, Debian 11 — glibc < 2.34), run the *same* binary in a container, no rebuild:
 
 ```bash
-docker run --rm -v "$PWD":/w -w /w ubuntu:24.04 ./host verify-any proof.bin
+docker run --rm -v "$PWD":/w -w /w ubuntu:22.04 ./host verify-any proof.bin
 ```
 
 (Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).)

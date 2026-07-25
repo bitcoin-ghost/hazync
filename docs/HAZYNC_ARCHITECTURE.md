@@ -694,7 +694,8 @@ block** (chained / CPFP). Today `build_block_carried` deletes all external input
 so an in-block spend panics on the host (the parent output isn't in the accumulator yet) and would fail
 the guest's `stump.delete`.
 
-**The latent soundness gap (found while scoping H1).** The guest adds the host-supplied
+**The latent soundness gap (found while scoping H1).** **(FIXED — the guest now recomputes every output
+leaf in-guest; see `SECURITY.md`.)** The guest adds the host-supplied
 `w.new_outputs` **without recomputing them from the block's transactions** (`validate_block`, the
 `for out_leaf in &w.new_outputs { stump.add }` loop). A malicious prover could therefore add fabricated
 output leaves (fake coins, spendable later) or omit real ones. The honest host always supplies correct

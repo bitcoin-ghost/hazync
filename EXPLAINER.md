@@ -35,8 +35,9 @@ been wrong, the certificate simply could not have been made.
 
 That magic stamp is real. In computer science it's called a **zero-knowledge proof** (the name is
 unfortunate — it just means "a proof you can check quickly without re-running the work"). You run a
-computation, and out pops a tiny certificate. Anyone can verify the certificate in a moment, and it is
-mathematically impossible to fake one for work that wasn't actually done correctly.
+computation, and out pops a tiny certificate. Anyone can verify the certificate in a moment, and —
+under standard cryptographic assumptions — it is computationally infeasible to forge one for work that
+wasn't actually done correctly.
 
 **Hazync applies that magic stamp to Bitcoin's entire history.**
 
@@ -58,10 +59,13 @@ rulebook in even one comma — one weird edge case out of millions — your cert
 thing. It says "valid" for something the real Bitcoin would reject. And Bitcoin's real rulebook is
 famously full of tiny, load-bearing quirks that have to match *exactly*.
 
-**Hazync doesn't rewrite anything.** We took Bitcoin Core's own actual source code — the exact same
-program the whole network runs, unchanged — and ran *that* inside the magic-stamp machine. It's the
-original rulebook, not a copy. There is no "did we translate it faithfully?" gap, because there is no
-translation. This is the part everyone else got stuck on, and it's the part we cracked.
+**Hazync doesn't rewrite the part that's hard to get right.** We took Bitcoin Core's own actual source
+code for the fiddly, edge-case-heavy heart of validation — the script interpreter, the
+signature-hashing, the transaction checks, and the cryptography — the exact same code the whole network
+runs, unchanged — and ran *that* inside the magic-stamp machine. For that part there is no "did we
+translate it faithfully?" gap, because there is no translation. (The thin outer wrapper — the halving
+schedule, the difficulty adjustment — is short, simple arithmetic we did re-express, and we check it
+against Core's.) This is the part everyone else got stuck on, and it's the part we cracked.
 
 *(For the technically curious: we compile Bitcoin Core v28's real script interpreter, signature-hashing,
 and its cryptography library and run them, unmodified, inside a zero-knowledge virtual machine. The

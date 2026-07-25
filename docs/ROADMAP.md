@@ -50,10 +50,8 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   now framed generically (any Bitcoin Core-derived full node).
 - [x] Scrub docs for local paths / internal codenames / memory `[[wikilinks]]` (ARCHITECTURE, README,
   SCALING, SOUNDNESS, and the anchor-checkpoint references all de-coupled).
-- [ ] **Residual:** `PLAN.md` and the earlier docs are still in **git history** (the repo is already
-  public). Decide whether a history rewrite is worth it (force-pushing a public repo others may have
-  cloned is itself disruptive; the leak is a username + a project codename, no secrets/keys). Low
-  severity — flag for the user.
+- [x] **Resolved:** git history was squashed clean at publication; `PLAN.md` is absent from all refs
+  (verified).
 - [x] Consolidate the docs (2026-07-19): 17 → 12 files. Lean value-first README; merged
   ENGINE/SCALING/HARDENING into `HAZYNC_ARCHITECTURE.md`; dropped the redundant `WRITEUP.md` and the
   internal `coordinator/ROADMAP.md`. Remaining voice/date-style normalisation is a later polish pass.
@@ -67,13 +65,14 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `36a0415d…` (round-8 guest + the P2SH sigop-count fix #1 — see `reproduce/METHOD_ID`, authoritative). Superseded history:
+  `cb114426…` (round-9 R-1 coinbase-vin / header-length hardening — see `reproduce/METHOD_ID`, authoritative). Superseded history:
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
-  hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard). Each supersession changed only the guest
-  source; the reproducible-build mechanism is unchanged.
-  - [x] **Re-prove** the chain on the reproducible guest: the `601d7ca2` board was re-proven on the
-    `36a0415d` guest (the sigop fix changed the id). Board re-baselined; releases + docs consistent.
-  - [x] **Empirical era validation** (2026-07-25): every representative era block validates at `36a0415d`
+  hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening; v0.8.0).
+  Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
+  - [~] **Re-prove** the chain on the reproducible guest: `601d7ca2` → `36a0415d` (sigop #4) done; now
+    re-proving `36a0415d` → `cb114426` (round-9 R-1). R-1 is robustness-only (valid-block behaviour identical),
+    so the board carries over; re-proven at `cb114426` to keep releases + docs consistent.
+  - [x] **Empirical era validation** (2026-07-25): every representative era block validates (re-confirmed at `cb114426`)
     on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
     (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one
     real defect — a host witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would

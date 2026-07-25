@@ -72,7 +72,7 @@ curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin
 ```
 
-If it prints a line starting with `RANGE-OK`, the proof is genuine. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
+If it prints a line starting with `RANGE-OK`, the proof is genuine — with one nuance: `verify-any` attests *that single step* (this block is a correct consensus transition between its stated boundaries); `verify-chain` / `verify-range` (or the board's connected frontier) are what pin it back to the genesis anchor. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
 
 The `.bin` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
 
