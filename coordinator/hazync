@@ -261,18 +261,24 @@ def cmd_run(args):
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary before `run` — download it from "
                  "https://github.com/bitcoin-ghost/hazync/releases/latest and `export HAZYNC_HOST=/path/to/host`.")
-    if not args:                                     # no range given — let the coordinator pick one
-        rng = cmd_pick([])
-        if not rng: sys.exit("nothing open to claim")
-        args = [rng]
-    # Fail fast BEFORE claiming: the whole range must be inside the coordinator's served window. Probe both
-    # ends (block 0 is unprovable, so clamp to 1) so a claim never locks a range we then can't fetch.
-    lo, hi = parse_range(args[0])
-    for probe in sorted({max(lo, 1), hi}):
-        if not witness_in_window(probe):
-            sys.exit(f"range {args[0]} is outside the coordinator's served window (block {probe} has no "
-                     f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
-    cmd_claim(args); cmd_prove(args); cmd_submit(args)
+    if args:
+        # Explicit range: fail fast BEFORE claiming — the whole range must be inside the coordinator's served
+        # window (block 0 is unprovable, so clamp to 1) so a claim never locks a range we then can't fetch.
+        lo, hi = parse_range(args[0])
+        for probe in sorted({max(lo, 1), hi}):
+            if not witness_in_window(probe):
+                sys.exit(f"range {args[0]} is outside the coordinator's served window (block {probe} has no "
+                         f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
+        cmd_claim(args); rng = args[0]
+    else:
+        # No range given — ATOMIC claim-next: the coordinator picks the next open window (incl the genesis
+        # window) AND locks it in one step under its lock, so parallel `hazync run` workers never race onto
+        # the same range (the old pick-then-claim left a window where two workers grabbed the same one).
+        _, pub, handle = identity()
+        res = post("/api/claim", {"range": "next", "pubkey": pub, "handle": handle})
+        if not res.get("ok"): sys.exit(f"nothing to claim: {res.get('error') or res}")
+        rng = res["range"]; print(f"claimed {rng}")
+    cmd_prove([rng]); cmd_submit([rng])
 
 def main():
     argv = sys.argv[1:]

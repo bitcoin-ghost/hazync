@@ -1,0 +1,11 @@
+# Zero-drift verification of the guest's PURE-Rust consensus helpers. build.rs extracts the real
+# functions from prover/methods/guest/src/main.rs at compile time (no copy-paste), and the tests
+# check them against independent references grounded in canonical Bitcoin mainnet values.
+[package]
+name = "guest-pure-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[workspace]

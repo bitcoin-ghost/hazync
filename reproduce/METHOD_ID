@@ -14,12 +14,37 @@
 # hardening (incl. the length-prefixed leaf scriptPubKey, which changes every leaf hash). The
 # reproducible-build MECHANISM is unchanged — only the guest source did — so the id stays reproducible;
 # it is re-pinned below. Superseded the earlier id c029cee4…
-# 2026-07-24: sigop over-count fix (#1) — tx_full_sigops now guards the P2SH redeemScript sigop count
+# 2026-07-24: sigop over-count fix (#4) — tx_full_sigops now guards the P2SH redeemScript sigop count
 # with IsPayToScriptHash(), matching Core's GetP2SHSigOpCount; the previous code over-counted every
 # non-P2SH (legacy) input and could reject Core-valid blocks. Guest logic change → new id (build
 # mechanism unchanged, still reproducible). Superseded the earlier id 601d7ca2…
+# 2026-07-25: round-9 soundness-audit hardening — R-1 coinbase vin[0] empty-guards (check_witness_commitment,
+# check_bip34) + a header-length assert in the diagnostic block_proof path. Guest robustness: a malformed
+# 0-input "coinbase" no longer reads vin[0] out of bounds (UB in the zkVM). NOT a soundness change (such
+# blocks are rejected regardless) and valid-block behaviour is identical (130000/140000 still VALID;
+# soundness-suite green), but it touches guest source → new id. Superseded the earlier id 36a0415d…
+# 2026-07-26: real-Core difficulty retarget. The guest now compiles Bitcoin Core's own src/pow.cpp +
+# src/chain.cpp verbatim; calc_next_bits (verify_input.cpp) drives Core's CalculateNextWorkRequired
+# through the real CBlockIndex + mainnet Consensus::Params instead of a hand-written transcription. The
+# only additions are coreshim/{sync.h,threadsafety.h} — no-op single-thread locking so chain.h's include
+# chain compiles freestanding (non-consensus platform glue, provision ships them, build.rs includes them
+# first) — and the extraction of block_script_flags into a shared script_flags module (host-testable).
+# Behaviour is byte-identical to the prior transcription (476-vector + fuzz equivalence; 130000/140000/
+# 741000 still VALID; regress + adversarial green), but guest source changed → new id. Verified against
+# the actual on-chain nBits at all 476 mainnet retargets (retarget_diff_test.sh). Superseded id cb114426…
+# 2026-07-26 (later): maximal-Core — source ALL consensus constants from Core's chainparams.cpp. The
+# guest now compiles kernel/chainparams.cpp (+ primitives/block.cpp, util/chaintype.cpp); calc_next_bits
+# and block_subsidy read powLimit / timespan / spacing / halving-interval straight from Core's real
+# CChainParams::Main() Consensus::Params, and main.rs assert_core_constants() runtime-pins every
+# remaining Rust literal (retarget interval, block weight/sigops, buried heights, SCRIPT_VERIFY_* bit
+# positions) to Core's compiled value on every proving path — a mismatch aborts. Adds coreshim/logging.h
+# (no-op non-consensus logging). Nothing consensus-relevant is a hand-typed magic number now: it is
+# either Core's compiled code or a literal runtime-verified equal to it (chainparams_check.sh anchors
+# Core's constants to the canonical mainnet values). Behaviourally identical (regress/adversarial/
+# script-flags/chainparams-anchor + 130000/140000/741000 all green; +~61k cyc/proof for the one-time
+# CChainParams construction), but guest source changed → new id. Superseded id ffdc6095…
 #
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-36a0415d5763ed62e71c44915d36caa34ae840cfd1051587bce1de27be0dd7f5
+7a8b29e0d644eecd6c46d125d6646909f017c80a2de679301228d428cdccae3d

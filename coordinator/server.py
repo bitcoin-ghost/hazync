@@ -192,23 +192,23 @@ def parse_range(rid):
     return lo, hi
 
 def pick(body):
-    """Suggest the next open block/range after the genesis frontier — the 'just give me something' pick."""
+    """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
+    per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`
+    stays valid). Block 1 pins to genesis. A bigger aligned chunk is opt-in via `hazync run <lo>-<hi>`."""
     reap()
     fr = frontier_hi()
     c = db()
     taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
     c.close()
-    k = max(1, fr + 1)
-    for _ in range(200000):
-        lo = (k // RANGE_SIZE) * RANGE_SIZE
-        hi = lo + RANGE_SIZE - 1
-        rid = f"{lo}-{hi}"
-        if hi >= TIP:
+    n = max(1, fr + 1)
+    for _ in range(2_000_000):
+        if n >= TIP:
             break
-        if lo >= 1 and rid not in taken:
-            return 200, {"range": rid, "lo": lo, "hi": hi, "cmd": f"hazync run {rid}"}
-        k = hi + 1
-    return 404, {"error": "no open range available"}
+        rid = str(n)
+        if rid not in taken:
+            return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
+        n += 1
+    return 404, {"error": "no open block available"}
 
 def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
     """ed25519 signature over the receipt bytes. Fails closed if the crypto lib is missing, unless
@@ -502,14 +502,29 @@ def state_cached():
 
 def claim(body):
     rid, pk, handle = body.get("range"), body.get("pubkey", ""), clean_handle(body.get("handle"))
-    if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    if not pk: return 400, {"error": "pubkey required"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
-    if not parse_range(rid): return 400, {"error": "invalid range id"}
+    want_next = (not rid) or rid == "next"
+    if not want_next and not parse_range(rid): return 400, {"error": "invalid range id"}
     reap()
     now = time.time()
     with _lock:
         c = db()
+        if want_next:
+            # Atomic claim-next: pick the next open BLOCK after the frontier AND claim it under the lock, so
+            # two parallel workers can never grab the same one (the old client-side pick-then-claim left a
+            # window where both did). Per-block is the default proving unit (no fold; matches the board's
+            # per-block proofs). Block 1 pins to genesis; a bigger aligned chunk is opt-in via `run <lo>-<hi>`.
+            fr = frontier_hi()
+            taken = set(row["id"] for row in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
+            n = max(1, fr + 1); rid = None
+            for _ in range(2_000_000):
+                if n >= TIP: break
+                cand = str(n)
+                if cand not in taken: rid = cand; break
+                n += 1
+            if rid is None: c.close(); return 404, {"error": "no open block available"}
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if not r:
             pr = parse_range(rid)                       # pick-any: auto-create a valid range on demand

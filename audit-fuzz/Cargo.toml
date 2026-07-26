@@ -1,0 +1,16 @@
+# Standalone adversarial-fuzz harness for the Hazync Utreexo accumulator.
+# Lives outside the repo crates and touches none of them. Depends on the real reference
+# crate for the `Forest` oracle + honest proof generation, and `include!`s the *guest's*
+# hardened `utreexo.rs` verbatim so what we fuzz is the actual proven authority.
+[package]
+name = "audit-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+hazync-utreexo = { path = "../accumulator" }
+sha2 = "0.10"
+arbitrary = { version = "1", features = ["derive"] }
+
+[workspace]

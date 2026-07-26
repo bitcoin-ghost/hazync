@@ -71,6 +71,11 @@ git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0001-serialize-ilp32-int-ov
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0002-sha256-route-through-risc0-accelerator.patch"
 mkdir -p "$WORK/coreshim/config"
 : > "$WORK/coreshim/config/bitcoin-config.h"    # empty config header (SIMD paths #ifdef'd off on riscv)
+# Ship the repo's target shims (sync.h / threadsafety.h — single-threaded no-op locking) into the
+# coreshim include dir. build.rs puts coreshim FIRST on the include path so these override Core's
+# pthread-backed headers, letting the REAL chain.h CBlockIndex + pow.cpp retarget math compile on the
+# freestanding riscv32 guest. Non-consensus platform glue only; the METHOD_ID depends on these.
+cp "$REPO_DIR"/coreshim/*.h "$WORK/coreshim/"
 
 echo "== 6. env wiring (guest build.rs reads HAZYNC_BASE; toolchain auto-discovered under RISC0_HOME) =="
 export HAZYNC_BASE="$WORK"

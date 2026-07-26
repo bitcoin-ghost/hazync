@@ -98,12 +98,13 @@ The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_
 IVC chain step, and the SNARK wrap — and the CLI retries a failed prove *or fold* with progressively
 **smaller** segments (`HAZYNC_SEG_PO2` 20→19→18), which repartition the work and clear the boundary.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.7.2** at `METHOD_ID 36a0415d`. Its
-**`hazync-host-x86_64-linux-gnu`** CPU binary carries the segment-retry across all prove paths plus the
-later fixes (P2SH sigop count, BIP30 bridge handling, and the in-block-spend leaf fix). The corrected
-**CUDA** binary — which also carries the segment-retry — shipped from `v0.7.0`; the `v0.7.2` CUDA build is
-a follow-up rebuild (host-only, no id change). A deeper fix (patching risc0's segment reservation so no
-retry is needed) is future work.
+either way. **Releases:** the current release is **v0.8.0** at `METHOD_ID 7a8b29e0` (real-Core `pow.cpp`
+difficulty retarget carved into the guest + every consensus constant sourced from Core's own
+`chainparams.cpp` — see `reproduce/METHOD_ID`). Both the
+**`hazync-host-x86_64-linux-gnu`** CPU binary and the multi-arch **CUDA** binary embed this guest and
+carry the segment-retry across all prove paths plus the earlier fixes (P2SH sigop count, BIP30 bridge
+handling, in-block-spend leaf fix, and the round-9 R-1 coinbase-vin hardening). A deeper fix (patching
+risc0's segment reservation so no retry is needed) is future work.
 
 ## The guest image id (METHOD_ID) & reproducibility
 
@@ -146,6 +147,10 @@ every build still matches it. A from-source host built **outside** the container
 paths bake into the ELF) — that's the mismatch `verify-any` warns about; build via the container to get
 the canonical guest. The **coordinator** is also an independent check: it re-verifies every submitted
 proof before recording it, so a bad proof never lands on the board.
+
+The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
+the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id (`7a8b29e0`,
+the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 

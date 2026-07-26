@@ -169,10 +169,14 @@ Coinbase-only blocks ~160K cycles; the spend block 2.08M.
 Added to `validate_block` / `chain_step`, all real Core code, all enforced over blocks 170→172
 (negligible cost — coinbase-only stayed ~176K cyc):
 - **Difficulty retarget** (`chain_step`): between epochs nBits must equal the tip's nBits; on a
-  2016-boundary it must equal `calc_next_bits` (Core's CalculateNextWorkRequired math — real
-  arith_uint256, 2-week timespan clamped 4×, capped at powLimit). `ChainState` now carries
-  `prev_nbits`, `prev_time`, `epoch_start`. Non-boundary path validated on 170–172; boundary path is
-  faithful-by-construction, exercised when a real 2016-boundary block is folded. **This closes the
+  2016-boundary it must equal `calc_next_bits`, which is Bitcoin Core's **real compiled `pow.cpp`** —
+  `CalculateNextWorkRequired` driven through the actual `CBlockIndex` (from `chain.cpp`) with the
+  mainnet `Consensus::Params`, not a transcription (the guest builds `pow.cpp`/`chain.cpp` verbatim;
+  only the single-threaded platform glue in `chain.h`'s include chain — `sync.h`/`threadsafety.h` — is
+  shimmed, in `coreshim/`). `ChainState` now carries `prev_nbits`, `prev_time`, `epoch_start`. The carve
+  is checked against the actual on-chain nBits at every one of the 476 mainnet retargets by
+  `retarget_diff_test.sh` (CI). Non-boundary path validated on 170–172; the boundary path is Core's own
+  code, exercised when a real 2016-boundary block is folded. **This closes the
   PoW-carve** — difficulty can no longer be forged.
 - **Block weight** ≤ `MAX_BLOCK_WEIGHT` (4M) and **sigop cost** ≤ `MAX_BLOCK_SIGOPS_COST` (80k):
   `tx_wu_sigops` = real `GetSerializeSize(TX_NO_WITNESS/TX_WITH_WITNESS)` + `CScript::GetSigOpCount`,
@@ -694,7 +698,8 @@ block** (chained / CPFP). Today `build_block_carried` deletes all external input
 so an in-block spend panics on the host (the parent output isn't in the accumulator yet) and would fail
 the guest's `stump.delete`.
 
-**The latent soundness gap (found while scoping H1).** The guest adds the host-supplied
+**The latent soundness gap (found while scoping H1).** **(FIXED — the guest now recomputes every output
+leaf in-guest; see `SECURITY.md`.)** The guest adds the host-supplied
 `w.new_outputs` **without recomputing them from the block's transactions** (`validate_block`, the
 `for out_leaf in &w.new_outputs { stump.add }` loop). A malicious prover could therefore add fabricated
 output leaves (fake coins, spendable later) or omit real ones. The honest host always supplies correct

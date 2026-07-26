@@ -18,6 +18,13 @@
 #include <arith_uint256.h>
 #include <hash.h>
 #include <uint256.h>
+#include <chain.h>              // real CBlockIndex (feeds the retarget)
+#include <pow.h>                // real CalculateNextWorkRequired
+#include <consensus/params.h>   // Consensus::Params (mainnet PoW parameters)
+#include <consensus/consensus.h> // MAX_BLOCK_WEIGHT / MAX_BLOCK_SIGOPS_COST / WITNESS_SCALE_FACTOR
+#include <kernel/chainparams.h> // real mainnet CChainParams::Main() (authoritative consensus constants)
+#include <memory>
+#include <string>
 
 // Minimal byte reader satisfying the Stream interface Core's Unserialize needs (no streams.h).
 struct MiniReader {
@@ -248,7 +255,11 @@ extern "C" int check_witness_commitment(const uint8_t* cb, unsigned cb_len,
             s[2] == 0xaa && s[3] == 0x21 && s[4] == 0xa9 && s[5] == 0xed) found = (int)i;
     }
     if (found < 0) return has_witness ? -1 : 1; // segwit block with witness MUST carry a commitment
-    // reserved value = the coinbase input's single 32-byte witness element.
+    // reserved value = the coinbase input's single 32-byte witness element. Guard the malformed empty-vin
+    // case: a 0-input "coinbase" parses fine (CompactSize 0) but would read tx.vin[0] out of bounds — UB in a
+    // zkVM with no memory protection. Such a block is rejected anyway (is_coinbase / CheckTransaction
+    // bad-txns-vin-empty), but never compute a consensus flag from a wild read.
+    if (tx.vin.empty()) return -2;
     const auto& stack = tx.vin[0].scriptWitness.stack;
     if (stack.size() != 1 || stack[0].size() != 32) return -2;
     // witness merkle root over the wtxids.
@@ -274,6 +285,7 @@ extern "C" int check_bip34(const uint8_t* cb, unsigned cb_len, uint32_t height) 
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);
     CScript expect = CScript() << (int64_t)height;
+    if (mtx.vin.empty()) return -50; // empty-vin "coinbase": rejected elsewhere; don't read vin[0] out of bounds
     const CScript& ss = mtx.vin[0].scriptSig;
     if (ss.size() < expect.size()) return -50;
     if (!std::equal(expect.begin(), expect.end(), ss.begin())) return -51;
@@ -381,22 +393,37 @@ extern "C" int64_t tx_full_sigops(const uint8_t* tx_bytes, unsigned tx_len,
     return cost;
 }
 
+// kernel/cs_main.h declares `extern RecursiveMutex cs_main;` (pulled in via chain.h). The guest is
+// single-threaded and never locks it (coreshim/sync.h makes LOCK/AssertLockHeld no-ops), but Core's
+// ODR wants exactly one definition — supply it here. It is never read or written.
+RecursiveMutex cs_main;
+
+// chain.cpp's CBlockIndex::ToString / CBlockFileInfo::ToString reference this ISO-8601 log formatter
+// (from util/time.cpp, which we do not compile — it is diagnostic output, not consensus). The guest
+// never calls ToString; provide a trivial definition so the link resolves. Non-consensus glue only.
+std::string FormatISO8601Date(int64_t) { return std::string(); }
+
+// The authoritative mainnet consensus parameters, sourced from Bitcoin Core's OWN chainparams.cpp
+// (compiled into the guest). CChainParams::Main() builds the real CMainParams — powLimit,
+// nPowTargetTimespan/Spacing, the buried soft-fork heights, the halving interval — and asserts the
+// genesis hash. Constructed once (function-static) and reused; every consensus constant below comes
+// from here rather than a hand-typed literal, so there is nothing to mis-transcribe.
+static const Consensus::Params& mainnet_params() {
+    static const std::unique_ptr<const CChainParams> params = CChainParams::Main();
+    return params->GetConsensus();
+}
+
 // Difficulty retarget: the expected nBits for the block after `prev_bits`, given the epoch's first
-// block time and the last block's time. Core's CalculateNextWorkRequired math (pow.cpp) — real
-// arith_uint256, mainnet 2-week timespan, clamped 4x, capped at powLimit.
+// block time and the last block's time. This drives Bitcoin Core's REAL, unmodified
+// CalculateNextWorkRequired (compiled from src/pow.cpp), fed the real mainnet Consensus::Params from
+// Core's own chainparams.cpp — the retarget math AND its parameters are Core's own, not a transcription.
 extern "C" uint32_t calc_next_bits(uint32_t prev_bits, int64_t first_time, int64_t last_time) {
-    const int64_t timespan = 14 * 24 * 60 * 60; // nPowTargetTimespan (2 weeks)
-    int64_t actual = last_time - first_time;
-    if (actual < timespan / 4) actual = timespan / 4;
-    if (actual > timespan * 4) actual = timespan * 4;
-    bool neg, over, n2, o2;
-    arith_uint256 bn, powLimit;
-    bn.SetCompact(prev_bits, &neg, &over);
-    bn *= (uint32_t)actual;
-    bn /= (uint32_t)timespan;
-    powLimit.SetCompact(0x1d00ffff, &n2, &o2);
-    if (bn > powLimit) bn = powLimit;
-    return bn.GetCompact();
+    CBlockIndex pindexLast;
+    pindexLast.nBits   = prev_bits;
+    pindexLast.nTime   = (uint32_t)last_time;
+    pindexLast.nHeight = 0;  // unused on the mainnet retarget path (only the BIP94/min-difficulty
+                             // branches read it, and both are disabled for mainnet params)
+    return CalculateNextWorkRequired(&pindexLast, first_time, mainnet_params());
 }
 
 // Cumulative chainwork: cum += GetBlockProof(nBits) (real Core formula, chain.cpp), 256-bit.
@@ -414,15 +441,38 @@ extern "C" void add_work(uint8_t* cum, uint32_t nBits) {
     std::memcpy(cum, r.begin(), 32);
 }
 
-// Block subsidy — exact Core GetBlockSubsidy formula (kept in validation.cpp, too heavy to carve;
-// this is the halving schedule verbatim: 50 BTC >> (height / 210000)).
+// Block subsidy — Core's GetBlockSubsidy formula (the 6-line body lives in validation.cpp, which is
+// un-carvable; this is that body verbatim). The one consensus constant, the halving interval, is read
+// from Core's chainparams (mainnet_params().nSubsidyHalvingInterval) rather than hard-typed.
 extern "C" int64_t block_subsidy(uint32_t height) {
-    int halvings = height / 210000;
+    int halvings = height / mainnet_params().nSubsidyHalvingInterval;
     if (halvings >= 64) return 0;
     int64_t subsidy = 50LL * 100000000LL; // 50 * COIN
     subsidy >>= halvings;
     return subsidy;
 }
+
+// Consensus constants sourced from Core's own compiled source, exposed to the Rust guest so it can pin
+// every hard-coded literal to Core's value at runtime (a mismatch aborts the proof). Heights + retarget
+// interval come from chainparams (mainnet_params()); the weight/sigop limits from consensus/consensus.h;
+// the SCRIPT_VERIFY_* bit positions from script/interpreter.h — so nothing consensus-relevant is a
+// magic number we could have typed wrong.
+extern "C" uint32_t core_bip66_height()            { return (uint32_t)mainnet_params().BIP66Height; }
+extern "C" uint32_t core_bip65_height()            { return (uint32_t)mainnet_params().BIP65Height; }
+extern "C" uint32_t core_csv_height()              { return (uint32_t)mainnet_params().CSVHeight; }
+extern "C" uint32_t core_segwit_height()           { return (uint32_t)mainnet_params().SegwitHeight; }
+extern "C" uint32_t core_retarget_interval()       { return (uint32_t)mainnet_params().DifficultyAdjustmentInterval(); }
+extern "C" uint32_t core_subsidy_halving_interval(){ return (uint32_t)mainnet_params().nSubsidyHalvingInterval; }
+extern "C" int64_t  core_max_block_weight()        { return (int64_t)MAX_BLOCK_WEIGHT; }
+extern "C" int64_t  core_max_block_sigops_cost()   { return (int64_t)MAX_BLOCK_SIGOPS_COST; }
+extern "C" int64_t  core_witness_scale_factor()    { return (int64_t)WITNESS_SCALE_FACTOR; }
+extern "C" uint32_t core_flag_p2sh()               { return (uint32_t)SCRIPT_VERIFY_P2SH; }
+extern "C" uint32_t core_flag_dersig()             { return (uint32_t)SCRIPT_VERIFY_DERSIG; }
+extern "C" uint32_t core_flag_nulldummy()          { return (uint32_t)SCRIPT_VERIFY_NULLDUMMY; }
+extern "C" uint32_t core_flag_cltv()               { return (uint32_t)SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY; }
+extern "C" uint32_t core_flag_csv()                { return (uint32_t)SCRIPT_VERIFY_CHECKSEQUENCEVERIFY; }
+extern "C" uint32_t core_flag_witness()            { return (uint32_t)SCRIPT_VERIFY_WITNESS; }
+extern "C" uint32_t core_flag_taproot()            { return (uint32_t)SCRIPT_VERIFY_TAPROOT; }
 
 extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             unsigned input_idx,

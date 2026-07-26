@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
+mod script_flags;
+use script_flags::block_script_flags;
 
 // H8: domain tags — the first committed field of every recursion-consumed journal. env::verify binds
 // (image_id, journal) but not the journal's TYPE, so without a tag a mode-1 BlockOutput (which never
@@ -66,6 +68,24 @@ extern "C" {
     fn tx_full_sigops(tx: *const u8, tx_len: u32, prevouts: *const u8, prevouts_len: u32, flags: u32) -> i64;
     // Expected nBits after a retarget epoch (real Core CalculateNextWorkRequired math).
     fn calc_next_bits(prev_bits: u32, first_time: i64, last_time: i64) -> u32;
+    // Consensus constants read from Core's OWN compiled source (chainparams.cpp buried heights +
+    // DifficultyAdjustmentInterval; consensus/consensus.h weight/sigop limits; script/interpreter.h
+    // SCRIPT_VERIFY_* bit positions). Used to pin our Rust literals to Core at runtime — see
+    // assert_core_constants().
+    fn core_bip66_height() -> u32;
+    fn core_bip65_height() -> u32;
+    fn core_csv_height() -> u32;
+    fn core_segwit_height() -> u32;
+    fn core_retarget_interval() -> u32;
+    fn core_max_block_weight() -> i64;
+    fn core_max_block_sigops_cost() -> i64;
+    fn core_flag_p2sh() -> u32;
+    fn core_flag_dersig() -> u32;
+    fn core_flag_nulldummy() -> u32;
+    fn core_flag_cltv() -> u32;
+    fn core_flag_csv() -> u32;
+    fn core_flag_witness() -> u32;
+    fn core_flag_taproot() -> u32;
     // Coin leaf ONLY (no VerifyScript) — for the aggregation proof to bind chunk results to inputs.
     fn coin_leaf_only(
         tx: *const u8, tx_len: u32, input_idx: u32, prevouts: *const u8, prevouts_len: u32,
@@ -85,14 +105,36 @@ const MAX_BLOCK_WEIGHT: i64 = 4_000_000;
 const MAX_BLOCK_SIGOPS_COST: i64 = 80_000;
 const RETARGET_INTERVAL: u32 = 2016;
 
+// Pin every hard-coded consensus literal in the Rust guest to Bitcoin Core's OWN compiled value
+// (chainparams.cpp / consensus.h / interpreter.h, via the FFI getters above). Run on every proving
+// path: a mismatch aborts the guest, so a proof can never be produced under a constant that has
+// silently drifted from Core. Together with the retarget carve (real pow.cpp) and the C++ side reading
+// powLimit/timespan/subsidy-interval straight from chainparams, this leaves no consensus magic number
+// that isn't either Core's compiled code or runtime-verified equal to it.
+fn assert_core_constants() {
+    use script_flags as sf;
+    unsafe {
+        assert_eq!(RETARGET_INTERVAL, core_retarget_interval(), "RETARGET_INTERVAL != Core");
+        assert_eq!(MAX_BLOCK_WEIGHT, core_max_block_weight(), "MAX_BLOCK_WEIGHT != Core");
+        assert_eq!(MAX_BLOCK_SIGOPS_COST, core_max_block_sigops_cost(), "MAX_BLOCK_SIGOPS_COST != Core");
+        assert_eq!(sf::BIP66_HEIGHT, core_bip66_height(), "BIP66Height != Core");
+        assert_eq!(sf::BIP65_HEIGHT, core_bip65_height(), "BIP65Height != Core");
+        assert_eq!(sf::CSV_HEIGHT, core_csv_height(), "CSVHeight != Core");
+        assert_eq!(sf::SEGWIT_HEIGHT, core_segwit_height(), "SegwitHeight != Core");
+        assert_eq!(sf::P2SH, core_flag_p2sh(), "SCRIPT_VERIFY_P2SH != Core");
+        assert_eq!(sf::DERSIG, core_flag_dersig(), "SCRIPT_VERIFY_DERSIG != Core");
+        assert_eq!(sf::NULLDUMMY, core_flag_nulldummy(), "SCRIPT_VERIFY_NULLDUMMY != Core");
+        assert_eq!(sf::CLTV, core_flag_cltv(), "SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY != Core");
+        assert_eq!(sf::CSV, core_flag_csv(), "SCRIPT_VERIFY_CHECKSEQUENCEVERIFY != Core");
+        assert_eq!(sf::WITNESS, core_flag_witness(), "SCRIPT_VERIFY_WITNESS != Core");
+        assert_eq!(sf::TAPROOT, core_flag_taproot(), "SCRIPT_VERIFY_TAPROOT != Core");
+    }
+}
+
 // Consensus VerifyScript flags active at a given mainnet height (soft-fork activation heights).
-// This is how BIP66/65/112(CSV)/147/segwit/taproot get enforced — through VerifyScript.
-// Core mainnet script_flag_exceptions (chainparams.cpp), in internal (dsha256(header)) byte order.
-// One historical block violated BIP16 (runs with NO script flags) and one violated Taproot (runs
-// without TAPROOT). Matching Core here is REQUIRED — otherwise the from-genesis prover stalls on these
-// canonical blocks (guest rejects a block Core accepts).
-const BIP16_EXCEPTION: [u8; 32] = [0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d, 0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0xd5, 0x85, 0xc5, 0xe8, 0x1d, 0x44, 0xb5, 0x6a, 0x98, 0x1e, 0x84, 0x2d, 0x5b, 0xc3, 0x14, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+// This is how BIP66/65/112(CSV)/147/segwit/taproot get enforced — through VerifyScript. The
+// height→flags schedule + the two script_flag_exception blocks live in `script_flags` (shared with the
+// host differential test `host script-flags-test`).
 
 // BIP30 grandfathered duplicate-coinbase blocks (internal/dsha256(header) order). Each reuses an
 // earlier still-unspent coinbase's outpoint; pre-BIP30-enforcement Core OVERWRITES the old coin (it
@@ -101,26 +143,6 @@ const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0
 // (BIP34, enforced from 227931, makes coinbases unique thereafter, so no later duplicate can occur.)
 const BIP30_OVERWRITE_A: [u8; 32] = [0xec, 0xca, 0xe0, 0x00, 0xe3, 0xc8, 0xe4, 0xe0, 0x93, 0x93, 0x63, 0x60, 0x43, 0x1f, 0x3b, 0x76, 0x03, 0xc5, 0x63, 0xc1, 0xff, 0x61, 0x81, 0x39, 0x0a, 0x4d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91842
 const BIP30_OVERWRITE_B: [u8; 32] = [0x21, 0xd7, 0x7c, 0xcb, 0x4c, 0x08, 0x38, 0x6a, 0x04, 0xac, 0x01, 0x96, 0xae, 0x10, 0xf6, 0xa1, 0xd2, 0xc2, 0xa3, 0x77, 0x55, 0x8c, 0xa1, 0x90, 0xf1, 0x43, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91880
-
-// Consensus script flags for a block — replicates Core's GetBlockScriptFlags (validation.cpp) EXACTLY:
-// the base P2SH|WITNESS|TAPROOT is ALWAYS on (retroactive to genesis) except for the two exception
-// blocks above (which override it), then DERSIG/CLTV/CSV/NULLDUMMY are OR'd in at their buried-deployment
-// heights. `block_hash` is the guest-computed dsha256(header) (internal order), so the exception override
-// cannot be forged — a wrong hash fails PoW (monolithic) or the H2 bind digest (segmented). Height-gating
-// the base flags (the previous behaviour) was both too lenient below the gate (accept-invalid, H-S4) and
-// wrong on the exception blocks (reject-valid, H-S1).
-fn block_script_flags(height: u32, block_hash: &[u8; 32]) -> u32 {
-    const P2SH: u32 = 1 << 0; const DERSIG: u32 = 1 << 2; const NULLDUMMY: u32 = 1 << 4;
-    const CLTV: u32 = 1 << 9; const CSV: u32 = 1 << 10; const WITNESS: u32 = 1 << 11; const TAPROOT: u32 = 1 << 17;
-    let mut f = P2SH | WITNESS | TAPROOT;
-    if block_hash == &BIP16_EXCEPTION { f = 0; }
-    else if block_hash == &TAPROOT_EXCEPTION { f = P2SH | WITNESS; }
-    if height >= 363_725 { f |= DERSIG; }               // BIP66Height (DERSIG)
-    if height >= 388_381 { f |= CLTV; }                 // BIP65Height (CHECKLOCKTIMEVERIFY)
-    if height >= 419_328 { f |= CSV; }                  // CSVHeight (CHECKSEQUENCEVERIFY)
-    if height >= 481_824 { f |= NULLDUMMY; }            // SegwitHeight (BIP147 NULLDUMMY)
-    f
-}
 
 // --- libc glue for bare-metal C/C++ in the zkVM guest: malloc family + abort, backed by the
 // guest's Rust global allocator (size stored in a 16-byte header before each block). ---
@@ -679,6 +701,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 // Mode 1: commit the full per-block report (used for standalone block validation + debugging).
 fn block_proof() {
     let w: BlockWitness = env::read();
+    assert!(w.header.len() == 80, "block header must be 80 bytes"); // guard before slicing header[68..72]
     let block_time = u32::from_le_bytes(w.header[68..72].try_into().unwrap());
     let r = validate_block(&w, block_time, None); // standalone: MTP fallback = block time
     env::commit(&BlockOutput {
@@ -1091,6 +1114,8 @@ fn aggregate() {
 fn main() {
     // Run C++ static constructors ONCE (Core's global tagged-hash midstates) — fixed cost per run.
     unsafe { __libc_init_array() };
+    // Pin every Rust-side consensus literal to Core's own compiled value before doing any work.
+    assert_core_constants();
     let mode: u32 = env::read();
     match mode {
         1 => block_proof(),

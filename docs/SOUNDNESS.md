@@ -18,7 +18,9 @@ committed* — checkable by verifying one succinct proof, without re-executing h
    list in `prover/methods/guest/build.rs`.
 2. **SHA-256 collision resistance** — the accumulator (Utreexo) and merkle/commitment checks are
    SHA-256; that's their entire security. The accumulator is *our* code but it's a commitment ABOVE
-   consensus, not a Core reimpl — exhaustively tested (`accumulator/src/lib.rs`).
+   consensus, not a Core reimpl — exhaustively tested (`accumulator/src/lib.rs`). Being the one non-Core
+   component, it is the single most likely location of any remaining soundness bug; it is differentially
+   fuzzed but has **not** been externally audited.
 3. **RISC0 zkVM soundness** — the STARK/SNARK proving system. Standard cryptographic assumption.
 4. **The anchor checkpoint** — the chain proof starts from a trusted state (genesis, or a trusted
    block-hash checkpoint). Everything after the anchor is proven; the anchor itself is a trust input
@@ -135,8 +137,10 @@ tips; 741000_badwit rejected; check-bip30 PASS). `METHOD_ID` + leaf format chang
 ENFORCED (real Core unless noted):
 - Script validity, all types, per-height soft-fork flags (P2SH/DERSIG/CLTV/CSV/segwit/taproot).
 - `CheckTransaction` (structure, dup inputs, value bounds).
-- No inflation: Σin ≥ Σout per tx; coinbase ≤ subsidy(height)+Σfees (subsidy = exact halving formula).
-- PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget rule.
+- No inflation: Σin ≥ Σout per tx; coinbase ≤ subsidy(height)+Σfees (subsidy = exact halving formula —
+  **reimplemented, differentially fuzzed vs Core**).
+- PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget rule
+  (**reimplemented, differentially fuzzed vs Core**).
 - Merkle root, **including the CVE-2012-2459 mutation check** (duplicate-txid malleability — Core's
   `mutated` flag is captured and rejected); **BIP141 witness commitment** (activation-gated at segwit
   height 481824, round 8 / G3) + **`unexpected-witness`** below activation (incl. the coinbase).
@@ -199,7 +203,7 @@ OPEN (none architectural):
    byte-identical to the replay path, so the trust base is unchanged. (c) **Parallel backfill** across a
    GPU fleet → tree fold.
 
-The §2 trust base is untouched — the hard part (real Core code proving) is done and unimpeachable.
+The §2 trust base is untouched — the hard part (real Core code proving) is done and is the core of the design.
 Items 1-5 are complete; item 6 is the scaling work (the bridge, 6b, is now built and running).
 
 ## 7. Known open issues (security)
