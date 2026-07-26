@@ -22,6 +22,8 @@ jobs:
         run: cargo test --manifest-path accumulator/Cargo.toml --release
       - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
         run: ./prover/check_seg_guards.sh
+      - name: Workflow YAML valid (a bad step name can silently break the whole run)
+        run: ./scripts/check-workflows.sh
 
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.

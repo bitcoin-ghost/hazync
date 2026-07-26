@@ -168,3 +168,24 @@ run through the compiled, unmodified `libsecp256k1`, unaccelerated. Speeding up 
 work — the k256 substitution was **removed from the guest** (2026-07-19; it reintroduced the
 reimplementation question), and the bigint2 field-mul intercept was prototyped and disproven (~10%
 slower). The guest is pure Core; acceleration analysis in [`ACCELERATION.md`](ACCELERATION.md).
+
+## Building the release binaries (maintainer notes)
+
+Both published binaries must print the canonical `METHOD_ID` (`68819a54…`); the guest id is reproducible,
+the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
+22.04) and runs on older distros:
+
+- **CPU** — `reproduce/Dockerfile` is the canonical build, but its base is `ubuntu:24.04` (glibc 2.39). For
+  a portable release binary, build it with the base pinned to 22.04:
+  `sed 's|^FROM ubuntu:24.04|FROM ubuntu:22.04|' reproduce/Dockerfile > Dockerfile.cpu22 && docker build -f Dockerfile.cpu22 -t hazync-cpu22 .`
+  then copy `/hazync-zkvm/prover/target/release/host` out of the image.
+- **CUDA** — the same container plus `--features cuda`, run with `--gpus all`. **Do not build natively if the
+  box has CUDA 13**: risc0-sys 1.5.0's kernels don't compile under CUDA 13 (`nvcc -arch=native` fails). Use
+  the **CUDA 12** toolchain inside the `ubuntu:22.04` container, and pass multi-arch flags so the binary
+  isn't pinned to one GPU:
+  `NVCC_APPEND_FLAGS="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90"`.
+  Confirm coverage with `cuobjdump --list-elf <host>` (expect `sm_80 sm_86 sm_89 sm_90`).
+
+Before publishing, smoke-test each binary: `host method-id` (== `reproduce/METHOD_ID`), `host
+bundle-roundtrip-test`, and `host verify-any` on a served proof. `prover/e2e_bundle_test.sh` runs the full
+served-bundle → prove → verify path on a spend-block — the coverage the in-memory suite doesn't reach.
