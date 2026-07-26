@@ -11,6 +11,27 @@ use serde::{Deserialize, Serialize};
 #[path = "../../methods/guest/src/script_flags.rs"]
 mod script_flags;
 
+// A byte blob (de)serialised via risc0 serde's PACKED byte path (serialize_bytes → 4 bytes/word) instead
+// of the default one-word-per-byte. Must match the guest's PackedBytes. Wire encoding only. Used for the
+// shared, de-duplicated per-tx raw_tx / prevouts blobs.
+#[derive(Clone)]
+struct PackedBytes(Vec<u8>);
+impl serde::Serialize for PackedBytes {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
+}
+impl<'de> serde::Deserialize<'de> for PackedBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+        }
+        Ok(PackedBytes(d.deserialize_byte_buf(V)?))
+    }
+}
+
 // H8 domain tags — first committed field of each recursion-consumed journal (must match the guest).
 const KIND_CHAIN: u32 = 0xC4A1_0002;
 const KIND_RANGE: u32 = 0xC4A1_0006;
@@ -22,7 +43,9 @@ struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct BlockInput {
     // flags removed: script flags are guest-derived (block_script_flags), never host-supplied.
-    raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>,
+    // raw_tx + prevouts are de-duplicated into BlockWitness.txs / tx_prevouts; this input refers to its
+    // tx by index (a multi-input tx would otherwise repeat its full bytes once per input).
+    tx_idx: u32, input_idx: u32,
     global_pos: u64, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32, tx_first: u32,
     proof_i: WireProof, proof_last: WireProof,
 }
@@ -35,7 +58,8 @@ struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // 
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
     header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>, wtxids: Vec<[u8; 32]>,
-    root_prev: WireStump, inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
+    root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
+    inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
 }
 #[derive(Serialize, Deserialize, Clone)]
@@ -217,17 +241,21 @@ fn build_block(
 
     let mut txids = vec![cb_txid];
     let mut inputs = Vec::new();
-    for sp in spends {
+    let mut txs = Vec::new();
+    let mut tx_prevouts = Vec::new();
+    for (tx_i, sp) in spends.iter().enumerate() {
         let tx: Transaction = deserialize(&sp.raw).unwrap();
         txids.push(tx.compute_txid().to_byte_array());
         let op = tx.input[0].previous_output;
         let spk = ScriptBuf::from_bytes(sp.prev_spk.clone());
         let coin = coin_leaf(&op.txid.to_byte_array(), op.vout, sp.prev_value, spk.as_bytes(), sp.coin_height, sp.coin_is_coinbase, sp.coin_mtp);
         let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(sp.prev_value), script_pubkey: spk }]);
+        txs.push(PackedBytes(sp.raw.clone()));
+        tx_prevouts.push(PackedBytes(prevouts));
         let pos = forest.leaves.iter().position(|x| *x == coin).expect("spent coin in accumulator");
         let last = forest.leaves.len() - 1;
         inputs.push(BlockInput {
-            raw_tx: sp.raw.clone(), input_idx: 0, prevouts,
+            tx_idx: tx_i as u32, input_idx: 0,
             global_pos: pos as u64, coin_height: sp.coin_height, coin_is_coinbase: sp.coin_is_coinbase as u32, coin_mtp: sp.coin_mtp, tx_first: 1,
             proof_i: wire_proof(&forest.prove(pos)),
             proof_last: wire_proof(&forest.prove(last)),
@@ -256,7 +284,7 @@ fn build_block(
     }
     let root_next = wire_stump(forest);
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -520,16 +548,20 @@ fn build_full() -> (ChainState, BlockWitness) {
     let mut txids = vec![cb_txid];
     let mut wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase wtxid = zeros (BIP141)
     let mut inputs: Vec<BlockInput> = Vec::new();
+    let mut txs: Vec<PackedBytes> = Vec::new();          // de-duplicated: one raw_tx blob per tx
+    let mut tx_prevouts: Vec<PackedBytes> = Vec::new();  // parallel: one prevouts blob per tx
     // SEC-2 negative-test hook (test-only, inert unless HAZYNC_SEC2_BADPOS is set): corrupt the FIRST
     // spend's claimed global position while leaving its inclusion proof honest — the exact inconsistency
     // an honest witness-builder cannot express (both fields normally derive from the same `pos`). The
     // guest's hardened `delete` must reject it (`all_ok=false`, and the accumulator diverges so
     // `root_matches=false`). See SECURITY.md / ROADMAP (SEC-2). NEVER set in production.
     let sec2_bad = std::env::var("HAZYNC_SEC2_BADPOS").is_ok();
-    for p in &ptxs {
+    for (tx_i, p) in ptxs.iter().enumerate() {
         txids.push(p.txid);
         wtxids.push(p.tx.compute_wtxid().to_byte_array());
         let prevouts_blob = serialize(&p.prevouts);
+        txs.push(PackedBytes(p.raw.clone()));            // this tx's shared raw_tx blob (index == tx_i)
+        tx_prevouts.push(PackedBytes(prevouts_blob));    // this tx's shared prevouts blob
         for i in 0..p.tx.input.len() {
             let (ch_i, cb_i, mtp_i) = p.meta[i];
             let coin = leaf_of(&p.tx.input[i].previous_output, &p.prevouts[i], ch_i, cb_i, mtp_i);
@@ -538,7 +570,7 @@ fn build_full() -> (ChainState, BlockWitness) {
                 // rule) — it never entered the accumulator: dummy proof, no delete. Script still verifies.
                 spent_in_block.insert(coin);
                 inputs.push(BlockInput {
-                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                    tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
                     proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
                     proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
@@ -554,7 +586,7 @@ fn build_full() -> (ChainState, BlockWitness) {
                 eprintln!("[SEC2-TEST] corrupting first spend global_pos {} -> {} (proof_i left honest)", pos, global_pos);
             }
             inputs.push(BlockInput {
-                raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                tx_idx: tx_i as u32, input_idx: i as u32,
                 global_pos, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
                 proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
             });
@@ -567,7 +599,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); }
     for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30: None };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -683,6 +715,21 @@ fn test_locks_cmd() {
 fn check_full() {
     use std::time::Instant;
     let (anchor, w) = build_full();
+    if std::env::var("HAZYNC_WITNESS_SIZES").is_ok() {
+        let tot = risc0_zkvm::serde::to_vec(&w).unwrap().len() * 4;
+        let n = w.inputs.len();
+        let rawtx: usize = w.txs.iter().map(|t| t.0.len()).sum(); // de-duplicated: one blob per tx
+        let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
+        let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
+        println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
+        let idlists = (w.txids.len() + w.wtxids.len()) * 32;
+        let outs = w.new_outputs.len() * 32;
+        let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
+        println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
+        println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
+        println!("  txids+wtxids = {}B ({:.1}%)   new_outputs = {}B ({:.1}%)", idlists, pct(idlists), outs, pct(outs));
+        return;
+    }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
     let mut b = ExecutorEnv::builder();
     b.write(&2u32).unwrap();
@@ -779,6 +826,8 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     let mut txids: Vec<[u8; 32]> = vec![cb_txid];
     let mut wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase wtxid convention (pre-segwit: unused)
     let mut inputs: Vec<BlockInput> = Vec::new();
+    let mut txs: Vec<PackedBytes> = Vec::new();
+    let mut tx_prevouts: Vec<PackedBytes> = Vec::new();
 
     struct P { raw: Vec<u8>, tx: Transaction, prevouts: Vec<TxOut>, meta: Vec<(u32, bool, u32)>, txid: [u8; 32] }
     let mut ptxs: Vec<P> = Vec::new();
@@ -823,10 +872,12 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     }
     let mut spent_in_block: std::collections::HashSet<Hash> = std::collections::HashSet::new();
 
-    for p in &ptxs {
+    for (tx_i, p) in ptxs.iter().enumerate() {
         txids.push(p.txid);
         wtxids.push(p.tx.compute_wtxid().to_byte_array());
         let prevouts_blob = serialize(&p.prevouts);
+        txs.push(PackedBytes(p.raw.clone()));
+        tx_prevouts.push(PackedBytes(prevouts_blob));
         for i in 0..p.tx.input.len() {
             let (ch, cb, mtp) = p.meta[i];
             let o = &p.prevouts[i];
@@ -837,7 +888,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                 // rule) — never entered the accumulator: dummy proof, no delete. Script still verifies.
                 spent_in_block.insert(coin);
                 inputs.push(BlockInput {
-                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                    tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
                     proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
                     proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
@@ -848,7 +899,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                     .expect("spent coin not in carried accumulator (bad metadata)");
                 let last = forest.leaves.len() - 1;
                 inputs.push(BlockInput {
-                    raw_tx: p.raw.clone(), input_idx: i as u32, prevouts: prevouts_blob.clone(),
+                    tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: pos as u64, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
                     proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
                 });
@@ -904,7 +955,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         add_out(&p.tx, &p.txid, false, forest, &mut new_outputs);
     }
     let root_next = wire_stump(forest);
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, inputs, new_outputs, root_next, bip30 }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30 }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1218,7 +1269,7 @@ fn prove_seg() {
         b.write(&((hi - lo) as u32)).unwrap();
         for inp in &w.inputs[lo..hi] {
             b.write(&ChunkInput {
-                raw_tx: inp.raw_tx.clone(), input_idx: inp.input_idx, prevouts: inp.prevouts.clone(),
+                raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
                 coin_height: inp.coin_height, coin_is_coinbase: inp.coin_is_coinbase, coin_mtp: inp.coin_mtp,
             }).unwrap();
         }
@@ -1279,7 +1330,7 @@ fn prove_chunk(idx: usize) {
     b.write(&((hi - lo) as u32)).unwrap();
     for inp in &w.inputs[lo..hi] {
         b.write(&ChunkInput {
-            raw_tx: inp.raw_tx.clone(), input_idx: inp.input_idx, prevouts: inp.prevouts.clone(),
+            raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
             coin_height: inp.coin_height, coin_is_coinbase: inp.coin_is_coinbase, coin_mtp: inp.coin_mtp,
         }).unwrap();
     }
@@ -1432,6 +1483,8 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let mut txids = vec![cb_txid];
     let mut wtxids: Vec<[u8; 32]> = vec![[0u8; 32]]; // coinbase wtxid = zeros (BIP141)
     let mut inputs: Vec<BlockInput> = Vec::new();
+    let mut wtxs: Vec<PackedBytes> = Vec::new();
+    let mut wtx_prevs: Vec<PackedBytes> = Vec::new();
     for (i, tx) in txs.iter().enumerate() {
         txids.push(tx.compute_txid().to_byte_array());
         wtxids.push(tx.compute_wtxid().to_byte_array());
@@ -1439,8 +1492,9 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             // spends A:0 (in-block coin, created THIS block at height H, mtp = block_time). No
             // accumulator proof needed — the guest skips the delete for in-block coins.
             let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_000_000), script_pubkey: optrue() }]);
+            wtxs.push(PackedBytes(serialize(*tx))); wtx_prevs.push(PackedBytes(prevouts));
             inputs.push(BlockInput {
-                raw_tx: serialize(*tx), input_idx: 0, prevouts,
+                tx_idx: i as u32, input_idx: 0,
                 global_pos: 0, coin_height: SYNTH_H, coin_is_coinbase: 0, coin_mtp: SYNTH_T, tx_first: 1,
                 proof_i: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
                 proof_last: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
@@ -1450,8 +1504,9 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_001_000), script_pubkey: optrue() }]);
             let pos = forest.leaves.iter().position(|x| *x == c_leaf).expect("C in accumulator");
             let last = forest.leaves.len() - 1;
+            wtxs.push(PackedBytes(serialize(*tx))); wtx_prevs.push(PackedBytes(prevouts));
             inputs.push(BlockInput {
-                raw_tx: serialize(*tx), input_idx: 0, prevouts,
+                tx_idx: i as u32, input_idx: 0,
                 global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: 1,
                 proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)),
             });
@@ -1460,7 +1515,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     }
     let root_next = wire_stump(&forest); // approximate — root_matches is not part of all_ok
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, inputs, new_outputs: vec![], root_next, bip30: None }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -1522,23 +1577,28 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     for i in 0..2u64 { forest.add(hash_leaf(&[b"post".as_slice(), &i.to_le_bytes()].concat())); }
     let root_prev = wire_stump(&forest);
 
-    let mk_input = |forest: &mut Forest, idx: u32, leaf: Hash, blob: Vec<u8>| -> BlockInput {
+    let mk_input = |forest: &mut Forest, idx: u32, leaf: Hash| -> BlockInput {
         let pos = forest.leaves.iter().position(|x| *x == leaf).expect("coin in accumulator");
         let last = forest.leaves.len() - 1;
-        let bi = BlockInput { raw_tx: t_raw.clone(), input_idx: idx, prevouts: blob,
+        let bi = BlockInput { tx_idx: 0, input_idx: idx,
             global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: (idx == 0) as u32,
             proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) };
         forest.delete(pos); bi
     };
-    // input 0 carries the phantom blob (if requested); input 1 always carries the real blob.
-    let in0 = mk_input(&mut forest, 0, c1_leaf, if phantom { phantom_blob } else { real_blob.clone() });
-    let in1 = mk_input(&mut forest, 1, c2_leaf, real_blob.clone());
+    // Both inputs share the tx's SINGLE prevouts blob (dedup). The phantom-fee attack now lives in that
+    // shared blob: prevouts[1] is a fake ~21M-BTC coin instead of the real C2 — so input 1's guest-computed
+    // coin leaf no longer matches the accumulator-proven C2, and the block is rejected (accumulator binding,
+    // the same soundness the per-input blob-equality check used to enforce).
+    let in0 = mk_input(&mut forest, 0, c1_leaf);
+    let in1 = mk_input(&mut forest, 1, c2_leaf);
+    let shared_blob = if phantom { phantom_blob } else { real_blob.clone() };
 
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
         wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
-        root_prev, inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None }
+        root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
+        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None }
 }
 
 // #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
@@ -1651,7 +1711,7 @@ fn check_bip30() {
 
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
         header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
-        root_prev: root_prev.clone(), inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
     };
     let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
     let skip = block_out(&mk(None));

@@ -8,6 +8,28 @@ mod utreexo;
 mod script_flags;
 use script_flags::block_script_flags;
 
+// A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)
+// instead of the default seq path (serialize_u8 emits one u32 word PER byte → 4x bloat). Used for the
+// shared, de-duplicated per-tx raw_tx / prevouts blobs in the witness — purely wire encoding, no
+// consensus meaning, but it collapses the biggest source of witness I/O.
+#[derive(Clone)]
+struct PackedBytes(Vec<u8>);
+impl serde::Serialize for PackedBytes {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
+}
+impl<'de> serde::Deserialize<'de> for PackedBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+        }
+        Ok(PackedBytes(d.deserialize_byte_buf(V)?))
+    }
+}
+
 // H8: domain tags — the first committed field of every recursion-consumed journal. env::verify binds
 // (image_id, journal) but not the journal's TYPE, so without a tag a mode-1 BlockOutput (which never
 // aborts and commits no self_id) or a RangeState/ChunkOut could in principle be laundered in where a
@@ -198,9 +220,10 @@ struct WireProof {
 }
 #[derive(Deserialize)]
 struct BlockInput {
-    raw_tx: Vec<u8>,
+    tx_idx: u32,            // index into BlockWitness.txs / tx_prevouts (the tx this input belongs to).
+                           // raw_tx + prevouts are de-duplicated: one shared blob per tx, not per input
+                           // (a multi-input tx would otherwise repeat its full bytes N times).
     input_idx: u32,
-    prevouts: Vec<u8>,
     // NOTE: consensus script flags are NOT taken from the host — they are derived in-guest by
     // block_script_flags(height, block_hash). The field was removed (was dead/never read) so a future
     // change cannot accidentally start honouring a host-chosen flag set. Do not re-add a host flags input.
@@ -233,7 +256,9 @@ struct BlockWitness {
     txids: Vec<[u8; 32]>,      // all txids in order (internal), for the merkle root
     wtxids: Vec<[u8; 32]>,     // all wtxids (coinbase = zeros), for the BIP141 witness commitment
     root_prev: WireStump,
-    inputs: Vec<BlockInput>,   // non-coinbase input verifications
+    txs: Vec<PackedBytes>,     // the block's non-coinbase txs, ONE shared blob each (raw bytes)
+    tx_prevouts: Vec<PackedBytes>, // parallel to `txs`: each tx's concatenated input prevouts blob
+    inputs: Vec<BlockInput>,   // non-coinbase input verifications (each refers to its tx by tx_idx)
     new_outputs: Vec<[u8; 32]>, // leaves of the coins the block creates
     root_next: WireStump,
     bip30: Option<Bip30Overwrite>, // Some ONLY at the two grandfathered BIP30 blocks (F3)
@@ -384,17 +409,23 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let cb_txid = gather(&w.coinbase_tx, 1, &mut output_leaves);
     for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
     if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
-    let mut tx_idx = 1usize;
+    // The de-duplicated per-tx blobs: one raw_tx + one prevouts blob per non-coinbase tx. Bind their
+    // counts to the merkle-committed tx set so a prover can neither add nor drop a tx.
+    if w.txs.len() + 1 != w.txids.len() || w.tx_prevouts.len() != w.txs.len() { all_ok = false; }
+    let mut tx_pos = 1usize; // 1-based block position (coinbase is position 0 / txids[0])
     for inp in &w.inputs {
         if inp.tx_first == 1 {
+            // The tx a first-input refers to must be the tx at this block position (txs in block order).
+            if inp.tx_idx as usize != tx_pos - 1 { all_ok = false; }
+            let raw_tx = if (inp.tx_idx as usize) < w.txs.len() { &w.txs[inp.tx_idx as usize].0 } else { all_ok = false; break; };
             let start = output_leaves.len();
-            let t = gather(&inp.raw_tx, 0, &mut output_leaves);
-            for l in &output_leaves[start..] { created_at.entry(*l).or_insert(tx_idx as u32); }
-            if tx_idx >= w.txids.len() || t != w.txids[tx_idx] { all_ok = false; }
-            tx_idx += 1;
+            let t = gather(raw_tx, 0, &mut output_leaves);
+            for l in &output_leaves[start..] { created_at.entry(*l).or_insert(tx_pos as u32); }
+            if tx_pos >= w.txids.len() || t != w.txids[tx_pos] { all_ok = false; }
+            tx_pos += 1;
         }
     }
-    if tx_idx != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
+    if tx_pos != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
     let mut spent_in_block: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut cur_tx: u32 = 0; // index of the tx currently being processed (increments on each tx_first)
 
@@ -411,11 +442,14 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         let mut group_ok = true;
         while i < w.inputs.len() {
             let head = &w.inputs[i];
-            let n = unsafe { tx_vin_count(head.raw_tx.as_ptr(), head.raw_tx.len() as u32) } as usize;
-            if head.tx_first != 1 || n == 0 || i + n > w.inputs.len() { group_ok = false; break; }
+            if head.tx_first != 1 || (head.tx_idx as usize) >= w.txs.len() { group_ok = false; break; }
+            let ht = &w.txs[head.tx_idx as usize].0;
+            let n = unsafe { tx_vin_count(ht.as_ptr(), ht.len() as u32) } as usize;
+            if n == 0 || i + n > w.inputs.len() { group_ok = false; break; }
             for j in 0..n {
                 let g = &w.inputs[i + j];
-                if g.raw_tx != head.raw_tx || g.prevouts != head.prevouts
+                // same tx_idx ⟹ identical shared raw_tx + prevouts blob (they index the same object)
+                if g.tx_idx != head.tx_idx
                     || g.input_idx as usize != j || (g.tx_first == 1) != (j == 0) {
                     group_ok = false; break;
                 }
@@ -428,13 +462,19 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 
     for (idx, inp) in w.inputs.iter().enumerate() {
         if inp.tx_first == 1 { cur_tx += 1; } // this input begins a new tx (1 = first non-coinbase tx)
+        // Resolve this input's shared (de-duplicated) tx + prevouts blob. w.inputs is non-empty here ⇒
+        // w.txs is non-empty; clamp a malformed out-of-range tx_idx to reject cleanly instead of panicking.
+        let ti = (inp.tx_idx as usize).min(w.txs.len() - 1);
+        if ti != inp.tx_idx as usize { all_ok = false; }
+        let raw_tx = &w.txs[ti].0;
+        let prevouts = &w.tx_prevouts[ti].0;
         let mut leaf = [0u8; 32];
         let r = match chunk {
             None => unsafe {
                 // Full verify (expensive VerifyScript), fills `leaf`.
                 verify_input(
-                    inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.input_idx,
-                    inp.prevouts.as_ptr(), inp.prevouts.len() as u32, flags,
+                    raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
+                    prevouts.as_ptr(), prevouts.len() as u32, flags,
                     inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp,
                     leaf.as_mut_ptr(),
                 )
@@ -448,12 +488,12 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                 // valid spend of the coin or validate it under attacker-chosen weaker flags.
                 unsafe {
                     coin_leaf_only(
-                        inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.input_idx,
-                        inp.prevouts.as_ptr(), inp.prevouts.len() as u32,
+                        raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
+                        prevouts.as_ptr(), prevouts.len() as u32,
                         inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, leaf.as_mut_ptr(),
                     )
                 };
-                let d = input_bind(&inp.raw_tx, inp.input_idx, &inp.prevouts,
+                let d = input_bind(raw_tx, inp.input_idx, prevouts,
                     inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, flags);
                 if idx < chunk_binds.len() && chunk_binds[idx] == d && all_valid { 1 } else { -1 }
             }
@@ -466,15 +506,15 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
             let mut fee: i64 = 0;
             let c = unsafe {
                 check_tx(
-                    inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32,
-                    inp.prevouts.as_ptr(), inp.prevouts.len() as u32,
+                    raw_tx.as_ptr(), raw_tx.len() as u32,
+                    prevouts.as_ptr(), prevouts.len() as u32,
                     &mut fee as *mut i64,
                 )
             };
             tx_checks.push(c);
             if c != 1 { all_ok = false; } else { total_fee += fee; }
             let final_ok = unsafe {
-                is_final_tx(inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, w.height as i64, lock_time as i64)
+                is_final_tx(raw_tx.as_ptr(), raw_tx.len() as u32, w.height as i64, lock_time as i64)
             } == 1;
             if !final_ok { all_ok = false; }
         }
@@ -482,7 +522,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         // Per-INPUT: coinbase maturity + BIP68 relative locktime (height + time).
         let locks = unsafe {
             check_input_locks(
-                inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.input_idx,
+                raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
                 inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, w.height, mtp,
             )
         };
@@ -574,8 +614,9 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     let mut has_witness = cb_hw == 1;
     for inp in &w.inputs {
         if inp.tx_first == 1 {
+            let raw_tx = &w.txs[(inp.tx_idx as usize).min(w.txs.len() - 1)].0;
             let mut wt = [0u8; 32];
-            let hw = unsafe { tx_wtxid_info(inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, wt.as_mut_ptr()) };
+            let hw = unsafe { tx_wtxid_info(raw_tx.as_ptr(), raw_tx.len() as u32, wt.as_mut_ptr()) };
             rec_wtxids.push(wt);
             has_witness |= hw == 1;
         }
@@ -665,9 +706,11 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         if inp.tx_first != 1 {
             continue; // weight + sigops are per-tx; count once (on the tx's first input)
         }
-        total_weight += weight_of(&inp.raw_tx);
+        let ti = (inp.tx_idx as usize).min(w.txs.len() - 1);
+        let (raw_tx, prevouts) = (&w.txs[ti].0, &w.tx_prevouts[ti].0);
+        total_weight += weight_of(raw_tx);
         total_sigops += unsafe {
-            tx_full_sigops(inp.raw_tx.as_ptr(), inp.raw_tx.len() as u32, inp.prevouts.as_ptr(), inp.prevouts.len() as u32, flags)
+            tx_full_sigops(raw_tx.as_ptr(), raw_tx.len() as u32, prevouts.as_ptr(), prevouts.len() as u32, flags)
         };
     }
     // Core's GetBlockWeight also weighs the 80-byte header and the tx-count varint (non-witness data, so
