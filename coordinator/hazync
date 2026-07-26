@@ -8,6 +8,7 @@ hazync — Proof Party contributor CLI.
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
   hazync run [id]           # claim + prove + submit, end to end (id optional: picks the next open range)
+  hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
 
 The party proves the chain forward from genesis, so you take a range near the current
 frontier. The coordinator serves a ready-made witness bundle for each block in its window,
@@ -275,9 +276,63 @@ def cmd_submit(args):
                                "sig": sig, "receipt": base64.b64encode(receipt).decode()})
     if res.get("ok"):
         print(f"✓ range {rng}: the coordinator re-verified your proof and put it on the board as '{handle}'.")
+        sys.exit(0)
+    if "already proven" in str(res.get("error", "")):
+        # Benign race: another prover landed this block first. Not a failure — don't alarm the contributor
+        # (and cmd_run, seeing exit 0, won't release: the block is already verified).
+        print(f"✓ range {rng} was already proved by someone else — nothing to do.")
+        sys.exit(0)
+    print("✗ submit rejected:", res.get("error") or res)
+    sys.exit(1)
+
+def cmd_selftest(args):
+    # One command a contributor runs BEFORE committing a GPU to real work: confirm the prover is present,
+    # its guest id matches this coordinator (else every submit is rejected), and it can actually verify a
+    # real board proof end to end. Catches the common "built a different guest" trap up front.
+    print("hazync selftest — checking your setup before you claim real work\n")
+    ok = True
+    if not HOSTBIN or not os.path.exists(HOSTBIN):
+        sys.exit("✗ HAZYNC_HOST is not set to a prover binary.\n"
+                 "  Download it from https://github.com/bitcoin-ghost/hazync/releases/latest and\n"
+                 "  export HAZYNC_HOST=/path/to/host")
+    print(f"✓ prover binary present: {HOSTBIN}")
+    try:
+        r = subprocess.run([HOSTBIN, "method-id"], capture_output=True, text=True, timeout=30)
+        mine = next((t for t in r.stdout.split() if len(t) == 64 and all(c in "0123456789abcdef" for c in t)), None)
+    except Exception as e:
+        sys.exit(f"✗ could not run `{HOSTBIN} method-id`: {e}")
+    if not mine:
+        sys.exit("✗ `host method-id` printed no image id — is this the hazync host binary?")
+    print(f"✓ your guest METHOD_ID: {mine}")
+    try:
+        want = json.loads(get("/api/meta")).get("method_id")
+    except Exception as e:
+        print(f"! could not reach {COORD}/api/meta to compare ids ({e}) — skipping the match check"); want = None
+    if want and want == mine:
+        print("✓ matches the coordinator — your proofs will be accepted")
+    elif want:
+        print(f"✗ METHOD_ID MISMATCH — the coordinator expects {want}.\n"
+              "  You built a different guest, so every proof would be rejected. Use the prebuilt release\n"
+              "  binary, or the reproducible build (reproduce/Dockerfile). (Nothing was claimed.)")
+        ok = False
+    try:
+        proof = get("/api/proof/1")
+        RCPTDIR.mkdir(parents=True, exist_ok=True)
+        pf = RCPTDIR / "selftest_proof.bin"; pf.write_bytes(proof)
+        vr = subprocess.run([HOSTBIN, "verify-any", str(pf)], capture_output=True, text=True, timeout=120)
+        try: pf.unlink()
+        except OSError: pass
+        if vr.returncode == 0 and any(l.startswith("RANGE-OK") for l in vr.stdout.splitlines()):
+            print("✓ verified a real board proof end to end (verify-any → RANGE-OK)")
+        else:
+            print(f"✗ verify-any failed: {(vr.stdout + vr.stderr).strip()[-200:]}"); ok = False
+    except Exception as e:
+        print(f"! could not fetch/verify a sample proof ({e}) — skipping the verify check")
+    print()
+    if ok:
+        print("ALL GOOD — you're ready. Claim work with `hazync run`.")
     else:
-        print("✗ submit rejected:", res.get("error") or res)
-    sys.exit(0 if res.get("ok") else 1)
+        sys.exit("SETUP INCOMPLETE — fix the ✗ items above before `hazync run`.")
 
 def cmd_run(args):
     # Check the prover binary FIRST — `run` claims a range (locking it under the claim TTL), so we must
@@ -319,7 +374,7 @@ def main():
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
     c, a = argv[0], argv[1:]
-    fn = {"id": cmd_id, "pick": cmd_pick, "claim": cmd_claim, "prove": cmd_prove,
+    fn = {"id": cmd_id, "pick": cmd_pick, "claim": cmd_claim, "prove": cmd_prove, "selftest": cmd_selftest,
           "submit": cmd_submit, "run": cmd_run}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)

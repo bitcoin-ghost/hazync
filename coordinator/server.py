@@ -584,6 +584,20 @@ def release(body):
         c.commit(); c.close()
     return 200, {"ok": True, "released": rid}
 
+_MID_CACHE = {"v": None}
+def expected_method_id():
+    # The guest image id this coordinator verifies against == HOST_BIN's method-id. Exposed via /api/meta
+    # so a contributor can pre-flight `host method-id` BEFORE proving, instead of discovering a mismatch
+    # only when their first submit is rejected. Cached — a binary's id never changes at runtime.
+    if _MID_CACHE["v"] is None and HOST_BIN:
+        try:
+            r = subprocess.run([HOST_BIN, "method-id"], capture_output=True, text=True, timeout=30)
+            _MID_CACHE["v"] = next((t for t in r.stdout.split()
+                                    if len(t) == 64 and all(ch in "0123456789abcdef" for ch in t)), None)
+        except Exception:
+            pass
+    return _MID_CACHE["v"]
+
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
@@ -682,6 +696,9 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/state":
             return self._send(200, raw=state_cached(), ctype="application/json")
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
+        if p == "/api/meta":                               # pre-flight: expected guest id + frontier
+            return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
+                                    "reproduce": "reproduce/METHOD_ID"})
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
             if parse_range(rid):

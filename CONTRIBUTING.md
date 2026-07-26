@@ -48,6 +48,14 @@ export WITNESS_DIR=$PWD/w
 
 Your name can be anything. It is tied to a signing key the tool makes for you and keeps in `~/.hazync`, so nobody else can claim your blocks. Back that folder up if you care about keeping the same identity.
 
+**Before you prove, run a pre-flight:**
+
+```
+./hazync selftest
+```
+
+It confirms your prover is present, its guest `METHOD_ID` matches the coordinator (the common trap — a different guest build has every proof rejected), and it can verify a real board proof end to end. Better to catch a setup problem now than after a long prove.
+
 ## Step 3: prove
 
 ```
