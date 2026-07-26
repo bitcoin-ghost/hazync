@@ -98,7 +98,7 @@ The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_
 IVC chain step, and the SNARK wrap — and the CLI retries a failed prove *or fold* with progressively
 **smaller** segments (`HAZYNC_SEG_PO2` 20→19→18), which repartition the work and clear the boundary.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.9.0** at `METHOD_ID 68819a54` (real-Core `pow.cpp`
+either way. **Releases:** the current release is **v0.9.1** at `METHOD_ID 68819a54` (real-Core `pow.cpp`
 difficulty retarget carved into the guest + every consensus constant sourced from Core's own
 `chainparams.cpp` — see `reproduce/METHOD_ID`). Both the
 **`hazync-host-x86_64-linux-gnu`** CPU binary and the multi-arch **CUDA** binary embed this guest and

@@ -52,6 +52,14 @@
 # VALID + all differential/negative tests. Only the witness encoding/structure changed → new id.
 # Superseded id 7a8b29e0…
 #
+# 2026-07-27 (v0.9.1): HOST-ONLY patch — the v0.9.0 byte-packing shipped a bundle-parse bug. PackedBytes
+# serialises via serialize_bytes, which serde_json emits as a JSON array (a sequence), but the deserialiser
+# accepted only a native bytes type — so every bridge bundle with a non-empty txs/tx_prevouts (every block
+# with a real spend; block 170 is the first) failed to parse in prove-range-bridge. Fixed by also accepting
+# a JSON sequence (host visit_seq). The GUEST is unchanged, so THIS ID IS UNCHANGED and every existing proof
+# stays valid — v0.9.1 only rebuilds the host binaries + hardens the coordinator (release-on-failure,
+# fail-fast errors, `hazync selftest` + `/api/meta`, bundle round-trip CI regression).
+#
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
