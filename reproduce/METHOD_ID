@@ -36,4 +36,4 @@
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-cb114426268b7ca533a03454b4717fb67e4fe316abe115aa42a06daf7447c787
+ffdc6095b3ee5b4ecae6489be663a023ba80b2a192db306687704a7099e50e21
