@@ -63,9 +63,11 @@ famously full of tiny, load-bearing quirks that have to match *exactly*.
 code for the fiddly, edge-case-heavy heart of validation — the script interpreter, the
 signature-hashing, the transaction checks, and the cryptography — the exact same code the whole network
 runs, unchanged — and ran *that* inside the magic-stamp machine. For that part there is no "did we
-translate it faithfully?" gap, because there is no translation. (The thin outer wrapper — the halving
-schedule, the difficulty adjustment — is short, simple arithmetic we did re-express, and we check it
-against Core's.) This is the part everyone else got stuck on, and it's the part we cracked.
+translate it faithfully?" gap, because there is no translation. The difficulty adjustment is Core's
+real code too now (its own `pow.cpp`). What's left outside is a sliver — the halving schedule and the
+handful of soft-fork switch-on heights — short, simple arithmetic we did re-express, and we check it
+against Core's (the retarget carve against the *actual* difficulty of every real adjustment in Bitcoin's
+history). This is the part everyone else got stuck on, and it's the part we cracked.
 
 *(For the technically curious: we compile Bitcoin Core v28's real script interpreter, signature-hashing,
 and its cryptography library and run them, unmodified, inside a zero-knowledge virtual machine. The
