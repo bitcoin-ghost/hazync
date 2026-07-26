@@ -98,8 +98,12 @@ committed `UTXO_root_next`. Journal: `{script_results:[1,1,1], all_ok:true, root
   computed inside the guest from the SAME tx+coin `VerifyScript` checked, and the guest commits it —
   the host bridge (`bitcoin` crate + `hazync-utreexo` Forest) computes byte-identical leaves
   (matched first try). So "script valid" and "coin in the UTXO set" are bound to one coin.
-- Guest `mode==1` reads a `BlockWitness {root_prev, inputs[], new_outputs[], root_next}`; per input a
-  `(proof_i, proof_last)` pair against the running state (bridge advances its Forest in lockstep).
+- Guest `mode==1` reads a `BlockWitness {root_prev, txs[], tx_prevouts[], inputs[], new_outputs[], root_next}`;
+  per input a `(proof_i, proof_last)` pair against the running state (bridge advances its Forest in lockstep).
+  The byte-heavy fields are packed and **de-duplicated per tx** (v0.9.0): each `BlockInput` refers to its
+  spending tx + prevouts blob by `tx_idx` rather than carrying a copy, so a multi-input tx stores its bytes
+  once (block 741000: witness 33.9MB → 0.92MB, and the deserialise cost drops ~40% — see `ACCELERATION.md`).
+  The per-tx grouping soundness (#5) now compares `tx_idx` and pins it to the merkle-committed position.
 - **CheckTransaction + no-inflation DONE (2026-07-14).** Carved real Core `consensus/tx_check.cpp`
   (`CheckTransaction`) + a `check_tx` wrapper adding the amount rules (all values in `MoneyRange`,
   non-coinbase Σin≥Σout ⇒ fee≥0). Wired per-tx into the block proof: honest block `tx_checks=[1,1,1]`,

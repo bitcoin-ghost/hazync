@@ -1,5 +1,29 @@
 # Task: accelerate libsecp256k1 modular multiplication via the RISC0 bigint2 precompile
 
+> **Update 2026-07-26 — profiled + measured the maximal-Core-safe alternatives.** A cycle profile of a
+> signature-bearing block (execute mode, `RISC0_PPROF_OUT`) confirms the shape this doc assumes:
+> **~69% of a small block is `secp256k1_fe_mul_inner` (47%) + `fe_sqr_inner` (22%)** — the field
+> arithmetic only the (rejected) bigint2 backend below would touch. SHA is 3.4% (already accelerated),
+> paging just 3.8%. The **`ECMULT_WINDOW_SIZE` sweep is dead**: window 15 (current) is already optimal;
+> every step down costs more (the `pre_g` table pages in once and stays resident, so a smaller table just
+> adds wNAF additions). So there is no big maximal-Core *guest-compute* win — the cost is the field math
+> we've chosen not to reimplement.
+>
+> **What we DID ship instead (v0.9.0, maximal-Core-safe, wire-format only):**
+> 1. **Witness byte-packing** — risc0 serde encodes `Vec<u8>` as one 32-bit word *per byte* (4× bloat);
+>    routing `raw_tx`/`prevouts` through `serialize_bytes` (4 bytes/word) turns the per-byte deserialise
+>    loop into a bulk copy. **−40% guest cycles on big blocks** (block 741000: 3.06B → 1.84B).
+> 2. **Per-tx `raw_tx`/`prevouts` dedup** — each input carried the full spending tx + prevouts blob, so a
+>    multi-input tx repeated them per input (741000: 670 inputs, 146 unique txs). Sharing one blob per tx
+>    (`tx_idx` reference) cuts the **witness 37×** (33.9MB → 0.92MB; `raw_tx` 56×, `prevouts` 67×). Its
+>    payoff is bandwidth/storage (the coordinator ships 37× less to every worker), not proving cycles.
+>
+> Both are validated against the full adversarial suite (the #5 phantom-prevouts hole is now caught by the
+> accumulator binding rather than a per-input blob-equality check). Remaining maximal-Core levers:
+> host-side tree-fold + segment po2 (~14% fold overhead), and multi-GPU throughput (safe — every parallel
+> proof is independently verified). The bigint2 field backend below stays **out of scope** (reimplements
+> Core's field layer → the exact equivalence question Hazync exists to delete).
+
 > **Update 2026-07-19 — the k256 experiment has been REMOVED from the guest.** `k256_ecdsa_verify`, the
 > `k256`/`crypto-bigint` dependencies, the `HAZYNC_ECDSA_BENCH` branch, and `patches/0003` are gone. The
 > sound guest is now **pure Core + the accumulator, nothing else** — no alternative EC implementation

@@ -43,8 +43,16 @@
 # Core's constants to the canonical mainnet values). Behaviourally identical (regress/adversarial/
 # script-flags/chainparams-anchor + 130000/140000/741000 all green; +~61k cyc/proof for the one-time
 # CChainParams construction), but guest source changed → new id. Superseded id ffdc6095…
+# 2026-07-26 (v0.9.0): witness efficiency — two maximal-Core-safe WIRE-FORMAT changes (no consensus logic).
+# (1) Byte-pack raw_tx/prevouts via risc0 serde serialize_bytes (4 bytes/word) instead of one-word-per-byte
+# → -40% guest cycles on big blocks (741000: 3.06B→1.84B). (2) De-duplicate the per-tx raw_tx/prevouts
+# blobs (BlockWitness.txs/tx_prevouts + BlockInput.tx_idx) so a multi-input tx no longer repeats its bytes
+# per input → witness 741000: 33.9MB→0.92MB (37x). Validated: regress + FULL adversarial suite (every hole
+# REJECTS incl. #5 phantom-prevouts via the accumulator binding; honest accepted) + 130000/140000/741000
+# VALID + all differential/negative tests. Only the witness encoding/structure changed → new id.
+# Superseded id 7a8b29e0…
 #
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-7a8b29e0d644eecd6c46d125d6646909f017c80a2de679301228d428cdccae3d
+68819a54f2377fc6bc3a90ead0e07075e316d2e0e08d4f97bb77b15c5f12b0b9
