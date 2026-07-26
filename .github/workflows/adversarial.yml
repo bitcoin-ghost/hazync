@@ -70,6 +70,11 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host script-flags-test
+      - name: Chainparams anchor (Core's compiled consensus constants == canonical mainnet values)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && ./chainparams_check.sh
 
   reproducible-image-id:
     # Build the guest in the hermetic container (fixed paths) and assert its METHOD_ID equals the

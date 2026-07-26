@@ -21,6 +21,9 @@
 #include <chain.h>              // real CBlockIndex (feeds the retarget)
 #include <pow.h>                // real CalculateNextWorkRequired
 #include <consensus/params.h>   // Consensus::Params (mainnet PoW parameters)
+#include <consensus/consensus.h> // MAX_BLOCK_WEIGHT / MAX_BLOCK_SIGOPS_COST / WITNESS_SCALE_FACTOR
+#include <kernel/chainparams.h> // real mainnet CChainParams::Main() (authoritative consensus constants)
+#include <memory>
 #include <string>
 
 // Minimal byte reader satisfying the Stream interface Core's Unserialize needs (no streams.h).
@@ -400,29 +403,27 @@ RecursiveMutex cs_main;
 // never calls ToString; provide a trivial definition so the link resolves. Non-consensus glue only.
 std::string FormatISO8601Date(int64_t) { return std::string(); }
 
+// The authoritative mainnet consensus parameters, sourced from Bitcoin Core's OWN chainparams.cpp
+// (compiled into the guest). CChainParams::Main() builds the real CMainParams — powLimit,
+// nPowTargetTimespan/Spacing, the buried soft-fork heights, the halving interval — and asserts the
+// genesis hash. Constructed once (function-static) and reused; every consensus constant below comes
+// from here rather than a hand-typed literal, so there is nothing to mis-transcribe.
+static const Consensus::Params& mainnet_params() {
+    static const std::unique_ptr<const CChainParams> params = CChainParams::Main();
+    return params->GetConsensus();
+}
+
 // Difficulty retarget: the expected nBits for the block after `prev_bits`, given the epoch's first
 // block time and the last block's time. This drives Bitcoin Core's REAL, unmodified
-// CalculateNextWorkRequired (compiled from src/pow.cpp) — the retarget math is Core's own code, not a
-// transcription. We hand it a CBlockIndex carrying the tip's nBits/nTime and the mainnet PoW params;
-// on mainnet (enforce_BIP94=false, fPowNoRetargeting=false) it clamps the 2-week timespan to [/4, *4],
-// scales the target via real arith_uint256, and caps at powLimit — returning the compact next nBits.
+// CalculateNextWorkRequired (compiled from src/pow.cpp), fed the real mainnet Consensus::Params from
+// Core's own chainparams.cpp — the retarget math AND its parameters are Core's own, not a transcription.
 extern "C" uint32_t calc_next_bits(uint32_t prev_bits, int64_t first_time, int64_t last_time) {
     CBlockIndex pindexLast;
     pindexLast.nBits   = prev_bits;
     pindexLast.nTime   = (uint32_t)last_time;
     pindexLast.nHeight = 0;  // unused on the mainnet retarget path (only the BIP94/min-difficulty
-                             // branches read it, and both are disabled for mainnet params below)
-    Consensus::Params params{};
-    bool neg, over;
-    arith_uint256 powLimit;
-    powLimit.SetCompact(0x1d00ffff, &neg, &over);   // mainnet powLimit (0x1d00ffff compact form)
-    params.powLimit                     = ArithToUint256(powLimit);
-    params.nPowTargetTimespan           = 14 * 24 * 60 * 60;  // 2 weeks
-    params.nPowTargetSpacing            = 10 * 60;            // 10 minutes
-    params.fPowAllowMinDifficultyBlocks = false;
-    params.fPowNoRetargeting            = false;
-    params.enforce_BIP94                = false;             // mainnet (BIP94 is Testnet4-only)
-    return CalculateNextWorkRequired(&pindexLast, first_time, params);
+                             // branches read it, and both are disabled for mainnet params)
+    return CalculateNextWorkRequired(&pindexLast, first_time, mainnet_params());
 }
 
 // Cumulative chainwork: cum += GetBlockProof(nBits) (real Core formula, chain.cpp), 256-bit.
@@ -440,15 +441,38 @@ extern "C" void add_work(uint8_t* cum, uint32_t nBits) {
     std::memcpy(cum, r.begin(), 32);
 }
 
-// Block subsidy — exact Core GetBlockSubsidy formula (kept in validation.cpp, too heavy to carve;
-// this is the halving schedule verbatim: 50 BTC >> (height / 210000)).
+// Block subsidy — Core's GetBlockSubsidy formula (the 6-line body lives in validation.cpp, which is
+// un-carvable; this is that body verbatim). The one consensus constant, the halving interval, is read
+// from Core's chainparams (mainnet_params().nSubsidyHalvingInterval) rather than hard-typed.
 extern "C" int64_t block_subsidy(uint32_t height) {
-    int halvings = height / 210000;
+    int halvings = height / mainnet_params().nSubsidyHalvingInterval;
     if (halvings >= 64) return 0;
     int64_t subsidy = 50LL * 100000000LL; // 50 * COIN
     subsidy >>= halvings;
     return subsidy;
 }
+
+// Consensus constants sourced from Core's own compiled source, exposed to the Rust guest so it can pin
+// every hard-coded literal to Core's value at runtime (a mismatch aborts the proof). Heights + retarget
+// interval come from chainparams (mainnet_params()); the weight/sigop limits from consensus/consensus.h;
+// the SCRIPT_VERIFY_* bit positions from script/interpreter.h — so nothing consensus-relevant is a
+// magic number we could have typed wrong.
+extern "C" uint32_t core_bip66_height()            { return (uint32_t)mainnet_params().BIP66Height; }
+extern "C" uint32_t core_bip65_height()            { return (uint32_t)mainnet_params().BIP65Height; }
+extern "C" uint32_t core_csv_height()              { return (uint32_t)mainnet_params().CSVHeight; }
+extern "C" uint32_t core_segwit_height()           { return (uint32_t)mainnet_params().SegwitHeight; }
+extern "C" uint32_t core_retarget_interval()       { return (uint32_t)mainnet_params().DifficultyAdjustmentInterval(); }
+extern "C" uint32_t core_subsidy_halving_interval(){ return (uint32_t)mainnet_params().nSubsidyHalvingInterval; }
+extern "C" int64_t  core_max_block_weight()        { return (int64_t)MAX_BLOCK_WEIGHT; }
+extern "C" int64_t  core_max_block_sigops_cost()   { return (int64_t)MAX_BLOCK_SIGOPS_COST; }
+extern "C" int64_t  core_witness_scale_factor()    { return (int64_t)WITNESS_SCALE_FACTOR; }
+extern "C" uint32_t core_flag_p2sh()               { return (uint32_t)SCRIPT_VERIFY_P2SH; }
+extern "C" uint32_t core_flag_dersig()             { return (uint32_t)SCRIPT_VERIFY_DERSIG; }
+extern "C" uint32_t core_flag_nulldummy()          { return (uint32_t)SCRIPT_VERIFY_NULLDUMMY; }
+extern "C" uint32_t core_flag_cltv()               { return (uint32_t)SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY; }
+extern "C" uint32_t core_flag_csv()                { return (uint32_t)SCRIPT_VERIFY_CHECKSEQUENCEVERIFY; }
+extern "C" uint32_t core_flag_witness()            { return (uint32_t)SCRIPT_VERIFY_WITNESS; }
+extern "C" uint32_t core_flag_taproot()            { return (uint32_t)SCRIPT_VERIFY_TAPROOT; }
 
 extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             unsigned input_idx,

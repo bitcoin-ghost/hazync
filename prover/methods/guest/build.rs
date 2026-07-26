@@ -96,6 +96,9 @@ fn main() {
         "arith_uint256.cpp",       // real SetCompact / target arithmetic for PoW
         "pow.cpp",                 // real CalculateNextWorkRequired (difficulty retarget)
         "chain.cpp",               // real CBlockIndex::GetAncestor / GetBlockProof (pow.cpp deps)
+        "kernel/chainparams.cpp",  // real mainnet Consensus::Params (authoritative consensus constants)
+        "primitives/block.cpp",    // CBlockHeader::GetHash (chainparams genesis) — pow/subsidy dep
+        "util/chaintype.cpp",      // ChainType strings (chainparams dep)
     ];
     let mut b = cc::Build::new();
     b.cpp(true).compiler(&gpp).archiver(&ar)
