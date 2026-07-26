@@ -60,6 +60,16 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host check-bip30
+      - name: Retarget differential (carved real Core pow.cpp vs actual on-chain nBits at every mainnet retarget)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && ./retarget_diff_test.sh
+      - name: Script-flag schedule differential (guest ⊇ Core, buried forks exact, exception blocks)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host script-flags-test
 
   reproducible-image-id:
     # Build the guest in the hermetic container (fixed paths) and assert its METHOD_ID equals the

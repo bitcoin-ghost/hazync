@@ -6,6 +6,11 @@ use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use serde::{Deserialize, Serialize};
 
+// The guest's actual script-flag schedule, compiled here too so `script-flags-test` exercises the real
+// code (no drifting copy). Same file the guest builds as `mod script_flags`.
+#[path = "../../methods/guest/src/script_flags.rs"]
+mod script_flags;
+
 // H8 domain tags — first committed field of each recursion-consumed journal (must match the guest).
 const KIND_CHAIN: u32 = 0xC4A1_0002;
 const KIND_RANGE: u32 = 0xC4A1_0006;
@@ -1860,6 +1865,67 @@ fn cmd_prove_range_bridge(n: u32) {
     println!("proved range [{n}..{n}] from bridge bundle in {:.1}s -> {out}", t.elapsed().as_secs_f64());
 }
 
+// Differential audit of the guest's script-flag schedule (script_flags::block_script_flags — the SAME
+// module the guest compiles) against Core's canonical mainnet GetBlockScriptFlags. The guest applies
+// P2SH|WITNESS|TAPROOT retroactively to genesis — stricter than Core's height-gated activation
+// (P2SH@173805, segwit@481824, taproot@709632) — so the from-genesis prover need not special-case
+// pre-activation blocks. That is SOUND because extra flags can only REJECT more, never accept a
+// Core-invalid block, so a Hazync proof still implies Core-validity. This test proves that safety
+// property (guest ⊇ Core at every boundary), that the buried soft-forks (DERSIG/CLTV/CSV/NULLDUMMY)
+// flip at Core's EXACT heights, and that the two script_flag_exception blocks behave (BIP16 → no flags;
+// taproot → TAPROOT cleared, base retained).
+fn script_flags_test() {
+    use script_flags::*;
+    const P2SH_HEIGHT: u32 = 173_805; // BIP16Height (chainparams.cpp)
+    const TAPROOT_HEIGHT: u32 = 709_632;
+    // Core's GetBlockScriptFlags for a NON-exception block at height h (each flag active iff h >= its height).
+    let core_flags = |h: u32| -> u32 {
+        let mut f = 0u32;
+        if h >= P2SH_HEIGHT { f |= P2SH; }
+        if h >= BIP66_HEIGHT { f |= DERSIG; }
+        if h >= BIP65_HEIGHT { f |= CLTV; }
+        if h >= CSV_HEIGHT { f |= CSV; }
+        if h >= SEGWIT_HEIGHT { f |= WITNESS | NULLDUMMY; }
+        if h >= TAPROOT_HEIGHT { f |= TAPROOT; }
+        f
+    };
+    let non_exc = [0u8; 32]; // any non-exception hash → the base schedule
+    let (mut fails, mut checked) = (0u32, 0u32);
+    let mut heights: Vec<u32> = vec![0, 1, 100_000, 227_931, 959_617];
+    for h in [P2SH_HEIGHT, BIP66_HEIGHT, BIP65_HEIGHT, CSV_HEIGHT, SEGWIT_HEIGHT, TAPROOT_HEIGHT] {
+        heights.push(h.saturating_sub(1)); heights.push(h); heights.push(h + 1);
+    }
+    for &h in &heights {
+        let g = block_script_flags(h, &non_exc);
+        let c = core_flags(h);
+        checked += 1;
+        // (a) monotonic strictness / soundness: the guest never CLEARS a flag Core sets.
+        if c & !g != 0 { fails += 1; println!("  SOUNDNESS FAIL h={h}: core={c:#x} guest={g:#x} missing={:#x}", c & !g); }
+        // (b) buried soft-forks EXACT: guest bit == Core bit at every boundary.
+        for (bit, name) in [(DERSIG, "DERSIG"), (CLTV, "CLTV"), (CSV, "CSV"), (NULLDUMMY, "NULLDUMMY")] {
+            if (g & bit) != (c & bit) { fails += 1; println!("  BURIED FAIL h={h} {name}: guest={:#x} core={:#x}", g & bit, c & bit); }
+        }
+        // (c) retroactive base (P2SH|WITNESS|TAPROOT) always on for non-exception blocks.
+        if g & (P2SH | WITNESS | TAPROOT) != (P2SH | WITNESS | TAPROOT) { fails += 1; println!("  BASE FAIL h={h}: guest={g:#x}"); }
+    }
+    // Exception blocks — keyed by the guest-computed block hash (unforgeable).
+    let bip16 = block_script_flags(BIP16_EXCEPTION_HEIGHT, &BIP16_EXCEPTION);
+    if bip16 != 0 { fails += 1; println!("  BIP16 EXCEPTION FAIL: expected 0 (SCRIPT_VERIFY_NONE), got {bip16:#x}"); }
+    let tap = block_script_flags(TAPROOT_EXCEPTION_HEIGHT, &TAPROOT_EXCEPTION);
+    if tap & TAPROOT != 0 { fails += 1; println!("  TAPROOT EXCEPTION FAIL: TAPROOT must be OFF, got {tap:#x}"); }
+    if tap & (P2SH | WITNESS) != (P2SH | WITNESS) { fails += 1; println!("  TAPROOT EXCEPTION FAIL: P2SH|WITNESS must be ON, got {tap:#x}"); }
+    // Core's mapped exception value must be a subset of the guest's (guest ⊇ Core → still sound).
+    if (0u32 & !bip16) != 0 || ((P2SH | WITNESS) & !tap) != 0 { fails += 1; println!("  EXCEPTION SUBSET FAIL"); }
+    checked += 2;
+    println!("script-flags differential: checked {checked} height/exception cases (guest ⊇ Core, buried forks exact)");
+    if fails == 0 {
+        println!(">>> SCRIPT-FLAGS TEST PASS ✓");
+    } else {
+        println!(">>> SCRIPT-FLAGS TEST FAIL — {fails} discrepancies");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -1922,6 +1988,7 @@ fn main() {
         println!("  u32x8   {:?}", METHOD_ID);
         return;
     }
+    if args.iter().any(|a| a == "script-flags-test") { script_flags_test(); return; }
     if let Some(p) = args.iter().position(|a| a == "verify-any") {
         verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
         return;

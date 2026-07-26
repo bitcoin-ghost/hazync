@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
+mod script_flags;
+use script_flags::block_script_flags;
 
 // H8: domain tags — the first committed field of every recursion-consumed journal. env::verify binds
 // (image_id, journal) but not the journal's TYPE, so without a tag a mode-1 BlockOutput (which never
@@ -86,13 +88,9 @@ const MAX_BLOCK_SIGOPS_COST: i64 = 80_000;
 const RETARGET_INTERVAL: u32 = 2016;
 
 // Consensus VerifyScript flags active at a given mainnet height (soft-fork activation heights).
-// This is how BIP66/65/112(CSV)/147/segwit/taproot get enforced — through VerifyScript.
-// Core mainnet script_flag_exceptions (chainparams.cpp), in internal (dsha256(header)) byte order.
-// One historical block violated BIP16 (runs with NO script flags) and one violated Taproot (runs
-// without TAPROOT). Matching Core here is REQUIRED — otherwise the from-genesis prover stalls on these
-// canonical blocks (guest rejects a block Core accepts).
-const BIP16_EXCEPTION: [u8; 32] = [0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d, 0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0xd5, 0x85, 0xc5, 0xe8, 0x1d, 0x44, 0xb5, 0x6a, 0x98, 0x1e, 0x84, 0x2d, 0x5b, 0xc3, 0x14, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+// This is how BIP66/65/112(CSV)/147/segwit/taproot get enforced — through VerifyScript. The
+// height→flags schedule + the two script_flag_exception blocks live in `script_flags` (shared with the
+// host differential test `host script-flags-test`).
 
 // BIP30 grandfathered duplicate-coinbase blocks (internal/dsha256(header) order). Each reuses an
 // earlier still-unspent coinbase's outpoint; pre-BIP30-enforcement Core OVERWRITES the old coin (it
@@ -101,26 +99,6 @@ const TAPROOT_EXCEPTION: [u8; 32] = [0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0
 // (BIP34, enforced from 227931, makes coinbases unique thereafter, so no later duplicate can occur.)
 const BIP30_OVERWRITE_A: [u8; 32] = [0xec, 0xca, 0xe0, 0x00, 0xe3, 0xc8, 0xe4, 0xe0, 0x93, 0x93, 0x63, 0x60, 0x43, 0x1f, 0x3b, 0x76, 0x03, 0xc5, 0x63, 0xc1, 0xff, 0x61, 0x81, 0x39, 0x0a, 0x4d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91842
 const BIP30_OVERWRITE_B: [u8; 32] = [0x21, 0xd7, 0x7c, 0xcb, 0x4c, 0x08, 0x38, 0x6a, 0x04, 0xac, 0x01, 0x96, 0xae, 0x10, 0xf6, 0xa1, 0xd2, 0xc2, 0xa3, 0x77, 0x55, 0x8c, 0xa1, 0x90, 0xf1, 0x43, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91880
-
-// Consensus script flags for a block — replicates Core's GetBlockScriptFlags (validation.cpp) EXACTLY:
-// the base P2SH|WITNESS|TAPROOT is ALWAYS on (retroactive to genesis) except for the two exception
-// blocks above (which override it), then DERSIG/CLTV/CSV/NULLDUMMY are OR'd in at their buried-deployment
-// heights. `block_hash` is the guest-computed dsha256(header) (internal order), so the exception override
-// cannot be forged — a wrong hash fails PoW (monolithic) or the H2 bind digest (segmented). Height-gating
-// the base flags (the previous behaviour) was both too lenient below the gate (accept-invalid, H-S4) and
-// wrong on the exception blocks (reject-valid, H-S1).
-fn block_script_flags(height: u32, block_hash: &[u8; 32]) -> u32 {
-    const P2SH: u32 = 1 << 0; const DERSIG: u32 = 1 << 2; const NULLDUMMY: u32 = 1 << 4;
-    const CLTV: u32 = 1 << 9; const CSV: u32 = 1 << 10; const WITNESS: u32 = 1 << 11; const TAPROOT: u32 = 1 << 17;
-    let mut f = P2SH | WITNESS | TAPROOT;
-    if block_hash == &BIP16_EXCEPTION { f = 0; }
-    else if block_hash == &TAPROOT_EXCEPTION { f = P2SH | WITNESS; }
-    if height >= 363_725 { f |= DERSIG; }               // BIP66Height (DERSIG)
-    if height >= 388_381 { f |= CLTV; }                 // BIP65Height (CHECKLOCKTIMEVERIFY)
-    if height >= 419_328 { f |= CSV; }                  // CSVHeight (CHECKSEQUENCEVERIFY)
-    if height >= 481_824 { f |= NULLDUMMY; }            // SegwitHeight (BIP147 NULLDUMMY)
-    f
-}
 
 // --- libc glue for bare-metal C/C++ in the zkVM guest: malloc family + abort, backed by the
 // guest's Rust global allocator (size stored in a 16-byte header before each block). ---

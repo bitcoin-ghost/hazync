@@ -94,13 +94,17 @@ fn main() {
         "consensus/tx_check.cpp",  // real CheckTransaction (structural consensus checks)
         "consensus/merkle.cpp",    // real ComputeMerkleRoot
         "arith_uint256.cpp",       // real SetCompact / target arithmetic for PoW
+        "pow.cpp",                 // real CalculateNextWorkRequired (difficulty retarget)
+        "chain.cpp",               // real CBlockIndex::GetAncestor / GetBlockProof (pow.cpp deps)
     ];
     let mut b = cc::Build::new();
     b.cpp(true).compiler(&gpp).archiver(&ar)
         .flag("-march=rv32im").flag("-mabi=ilp32").flag("-std=c++20")
         .flag("-fexceptions").flag("-fno-rtti").opt_level(2).warnings(false)
         .flag(&fpm)
-        .include(&core).include(&shim).include(format!("{secp}/include"));
+        // coreshim FIRST: its no-op sync.h/threadsafety.h override Core's pthread-backed versions so
+        // the real chain.h CBlockIndex + pow.cpp compile on the single-threaded freestanding guest.
+        .include(&shim).include(&core).include(format!("{secp}/include"));
     for tu in core_tus { b.file(format!("{core}/{tu}")); }
     b.file("verify_input.cpp");
     b.compile("bitcoinconsensus");

@@ -18,6 +18,10 @@
 #include <arith_uint256.h>
 #include <hash.h>
 #include <uint256.h>
+#include <chain.h>              // real CBlockIndex (feeds the retarget)
+#include <pow.h>                // real CalculateNextWorkRequired
+#include <consensus/params.h>   // Consensus::Params (mainnet PoW parameters)
+#include <string>
 
 // Minimal byte reader satisfying the Stream interface Core's Unserialize needs (no streams.h).
 struct MiniReader {
@@ -386,22 +390,39 @@ extern "C" int64_t tx_full_sigops(const uint8_t* tx_bytes, unsigned tx_len,
     return cost;
 }
 
+// kernel/cs_main.h declares `extern RecursiveMutex cs_main;` (pulled in via chain.h). The guest is
+// single-threaded and never locks it (coreshim/sync.h makes LOCK/AssertLockHeld no-ops), but Core's
+// ODR wants exactly one definition — supply it here. It is never read or written.
+RecursiveMutex cs_main;
+
+// chain.cpp's CBlockIndex::ToString / CBlockFileInfo::ToString reference this ISO-8601 log formatter
+// (from util/time.cpp, which we do not compile — it is diagnostic output, not consensus). The guest
+// never calls ToString; provide a trivial definition so the link resolves. Non-consensus glue only.
+std::string FormatISO8601Date(int64_t) { return std::string(); }
+
 // Difficulty retarget: the expected nBits for the block after `prev_bits`, given the epoch's first
-// block time and the last block's time. Core's CalculateNextWorkRequired math (pow.cpp) — real
-// arith_uint256, mainnet 2-week timespan, clamped 4x, capped at powLimit.
+// block time and the last block's time. This drives Bitcoin Core's REAL, unmodified
+// CalculateNextWorkRequired (compiled from src/pow.cpp) — the retarget math is Core's own code, not a
+// transcription. We hand it a CBlockIndex carrying the tip's nBits/nTime and the mainnet PoW params;
+// on mainnet (enforce_BIP94=false, fPowNoRetargeting=false) it clamps the 2-week timespan to [/4, *4],
+// scales the target via real arith_uint256, and caps at powLimit — returning the compact next nBits.
 extern "C" uint32_t calc_next_bits(uint32_t prev_bits, int64_t first_time, int64_t last_time) {
-    const int64_t timespan = 14 * 24 * 60 * 60; // nPowTargetTimespan (2 weeks)
-    int64_t actual = last_time - first_time;
-    if (actual < timespan / 4) actual = timespan / 4;
-    if (actual > timespan * 4) actual = timespan * 4;
-    bool neg, over, n2, o2;
-    arith_uint256 bn, powLimit;
-    bn.SetCompact(prev_bits, &neg, &over);
-    bn *= (uint32_t)actual;
-    bn /= (uint32_t)timespan;
-    powLimit.SetCompact(0x1d00ffff, &n2, &o2);
-    if (bn > powLimit) bn = powLimit;
-    return bn.GetCompact();
+    CBlockIndex pindexLast;
+    pindexLast.nBits   = prev_bits;
+    pindexLast.nTime   = (uint32_t)last_time;
+    pindexLast.nHeight = 0;  // unused on the mainnet retarget path (only the BIP94/min-difficulty
+                             // branches read it, and both are disabled for mainnet params below)
+    Consensus::Params params{};
+    bool neg, over;
+    arith_uint256 powLimit;
+    powLimit.SetCompact(0x1d00ffff, &neg, &over);   // mainnet powLimit (0x1d00ffff compact form)
+    params.powLimit                     = ArithToUint256(powLimit);
+    params.nPowTargetTimespan           = 14 * 24 * 60 * 60;  // 2 weeks
+    params.nPowTargetSpacing            = 10 * 60;            // 10 minutes
+    params.fPowAllowMinDifficultyBlocks = false;
+    params.fPowNoRetargeting            = false;
+    params.enforce_BIP94                = false;             // mainnet (BIP94 is Testnet4-only)
+    return CalculateNextWorkRequired(&pindexLast, first_time, params);
 }
 
 // Cumulative chainwork: cum += GetBlockProof(nBits) (real Core formula, chain.cpp), 256-bit.

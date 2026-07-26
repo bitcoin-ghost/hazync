@@ -1,0 +1,28 @@
+[package]
+name = "audit-fuzz-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+audit-fuzz = { path = ".." }
+
+[[bin]]
+name = "delete_soundness"
+path = "fuzz_targets/delete_soundness.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "delete_soundness_reference"
+path = "fuzz_targets/delete_soundness_reference.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
