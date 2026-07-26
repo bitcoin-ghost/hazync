@@ -565,6 +565,25 @@ def heartbeat(body):
         c.commit(); c.close()
     return 200, {"ok": True, "heartbeat_ttl": CLAIM_TTL}
 
+def release(body):
+    # Voluntarily hand a claim back to the pool — called by `hazync run` when a prove/submit fails, so a
+    # failed block reopens in seconds instead of waiting out the CLAIM_TTL reap. Idempotent and ownership-
+    # checked: only the holder frees a still-claimed range; anything else (already reaped, verified, not
+    # ours) is a no-op success so the client never errors on cleanup.
+    rid, pk = body.get("range"), body.get("pubkey", "")
+    if not rid or not pk: return 400, {"error": "range and pubkey required"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    with _lock:
+        c = db()
+        r = c.execute("SELECT status, assignee FROM ranges WHERE id=?", (rid,)).fetchone()
+        if not r: c.close(); return 404, {"error": "no such range"}
+        if r["status"] != "claimed" or r["assignee"] != pk:
+            c.close(); return 200, {"ok": True, "noop": True}   # already freed/verified/not ours
+        c.execute("UPDATE ranges SET status='open', assignee=NULL, handle=NULL, claimed_at=NULL, "
+                  "last_beat=NULL WHERE id=?", (rid,))
+        c.commit(); c.close()
+    return 200, {"ok": True, "released": rid}
+
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
@@ -693,14 +712,15 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         p = urlparse(self.path).path
-        if p not in ("/api/claim", "/api/heartbeat", "/api/submit"):
+        if p not in ("/api/claim", "/api/heartbeat", "/api/submit", "/api/release"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
-        fn = {"/api/claim": claim, "/api/heartbeat": heartbeat, "/api/submit": submit}[p]
+        fn = {"/api/claim": claim, "/api/heartbeat": heartbeat, "/api/submit": submit,
+              "/api/release": release}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 

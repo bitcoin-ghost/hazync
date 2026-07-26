@@ -27,6 +27,14 @@ impl<'de> serde::Deserialize<'de> for PackedBytes {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
             fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
             fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+            // JSON (serde_json) has no native bytes type: `serialize_bytes` emits a sequence of u8, so the
+            // bundle round-trip (bridge writes bundle_<n>.json, prove-range-bridge reads it) lands here.
+            // risc0's binary serde still hits visit_bytes/visit_byte_buf above; both paths yield Vec<u8>.
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(b) = seq.next_element::<u8>()? { out.push(b); }
+                Ok(out)
+            }
         }
         Ok(PackedBytes(d.deserialize_byte_buf(V)?))
     }
