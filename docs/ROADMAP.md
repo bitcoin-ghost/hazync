@@ -65,16 +65,16 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `ffdc6095…` (real-Core `pow.cpp` difficulty retarget carved into the guest — see `reproduce/METHOD_ID`, authoritative). Superseded history:
+  `7a8b29e0…` (maximal-Core: every consensus constant sourced from Core's own chainparams.cpp — see `reproduce/METHOD_ID`, authoritative). Superseded history:
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening) →
-  `ffdc6095…` (real-Core retarget carve; v0.8.0). Each supersession changed only the guest source; the
-  reproducible-build mechanism is unchanged.
+  `ffdc6095…` (real-Core `pow.cpp` retarget carve) → `7a8b29e0…` (chainparams-sourced constants; v0.8.0).
+  Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
-    carried over (robustness-only). The `ffdc6095` retarget carve is likewise behaviourally identical
-    (476-retarget + fuzz equivalence), so the board carries over again; re-proven at `ffdc6095` to keep
-    the live board, releases, and docs consistent.
-  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `ffdc6095`): every representative era block validates
+    carried over (robustness-only). The `ffdc6095` pow.cpp carve and the `7a8b29e0` chainparams sourcing
+    are likewise behaviourally identical (476-retarget + fuzz equivalence; chainparams-anchor green), so
+    the board carries over again; re-proven at `7a8b29e0` to keep the live board, releases, and docs consistent.
+  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `7a8b29e0`): every representative era block validates
     on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
     (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one
     real defect — a host witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would
