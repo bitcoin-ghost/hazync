@@ -10,15 +10,19 @@ Bitcoin Core consensus, the UTXO set is exactly the committed root, and cumulati
 committed* — checkable by verifying one succinct proof, without re-executing history or trusting peers.
 
 ## 2. Trust base (what the soundness rests on)
-1. **Real Bitcoin Core v28 code.** The script interpreter, sighash, and libsecp256k1 are the *actual*
-   Core sources compiled into the zkVM — not a reimplementation. Only two portability shims
-   (`serialize.h` 32-bit int overload; SHA256 routed to the RISC0 accelerator, byte-identical) and
-   libc/unwinder glue. **No consensus-logic changes.** This is the property that removes the
-   reimplementation-soundness gap every prior effort carries. Auditable: `patches/000{1,2}` + the TU
-   list in `prover/methods/guest/build.rs`.
+1. **Real Bitcoin Core v28 code.** The script interpreter, sighash, `CheckTransaction`, the
+   transaction/weight/sigop machinery, `ComputeMerkleRoot`, the difficulty retarget (`pow.cpp`'s
+   `CalculateNextWorkRequired` / `CheckProofOfWorkImpl`, driven through the real `CBlockIndex` /
+   `chain.cpp` with consensus constants from `kernel/chainparams.cpp` and `primitives/block.cpp`), and
+   libsecp256k1 are the *actual* Core sources compiled into the zkVM — not a reimplementation. The shims
+   are portability-only (`serialize.h` 32-bit int overload; SHA256 routed to the RISC0 accelerator,
+   byte-identical; single-thread no-op `coreshim/{sync,threadsafety,logging}.h`) plus libc/unwinder glue.
+   **No consensus-logic changes.** This is the property that removes the reimplementation-soundness gap
+   every prior effort carries. Auditable: `patches/000{1,2}` + the TU list in
+   `prover/methods/guest/build.rs`.
 2. **SHA-256 collision resistance** — the accumulator (Utreexo) and merkle/commitment checks are
    SHA-256; that's their entire security. The accumulator is *our* code but it's a commitment ABOVE
-   consensus, not a Core reimpl — exhaustively tested (`accumulator/src/lib.rs`). Being the one non-Core
+   consensus, not a Core reimpl — the proven version is the guest's `prover/methods/guest/src/utreexo.rs`, differentially fuzzed against a reference model (`accumulator/src/lib.rs`). Being the one non-Core
    component, it is the single most likely location of any remaining soundness bug; it is differentially
    fuzzed but has **not** been externally audited.
 3. **RISC0 zkVM soundness** — the STARK/SNARK proving system. Standard cryptographic assumption.
@@ -139,8 +143,9 @@ ENFORCED (real Core unless noted):
 - `CheckTransaction` (structure, dup inputs, value bounds).
 - No inflation: Σin ≥ Σout per tx; coinbase ≤ subsidy(height)+Σfees (subsidy = exact halving formula —
   **reimplemented, differentially fuzzed vs Core**).
-- PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget rule
-  (**reimplemented, differentially fuzzed vs Core**).
+- PoW (`CheckProofOfWorkImpl`, real arith_uint256) + difficulty retarget (`pow.cpp`'s
+  `CalculateNextWorkRequired`, **real compiled Core**, cross-checked against the actual on-chain nBits
+  at all 476 mainnet retargets).
 - Merkle root, **including the CVE-2012-2459 mutation check** (duplicate-txid malleability — Core's
   `mutated` flag is captured and rejected); **BIP141 witness commitment** (activation-gated at segwit
   height 481824, round 8 / G3) + **`unexpected-witness`** below activation (incl. the coinbase).

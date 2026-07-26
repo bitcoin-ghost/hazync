@@ -72,10 +72,12 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0).
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
-    carried over (robustness-only). The `ffdc6095` pow.cpp carve and the `7a8b29e0` chainparams sourcing
-    are likewise behaviourally identical (476-retarget + fuzz equivalence; chainparams-anchor green), so
-    the board carries over again; re-proven at `7a8b29e0` to keep the live board, releases, and docs consistent.
-  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `7a8b29e0`): every representative era block validates
+    carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`
+    (chainparams-sourced constants) — both behaviourally identical (476-retarget + fuzz equivalence;
+    chainparams-anchor green). The v0.9.0 change to `68819a54` altered the witness **wire format**
+    (byte-packing + per-tx de-duplication), so proofs are not interchangeable across that id — the board is
+    being **re-proven from genesis at `68819a54`** (live now: contiguous frontier climbing on the coordinator).
+  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `68819a54`): every representative era block validates
     on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
     (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one
     real defect — a host witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would

@@ -33,6 +33,8 @@ sudo apt install -y python3-cryptography
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
+Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`SECURITY.md`](SECURITY.md#verifying-releases) — or, stronger, run `./host method-id` and confirm it matches `reproduce/METHOD_ID`.
+
 > **Building from source instead?** You *must* build the **canonical guest** (via `reproduce/Dockerfile`, or the pinned inputs at fixed paths — see the repo README) so your `METHOD_ID` matches `reproduce/METHOD_ID`. If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
 
 ## Step 2: set your name and point at the party
@@ -71,6 +73,8 @@ chmod +x host
 curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin
 ```
+
+(Want to check the verifier binary itself before trusting it? SHA256 + PGP signature steps are in [`SECURITY.md`](SECURITY.md#verifying-releases); or confirm `./host method-id` equals `reproduce/METHOD_ID`.)
 
 If it prints a line starting with `RANGE-OK`, the proof is genuine — with one nuance: `verify-any` attests *that single step* (this block is a correct consensus transition between its stated boundaries); `verify-chain` / `verify-range` (or the board's connected frontier) are what pin it back to the genesis anchor. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
 

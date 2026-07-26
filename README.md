@@ -1,6 +1,6 @@
 # Hazync
 
-**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* Core code for the hard, edge-case-heavy part of validation — the script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`, `ComputeMerkleRoot`, the transaction/weight/sigop machinery, the difficulty retarget (`pow.cpp`'s `CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1` — inside a zkVM, not a reimplementation, and proves each block valid under real consensus. That's where prior validity-proof efforts inherit the question "does your rewrite match Core in every edge case, forever?" — and where Hazync doesn't. What remains outside compiled Core is a thin, self-contained slice — the subsidy halving schedule and the script-flag activation heights — and each is differentially tested against Core (the retarget carve is checked against the *actual on-chain nBits* at every one of the 476 mainnet retargets; the flag schedule is proven a sound superset of Core's `GetBlockScriptFlags`).
+**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* Core code for the hard, edge-case-heavy part of validation — the script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`, `ComputeMerkleRoot`, the transaction/weight/sigop machinery, the difficulty retarget (`pow.cpp`'s `CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1` — inside a zkVM, not a reimplementation, and proves each block valid under real consensus. That's where prior validity-proof efforts inherit the question "does your rewrite match Core in every edge case, forever?" — and where Hazync doesn't. What remains outside compiled Core is a thin, self-contained slice — the subsidy halving schedule and the script-flag activation heights — each differentially tested against Core (the flag schedule is proven a sound superset of Core's `GetBlockScriptFlags`). And even the compiled retarget is belt-and-suspenders: cross-checked against the *actual on-chain nBits* at every one of the 476 mainnet retargets.
 
 The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
 
@@ -22,7 +22,7 @@ curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 docker run --rm -v "$PWD":/w -w /w ubuntu:22.04 ./host verify-any proof.bin
 ```
 
-(Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).)
+(Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).) Want to trust the binary itself? Verify its SHA256 + PGP signature first — [`SECURITY.md`](SECURITY.md#verifying-releases). The stronger guarantee, though, is reproducibility: `host method-id` prints the guest image id, and it matches `reproduce/METHOD_ID` byte for byte.
 
 `RANGE-OK` means the STARK checks out and the receipt is a valid proof that block *n* is a correct consensus transition between its stated boundaries. **Genesis-anchoring** — that those boundaries chain all the way back to the real genesis — is what the connected chain establishes (the board's frontier, or `host verify-chain` on a folded chain proof, which pins the genesis anchor); a single isolated proof attests its own step, not the whole history. Every proof on the [board](https://bitcoinghost.org/hazync) is public. The binary is the canonical guest — rebuild it yourself (`reproduce/Dockerfile`) and you get the same image id, byte for byte (`reproduce/METHOD_ID`).
 
@@ -49,7 +49,8 @@ Still to come: the full genesis→tip proving campaign and an external audit. Tr
 
 - New to zero-knowledge proofs? [`EXPLAINER.md`](EXPLAINER.md) — plain English.
 - Prove blocks, join the party: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Soundness and the audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](AUDIT_2026-07.md)
+- Soundness statement (a reviewer's best first read): [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
+- Audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](AUDIT_2026-07.md)
 - How it's built: [`docs/`](docs/)
 
 ## Licence

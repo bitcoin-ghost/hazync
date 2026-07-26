@@ -38,9 +38,10 @@ A good signature plus a matching checksum means the binary is the maintainer's p
 that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
 confirm its `METHOD_ID` matches the canonical id in `reproduce/METHOD_ID`, and any proof verifies against
 that id regardless of who built the host. The signature adds provenance on top of that. (The canonical id
-is re-pinned whenever the guest changes — most recently by the round-9 post-audit hardening (the P2SH
-sigop over-count fix #4 and the R-1 coinbase `vin[0]` empty-guard — see the round-9 section below); the
-reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 v0.5.1, `Cargo.lock`,
+is re-pinned whenever the guest changes — most recently to `68819a54` (v0.9.0: witness wire-format —
+byte-packing + per-tx de-duplication), after the round-9 post-audit hardening (`cb114426`), the real-Core
+`pow.cpp` retarget carve (`ffdc6095`), and chainparams-sourced consensus constants (`7a8b29e0`); see
+`reproduce/METHOD_ID` for the authoritative lineage. The reproducible-build mechanism itself — pinned toolchain, Core v28.0, secp256k1 v0.5.1, `Cargo.lock`,
 `reproduce/Dockerfile` — is unchanged, so the id stays reproducible, it is just a new value.)
 
 ## Status at a glance
