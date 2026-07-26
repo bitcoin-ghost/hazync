@@ -1,0 +1,15 @@
+[Unit]
+Description=Hazync coordinator backup (signed ledger + proof receipts)
+# Back up AFTER the coordinator is up so the DB exists; backup.sh uses sqlite's online .backup, so it is
+# safe to run while the coordinator is live (WAL-consistent, no downtime).
+After=hazync-coordinator.service
+
+[Service]
+Type=oneshot
+Environment=HZ_HOME=/opt/hazync
+# STRONGLY RECOMMENDED: set an offsite target, or the snapshot lives on the same disk as the data it backs
+# up and dies with the box. Uncomment and point at your remote (rclone:remote:path or user@host:/path):
+# Environment=BACKUP_REMOTE=rclone:hazync-backup:hazync
+ExecStart=/opt/hazync/coordinator/deploy/backup.sh
+Nice=10
+IOSchedulingClass=idle
