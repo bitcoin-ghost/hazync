@@ -70,6 +70,11 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           ./prover/target/release/host script-flags-test
+      - name: Bundle JSON round-trip (regression: v0.9.0 spend-block parse bug, block 170)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          ./prover/target/release/host bundle-roundtrip-test
       - name: Chainparams anchor (Core's compiled consensus constants == canonical mainnet values)
         run: |
           . "$HOME/.cargo/env"

@@ -172,16 +172,33 @@ def _release(rng, pub):
     try: post("/api/release", {"range": rng, "pubkey": pub})
     except Exception: pass
 
+# Failures that smaller proving segments cannot fix — a bad/mismatched bundle, a guest-id mismatch, a
+# missing input. When the host dies on one of these, surface the real error at once instead of burning all
+# three retries and hiding it behind "failed to prove" (that masking cost real debugging time on the
+# v0.9.0 bundle-parse bug — the true cause, "parse bundle: invalid type: sequence", was buried).
+_HARD_ERR = ("parse bundle", "invalid type", "deserialize", "missing field", "METHOD_ID", "image id",
+             "read bundle", "No such file", "no such file")
+
 def _run_with_seg_retry(argv, env, work, label):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
     # proving segments (HAZYNC_SEG_PO2 20->19->18); smaller segments repartition the work and clear the
     # boundary, and the receipt is identical (guest unchanged, METHOD_ID unchanged), so it's transparent.
+    last = ""
     for _po2 in (20, 19, 18):
-        if subprocess.run([HOSTBIN, *argv],
-                          env=dict(env, HAZYNC_SEG_PO2=str(_po2)), cwd=work).returncode == 0:
+        r = subprocess.run([HOSTBIN, *argv], env=dict(env, HAZYNC_SEG_PO2=str(_po2)),
+                           cwd=work, stderr=subprocess.PIPE, text=True)
+        if r.stderr:                                    # keep the host's real output in the worker log
+            sys.stderr.write(r.stderr); sys.stderr.flush()
+        if r.returncode == 0:
             return
-    sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18)")
+        last = (r.stderr or "").strip()
+        if any(h in last for h in _HARD_ERR):           # smaller segments won't help — fail fast, loudly
+            tail = last.splitlines()[-1] if last else "(no error output)"
+            sys.exit(f"{label}: {tail}\n(not a segment-size issue — retrying smaller won't help; check the "
+                     f"bundle/witness and that `host method-id` matches reproduce/METHOD_ID)")
+    tail = last.splitlines()[-1] if last else "(no error output)"
+    sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {tail}")
 
 def cmd_prove(args):
     rng = args[0]

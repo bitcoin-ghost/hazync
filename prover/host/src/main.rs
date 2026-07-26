@@ -1747,6 +1747,53 @@ struct Bundle {
     witness: BlockWitness,
 }
 
+// Regression test for the v0.9.0 bundle-parse bug. `PackedBytes` serialises via `serialize_bytes`, which
+// serde_json emits as a JSON array (a *sequence*) since JSON has no native bytes type — so the deserialiser
+// must accept a sequence, not only a bytes type. Any block with a non-empty `txs`/`tx_prevouts` (i.e. every
+// block with a real spend; block 170 is the first) exercises this path. The whole adversarial+regression
+// suite passed while this was broken because those prove from in-memory witnesses; ONLY the bridge →
+// bundle_<n>.json → prove-range-bridge round-trip (this exact `to_vec` → `from_slice`) hit it. This test
+// closes that coverage gap: it must PASS after the fix and would panic ("invalid type: sequence") before it.
+fn bundle_roundtrip_test() {
+    let mut fails = 0;
+    // 1) PackedBytes alone, across cases that stress the JSON sequence path: empty, single, the full 0..=255
+    //    range (bytes > 127 are where a signed/unsigned mixup would show), and a hand-picked mix.
+    for case in [Vec::new(), vec![0u8], (0u8..=255).collect::<Vec<u8>>(), vec![255, 128, 0, 1, 127, 200]] {
+        let j = serde_json::to_vec(&PackedBytes(case.clone())).expect("serialise PackedBytes");
+        let back: PackedBytes = serde_json::from_slice(&j)
+            .expect("PackedBytes JSON round-trip must parse (regression: v0.9.0 'invalid type: sequence')");
+        if back.0 != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedBytes {} bytes mismatch", case.len()); fails += 1; }
+    }
+    // 2) A full Bundle carrying a spend tx — the exact struct prove-range-bridge parses. Non-empty txs +
+    //    tx_prevouts with bytes spanning the range, so this is the production shape that used to fail.
+    let raw_tx: Vec<u8> = (0u8..=255).cycle().take(400).collect();
+    let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
+    let w = BlockWitness {
+        header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
+        txids: vec![[7u8; 32], [8u8; 32]], wtxids: vec![[0u8; 32], [0u8; 32]],
+        root_prev: WireStump { roots: vec![], num_leaves: 0 },
+        txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
+        inputs: vec![], new_outputs: vec![[5u8; 32]],
+        root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None,
+    };
+    let b = Bundle {
+        height: 170, in_tip: [1u8; 32], in_roots: vec![None, Some([2u8; 32])], in_leaves: 42,
+        in_nbits: 0x1d00_ffff, in_time: 1_231_731_025, in_epoch_start: 1_231_006_505, in_recent: vec![1, 2, 3],
+        witness: w,
+    };
+    let j = serde_json::to_vec(&b).expect("serialise Bundle");
+    let back: Bundle = serde_json::from_slice(&j)
+        .expect("Bundle JSON round-trip must parse (regression: the v0.9.0 spend-block parse bug)");
+    if back.witness.txs.first().map(|p| &p.0) != Some(&raw_tx) {
+        println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.txs mismatch"); fails += 1;
+    }
+    if back.witness.tx_prevouts.first().map(|p| &p.0) != Some(&prevouts) {
+        println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.tx_prevouts mismatch"); fails += 1;
+    }
+    if fails == 0 { println!(">>> BUNDLE-ROUNDTRIP: PASS — PackedBytes + full spend-block Bundle JSON round-trip"); }
+    else { std::process::exit(1); }
+}
+
 fn bcli(args: &[&str]) -> String {
     let dd = std::env::var("HAZYNC_BITCOIN_DATADIR").unwrap_or_else(|_| "/root/.bitcoin".into());
     let o = std::process::Command::new("bitcoin-cli").arg(format!("-datadir={dd}")).args(args)
@@ -2057,6 +2104,7 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "script-flags-test") { script_flags_test(); return; }
+    if args.iter().any(|a| a == "bundle-roundtrip-test") { bundle_roundtrip_test(); return; }
     if let Some(p) = args.iter().position(|a| a == "verify-any") {
         verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
         return;
