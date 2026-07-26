@@ -37,7 +37,7 @@ per-input script proof ── block proof ── chain fold ── tip / range p
  (real VerifyScript)     (all rules)    (recursion)   (one receipt)
 ```
 
-Prove each block with real Core in the zkVM, fold blocks recursively into one receipt, verify the receipt. Witnesses are served ready-made by an archive-node bridge (a full node that drives the UTXO accumulator forward once and emits each block's witness), so a prover needs no node of its own and no chain replay. Details in [`docs/`](docs/).
+Prove each block with real Core in the zkVM, fold blocks recursively into one receipt, verify the receipt. Witnesses are served ready-made by an archive-node bridge (a full node that drives the UTXO accumulator forward once and emits each block's witness) — compactly encoded and de-duplicated per transaction, so a big block's witness is tens of MB smaller — so a prover needs no node of its own and no chain replay. Details in [`docs/`](docs/).
 
 ## Status
 
