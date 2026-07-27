@@ -24,6 +24,10 @@ jobs:
         run: rustup update --no-self-update stable && rustc --version
       - name: Utreexo accumulator tests
         run: cargo test --manifest-path accumulator/Cargo.toml --release
+      - name: Guest pure-Rust helper tests (activation heights, add256, median_time_past)
+        run: cargo test --manifest-path guest-pure-fuzz/Cargo.toml --release
+      - name: Accumulator fuzz-harness unit tests
+        run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
         run: ./prover/check_seg_guards.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
@@ -88,6 +92,16 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && ./chainparams_check.sh
+      - name: BIP68 relative-locktime matrix (real mainnet MTP, height and time based)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && ./test_bip68_locks.sh
+      - name: BIP68 time-lock on a real mainnet transaction (and the pre-CSV non-enforcement control)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && ./test_bip68_real.sh
 
   reproducible-image-id:
     # Build the guest in the hermetic container (fixed paths) and assert its METHOD_ID equals the

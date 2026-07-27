@@ -37,8 +37,14 @@ crashes. Control: removing the H9 height guard is caught in the first scenarios.
 random/adversarial inputs, no crash, all invariants held.
 
 ### 4 — Guest pure-Rust consensus helpers (`guest-pure-fuzz/`)
-`build.rs` extracts `block_script_flags`, `add256`, and `median_time_past` verbatim from
-`main.rs` at compile time (zero drift), and the tests check them against independent references:
+> **2026-07-27:** this harness had stopped building. `build.rs` extracts items verbatim from the guest,
+> and `block_script_flags` + the two exception hashes had moved from `main.rs` into `script_flags.rs`
+> during the chainparams carve, so extraction failed on `BIP16_EXCEPTION`. It rotted precisely because
+> nothing ran it. Fixed (the extractor now searches every guest source) and **added to CI**, along with
+> `audit-fuzz`'s unit tests, so it cannot rot again.
+`build.rs` extracts `block_script_flags`, `add256`, `median_time_past` and the flag/height constants
+they depend on verbatim from the guest sources at compile time (zero drift), and the tests check them
+against independent references:
 - **`block_script_flags`** — the soft-fork activation heights (DERSIG 363725, CLTV 388381, CSV
   419328, NULLDUMMY 481824) are asserted to match canonical Bitcoin **mainnet** chainparams with
   correct off-by-one boundaries (OFF at h-1, ON at h), plus exception-block handling (the BIP16 and
