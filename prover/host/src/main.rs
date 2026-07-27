@@ -117,9 +117,19 @@ fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 // right to its 2^po2 boundary and the assertion `cycles <= 1 << segment.po2` overflows -> the prove panics
 // (on CPU AND cuda — shared witgen). It's a liveness bug, never a wrong proof. Smaller segments repartition
 // the work and clear the boundary, so the caller retries a failed prove with a decremented HAZYNC_SEG_PO2.
-// EVERY prove path calls this so the retry is honoured everywhere. Default 20 = the risc0 default (normal
-// blocks unaffected). Host-side executor config only — the guest is untouched, so METHOD_ID is unchanged.
-fn seg_po2() -> u32 { std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok()).unwrap_or(20) }
+// EVERY prove path calls this so the retry is honoured everywhere. Host-side executor config only — the
+// guest is untouched by this knob, so it does not affect METHOD_ID.
+// Default depends on the backend, because the trade-off does. Bigger segments = fewer of them = less
+// recursion/fold overhead: on GPU that measured ~6% faster than 20 on block 130000 (23.0s vs 24.4s), flat
+// to 22, so 21 is the sweet spot (same speed as 22, less VRAM). But a po2-21 segment also needs ~2x the
+// working memory, and on CPU that is a pure cost — the speed win was never measured there, while an
+// 11 GB box proving block 170 (a 2.3M-cycle block!) hit 8.7 GB RSS and went to swap. Swapping is not a
+// prove *failure*, so the retry ladder below never fires; it just crawls. So: 21 with the cuda feature,
+// the risc0 default of 20 otherwise. HAZYNC_SEG_PO2 overrides either way.
+fn seg_po2() -> u32 {
+    std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if cfg!(feature = "cuda") { 21 } else { 20 })
+}
 
 // This host's guest image id (METHOD_ID) as the canonical RISC0 hex digest.
 fn method_id_hex() -> String { risc0_zkvm::Digest::from(METHOD_ID).to_string() }
@@ -2101,6 +2111,12 @@ fn main() {
         // Print THIS host's guest image id so a contributor can check it matches a proof's guest.
         println!("METHOD_ID {}", method_id_hex());
         println!("  u32x8   {:?}", METHOD_ID);
+        return;
+    }
+    if args.iter().any(|a| a == "seg-po2") {
+        // The segment po2 this binary would use, so the CLI's retry ladder can start from the binary's
+        // own per-backend default (21 cuda / 20 CPU) instead of guessing and wasting a duplicate attempt.
+        println!("{}", seg_po2());
         return;
     }
     if args.iter().any(|a| a == "script-flags-test") { script_flags_test(); return; }

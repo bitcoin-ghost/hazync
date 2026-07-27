@@ -90,13 +90,44 @@ fn main() {
     let gpp = format!("{pfx}riscv32-unknown-elf-g++");
     let ar = format!("{pfx}riscv32-unknown-elf-gcc-ar");
 
+    // ECMULT_WINDOW_SIZE tuning (issue #12): 19 is the measured cycle optimum — ~1.9% fewer guest cycles
+    // than libsecp's default 15 (block 130000), and beyond 19 the resident pre_g table's paging cost
+    // overtakes the wNAF saving. The checked-in precomputed_ecmult.c is generated for windows <=15 and
+    // HARD-ERRORS above that (`#if ECMULT_WINDOW_SIZE > 15 -> #error`), so for a larger window we regenerate
+    // it with libsecp's OWN generator (src/precompute_ecmult.c). That output is deterministic EC math —
+    // byte-identical on any machine — so the guest image id (METHOD_ID) stays reproducible. Regenerate only
+    // when the on-disk table isn't already ours (keeps incremental builds fast; the reproduce container
+    // starts from a fresh <=15 clone and regenerates once).
+    const ECMULT_WINDOW: u32 = 19;
+    let win = ECMULT_WINDOW.to_string();
+    if ECMULT_WINDOW > 15 {
+        let pc = format!("{secp}/src/precomputed_ecmult.c");
+        let want = format!("#if ECMULT_WINDOW_SIZE > {ECMULT_WINDOW}");
+        let up_to_date = std::fs::read_to_string(&pc).map_or(false, |s| s.contains(&want));
+        if !up_to_date {
+            let out = std::env::var("OUT_DIR").unwrap();
+            let genbin = format!("{out}/precompute_ecmult");
+            let host_cc = std::env::var("HOST_CC").unwrap_or_else(|_| "cc".into());
+            let compiled = std::process::Command::new(&host_cc)
+                .current_dir(&secp)
+                .args(["-O2", &format!("-DECMULT_WINDOW_SIZE={ECMULT_WINDOW}"),
+                       "-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1", "-DVERIFY",
+                       "-I.", "-Isrc", "-Iinclude", "src/precompute_ecmult.c", "-o", &genbin])
+                .status().expect("compile precompute_ecmult (host cc)");
+            assert!(compiled.success(), "failed to compile libsecp's ecmult table generator");
+            let ran = std::process::Command::new(&genbin).current_dir(&secp).status()
+                .expect("run precompute_ecmult");
+            assert!(ran.success(), "failed to regenerate precomputed_ecmult.c for window {ECMULT_WINDOW}");
+        }
+    }
+
     // 1) REAL libsecp256k1 (C) + libc-glue shims.
     cc::Build::new()
         .compiler(&gcc).archiver(&ar)
         .flag("-march=rv32im").flag("-mabi=ilp32").opt_level(2).warnings(false)
         .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
-        .define("ECMULT_WINDOW_SIZE", "15").define("ECMULT_GEN_KB", "22")
+        .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", "22")
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))

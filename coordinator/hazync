@@ -180,14 +180,44 @@ def _release(rng, pub):
 _HARD_ERR = ("parse bundle", "invalid type", "deserialize", "missing field", "METHOD_ID", "image id",
              "read bundle", "No such file", "no such file")
 
+_SEG_MIN = 18                                       # below this the segments stop repartitioning usefully
+_SEG_TOP_CACHE = {"v": False}                       # False = not yet asked (None is a valid answer)
+
+def _seg_ladder(env):
+    # [first attempt, then every smaller size down to _SEG_MIN]. The first attempt is None = "let the
+    # binary (or the operator's HAZYNC_SEG_PO2) decide"; the rest walk down from whatever that was, with
+    # no duplicate rung. Falls back to the old fixed ladder if the binary predates `seg-po2`.
+    if env.get("HAZYNC_SEG_PO2", "").isdigit():
+        top = int(env["HAZYNC_SEG_PO2"])
+    else:
+        if _SEG_TOP_CACHE["v"] is False:             # ask the binary once per run, not once per block
+            _SEG_TOP_CACHE["v"] = None
+            try:
+                r = subprocess.run([HOSTBIN, "seg-po2"], capture_output=True, text=True, timeout=30)
+                if r.returncode == 0 and r.stdout.strip().isdigit():
+                    _SEG_TOP_CACHE["v"] = int(r.stdout.strip())
+            except Exception:
+                pass
+        top = _SEG_TOP_CACHE["v"]
+    if top is None:
+        return (None, 20, 19, 18)
+    return (None, *range(top - 1, _SEG_MIN - 1, -1))
+
 def _run_with_seg_retry(argv, env, work, label):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
-    # proving segments (HAZYNC_SEG_PO2 20->19->18); smaller segments repartition the work and clear the
-    # boundary, and the receipt is identical (guest unchanged, METHOD_ID unchanged), so it's transparent.
+    # proving segments; smaller segments repartition the work and clear the boundary, and the receipt is
+    # identical (guest unchanged, METHOD_ID unchanged), so it's transparent.
+    #
+    # The ladder STARTS at the binary's own default rather than a hardcoded number: `host seg-po2` reports
+    # 21 for a cuda build and 20 for CPU (a po2-21 segment needs ~2x the working memory — a win on a GPU,
+    # a pure cost on a RAM-limited CPU box). Hardcoding the top rung would override that per-backend choice
+    # and, on CPU, waste a full duplicate prove attempt at a size that just failed. An operator's explicit
+    # HAZYNC_SEG_PO2 wins the first attempt for the same reason.
     last = ""
-    for _po2 in (20, 19, 18):
-        r = subprocess.run([HOSTBIN, *argv], env=dict(env, HAZYNC_SEG_PO2=str(_po2)),
+    for _po2 in _seg_ladder(env):
+        _env = dict(env) if _po2 is None else dict(env, HAZYNC_SEG_PO2=str(_po2))
+        r = subprocess.run([HOSTBIN, *argv], env=_env,
                            cwd=work, stderr=subprocess.PIPE, text=True)
         if r.stderr:                                    # keep the host's real output in the worker log
             sys.stderr.write(r.stderr); sys.stderr.flush()
