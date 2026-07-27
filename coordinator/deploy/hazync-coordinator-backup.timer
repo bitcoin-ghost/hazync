@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Hazync coordinator backup
+
+[Timer]
+# Daily at 03:17 UTC. Persistent=true runs a missed backup after downtime (e.g. the box was off at 03:17).
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

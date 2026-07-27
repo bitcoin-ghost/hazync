@@ -124,6 +124,24 @@ The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (th
 receipts — the artifacts the "you don't have to trust us" claim depends on) must **both** be backed up,
 offsite. A same-disk copy dies with the box.
 
+> ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of
+> the two schedulers below and confirm a snapshot actually lands (`ls $HZ_HOME/backups`). Until then the
+> ledger + receipts live only on one disk.
+
+**Option A — systemd timer (recommended):** install the units shipped alongside `backup.sh`, set an
+offsite `BACKUP_REMOTE` in the service, and enable the timer:
+
+```bash
+sudo cp coordinator/deploy/hazync-coordinator-backup.{service,timer} /etc/systemd/system/
+sudo systemctl edit hazync-coordinator-backup.service   # add: Environment=BACKUP_REMOTE=rclone:hazync-backup:hazync
+sudo systemctl daemon-reload
+sudo systemctl enable --now hazync-coordinator-backup.timer
+systemctl start hazync-coordinator-backup.service       # run once now; then check $HZ_HOME/backups
+systemctl list-timers hazync-coordinator-backup.timer   # confirm it is scheduled
+```
+
+**Option B — cron:**
+
 ```bash
 # daily, offsite (rclone or rsync target); keeps 14 local snapshots
 17 3 * * *  BACKUP_REMOTE=rclone:hazync-backup:hazync /opt/hazync/coordinator/deploy/backup.sh >> /var/log/hazync-backup.log 2>&1
