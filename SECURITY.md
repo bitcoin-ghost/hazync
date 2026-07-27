@@ -101,6 +101,15 @@ Core's own `HasWitness()` / `GetWitnessHash()`. The host can no longer influence
 decision. Block 741000 (segwit+taproot) still proves valid with an identical tip hash and 394 UTXO
 leaves.
 
+> **Leaf-count note (2026-07-27).** The `394` recorded here and below was measured against the
+> then-current `block_741000.json`, which predated the `coin_mtp` / `coin_height` fields. Without
+> `coin_height` a fixture cannot express an **in-block spend** (a coin created *and* spent inside the
+> same block), so that coin never netted out and left one stray leaf. Regenerating the fixtures from an
+> archive node (`prover/fetch_block_rpc.py`) makes it **393**, and the same −1 appears on 130000
+> (127→126) and 140000 (330→329) — each of those blocks contains exactly one in-block spend. Tip hashes
+> and `cum_work` are unchanged throughout, so this corrects the fixtures, not consensus. The historical
+> figures are left as recorded.
+
 ### SEC-2 (high-criticality location) — accumulator `delete` trusted an unverified position
 `delete(i, proof_i, proof_last)` verified *membership* of the proven leaves but never checked that the
 global index `i` actually matched them, nor that `proof_last` was the current rightmost coin. Fed
@@ -315,7 +324,7 @@ MAJOR hole in the coordinator seam.
   gap; asserted `header.len()==80`; bounds-guarded `check_input_locks`' `input_idx` (fail-closed `-43`).
 
 Validated in execute mode with **no regression**: `regress` (block 170 byte-exact), `adversarial` (all
-holes reject), `check-full` 741000 (byte-exact tip, UTXO 394), `check-bip30`, and an nVersion negative that
+holes reject), `check-full` 741000 (byte-exact tip, UTXO 394 — 393 with the regenerated fixtures, see the leaf-count note above), `check-bip30`, and an nVersion negative that
 rejects. `METHOD_ID` changed (guest changed) ⇒ prior proofs invalid, re-proven from genesis.
 
 ## Round 7 (2026-07-18) — re-audit of the round-6 fixes; no new soundness hole
