@@ -6,6 +6,11 @@ secp256k1/
 __pycache__/
 *.pyc
 
+# libFuzzer corpus + crash artifacts: machine-generated and regenerated on demand (they were 1,160
+# files / 4.6MB, i.e. 96% of the repo's file count). Meaningful inputs are curated in audit-fuzz/seeds/.
+audit-fuzz/fuzz/corpus/
+audit-fuzz/fuzz/artifacts/
+
 # never commit prover identity / key material
 .hazync/
 *.hex
