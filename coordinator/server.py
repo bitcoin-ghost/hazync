@@ -70,10 +70,18 @@ _state_lock = threading.Lock()
 # verify-any` subprocesses (each up to 120s + a multi-MiB receipt) and exhaust this small box's CPU/RAM.
 _verify_sem = threading.Semaphore(int(os.environ.get("VERIFY_CONCURRENCY", str(max(1, (os.cpu_count() or 2))))))
 
+# Hosts exempt from rate limiting (comma-separated IPs). A party's OWN provers legitimately issue far
+# more claim/heartbeat/submit traffic from a single IP than any limit sensible for the public, and the
+# tempting fix — raising RATE_MAX to a huge number — disables the limiter for everyone, on a public
+# write endpoint. Exempt the known prover instead and keep real limits for the rest.
+RATE_EXEMPT = {x.strip() for x in os.environ.get("RATE_EXEMPT", "").split(",") if x.strip()}
+
 def rate_ok(ip, kind="w", limit=RATE_MAX):
     """Sliding-window per-IP limiter (kind 'w'=writes/POST, 'r'=reads/GET). True if within budget.
     The map is bounded: once it grows past RATE_MAP_MAX we evict keys whose window has fully aged out,
     so a spoofed/rotating source key can't grow it without limit."""
+    if ip in RATE_EXEMPT:
+        return True
     now = time.time()
     with _rate_lock:
         if len(_rate) > RATE_MAP_MAX:
