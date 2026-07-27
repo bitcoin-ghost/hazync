@@ -203,7 +203,13 @@ it is the attribution ledger and it is small.
 
 ```bash
 # 2. Stop, swap the host binary (KEEP the old one — it is what re-verifies the archived proofs).
-systemctl stop hazync-coordinator
+#
+#    ⚠️ THE COORDINATOR IS NOT THE ONLY BINARY. The archive bridge PRODUCES the witnesses everyone
+#    else consumes, and it is a separate service with its own ExecStart path. Missing it is what
+#    caused the v0.10.0 stall: the bridge stayed on a pre-v0.9.0 host, emitted bundles without the
+#    `txs` field, and every prover panicked with "missing field `txs`" the moment the board reached
+#    the first bundle it had written. Swap BOTH, then run scripts/check-deployment.sh --local.
+systemctl stop hazync-coordinator hazync-bridge
 cp /root/hazync-host-x86_64-linux-gnu /root/hazync-host.bak.<OLD_ID_PREFIX>
 install -m755 ./host-new /root/hazync-host-x86_64-linux-gnu
 /root/hazync-host-x86_64-linux-gnu method-id                     # MUST equal reproduce/METHOD_ID
@@ -213,10 +219,30 @@ install -m755 ./host-new /root/hazync-host-x86_64-linux-gnu
 mv /root/coordinator.db /root/coordinator.db.<OLD_ID_PREFIX>
 mv /root/hazync-proofs /root/hazync-proofs.<OLD_ID_PREFIX> && mkdir /root/hazync-proofs
 
-# 4. Start — init_db() reseeds the open ranges; the frontier restarts at 0.
-systemctl start hazync-coordinator
+# 4. Start BOTH — init_db() reseeds the open ranges; the frontier restarts at 0.
+systemctl start hazync-coordinator hazync-bridge
 curl -s localhost:8899/api/meta      # method_id == the new id, frontier == 0
+
+# 5. Verify no component was left behind. This is the check that would have caught the v0.10.0 stall.
+./scripts/check-deployment.sh --local
 ```
+
+### Then purge the provers' bundle caches
+
+Regenerating bundles is **not enough**. The contributor CLI caches by height
+(`BUNDLE_DIR/bundle_<h>.json`) and skips re-fetching when the file exists, so a prover that already
+pulled a stale bundle keeps replaying it and keeps failing — long after the bridge is fixed. This cost
+real time to spot, because the coordinator was serving the correct bundle the whole while.
+
+On every prover:
+
+```bash
+pkill -f reprove_worker.sh; pkill -f 'hazync run'
+rm -rf "$BUNDLE_DIR" ~/.hazync/bundles          # whatever BUNDLE_DIR the workers use
+./coordinator/run-workers.sh 4                   # re-fetches cleanly; refuses to start on an id mismatch
+```
+
+Confirm a bundle actually re-fetched (a fresh mtime, and `txs` present) before assuming it worked.
 
 Then restart the provers (they pre-flight with `hazync selftest`, which now compares against the new
 `/api/meta` id and fails loudly on a stale worker binary — so update every worker's `HAZYNC_HOST` too).
