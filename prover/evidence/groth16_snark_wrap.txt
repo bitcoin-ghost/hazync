@@ -1,0 +1,64 @@
+# Groth16 SNARK wrap — block 170 (STARK -> Groth16), first recorded measurement
+#
+# Reproduce:  ./target/release/host prove-snark          (CPU binary; see the CUDA note below)
+# Guest:      METHOD_ID 3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e  (v0.10.0)
+# Box:        L40S GPU host, 12-core, CUDA 12.6, driver 595.58.03
+# Date:       2026-07-28
+#
+# Until now there was NO evidence log for this capability, while every other validated capability in
+# this directory had one — and docs/PROVING.md nevertheless stated "the capability is validated
+# (block 170)". This file is that missing measurement. See issues #20/#21/#22/#23.
+
+=== RESULT (CPU path, hazync-host-x86_64-linux-gnu) ===
+
+>>> GROTH16 receipt in 825.7s — VERIFIED. size ~2033 bytes
+    wall=825.73s   maxrss=9730720kB (9.7 GB)   exit=0
+
+  wall clock ........ 825.7 s  (~13.8 min)
+  peak RSS .......... 9.7 GB
+  receipt size ...... 2033 bytes   (bincode::serialize of the whole Receipt)
+  verification ...... receipt.verify(METHOD_ID) OK
+
+=== WHAT THE 2033 BYTES IS, AND IS NOT ===
+
+It is the WHOLE serialised Receipt: seal + journal + claim metadata + framing.
+
+It is NOT the Groth16 proof proper, which is 3 BN254 curve points (2xG1 + 1xG2) = 128-256 bytes.
+That is what the "~200-300 B" figure in docs/PROVING.md, ROADMAP.md and HAZYNC_ARCHITECTURE.md
+describes. Both numbers are true; they are different quantities, and the docs imply the shippable
+artifact is the smaller one. See issue #21.
+
+The journal dominates because risc0 serde commits each u8 as its own 32-bit word, so a [u8; 32]
+occupies 128 bytes on the wire — the same 4x bloat fixed for WITNESSES in v0.9.0 via PackedBytes, but
+never applied to the journal. Estimated (not instrumented) for this ChainState: tip_hash 128 B,
+cum_work 128 B, anchor_id 128 B, utxo_roots ~536 B at 4 roots, fixed scalars + recent_times ~496 B,
+i.e. journal ~1000+ B. Tracked as issue #22 — deferred to the next re-baseline, because changing what
+the guest commits changes METHOD_ID and forces a full board re-prove.
+
+Note the receipt GROWS with chain size: a Utreexo forest carries ~log2(leaves) roots (~25-30 at real
+scale), so no fixed-size claim about the artifact is safe.
+
+=== CUDA PATH: BROKEN (issue #20) ===
+
+The same operation on the CUDA binary fails within ~3 seconds:
+
+  terminate called after throwing an instance of 'sppark_error'
+    what():  cudaStreamSynchronize(stream)@sppark-0.1.15/sppark/util/gpu_t.cuh:158
+             failed: "an illegal memory access was encountered"
+  Command terminated by signal 6
+
+Reproduced on the RELEASED v0.10.0 CUDA binary with the pre-existing prove-snark command, so it is not
+caused by recent work. GPU contention ruled out: identical failure with the GPU completely idle (0%,
+0 MiB); peak RSS at the crash only ~2.7 GB, so not memory exhaustion.
+
+Probable cause: risc0-build-kernel-2.0.1/src/lib.rs:191 applies -arch=native ONLY when neither
+NVCC_PREPEND_FLAGS nor NVCC_APPEND_FLAGS is set. prover/build-release.sh sets NVCC_APPEND_FLAGS for
+multi-arch portability, and that variable also reaches risc0-groth16-sys's arch-specialised sppark MSM
+kernels. Unconfirmed — the deciding test is a build with no NVCC flags (-arch=native) — but if it holds,
+every CUDA binary published since v0.8.0 has Groth16 broken.
+
+=== SCOPE OF THIS MEASUREMENT ===
+
+Block 170 is a single chain_step: the SMALLEST possible case. It says nothing about wrapping a folded
+genesis->N range, which is the artifact that actually matters and remains unmeasured. Do not
+extrapolate 825 s to a real fold.
