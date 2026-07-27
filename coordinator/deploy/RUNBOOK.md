@@ -151,25 +151,41 @@ genesis. This is not a failure; it is the price of a guest change, so batch gues
 The coordinator derives the id it expects from its **own** `HAZYNC_HOST` binary (`expected_method_id()`,
 served at `/api/meta`), so the swap is: new binary in, board cleared, workers restarted.
 
+Read the real paths off the unit first — they are env-driven, so do not assume a layout:
+
+```bash
+systemctl cat hazync-coordinator | grep -E 'WorkingDirectory|COORD_DB|COORD_PROOFS|HAZYNC_HOST'
+```
+
+On the production coordinator those are `COORD_DB=/root/coordinator.db`,
+`COORD_PROOFS=/root/hazync-proofs`, `HAZYNC_HOST=/root/hazync-host-x86_64-linux-gnu`. Substitute yours.
+
 ```bash
 # 1. BACK UP FIRST — the old ledger + receipts are the historical record of the previous baseline.
-sudo -u hazync /opt/hazync/coordinator/deploy/backup.sh          # writes /opt/hazync/backups/<STAMP>
-ls /opt/hazync/backups/                                          # confirm the snapshot exists
+#    backup.sh honours COORD_DB/COORD_PROOFS, so pass them if they are not under $HZ_HOME.
+COORD_DB=/root/coordinator.db COORD_PROOFS=/root/hazync-proofs \
+  BACKUP_DIR=/root/hazync-backups /root/hazync/coordinator/deploy/backup.sh
+cd /root/hazync-backups/<STAMP> && sha256sum -c SHA256SUMS       # verify before relying on it
+```
 
-# 2. Stop, swap the host binary (keep the old one — it is what verifies the archived proofs).
-sudo systemctl stop hazync-coordinator
-sudo cp /opt/hazync/bin/host /opt/hazync/bin/host.bak.$(date +%Y%m%d-%H%M%S)
-sudo install -m755 -o hazync -g hazync ./host-new /opt/hazync/bin/host
-/opt/hazync/bin/host method-id                                   # MUST equal reproduce/METHOD_ID
+⚠️ Without `BACKUP_REMOTE` the snapshot sits on the **same disk** as the data. For a re-baseline that is
+tolerable *only* because step 3 archives in place rather than deleting — but copy the DB off-box anyway;
+it is the attribution ledger and it is small.
 
-# 3. Clear the board. Archive rather than delete — `proofs/` is the artifact the "don't trust us"
-#    claim rests on, and the old ledger stays re-verifiable with the archived binary.
-cd /opt/hazync/coordinator
-sudo -u hazync mv coordinator.db coordinator.db.<OLD_ID_PREFIX>
-sudo -u hazync mv proofs proofs.<OLD_ID_PREFIX> && sudo -u hazync mkdir proofs
+```bash
+# 2. Stop, swap the host binary (KEEP the old one — it is what re-verifies the archived proofs).
+systemctl stop hazync-coordinator
+cp /root/hazync-host-x86_64-linux-gnu /root/hazync-host.bak.<OLD_ID_PREFIX>
+install -m755 ./host-new /root/hazync-host-x86_64-linux-gnu
+/root/hazync-host-x86_64-linux-gnu method-id                     # MUST equal reproduce/METHOD_ID
+
+# 3. Clear the board. Archive, never delete — proofs/ is the artifact the "don't trust us" claim
+#    rests on, and the old ledger stays re-verifiable with the archived binary.
+mv /root/coordinator.db /root/coordinator.db.<OLD_ID_PREFIX>
+mv /root/hazync-proofs /root/hazync-proofs.<OLD_ID_PREFIX> && mkdir /root/hazync-proofs
 
 # 4. Start — init_db() reseeds the open ranges; the frontier restarts at 0.
-sudo systemctl start hazync-coordinator
+systemctl start hazync-coordinator
 curl -s localhost:8899/api/meta      # method_id == the new id, frontier == 0
 ```
 
