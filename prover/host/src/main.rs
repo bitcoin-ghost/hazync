@@ -1208,6 +1208,66 @@ fn verify_range_cmd(bin: &str) {
         hex(&rs.out_tip_hash), work_u128(&rs.range_work), work_u128(&total), rs.out_leaves);
 }
 
+// `snark-wrap <range.bin> <out.snark>`: Groth16-compress an EXISTING folded range receipt.
+//
+// Note this wraps a receipt that already exists rather than re-proving: risc0's `compress` takes the
+// composite/succinct receipt and produces a Groth16 one committing the SAME journal. The journal is
+// what every assertion below reads, so wrapping cannot weaken those checks — but it also cannot
+// strengthen them, which is why `verify-snark` re-applies the full genesis pin rather than trusting
+// that a small receipt must have come from a good one.
+fn snark_wrap_cmd(bin: &str, out: &str) {
+    use std::time::Instant;
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
+    // Verify BEFORE wrapping. Compressing an invalid receipt would either fail deep inside the prover
+    // or, worse, produce a small artifact nobody re-checks — so establish validity here first.
+    verify_receipt(&r);
+    let rs: RangeState = r.journal.decode().expect("receipt journal is not a RangeState");
+    assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
+    assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    let before = bincode::serialize(&r).map(|v| v.len()).unwrap_or(0);
+    println!("=== SNARK-wrapping range [{}..{}] (STARK -> Groth16) ===", rs.lo, rs.hi);
+    println!("  input receipt: {} bytes", before);
+    let t = Instant::now();
+    let snark = default_prover()
+        .compress(&ProverOpts::groth16(), &r)
+        .expect("groth16 compress");
+    let secs = t.elapsed().as_secs_f64();
+    // The wrapped receipt must verify against the same guest id, and must carry the same journal —
+    // a wrap that silently changed either would be a forgery vector, not an optimisation.
+    snark.verify(METHOD_ID).expect("wrapped receipt failed to verify");
+    let rs2: RangeState = snark.journal.decode().expect("wrapped journal is not a RangeState");
+    assert!(rs2.lo == rs.lo && rs2.hi == rs.hi && rs2.out_tip_hash == rs.out_tip_hash
+            && rs2.range_work == rs.range_work && rs2.self_id == rs.self_id,
+            "wrapped journal differs from the original — refusing to write it");
+    let bytes = bincode::serialize(&snark).unwrap();
+    std::fs::write(out, &bytes).unwrap();
+    println!("  wrapped in {:.1}s -> {} ({} bytes, {:.0}x smaller)",
+        secs, out, bytes.len(), before as f64 / bytes.len().max(1) as f64);
+    println!("  verify with: host verify-snark {out}");
+}
+
+// `verify-snark <out.snark>`: verify a Groth16-wrapped range proof and PIN it to genesis.
+//
+// This deliberately repeats EVERY assertion `verify-range` makes. A wrap is only worth having if it
+// is exactly as strong as what it replaces; a verifier that skipped the genesis pin because the
+// receipt "came from" a folded proof would accept a fabricated-anchor range in a smaller package.
+fn verify_snark_cmd(bin: &str) {
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(bin).expect("bin")).unwrap();
+    let claimed = r.journal.decode::<RangeState>().ok().map(|rs| rs.self_id);
+    verify_receipt_ex(&r, claimed);
+    let rs: RangeState = r.journal.decode().unwrap();
+    assert!(rs.self_id == METHOD_ID, "self_id != METHOD_ID");
+    assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState (domain tag)"); // H8
+    assert_eq!(rs.lo, 1, "range must start at block 1 (genesis-anchored)");
+    assert_genesis_in_boundary(&rs);
+    let mut total = arr_u128(GENESIS_WORK);
+    add256_host(&mut total, &rs.range_work);
+    let sz = std::fs::metadata(bin).map(|m| m.len()).unwrap_or(0);
+    println!(">>> SNARK RANGE PROOF [1..{}] VERIFIED — genesis-anchored, {} bytes.", rs.hi, sz);
+    println!("  out_tip_hash {}  range_work {}  total_cum_work {}  UTXO leaves {}",
+        hex(&rs.out_tip_hash), work_u128(&rs.range_work), work_u128(&total), rs.out_leaves);
+}
+
 // Verify a range receipt WITHOUT the genesis assertion — the CPU check a coordinator runs on each
 // submitted contribution. Confirms the STARK is valid and reports the committed [lo,hi] + boundary
 // tips, so the coordinator can chain ranges (out_tip of k == in_tip of k+1) into a genesis-anchored
@@ -2123,6 +2183,15 @@ fn main() {
     if args.iter().any(|a| a == "bundle-roundtrip-test") { bundle_roundtrip_test(); return; }
     if let Some(p) = args.iter().position(|a| a == "verify-any") {
         verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "snark-wrap") {
+        snark_wrap_cmd(args.get(p + 1).expect("snark-wrap <range.bin> <out.snark>"),
+                       args.get(p + 2).expect("snark-wrap <range.bin> <out.snark>"));
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "verify-snark") {
+        verify_snark_cmd(args.get(p + 1).expect("verify-snark <out.snark>"));
         return;
     }
     if let Some(p) = args.iter().position(|a| a == "verify-chain") {
