@@ -131,6 +131,17 @@ offsite. A same-disk copy dies with the box.
 **Option A — systemd timer (recommended):** install the units shipped alongside `backup.sh`, set an
 offsite `BACKUP_REMOTE` in the service, and enable the timer:
 
+⚠️ **First check the paths match the coordinator's own unit** — they are env-driven and differ per
+deployment (production uses `/root/...`, not the `/opt/hazync` defaults):
+
+```bash
+systemctl cat hazync-coordinator | grep -E 'COORD_DB|COORD_PROOFS'
+```
+
+If they differ, set the same values in the backup service (`systemctl edit`, see the comments in the
+unit). `backup.sh` aborts loudly on a path that doesn't exist, isn't a SQLite file, or isn't the
+coordinator schema — a wrong path used to yield a *green* snapshot containing an empty database.
+
 ```bash
 sudo cp coordinator/deploy/hazync-coordinator-backup.{service,timer} /etc/systemd/system/
 sudo systemctl edit hazync-coordinator-backup.service   # add: Environment=BACKUP_REMOTE=rclone:hazync-backup:hazync

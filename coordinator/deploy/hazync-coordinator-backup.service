@@ -6,10 +6,23 @@ After=hazync-coordinator.service
 
 [Service]
 Type=oneshot
+# HZ_HOME only supplies DEFAULTS (repo + $HZ_HOME/coordinator/{coordinator.db,proofs}). That fits a
+# fresh install per RUNBOOK §1 — it does NOT fit a deployment whose coordinator unit sets its own
+# COORD_DB / COORD_PROOFS, which is the norm once a box has been migrated.
+#
+# ⚠️ These paths MUST match the coordinator's own unit. Check before enabling the timer:
+#     systemctl cat hazync-coordinator | grep -E 'COORD_DB|COORD_PROOFS'
+# and if they differ from the defaults below, override them here (or via `systemctl edit`):
+#     Environment=COORD_DB=/root/coordinator.db
+#     Environment=COORD_PROOFS=/root/hazync-proofs
+#     Environment=BACKUP_DIR=/root/hazync-backups
+# If the REPO itself is not at $HZ_HOME either, point HZ_REPO at it (that is what ExecStart uses):
+#     Environment=HZ_REPO=/root/hazync
+# backup.sh now aborts loudly on a path that doesn't exist rather than writing an empty snapshot.
 Environment=HZ_HOME=/opt/hazync
 # STRONGLY RECOMMENDED: set an offsite target, or the snapshot lives on the same disk as the data it backs
 # up and dies with the box. Uncomment and point at your remote (rclone:remote:path or user@host:/path):
 # Environment=BACKUP_REMOTE=rclone:hazync-backup:hazync
-ExecStart=/opt/hazync/coordinator/deploy/backup.sh
+ExecStart=/bin/sh -c 'exec "${HZ_REPO:-$HZ_HOME}/coordinator/deploy/backup.sh"'
 Nice=10
 IOSchedulingClass=idle

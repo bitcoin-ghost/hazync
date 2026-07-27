@@ -19,6 +19,40 @@ KEEP="${BACKUP_KEEP:-14}"                 # keep this many local snapshots
 REMOTE="${BACKUP_REMOTE:-}"              # optional: rsync/rclone target, e.g. rclone:remote:path or user@host:/path
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$OUT/$STAMP"
+
+# Fail loudly on a mis-pointed path BEFORE writing anything. Without this the failure is silent and
+# worse than no backup: `sqlite3 <missing-path> ".backup ..."` happily CREATES an empty database and
+# exits 0, and a missing proofs/ dir is skipped by the `[ -d ]` test below — so a wrong COORD_DB/
+# COORD_PROOFS yields a green, rotating, offsite-copied snapshot containing nothing at all. The paths
+# are env-driven and must match whatever the coordinator unit sets; they differ per deployment.
+for _v in DB PROOFS; do
+    eval "_p=\$$_v"
+    if [ ! -e "$_p" ]; then
+        echo "[backup] FATAL: $_v path does not exist: $_p" >&2
+        echo "[backup] set COORD_DB / COORD_PROOFS (or HZ_HOME) to match the coordinator's own unit —" >&2
+        echo "[backup] check: systemctl cat hazync-coordinator | grep -E 'COORD_DB|COORD_PROOFS'" >&2
+        exit 1
+    fi
+done
+[ -s "$DB" ] || { echo "[backup] FATAL: ledger is empty: $DB" >&2; exit 1; }
+# Check it is actually a SQLite database, by magic header. This runs with no dependencies, because the
+# sqlite3 schema probe below cannot: on a box without sqlite3 we fall back to `cp`, which will happily
+# copy any file at all — so without this a wrong-but-existing path (or a stray file) is archived as
+# though it were the ledger.
+case "$(head -c 15 "$DB" 2>/dev/null)" in
+    "SQLite format 3") : ;;
+    *) echo "[backup] FATAL: $DB is not a SQLite database (bad magic header)" >&2; exit 1 ;;
+esac
+# And that it is OUR schema — an unrelated SQLite file, or a stray empty DB left by an earlier
+# mis-pointed run, is not the coordinator ledger and must not pass as a good backup.
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB" "select count(*) from ranges;" >/dev/null 2>&1 || {
+        echo "[backup] FATAL: $DB is not a coordinator ledger (no 'ranges' table)" >&2; exit 1; }
+else
+    echo "[backup] WARNING: sqlite3 not installed — falling back to a plain cp of the ledger, which is" >&2
+    echo "[backup] NOT WAL-consistent under a live coordinator. Install sqlite3 on this box." >&2
+fi
+
 mkdir -p "$DEST"
 
 # 1. Consistent DB snapshot — use sqlite's online backup (safe while the coordinator is running/WAL).
