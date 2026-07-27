@@ -58,6 +58,27 @@ fn main() {
     let core = format!("{base}/bitcoin-core/src");
     let shim = format!("{base}/coreshim");
 
+    // Guard a STALE HAZYNC_BASE. provision-vps.sh copies coreshim/*.h into $HAZYNC_BASE/coreshim, but a
+    // base provisioned BEFORE a shim was added (e.g. logging.h, added for the chainparams carve) silently
+    // lacks it, the build falls back to Core's real header, and it dies deep in the C++ compile with a
+    // cryptic error ("'StdLockGuard' was not declared", etc.). Fail fast, clearly, and actionably instead:
+    // every shim the repo ships (the source of truth, next to this crate) must exist in the base.
+    let repo_shim = format!("{}/../../../coreshim", std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    if let Ok(entries) = std::fs::read_dir(&repo_shim) {
+        for e in entries.flatten() {
+            let n = e.file_name();
+            let is_h = std::path::Path::new(&n).extension().map_or(false, |x| x == "h");
+            if is_h && !std::path::Path::new(&format!("{shim}/{}", n.to_string_lossy())).exists() {
+                panic!(
+                    "coreshim is stale: {shim} is missing '{}' (the repo ships it in coreshim/). Your \
+                     HAZYNC_BASE was provisioned before this shim existed. Re-run provision-vps.sh — it \
+                     copies coreshim/*.h into $HAZYNC_BASE/coreshim.",
+                    n.to_string_lossy()
+                );
+            }
+        }
+    }
+
     // Reproducible builds: remap the absolute source root to a fixed virtual path so __FILE__ and
     // debug strings baked into the compiled Core/secp objects don't carry $HAZYNC_BASE / the build
     // machine's home dir — which would otherwise change the guest image id (METHOD_ID) per machine.
