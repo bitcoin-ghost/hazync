@@ -79,16 +79,30 @@ The repo went public fast and reads like working notes. Make it a curated artifa
     (byte-packing + per-tx de-duplication), and v0.10.0's `3f52baff` changes the guest ELF again, so proofs
     are not interchangeable across either id. The board reached 3,897 blocks at `68819a54` before being
     **restarted from genesis at `3f52baff`** (the old ledger + receipts are archived and stay re-verifiable
-    with the v0.9.1 binary). At the new id, blocks 130000 / 140000 / 741000 were re-checked and produce
-    identical tip hashes, `cum_work` and UTXO-leaf counts — the era sweep itself has not been re-run on an
-    archive node, but the change is a libsecp compile-time constant, not consensus logic. Two re-baselines
-    in two days is the cost of shipping guest changes piecemeal: batch them.
-  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `68819a54`): every representative era block validates
-    on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
-    (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one
-    real defect — a host witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would
-    have stalled the bridge at the first colliding-txid block — fixed in `v0.7.2` (host-only, id unchanged;
-    see `SECURITY.md`).
+    with the v0.9.1 binary). Two re-baselines in two days is the cost of shipping guest changes
+    piecemeal: batch them.
+  - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `68819a54`, **re-run in full
+    2026-07-27 at `3f52baff`**): every representative era block validates on a real archive node with all
+    consensus flags true — segwit (500000), taproot (750000), big-block (741000, ~6.4k inputs), and the
+    pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one real defect — a host
+    witness-builder bug (in-block spends keyed on txid, not the coin leaf) that would have stalled the
+    bridge at the first colliding-txid block — fixed in `v0.7.2` (host-only, id unchanged; see
+    `SECURITY.md`).
+
+    v0.10.0 results, every fixture regenerated from an archive node via `prover/fetch_block_rpc.py` and
+    each tip checked against the node's own `getblockhash`:
+
+    | block | verdict | cycles | UTXO leaves | tip matches chain |
+    |-------|---------|--------|-------------|-------------------|
+    | 130000 (pre-BIP34) | VALID | 22,018,858 | 126 | ✓ |
+    | 140000 | VALID | 406,574,397 | 329 | ✓ |
+    | 500000 (segwit) | VALID | 12,864,697,913 | 5,128 | ✓ |
+    | 741000 (big block) | VALID | 1,793,731,304 | 393 | ✓ |
+    | 750000 (taproot) | VALID | 16,165,911,396 | 7,922 | ✓ |
+
+    The leaf counts are one lower than previously recorded on 130000/140000/741000 because the old
+    fixtures predated `coin_height` and so could not express an in-block spend; each of those blocks has
+    exactly one. Tip hashes and `cum_work` are unchanged — see the leaf-count note in `../SECURITY.md`.
 
 ## 3. External review + writeup
 
