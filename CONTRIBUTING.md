@@ -34,9 +34,13 @@ curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download
 chmod +x host
 # the contributor CLI + signing library
 curl -L -o hazync https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/hazync
-chmod +x hazync
+curl -L -o run-workers.sh https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/run-workers.sh
+chmod +x hazync run-workers.sh
 sudo apt install -y python3-cryptography
 ```
+
+(`run-workers.sh` is optional — it just runs several `hazync run` loops for you. Keep it **next to**
+`hazync`; it looks for the CLI beside itself.)
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
@@ -72,6 +76,19 @@ It confirms your prover is present, its guest `METHOD_ID` matches the coordinato
 ```
 
 `run` claims the work, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
+
+**Leaving it running, or running several at once?** One `run` proves one claim and exits, so use the
+supplied loop — it keeps N workers going and, importantly, refuses to start if your guest id doesn't
+match the coordinator's:
+
+```
+HAZYNC_HOST=./host ./run-workers.sh 4          # 4 parallel workers, logs in ~/hazync-workers
+./run-workers.sh 4 --stop
+```
+
+That pre-flight matters: a worker on the wrong guest id proves happily and has **every** submission
+rejected, burning GPU hours for nothing. That is exactly what happens if you keep an old binary after a
+re-baseline, so the script blocks it rather than letting it run.
 
 Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block (past the coordinator's served window) is not something a fresh contributor can prove yet: the coordinator's archive bridge serves a ready-made witness for each block in its window near the frontier, and you prove a block directly from that witness — no node of your own, no chain replay.
 

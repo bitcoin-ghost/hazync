@@ -182,6 +182,18 @@ slower). The guest is pure Core; acceleration analysis in [`ACCELERATION.md`](AC
 
 ## Building the release binaries (maintainer notes)
 
+**Both binaries are built by `prover/build-release.sh`**, which encodes everything below:
+
+```bash
+./prover/build-release.sh cpu     # -> dist/hazync-host-x86_64-linux-gnu
+./prover/build-release.sh cuda    # -> dist/hazync-host-x86_64-linux-gnu-cuda
+```
+
+It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch NVCC flags, and prints
+`METHOD_ID` / `seg-po2` / glibc / SASS coverage next to the canonical id so a mismatch is obvious before
+you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
+the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
+
 Both published binaries must print the canonical `METHOD_ID` (`3f52baff…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
