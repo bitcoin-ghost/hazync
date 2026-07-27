@@ -62,13 +62,35 @@ else
     cp -- "$DB" "$DEST/coordinator.db"   # fallback; prefer sqlite3 for a WAL-consistent copy
 fi
 
-# 2. Proof receipts — the re-verifiable artifacts. Hard-link into the snapshot (cheap), then archive.
+# 2. Proof receipts — the re-verifiable artifacts.
+#
+# The coordinator is LIVE while this runs and workers land new receipts continuously, so a naive
+# `tar <dir>` hits "file changed as we read it", exits 1, and `set -e` kills the whole backup — i.e. it
+# would fail every night on exactly the busy coordinator it exists to protect.
+#
+# So: snapshot the file LIST first and archive only those entries. Receipts are immutable once written
+# (one file per proven block), so anything that appears mid-run simply belongs to the next snapshot.
+# tar's exit 1 is the "changed/vanished as we read" warning class and is tolerated; >=2 is a real error.
+PROOF_COUNT=0
 if [ -d "$PROOFS" ]; then
-    tar -C "$(dirname "$PROOFS")" -czf "$DEST/proofs.tar.gz" "$(basename "$PROOFS")"
+    _list="$DEST/.proof-list"
+    ( cd "$(dirname "$PROOFS")" && find "$(basename "$PROOFS")" -type f -print > "$_list" )
+    PROOF_COUNT=$(wc -l < "$_list" | tr -d ' ')
+    set +e
+    tar -C "$(dirname "$PROOFS")" -czf "$DEST/proofs.tar.gz" -T "$_list"
+    _tar_rc=$?
+    set -e
+    rm -f "$_list"
+    if [ "$_tar_rc" -ge 2 ]; then
+        echo "[backup] FATAL: tar failed on $PROOFS (exit $_tar_rc)" >&2; exit 1
+    elif [ "$_tar_rc" -eq 1 ]; then
+        echo "[backup] note: some receipts changed/vanished while archiving (live coordinator) — expected"
+    fi
 fi
 
 # 3. Manifest + checksums so a restore can be verified.
-{ echo "hazync backup $STAMP"; echo "db: $DB"; echo "proofs: $PROOFS"; } > "$DEST/MANIFEST.txt"
+{ echo "hazync backup $STAMP"; echo "db: $DB"; echo "proofs: $PROOFS";
+  echo "receipts: $PROOF_COUNT"; } > "$DEST/MANIFEST.txt"
 ( cd "$DEST" && sha256sum ./* > SHA256SUMS 2>/dev/null || true )
 echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1))"
 
