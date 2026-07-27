@@ -16,6 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags are needed by check-versions.sh to compare the documented "current release" against the
+          # newest tag. The default shallow checkout has none, and the check would silently skip.
+          fetch-depth: 0
       - name: Rust toolchain
         run: rustup update --no-self-update stable && rustc --version
       - name: Utreexo accumulator tests
@@ -24,6 +28,8 @@ jobs:
         run: ./prover/check_seg_guards.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
+      - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
+        run: ./scripts/check-versions.sh
 
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
