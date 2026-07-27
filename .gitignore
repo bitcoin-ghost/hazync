@@ -1,5 +1,6 @@
 target/
 *.log
+dist/                      # prover/build-release.sh output (70-330MB binaries)
 bitcoin-core/
 secp256k1/
 __pycache__/
