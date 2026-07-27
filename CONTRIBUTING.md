@@ -15,6 +15,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 | Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done |
 | Prove early or small blocks | An NVIDIA GPU + CUDA 12.6 (or the CPU binary, slower) |
 | Prove big modern blocks (thousands of inputs) | 64 GB+ RAM and a serious GPU |
+| Run your own party (coordinator + archive bridge) | An always-on box with a full `bitcoind` — ~8-core, 32 GB, 1 TB+ NVMe |
 
 **Proving memory.** A proving *segment* is the unit that has to fit in memory, and its size is
 `HAZYNC_SEG_PO2` — each step up doubles the working set. The binary picks a sensible default (21 on the
@@ -22,7 +23,6 @@ CUDA build, where bigger segments prove ~6% faster; 20 on CPU, where the extra m
 the CLI automatically retries smaller if a prove fails. But **swapping is not a failure**, so if your box
 is RAM-tight it will crawl rather than fall back — set `HAZYNC_SEG_PO2=20` (or 19) explicitly. For scale:
 even block 170, a 2.3M-cycle toy block, peaks around 8.7 GB at po2 21.
-| Run your own party (coordinator + archive bridge) | An always-on box with a full `bitcoind` — ~8-core, 32 GB, 1 TB+ NVMe |
 
 ## Step 1: get the prover (no build needed)
 

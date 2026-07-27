@@ -8,8 +8,8 @@ make an invalid input prove valid, that is the finding that matters most.
 
 The property that makes this worth reviewing: the prover runs **real Bitcoin Core v28 consensus code**
 (unmodified `interpreter.cpp`, `SignatureHash`, `libsecp256k1`) inside a RISC0 zkVM, plus a Utreexo
-accumulator. There is no consensus reimplementation to diverge from Core — see `SOUNDNESS.md` for the
-full trust base and the two portability shims.
+accumulator. There is no consensus reimplementation to diverge from Core — see [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
+for the full trust base and the two portability shims.
 
 ## Verifying releases
 
@@ -29,8 +29,13 @@ curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt.asc
 gpg --recv-keys 852C2B3190F5B928            # import the key once (from a keyserver / trusted source)
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature from the key above
-sha256sum -c SHA256SUMS.txt                       # → hazync-host-x86_64-linux-gnu: OK
+sha256sum -c --ignore-missing SHA256SUMS.txt      # → hazync-host-x86_64-linux-gnu: OK
 ```
+
+`--ignore-missing` matters: the manifest covers **both** published binaries (CPU and CUDA), so a plain
+`sha256sum -c` reports `FAILED open or read` and exits non-zero for the one you didn't download. That is
+the command complaining about a missing file, not about a bad checksum — but it looks alarming, so use
+the flag and check only what you fetched.
 
 (If you saved the binary as `host` per the quick-start, `sha256sum -c` won't find it by name — either keep the asset filename as above, or run `sha256sum host` and compare the digest to the matching line in `SHA256SUMS.txt` by eye.)
 
