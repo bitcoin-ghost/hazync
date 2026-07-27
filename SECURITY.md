@@ -328,7 +328,7 @@ on concurrent `verify-any` subprocesses (fan-out DoS on the small box) — bound
 Two other observations (the `0-999` seed range is unprovable by design so blocks 1–999 are proven as
 single-block ranges; `by_in` first-wins can understate the frontier) are pre-existing and non-soundness.
 
-## Round 8 (2026-07-22) — completeness + verifier audit; full write-up in `AUDIT_2026-07.md`
+## Round 8 (2026-07-22) — completeness + verifier audit; full write-up in `docs/AUDIT_2026-07.md`
 
 Eighth pass (five reviewers, one dimension each, each told to break it: consensus completeness,
 enforcement gating, accumulator soundness, the FFI/VerifyScript boundary, and the end-to-end trust
@@ -339,7 +339,7 @@ an asserted panic path; mode 1 confirmed debug-only + tag-un-launderable), and c
 Core block-connection rules bar the deviations below, comments verified against the code). One
 verifier-hole and five completeness deviations were found; none allowed minting, theft, or double-spend on
 the real chain today. All fixed except G4 (unprovable — left documented). See the status table above and
-the finding-by-finding detail + verification in **`AUDIT_2026-07.md`**.
+the finding-by-finding detail + verification in **`docs/AUDIT_2026-07.md`**.
 
 - **A1 (verifier-hole) — FIXED.** A bare `ChainState` receipt (mode 2 `chain_step` / mode 5 `aggregate`)
   committed no record of the anchor it bottomed out at, so an `is_base=1` receipt built on a *fabricated*

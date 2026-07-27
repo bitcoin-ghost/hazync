@@ -98,7 +98,7 @@ anchoring gaps:
 
 ## 3c. Anchor identity + completeness (2026-07-22 audit, round 8)
 
-A five-reviewer completeness+verifier audit (full write-up: `../AUDIT_2026-07.md`). The soundness core
+A five-reviewer completeness+verifier audit (full write-up: `AUDIT_2026-07.md`). The soundness core
 held — accumulator, FFI/VerifyScript boundary, and enforcement gating all came back sound. One
 verifier-hole and five completeness deviations were found; all fixed except the one unprovable rule.
 
