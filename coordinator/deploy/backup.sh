@@ -26,7 +26,7 @@ DEST="$OUT/$STAMP"
 # COORD_PROOFS yields a green, rotating, offsite-copied snapshot containing nothing at all. The paths
 # are env-driven and must match whatever the coordinator unit sets; they differ per deployment.
 for _v in DB PROOFS; do
-    eval "_p=\$$_v"
+    _p="${!_v}"                      # indirect expansion, not eval — no re-parsing of the value
     if [ ! -e "$_p" ]; then
         echo "[backup] FATAL: $_v path does not exist: $_p" >&2
         echo "[backup] set COORD_DB / COORD_PROOFS (or HZ_HOME) to match the coordinator's own unit —" >&2

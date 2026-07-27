@@ -3,7 +3,10 @@
 # then fold adjacent ranges pairwise in a tree (each level parallel across GPUs), then verify the
 # genesis-anchored result. This is the parallel backfill: per-block proofs are independent, folds are
 # log-depth. Wall-clock ~ (one block prove) + log2(N)*(one fold), not N sequential steps.
-cd /root/hazync/prover
+# Hardcoded to the GPU box's checkout; override by running from the repo. || exit so a wrong/missing
+# path fails loudly instead of fanning out proves from whatever directory happened to be current.
+cd "${HAZYNC_REPO:-/root/hazync}/prover" || exit 1
+# shellcheck source=/dev/null
 source ~/.cargo/env
 export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:/usr/local/cuda-12.6/bin:$PATH"
 export HAZYNC_BASE=/root/hazync-build CUDA_PATH=/usr/local/cuda-12.6 RISC0_HOME=$HOME/.risc0 RUST_LOG=error

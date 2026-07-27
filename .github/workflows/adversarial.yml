@@ -44,6 +44,12 @@ jobs:
         run: ./scripts/check-versions.sh
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
+      - name: Shellcheck (scripts run as root on the coordinator and as build tooling)
+        # Caught a real one: check-test-surfaces.sh had an unguarded `cd`, so a failed cd would have
+        # run every check against the wrong directory, found no test surfaces, and PASSED.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning $(git ls-files '*.sh')
 
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
@@ -112,6 +118,36 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && ./test_bip68_real.sh
+
+  dependency-audit:
+    # Nothing was scanning dependencies for known advisories until now. This job fails on any NEW one.
+    #
+    # The three below are explicitly accepted rather than left to make the build permanently red — a
+    # scanner that is always failing gets ignored, which is worse than no scanner. Each is re-checked
+    # here every push, so if one becomes fixable (or a fourth appears) it surfaces immediately.
+    #
+    #   RUSTSEC-2025-0055  tracing-subscriber 0.2.25, ANSI escapes in logged user input. Reached only
+    #                      via ark-relations -> risc0-groth16. The host's OWN subscriber is 0.3.23,
+    #                      which is patched. Removing the 0.2.25 needs a risc0 bump, and risc0 versions
+    #                      feed the guest image id — so it cannot be done without a METHOD_ID
+    #                      re-baseline and a full board re-prove.
+    #   RUSTSEC-2023-0071  rsa 0.9.10 Marvin timing sidechannel, via rzup (the toolchain installer).
+    #                      Hazync performs no RSA private-key operations. NO upstream fix exists.
+    #   RUSTSEC-2024-0388  derivative 2.2.0 unmaintained (not a vulnerability), same ark path.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit every lockfile
+        run: |
+          IGNORE="--ignore RUSTSEC-2025-0055 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0388"
+          rc=0
+          for f in accumulator prover prover/methods/guest guest-pure-fuzz; do
+            echo "== $f =="
+            cargo audit --file "$f/Cargo.lock" $IGNORE || rc=1
+          done
+          exit $rc
 
   reproducible-image-id:
     # Build the guest in the hermetic container (fixed paths) and assert its METHOD_ID equals the

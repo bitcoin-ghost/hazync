@@ -14,7 +14,9 @@
 # The common shape is a green signal from an instrument that is not connected to anything. These
 # checks make that state fail the build instead.
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# || exit matters here: a failed cd would run every check against the WRONG directory, find no test
+# surfaces, and pass — a false green from the very script whose job is to prevent false greens.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 WF=.github/workflows
 fail=0
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }

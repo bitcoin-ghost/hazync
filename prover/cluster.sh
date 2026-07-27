@@ -2,7 +2,7 @@
 # Multi-GPU tip-prover fan-out: prove the block's chunks across NGPU GPUs (one process per GPU via
 # CUDA_VISIBLE_DEVICES), each chunk receipt -> chunk_<i>.bin, then aggregate from the files.
 #   NGPU=8 HAZYNC_CHUNKS=50 HAZYNC_BLOCK=/path/block.json bash cluster.sh
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1     # else the prove commands below run in an unrelated directory
 export RUST_LOG=${RUST_LOG:-error}
 export HAZYNC_BLOCK=${HAZYNC_BLOCK:?set HAZYNC_BLOCK to the block JSON}
 NGPU=${NGPU:-1}; NCHUNKS=${HAZYNC_CHUNKS:-8}; export HAZYNC_CHUNKS=$NCHUNKS
