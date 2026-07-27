@@ -65,18 +65,24 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `68819a54…` (v0.9.0: witness byte-packing + per-tx raw_tx/prevouts de-duplication — wire-format only, no consensus change — see `reproduce/METHOD_ID`, authoritative). Superseded history:
+  `3f52baff…` (v0.10.0: libsecp `ECMULT_WINDOW_SIZE` 15→19 — a compile-time speed trade, no consensus
+  change — see `reproduce/METHOD_ID`, authoritative). Superseded history:
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening) →
   `ffdc6095…` (real-Core `pow.cpp` retarget carve) → `7a8b29e0…` (chainparams-sourced constants; v0.8.0) →
-  `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0).
+  `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0/v0.9.1) → `3f52baff…` (ecmult window 19; v0.10.0).
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`
     (chainparams-sourced constants) — both behaviourally identical (476-retarget + fuzz equivalence;
     chainparams-anchor green). The v0.9.0 change to `68819a54` altered the witness **wire format**
-    (byte-packing + per-tx de-duplication), so proofs are not interchangeable across that id — the board is
-    being **re-proven from genesis at `68819a54`** (live now: contiguous frontier climbing on the coordinator).
+    (byte-packing + per-tx de-duplication), and v0.10.0's `3f52baff` changes the guest ELF again, so proofs
+    are not interchangeable across either id. The board reached 3,897 blocks at `68819a54` before being
+    **restarted from genesis at `3f52baff`** (the old ledger + receipts are archived and stay re-verifiable
+    with the v0.9.1 binary). At the new id, blocks 130000 / 140000 / 741000 were re-checked and produce
+    identical tip hashes, `cum_work` and UTXO-leaf counts — the era sweep itself has not been re-run on an
+    archive node, but the change is a libsecp compile-time constant, not consensus logic. Two re-baselines
+    in two days is the cost of shipping guest changes piecemeal: batch them.
   - [x] **Empirical era validation** (2026-07-25, re-confirmed 2026-07-26 at `68819a54`): every representative era block validates
     on a real archive node with all consensus flags true — segwit (500000), taproot (750000), big-block
     (741000, ~6.4k inputs), and the pre-BIP34 coinbase-txid-collision case (130000). The pass surfaced one

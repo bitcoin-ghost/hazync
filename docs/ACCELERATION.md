@@ -4,10 +4,31 @@
 > signature-bearing block (execute mode, `RISC0_PPROF_OUT`) confirms the shape this doc assumes:
 > **~69% of a small block is `secp256k1_fe_mul_inner` (47%) + `fe_sqr_inner` (22%)** — the field
 > arithmetic only the (rejected) bigint2 backend below would touch. SHA is 3.4% (already accelerated),
-> paging just 3.8%. The **`ECMULT_WINDOW_SIZE` sweep is dead**: window 15 (current) is already optimal;
-> every step down costs more (the `pre_g` table pages in once and stays resident, so a smaller table just
-> adds wNAF additions). So there is no big maximal-Core *guest-compute* win — the cost is the field math
+> paging just 3.8%. So there is no *big* maximal-Core guest-compute win — the cost is the field math
 > we've chosen not to reimplement.
+>
+> **Correction (2026-07-27): the `ECMULT_WINDOW_SIZE` sweep was not dead — it had only been run
+> downward.** The first sweep tested 4→15, found every step down worse, and wrongly concluded window 15
+> (libsecp's default) was optimal. It never tested *above* 15, because the checked-in
+> `precomputed_ecmult.c` hard-errors there (`#if ECMULT_WINDOW_SIZE > 15 → #error`). Regenerating the
+> table with libsecp's own `src/precompute_ecmult.c` generator and re-measuring shows **window 19 is the
+> optimum**, and the saving holds across eras:
+>
+> | block | W=15 cycles | W=19 cycles | gain |
+> |-------|------------|------------|------|
+> | 130000 (pre-segwit, 10 inputs) | 22,421,345 | 22,000,202 | **−1.88%** |
+> | 140000 | 416,197,506 | 406,635,106 | **−2.30%** |
+> | 741000 (post-taproot, 670 inputs) | 1,826,507,658 | 1,793,753,595 | **−1.79%** |
+>
+> Above 19 it reverses (W=20: −1.65%) — the resident `pre_g` table doubles each step (~16 MB → 32 MB) and
+> the paging cost finally overtakes the fewer wNAF additions. Adopted in **v0.10.0**. It is a pure
+> libsecp *compile-time* config with zero soundness cost — no consensus code changes — but it does change
+> the guest ELF, so it forced a `METHOD_ID` re-baseline. The generated table is deterministic EC maths
+> (byte-identical on any machine), so the build stays reproducible; `build.rs` regenerates it only when
+> the on-disk table isn't already ours.
+>
+> Modest, but the lesson is the transferable part: **"not worth it" was an unmeasured assertion, and the
+> sweep that "proved" it only covered half the range.**
 >
 > **What we DID ship instead (v0.9.0, maximal-Core-safe, wire-format only):**
 > 1. **Witness byte-packing** — risc0 serde encodes `Vec<u8>` as one 32-bit word *per byte* (4× bloat);
@@ -19,10 +40,19 @@
 >    payoff is bandwidth/storage (the coordinator ships 37× less to every worker), not proving cycles.
 >
 > Both are validated against the full adversarial suite (the #5 phantom-prevouts hole is now caught by the
-> accumulator binding rather than a per-input blob-equality check). Remaining maximal-Core levers:
-> host-side tree-fold + segment po2 (~14% fold overhead), and multi-GPU throughput (safe — every parallel
-> proof is independently verified). The bigint2 field backend below stays **out of scope** (reimplements
-> Core's field layer → the exact equivalence question Hazync exists to delete).
+> accumulator binding rather than a per-input blob-equality check).
+>
+> **Also shipped in v0.10.0 (host-side, no guest change): segment `po2` 20 → 21.** Bigger proving segments
+> mean fewer of them and so less recursion/fold overhead. Measured on GPU (L40S, block 130000):
+> po2 18 → 32.6s, 19 → 27.5s, 20 → 24.5s, **21 → 23.0s**, 22 → 23.3s — **~6% faster than the old default**,
+> and flat beyond 21, so 21 is the sweet spot (same speed as 22, less GPU memory). The CLI still retries
+> *downward* (21→20→19→18), so a smaller GPU that OOMs at 21 completes anyway. Receipts are identical
+> either way — this is executor configuration, not guest logic.
+>
+> Remaining maximal-Core levers: host-side tree-fold (log-depth aggregation, the rest of the ~14% fold
+> overhead), and multi-GPU throughput (safe — every parallel proof is independently verified). The bigint2
+> field backend below stays **out of scope** (reimplements Core's field layer → the exact equivalence
+> question Hazync exists to delete).
 
 > **Update 2026-07-19 — the k256 experiment has been REMOVED from the guest.** `k256_ecdsa_verify`, the
 > `k256`/`crypto-bigint` dependencies, the `HAZYNC_ECDSA_BENCH` branch, and `patches/0003` are gone. The

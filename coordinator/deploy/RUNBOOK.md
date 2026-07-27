@@ -142,6 +142,40 @@ sudo systemctl start hazync-coordinator
 curl -s localhost:8899/api/state | head -c 200   # frontier/proven should match pre-restore
 ```
 
+## Re-baseline (the guest id changed)
+
+When the guest changes, `METHOD_ID` changes, and **every proof on the board was made against the old
+id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
+genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
+
+The coordinator derives the id it expects from its **own** `HAZYNC_HOST` binary (`expected_method_id()`,
+served at `/api/meta`), so the swap is: new binary in, board cleared, workers restarted.
+
+```bash
+# 1. BACK UP FIRST — the old ledger + receipts are the historical record of the previous baseline.
+sudo -u hazync /opt/hazync/coordinator/deploy/backup.sh          # writes /opt/hazync/backups/<STAMP>
+ls /opt/hazync/backups/                                          # confirm the snapshot exists
+
+# 2. Stop, swap the host binary (keep the old one — it is what verifies the archived proofs).
+sudo systemctl stop hazync-coordinator
+sudo cp /opt/hazync/bin/host /opt/hazync/bin/host.bak.$(date +%Y%m%d-%H%M%S)
+sudo install -m755 -o hazync -g hazync ./host-new /opt/hazync/bin/host
+/opt/hazync/bin/host method-id                                   # MUST equal reproduce/METHOD_ID
+
+# 3. Clear the board. Archive rather than delete — `proofs/` is the artifact the "don't trust us"
+#    claim rests on, and the old ledger stays re-verifiable with the archived binary.
+cd /opt/hazync/coordinator
+sudo -u hazync mv coordinator.db coordinator.db.<OLD_ID_PREFIX>
+sudo -u hazync mv proofs proofs.<OLD_ID_PREFIX> && sudo -u hazync mkdir proofs
+
+# 4. Start — init_db() reseeds the open ranges; the frontier restarts at 0.
+sudo systemctl start hazync-coordinator
+curl -s localhost:8899/api/meta      # method_id == the new id, frontier == 0
+```
+
+Then restart the provers (they pre-flight with `hazync selftest`, which now compares against the new
+`/api/meta` id and fails loudly on a stale worker binary — so update every worker's `HAZYNC_HOST` too).
+
 ## Moderation
 
 Handles are HTML-sanitised and reserved/impersonation names (`satoshi`, `admin`, `bitcoinghost`, …,

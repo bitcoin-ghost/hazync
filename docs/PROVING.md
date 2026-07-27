@@ -92,15 +92,26 @@ segment packs right up to its `2^po2` boundary and the assertion `cycles <= 1 <<
 so the prove **panics** — on CPU *and* CUDA (it's the shared witgen, not backend-specific). This is a
 liveness bug only: it never produces a wrong proof, it just fails to produce one for those blocks.
 
-The fix is host-side, so **`METHOD_ID` is unchanged**: `host` reads `HAZYNC_SEG_PO2` for the executor's
-`segment_limit_po2` (default 20 = the risc0 default) on **every** prove path — single-block
+The fix is host-side, so it does **not** affect `METHOD_ID`: `host` reads `HAZYNC_SEG_PO2` for the
+executor's `segment_limit_po2` on **every** prove path — single-block
 `prove-range`/`prove-range-bridge`, `fold-range`, `prove-chunk`, chunk-aggregate, the replay path, the
 IVC chain step, and the SNARK wrap — and the CLI retries a failed prove *or fold* with progressively
-**smaller** segments (`HAZYNC_SEG_PO2` 20→19→18), which repartition the work and clear the boundary.
+**smaller** segments (`HAZYNC_SEG_PO2` 21→20→19→18), which repartition the work and clear the boundary.
+
+As of v0.10.0 the **default depends on the backend**: **21 for a `cuda` build, 20 (the risc0 default) for
+CPU**. Bigger segments mean fewer of them and so less recursion/fold overhead — measured on an L40S,
+block 130000 proves in **23.0s at po2 21 vs 24.4s at 20** (~6% faster), flat to 22. But a po2-21 segment
+also needs roughly **twice the working memory**, and that is a pure cost on CPU, where the speed win was
+never measured: an 11 GB box proving block 170 (2.3M cycles) peaked at **8.7 GB RSS and went to swap**.
+Swapping is not a prove *failure*, so the retry ladder never fires — it just crawls. Hence the split.
+`host seg-po2` prints the effective default, and the coordinator CLI starts its ladder there rather than
+at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
+`HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.9.1** at `METHOD_ID 68819a54` (real-Core `pow.cpp`
-difficulty retarget carved into the guest + every consensus constant sourced from Core's own
-`chainparams.cpp` — see `reproduce/METHOD_ID`). Both the
+either way. **Releases:** the current release is **v0.10.0** at `METHOD_ID 3f52baff` (libsecp's ecmult
+window raised to its measured optimum — see `reproduce/METHOD_ID`), on top of the real-Core `pow.cpp`
+difficulty retarget carved into the guest, every consensus constant sourced from Core's own
+`chainparams.cpp`, and the v0.9.0 witness wire format. Both the
 **`hazync-host-x86_64-linux-gnu`** CPU binary and the multi-arch **CUDA** binary embed this guest and
 carry the segment-retry across all prove paths plus the earlier fixes (P2SH sigop count, BIP30 bridge
 handling, in-block-spend leaf fix, and the round-9 R-1 coinbase-vin hardening). A deeper fix (patching
@@ -149,7 +160,7 @@ the canonical guest. The **coordinator** is also an independent check: it re-ver
 proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
-the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id (`68819a54`,
+the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id (`3f52baff`,
 the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
@@ -171,14 +182,14 @@ slower). The guest is pure Core; acceleration analysis in [`ACCELERATION.md`](AC
 
 ## Building the release binaries (maintainer notes)
 
-Both published binaries must print the canonical `METHOD_ID` (`68819a54…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`3f52baff…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 
-- **CPU** — `reproduce/Dockerfile` is the canonical build, but its base is `ubuntu:24.04` (glibc 2.39). For
-  a portable release binary, build it with the base pinned to 22.04:
-  `sed 's|^FROM ubuntu:24.04|FROM ubuntu:22.04|' reproduce/Dockerfile > Dockerfile.cpu22 && docker build -f Dockerfile.cpu22 -t hazync-cpu22 .`
-  then copy `/hazync-zkvm/prover/target/release/host` out of the image.
+- **CPU** — `reproduce/Dockerfile` *is* the release build: its base was pinned to `ubuntu:22.04` (glibc 2.34)
+  in v0.8.0, so the canonical reproducibility container and the portable CPU binary are now the same
+  artifact (no `sed` step any more). `docker build -t hazync-repro -f reproduce/Dockerfile .`, then copy
+  `/hazync-zkvm/prover/target/release/host` out of the image.
 - **CUDA** — the same container plus `--features cuda`, run with `--gpus all`. **Do not build natively if the
   box has CUDA 13**: risc0-sys 1.5.0's kernels don't compile under CUDA 13 (`nvcc -arch=native` fails). Use
   the **CUDA 12** toolchain inside the `ubuntu:22.04` container, and pass multi-arch flags so the binary
