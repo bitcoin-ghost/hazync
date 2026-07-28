@@ -1,0 +1,51 @@
+═══ 4. VALIDITY — the Hazync proof ═══
+    ✓ verified, genesis-anchored, blocks 1..1000
+      proof commits tip = 00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+      (3441 bytes; attests every tx in 1..1000 satisfied consensus rules)
+
+═══ 1+2. IDENTITY — merkle roots and header chain, blocks 1..1000 ═══
+    (txids from bitcoind — the stand-in for a hazed block's stored txids)
+      …200/1000 blocks checked
+      …400/1000 blocks checked
+      …600/1000 blocks checked
+      …800/1000 blocks checked
+      …1000/1000 blocks checked
+    ✓ all 1000 merkle roots recompute from txids alone
+    ✓ all 1000 headers link, and every PoW meets its target
+
+═══ 3. THE JOIN — does the chain end where the proof says? ═══
+    chain tip at 1000  00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    proof commits    00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    ✓ match
+
+═══ CONCLUSION ═══
+    Blocks 1..1000 are the real chain (identity, from merkle roots + PoW headers)
+    AND every transaction in them was valid (validity, from a 3441-byte proof).
+
+    A node holding hazed blocks — witnesses and scriptSigs destroyed — can establish both,
+    despite being unable to re-check a single signature.
+
+    NOT shown: this used bitcoind-derived txids, not real .gsb files. Links 1-3 are exactly
+    what haze::VerifyStrippedBlock does, so the reasoning holds — but Ghost's serialisation
+    is untested here until ghostd can emit hazed blocks.
+
+# Run 2026-07-28 against a live mainnet bitcoind. Proof: fold_1000.snark, guest 3f52baff.
+#
+# WHY THIS EXISTS (#31 Phase 1): stripping destroys the ability to re-verify signatures, so a
+# hazed block alone cannot establish that its transactions were ever VALID — only what they
+# were. The claim ghostd would rely on is that two things compose:
+#     merkle root + header chain -> IDENTITY  (these are the real blocks and the real txs)
+#     the Hazync proof           -> VALIDITY  (those txs satisfied consensus rules)
+# Identity is exactly what survives stripping; validity is exactly what does not.
+#
+# This demonstrates that composition standalone, BEFORE any of it reaches consensus code.
+#
+# CORRECTION TO AN EARLIER CLAIM ON #31: I had said the guest must commit a hash over the
+# hazed form, implying a re-baseline. It does not. haze::VerifyStrippedBlock already
+# recomputes the merkle root from stored txids, so a stored txid cannot be forged, and the
+# header chain already reaches the tip the proof commits to. The binding was already complete.
+#
+# NOT SHOWN: real .gsb files. ghostd is not built here and no hazed blocks exist, so txids came
+# from RPC. Links 1-3 are exactly what VerifyStrippedBlock does, so the reasoning holds — but
+# Ghost's serialisation is untested. The tool REFUSES --txid-source gsb (exit 1) rather than
+# silently falling back to RPC and reporting a pass for something it did not test.
