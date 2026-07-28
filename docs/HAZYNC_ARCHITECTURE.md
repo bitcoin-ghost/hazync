@@ -230,8 +230,11 @@ recursion) and folds in one block. The tip proof is a single receipt covering ge
 - **Aggregation shape:** either a linear fold (one block at a time, good for tip-following) or a
   balanced binary tree over ranges (good for parallel initial proving of history). Use both:
   tree for backfill, linear for the tip.
-- **Final wrap:** RISC0 STARK → Groth16 SNARK → ~200–300 byte proof, verifiable cheaply anywhere
-  (even on-chain / in a light client on a phone).
+- **Final wrap:** RISC0 STARK → Groth16 SNARK, verifiable cheaply anywhere (even on-chain / in a light
+  client on a phone). The *proof* proper is ~200–300 B, but the artifact you ship and verify is the whole
+  `Receipt`: a genesis-anchored `[1..1000]` fold measured **3,441 bytes**, and a full-chain wrap projects
+  to a few KB. Cost is flat in chain length (~70 s for a 1000-block fold vs 825 s for one block). See
+  `docs/PROVING.md` for the measurements — do not quote the ~200–300 B figure as the receipt size.
 
 ---
 
@@ -566,8 +569,10 @@ genesis→tip, no explorer, real metadata, and it's the same node that would run
 ### Build order to get to tip use
 1. Real STARK proving of one block + the 2-step recursive fold (256 GB box / GPU).
 2. SNARK-wrap the ChainState proof (STARK→Groth16) so verification is trivial everywhere — three BN254
-   pairings. The proof itself is ~200–300 B; the full receipt measured 2033 B on block 170 and grows
-   with chain size (see `prover/evidence/groth16_snark_wrap.txt`).
+   pairings. The proof itself is ~200–300 B; the full receipt measured 2033 B on block 170 and **3,441 B
+   on a folded genesis-anchored `[1..1000]` range**, with a full-chain wrap projecting to a few KB. Wrap
+   cost is flat in chain length, so this is practical (see `prover/evidence/groth16_snark_wrap.txt` and
+   `prover/evidence/fold_and_snark_wrap_1_1000.txt`).
 3. Chain-proof gossip + proof-frontier tracker in the node (verify-only path first).
 4. Gate pruning on the proof frontier; wire the divergence canary.
 5. Fast-IBD path: verify proof → validate unproven tail.

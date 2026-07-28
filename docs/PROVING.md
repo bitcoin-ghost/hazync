@@ -182,12 +182,39 @@ Mind the distinction: **~200–300 B describes the Groth16 proof**; the artifact
 verify is the whole `Receipt` — seal **plus journal plus claim metadata** — which measured 2033 bytes
 here. The journal dominates, because risc0 serde commits each `u8` as its own 32-bit word (a `[u8; 32]`
 is 128 bytes on the wire) — the same 4× bloat fixed for *witnesses* in v0.9.0 and never applied to the
-journal (issue #22). The receipt also **grows with chain size**, since a Utreexo forest carries
-~log₂(leaves) roots, so a genesis→N wrap will exceed this; no fixed-size claim is safe.
+journal (issue #22).
+
+### Wrapping a folded range (the artifact a light client is actually handed)
+
+Block 170 is a single chain step — the smallest possible case. Measured on a real **folded** range
+(log in [`prover/evidence/fold_and_snark_wrap_1_1000.txt`](../prover/evidence/fold_and_snark_wrap_1_1000.txt)):
+
+| | `[1..1000]` genesis-anchored | `[500..500]` mid-chain |
+|---|---|---|
+| wrapped receipt | **3,441 bytes** | 5,633 bytes |
+| wrap wall clock | **66–77 s**, 1.4 GB peak RSS | — |
+
+Two results matter more than the numbers:
+
+- **Wrap cost is essentially FLAT in chain length.** A 1000-block fold wrapped in ~70 s while a *single*
+  block-170 step took 825.7 s. Groth16 cost is dominated by the fixed `stark_verify` circuit, not by how
+  much chain is being proven. Wrapping a genesis→N fold is therefore practical.
+- **Size is driven by boundary content, not range length.** The single-block mid-chain range is *larger*
+  than the thousand-block one, because a genesis-anchored range has an empty in-boundary while a
+  mid-chain range commits two populated root vectors.
+
+The receipt does still grow with the UTXO set, but **more slowly than previously stated here**: a
+Utreexo forest carries **popcount(leaves)** roots, not ~log₂(leaves). log₂ is the number of root
+*slots* (~28 at mainnet scale); the actual count is the popcount, which over realistic leaf counts runs
+min 7 / mean ~14 / max 22. Calibrating from the two measurements above (~274 B per root, ~1,523 B
+fixed), a full-chain genesis-anchored wrap projects to roughly **3.4 KB best / ~5.4 KB typical /
+~7.6 KB worst**. Two data points are a fit, not a law — treat as inferred until instrumented, and do
+not quote 3,441 B as "the" size. **A few KB** is the honest characterisation; no fixed-size claim is safe.
 
 ⚠️ **Groth16 currently fails on CUDA builds** (issue #20) — `sppark` illegal memory access, reproduced on
-the released binary with the GPU idle. The CPU path works. Applying the wrap to a folded range/chain
-output is still future work (issues #19, #24).
+the released binary with the GPU idle. The CPU path works, and since the wrap is flat in chain length and
+runs once, CPU-only is not a throughput problem. Verification is gated in CI (issue #23); a minimal
+phone-runnable verifier is still outstanding (issues #19, #24).
 
 ```
 ./target/release/host prove-snark
