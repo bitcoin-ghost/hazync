@@ -37,6 +37,7 @@ PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file_
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many failed attempts
 MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
 MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
 RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes (POST) per IP per window
@@ -161,6 +162,10 @@ def init_db():
         print(f"[seed] created {SEED} ranges of {RANGE_SIZE} blocks (0..{SEED*RANGE_SIZE-1})")
     try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
     except Exception: pass
+    for col in ("attempts INTEGER DEFAULT 0", "last_error TEXT",
+                "last_failed_at REAL", "last_assignee TEXT"):   # failure tracking
+        try: c.execute(f"ALTER TABLE ranges ADD COLUMN {col}")
+        except Exception: pass
     for col in ("out_leaves INTEGER", "range_work TEXT",
                 "in_bhash TEXT", "out_bhash TEXT"):  # H7/S1: full-boundary continuity digest
         try: c.execute(f"ALTER TABLE vranges ADD COLUMN {col}")
@@ -169,14 +174,33 @@ def init_db():
 
 def reap():
     """Free stale claims: no heartbeat for CLAIM_TTL, or held longer than CLAIM_MAX. Lazy — called on
-    each state()/claim(), so an abandoned claim returns to the pool within a poll interval."""
+    each state()/claim(), so an abandoned claim returns to the pool within a poll interval.
+
+    An abandoned claim is a FAILED ATTEMPT, not a fresh start: the old code reset straight back to
+    'open', so a block that could not be proved was indistinguishable from one never tried, and could
+    loop claim -> fail -> reap -> claim forever while the contiguous frontier sat pinned behind it and
+    nothing anywhere said so. Attempts are now counted and a block is parked as 'failed' once it has
+    burnt MAX_ATTEMPTS, so the pool stops spending GPU-hours re-failing it."""
     now = time.time()
     c = db()
-    c.execute("UPDATE ranges SET status='open', assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL "
-              "WHERE status='claimed' AND ("
-              " (last_beat IS NOT NULL AND ?-last_beat > ?) OR"
-              " (claimed_at IS NOT NULL AND ?-claimed_at > ?) )",
-              (now, CLAIM_TTL, now, CLAIM_MAX))
+    stale = c.execute(
+        "SELECT id, handle, COALESCE(attempts,0) AS n FROM ranges WHERE status='claimed' AND ("
+        " (last_beat IS NOT NULL AND ?-last_beat > ?) OR"
+        " (claimed_at IS NOT NULL AND ?-claimed_at > ?) )",
+        (now, CLAIM_TTL, now, CLAIM_MAX)).fetchall()
+    for r in stale:
+        n = r["n"] + 1
+        parked = n >= MAX_ATTEMPTS
+        c.execute("UPDATE ranges SET status=?, attempts=?, last_assignee=assignee, last_failed_at=?, "
+                  "last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL WHERE id=?",
+                  ("failed" if parked else "open", n, now,
+                   "claim abandoned (no heartbeat within CLAIM_TTL, or held past CLAIM_MAX)", r["id"]))
+        if parked:
+            print(f"[reap] range {r['id']} PARKED as failed after {n} attempts "
+                  f"(last holder {r['handle']}) — it will not be served again until reset", flush=True)
+        else:
+            print(f"[reap] range {r['id']} reopened, attempt {n}/{MAX_ATTEMPTS} "
+                  f"(last holder {r['handle']})", flush=True)
     c.commit(); c.close()
 
 def parse_range(rid):
@@ -483,10 +507,30 @@ def state():
         claims.append(dict(lo=r["lo"], hi=r["hi"],
                            handle=(r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"),
                            elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL // 2))
+    # Blocks parked after MAX_ATTEMPTS, plus how long the frontier has been stuck. Without this a stall
+    # is invisible: the frontier is the lowest unproven block, so ONE bad block pins it while every other
+    # signal stays green — `proven` keeps climbing as workers prove ahead of the gap, which is exactly
+    # how a 45-minute stall went unnoticed on 2026-07-28.
+    failed = [dict(id=r["id"], lo=r["lo"], hi=r["hi"], attempts=r["attempts"],
+                   last_error=(r["last_error"] or "")[:200],
+                   since=int(now - (r["last_failed_at"] or now)))
+              for r in c.execute("SELECT id,lo,hi,attempts,last_error,last_failed_at FROM ranges "
+                                 "WHERE status='failed' ORDER BY lo")]
+    blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges WHERE id=?",
+                        (str(fr + 1),)).fetchone()
+    stalled_for = 0
+    if blocker is not None and blocker["status"] != "verified":
+        mark = blocker["last_failed_at"] or blocker["claimed_at"]
+        stalled_for = int(now - mark) if mark else 0
     c.close()
     return {
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
+        "failed": failed,
+        "frontier_blocker": {"id": str(fr + 1),
+                             "status": (blocker["status"] if blocker is not None else "open"),
+                             "attempts": (blocker["attempts"] if blocker is not None else 0) or 0,
+                             "stalled_for": stalled_for},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
@@ -525,7 +569,10 @@ def claim(body):
             # window where both did). Per-block is the default proving unit (no fold; matches the board's
             # per-block proofs). Block 1 pins to genesis; a bigger aligned chunk is opt-in via `run <lo>-<hi>`.
             fr = frontier_hi()
-            taken = set(row["id"] for row in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
+            # 'failed' is excluded too: a parked range must not be handed straight back out by
+            # claim-next, or MAX_ATTEMPTS achieves nothing. It stays claimable by EXPLICIT id, which is
+            # the operator's deliberate retry path.
+            taken = set(row["id"] for row in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified','failed')"))
             n = max(1, fr + 1); rid = None
             for _ in range(2_000_000):
                 if n >= TIP: break
@@ -540,6 +587,13 @@ def claim(body):
             c.execute("INSERT INTO ranges(id,lo,hi) VALUES(?,?,?)", (rid, pr[0], pr[1]))
             r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
+        if r["status"] == "failed":
+            # Claiming a parked range BY EXPLICIT ID is how an operator retries it — typically after
+            # fixing whatever actually broke (in practice: GPU oversubscription, not the block). Reset
+            # the counter so the retry gets a full budget rather than instantly re-parking.
+            print(f"[claim] range {rid} was parked as failed after {r['attempts']} attempts; "
+                  f"{handle} is retrying it explicitly — counter reset", flush=True)
+            c.execute("UPDATE ranges SET attempts=0 WHERE id=?", (rid,))
         if r["status"] == "claimed" and r["assignee"] != pk:
             # locked to someone else and still alive (reap() already freed stale ones)
             since = int((now - (r["last_beat"] or r["claimed_at"] or now)) / 60)
@@ -587,10 +641,19 @@ def release(body):
         if not r: c.close(); return 404, {"error": "no such range"}
         if r["status"] != "claimed" or r["assignee"] != pk:
             c.close(); return 200, {"ok": True, "noop": True}   # already freed/verified/not ours
-        c.execute("UPDATE ranges SET status='open', assignee=NULL, handle=NULL, claimed_at=NULL, "
-                  "last_beat=NULL WHERE id=?", (rid,))
+        # A voluntary release only ever follows a failed prove/submit, so it counts as an attempt for
+        # exactly the same reason a reap does. Without this, a client that dutifully releases on every
+        # failure would loop forever and never trip MAX_ATTEMPTS, while a client that crashed would.
+        n = (c.execute("SELECT COALESCE(attempts,0) AS n FROM ranges WHERE id=?", (rid,)).fetchone()["n"]) + 1
+        parked = n >= MAX_ATTEMPTS
+        err = str(body.get("error") or "released by holder after a failed prove/submit")[:500]
+        c.execute("UPDATE ranges SET status=?, attempts=?, last_assignee=assignee, last_failed_at=?, "
+                  "last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL WHERE id=?",
+                  ("failed" if parked else "open", n, time.time(), err, rid))
         c.commit(); c.close()
-    return 200, {"ok": True, "released": rid}
+    if parked:
+        print(f"[release] range {rid} PARKED as failed after {n} attempts: {err}", flush=True)
+    return 200, {"ok": True, "released": rid, "attempts": n, "parked": parked}
 
 _MID_CACHE = {"v": None}
 def expected_method_id():

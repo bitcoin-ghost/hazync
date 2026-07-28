@@ -167,11 +167,17 @@ def _heartbeat(rng, pub, stop):
         try: post("/api/heartbeat", {"range": rng, "pubkey": pub})
         except Exception: pass
 
-def _release(rng, pub):
+def _release(rng, pub, err=None):
     # A prove/submit failed after we claimed — hand the block back to the pool now, so it reopens in
     # seconds instead of sitting `claimed` until the coordinator's CLAIM_TTL reap (~30m). Best-effort:
     # the server-side reap is the backstop if this call can't get through (e.g. the box lost the network).
-    try: post("/api/release", {"range": rng, "pubkey": pub})
+    #
+    # The reason travels with the release so the coordinator can record it against the range. Without it
+    # a parked block says only "failed 3 times" and the operator has to go log-diving on whichever box
+    # happened to hold it — which does not work once the logs have rotated.
+    body = {"range": rng, "pubkey": pub}
+    if err: body["error"] = str(err)[:500]
+    try: post("/api/release", body)
     except Exception: pass
 
 # Failures that smaller proving segments cannot fix — a bad/mismatched bundle, a guest-id mismatch, a
@@ -450,10 +456,11 @@ def cmd_run(args):
     try:
         cmd_prove([rng]); cmd_submit([rng])
     except SystemExit as e:
-        if e.code not in (0, None): _release(rng, pub)   # non-zero / message exit == failure after claiming
+        if e.code not in (0, None):                      # non-zero / message exit == failure after claiming
+            _release(rng, pub, e.code)                   # carry the real reason to the coordinator
         raise
-    except BaseException:                                # Ctrl-C or an unexpected error — hand it back too
-        _release(rng, pub); raise
+    except BaseException as e:                           # Ctrl-C or an unexpected error — hand it back too
+        _release(rng, pub, f"{type(e).__name__}: {e}"); raise
 
 def main():
     argv = sys.argv[1:]
