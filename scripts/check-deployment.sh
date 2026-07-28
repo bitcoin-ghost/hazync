@@ -40,6 +40,29 @@ else
     served=$(grep -oE '"method_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' <<<"$meta" | grep -oE '[0-9a-f]{64}')
     if [ "$served" = "$CANON" ]; then ok "coordinator advertises the canonical guest"
     else bad "coordinator advertises ${served:0:8}… but canonical is ${CANON:0:8}… — provers will have every proof rejected"; fi
+
+    # SOURCE DRIFT. The guest-id check above says nothing about the coordinator's own Python: on
+    # 2026-07-28 production was found on a stale branch, months behind main, with UNCOMMITTED edits to
+    # server.py that existed nowhere in git. Nothing reported it, and a naive redeploy would have
+    # destroyed them silently. The coordinator now self-reports sha256 of the source it actually
+    # loaded (/api/meta.source_sha256); this compares it with the file in THIS checkout.
+    #
+    # A mismatch is not automatically wrong — this checkout may simply be at a different commit than
+    # the deployment. It means "these two disagree, go and find out which is stale", which is exactly
+    # the question nobody was in a position to ask before.
+    remote_src=$(grep -oE '"source_sha256"[[:space:]]*:[[:space:]]*"[0-9a-f]+"' <<<"$meta" | grep -oE '[0-9a-f]{64}')
+    local_src=$(sha256sum coordinator/server.py 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$remote_src" ]; then
+        skip "coordinator does not report source_sha256 (older build) — source drift NOT checked"
+    elif [ -z "$local_src" ]; then
+        skip "cannot hash coordinator/server.py here — source drift NOT checked"
+    elif [ "$remote_src" = "$local_src" ]; then
+        ok "coordinator runs the same server.py as this checkout (${local_src:0:12}…)"
+    else
+        bad "coordinator source DRIFT: it runs ${remote_src:0:12}…, this checkout has ${local_src:0:12}…
+       One of them is stale. Before redeploying, DIFF the deployed file against this one — production
+       has previously carried fixes that were never committed, and copying over them loses that work."
+    fi
 fi
 
 if [ "$LOCAL" -eq 0 ]; then

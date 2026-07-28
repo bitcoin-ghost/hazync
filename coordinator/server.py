@@ -243,6 +243,28 @@ def parse_range(rid):
         return None
     return lo, hi
 
+_SRC_SHA = {"v": None}
+def source_sha256():
+    """sha256 of the server source this process is ACTUALLY running, exposed via /api/meta.
+
+    Deployment drift is invisible otherwise. On 2026-07-28 the production coordinator was found on a
+    stale branch (`fix/r1-hardening-rebaseline`, months of commits behind main) with UNCOMMITTED local
+    edits to server.py and backup.sh — changes that existed nowhere in git. Nothing reported it, and a
+    naive redeploy would have silently destroyed them.
+
+    Hashing the file rather than shelling out to `git` is deliberate: a deployment need not be a git
+    checkout, and `git describe` reports the checkout, not what the running process actually loaded.
+    This catches an in-place edit that git status would show as clean if the file were untracked.
+
+    Compare against the repo with scripts/check-deployment.sh."""
+    if _SRC_SHA["v"] is None:
+        try:
+            with open(os.path.abspath(__file__), "rb") as fh:
+                _SRC_SHA["v"] = hashlib.sha256(fh.read()).hexdigest()
+        except Exception:
+            _SRC_SHA["v"] = "unknown"                  # never fail a request over provenance reporting
+    return _SRC_SHA["v"]
+
 def overlapping(c, lo, hi, exclude_id):
     """Any live range whose block interval intersects [lo, hi], other than exclude_id.
 
@@ -856,7 +878,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
-                                    "reproduce": "reproduce/METHOD_ID"})
+                                    "reproduce": "reproduce/METHOD_ID",
+                                    "source_sha256": source_sha256()})
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
             if parse_range(rid):
