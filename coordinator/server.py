@@ -48,7 +48,11 @@ MAX_ENV_FAILURES = int(os.environ.get("MAX_ENV_FAILURES", "12"))  # separate, lo
 #
 # These still count, against a looser cap, so a permanently mis-sized box cannot loop forever in silence.
 _ENV_ERR = ("out of memory", "oom", "cudaerror", "cuda error", "hash_rows",
-            "illegal memory access", "allocation failed", "no cuda-capable device")
+            "illegal memory access", "allocation failed", "no cuda-capable device",
+            # A deliberate shutdown says nothing about the block either. Workers are restarted routinely
+            # (config changes, redeploys) and each restart releases whatever was in flight, so counting
+            # those would park good blocks purely for being unlucky enough to be mid-prove at the time.
+            "received signal", "keyboardinterrupt", "systemexit")
 
 def is_env_failure(err):
     e = (err or "").lower()

@@ -25,6 +25,7 @@ Config (env):
 Identity + receipts live under ~/.hazync/.
 """
 import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil
+import signal
 import concurrent.futures
 
 HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
@@ -462,7 +463,21 @@ def cmd_run(args):
     except BaseException as e:                           # Ctrl-C or an unexpected error — hand it back too
         _release(rng, pub, f"{type(e).__name__}: {e}"); raise
 
+def _on_term(signum, _frame):
+    # Turn SIGTERM into a normal Python exception so the claim gets HANDED BACK.
+    #
+    # Python's default SIGTERM handling kills the interpreter outright: no `finally`, no `except`, so
+    # cmd_run's release-on-failure path never runs and the claim is orphaned until the coordinator's
+    # ~30m CLAIM_TTL reap. Since the frontier is the lowest unproven block, one orphaned claim stalls
+    # the whole board — and every routine `pkill` in restart_workers_v10.sh created one. Observed
+    # repeatedly on 2026-07-28: block 35519 sat `claimed` with a dead heartbeat for 19 minutes after a
+    # worker restart, with all of its neighbours already verified.
+    raise KeyboardInterrupt(f"received signal {signum}")
+
 def main():
+    for _sig in ("SIGTERM", "SIGINT", "SIGHUP"):
+        try: signal.signal(getattr(signal, _sig), _on_term)
+        except (AttributeError, ValueError): pass    # not all platforms/threads allow every signal
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
