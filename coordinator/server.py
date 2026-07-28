@@ -37,7 +37,22 @@ PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file_
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
-MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many failed attempts
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many BLOCK-implicating failures
+MAX_ENV_FAILURES = int(os.environ.get("MAX_ENV_FAILURES", "12"))  # separate, looser cap for environmental (capacity) failures
+
+# Failure signatures that say something about the BOX, not the block. An out-of-memory on an
+# oversubscribed GPU is not evidence that a block is unprovable — on 2026-07-28 block 29664 failed
+# repeatedly this way and then proved perfectly once worker count dropped from 4 to 2. Counting those
+# toward MAX_ATTEMPTS would park good blocks during any capacity incident, which is precisely backwards:
+# the whole point of parking is to stop burning GPU on blocks that CANNOT be proved.
+#
+# These still count, against a looser cap, so a permanently mis-sized box cannot loop forever in silence.
+_ENV_ERR = ("out of memory", "oom", "cudaerror", "cuda error", "hash_rows",
+            "illegal memory access", "allocation failed", "no cuda-capable device")
+
+def is_env_failure(err):
+    e = (err or "").lower()
+    return any(s in e for s in _ENV_ERR)
 SERVE_WIDE = os.environ.get("SERVE_WIDE", "0") == "1"    # claim-next hands out RANGE_SIZE chunks, not single blocks (#28)
 MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
 MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
@@ -163,7 +178,7 @@ def init_db():
         print(f"[seed] created {SEED} ranges of {RANGE_SIZE} blocks (0..{SEED*RANGE_SIZE-1})")
     try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
     except Exception: pass
-    for col in ("attempts INTEGER DEFAULT 0", "last_error TEXT",
+    for col in ("attempts INTEGER DEFAULT 0", "env_failures INTEGER DEFAULT 0", "last_error TEXT",
                 "last_failed_at REAL", "last_assignee TEXT"):   # failure tracking
         try: c.execute(f"ALTER TABLE ranges ADD COLUMN {col}")
         except Exception: pass
@@ -703,16 +718,25 @@ def release(body):
         # A voluntary release only ever follows a failed prove/submit, so it counts as an attempt for
         # exactly the same reason a reap does. Without this, a client that dutifully releases on every
         # failure would loop forever and never trip MAX_ATTEMPTS, while a client that crashed would.
-        n = (c.execute("SELECT COALESCE(attempts,0) AS n FROM ranges WHERE id=?", (rid,)).fetchone()["n"]) + 1
-        parked = n >= MAX_ATTEMPTS
         err = str(body.get("error") or "released by holder after a failed prove/submit")[:500]
-        c.execute("UPDATE ranges SET status=?, attempts=?, last_assignee=assignee, last_failed_at=?, "
-                  "last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL WHERE id=?",
-                  ("failed" if parked else "open", n, time.time(), err, rid))
+        row = c.execute("SELECT COALESCE(attempts,0) AS a, COALESCE(env_failures,0) AS e "
+                        "FROM ranges WHERE id=?", (rid,)).fetchone()
+        # An OOM says the box was full, not that the block is bad — count it separately, against a
+        # looser cap, so a capacity incident cannot park perfectly provable blocks.
+        env = is_env_failure(err)
+        n, ef = (row["a"], row["e"] + 1) if env else (row["a"] + 1, row["e"])
+        parked = (ef >= MAX_ENV_FAILURES) if env else (n >= MAX_ATTEMPTS)
+        c.execute("UPDATE ranges SET status=?, attempts=?, env_failures=?, last_assignee=assignee, "
+                  "last_failed_at=?, last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, "
+                  "last_beat=NULL WHERE id=?",
+                  ("failed" if parked else "open", n, ef, time.time(), err, rid))
         c.commit(); c.close()
     if parked:
-        print(f"[release] range {rid} PARKED as failed after {n} attempts: {err}", flush=True)
-    return 200, {"ok": True, "released": rid, "attempts": n, "parked": parked}
+        why = (f"{ef} environmental failures (capacity — check GPU memory/worker count, NOT the block)"
+               if env else f"{n} attempts")
+        print(f"[release] range {rid} PARKED as failed after {why}: {err}", flush=True)
+    return 200, {"ok": True, "released": rid, "attempts": n, "env_failures": ef,
+                 "environmental": env, "parked": parked}
 
 _MID_CACHE = {"v": None}
 def expected_method_id():
