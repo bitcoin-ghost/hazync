@@ -1,0 +1,44 @@
+═══ 4. VALIDITY — the Hazync proof ═══
+    ✓ verified, genesis-anchored, blocks 1..1000
+      proof commits tip = 00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+      (3441 bytes; attests every tx in 1..1000 satisfied consensus rules)
+
+═══ 1+2. IDENTITY — from REAL hazed storage (1255 stripped blocks) ═══
+    (txids read from gsb00000.dat — witnesses and
+     scriptSigs are gone; these are the txids the hazed archive actually retains)
+      …200/1000 blocks checked
+      …400/1000 blocks checked
+      …600/1000 blocks checked
+      …800/1000 blocks checked
+      …1000/1000 blocks checked
+    ✓ all 1000 merkle roots recompute from the hazed archive's own txids
+    ✓ all 1000 headers link, and every PoW meets its target
+
+═══ 3. THE JOIN — does the hazed chain end where the proof says? ═══
+    hazed archive tip at 1000  00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    proof commits             00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    ✓ match
+
+═══ CONCLUSION ═══
+    A node holding ONLY hazed blocks — witnesses and scriptSigs destroyed — established
+    that blocks 1..1000 are the real chain, and a 3441-byte proof established
+    that every transaction in them was valid. No signature was available to check.
+
+# Run 2026-07-29 against a REAL hazed archive produced by ghostd v1.10.16 (-hazemode=hazed,
+# -stopatheight=1000, mainnet). 1,255 stripped blocks in gsb00000.dat.
+#
+# This closes the gap left by prover/evidence/hazed_chain_binding.txt, which used bitcoind-derived
+# txids as a stand-in. These txids come from the hazed archive itself — the only copy that exists
+# on a hazed node, with witnesses and scriptSigs permanently destroyed.
+#
+# TWO THINGS THE FORMAT REQUIRED, neither documented outside the code:
+#   1. block files are XOR-obfuscated with blocks/xor.dat (here 88a020f371f05420). Not encryption
+#      and no security weight, but nothing parses without undoing it. It is also why ghost#542's
+#      crash reported magic 'f0542088' — that is the key showing through unwritten zeros, not
+#      corruption.
+#   2. records are NOT contiguous: files are preallocated, so the archive opens with unwritten
+#      space. The parser scans for the GSB magic rather than assuming a packed sequence, so it
+#      does not depend on the block index for positions.
+#
+# Stored txids are not taken on trust: the merkle root is recomputed from whatever txids the
+# block yields and must match the header, so a forged stored txid fails.

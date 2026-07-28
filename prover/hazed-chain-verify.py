@@ -52,6 +52,88 @@ def merkle_root(txids_le: list[bytes]) -> bytes:
     return layer[0]
 
 
+# ── GSB parsing ────────────────────────────────────────────────────────────────────────────────────
+# Ghost's on-disk hazed format, from ghost-core/src/haze/stripped_block.h:
+#
+#   GSB frame        : "GSB\0" magic (4) | size uint32-LE (4) | CStrippedBlock
+#   CStrippedBlock   : CBlockHeader (80) | compactsize n | n * CStrippedTransaction
+#   CStrippedTx      : flags u8 | [stored txid 32 if flags&1] | version i32 | inputs | outputs | locktime u32
+#   CStrippedInput   : prevout (32 hash + u32 index) | 0x00 (empty scriptSig length) | sequence u32
+#   CStrippedOutput  : value i64 | compactsize-prefixed scriptPubKey
+#
+# The stored-txid flag is the crux. Stripping scriptSigs, OP_RETURN payloads and non-standard scripts
+# changes the txid preimage, so those txids cannot be recomputed and are stored verbatim. A stored txid
+# is NOT taken on trust: the merkle root is recomputed from whatever txids the block yields and must
+# match the header, so a forged one fails.
+
+class _R:
+    def __init__(self, b): self.b, self.i = b, 0
+    def take(self, n):
+        if self.i + n > len(self.b): raise EOFError("gsb truncated")
+        v = self.b[self.i:self.i + n]; self.i += n; return v
+    def u8(self):  return self.take(1)[0]
+    def u32(self): return int.from_bytes(self.take(4), "little")
+    def i32(self): return int.from_bytes(self.take(4), "little", signed=True)
+    def i64(self): return int.from_bytes(self.take(8), "little", signed=True)
+    def compact(self):
+        n = self.u8()
+        if n < 0xfd: return n
+        if n == 0xfd: return int.from_bytes(self.take(2), "little")
+        if n == 0xfe: return self.u32()
+        return int.from_bytes(self.take(8), "little")
+
+
+def _tx_txid(r: _R) -> bytes:
+    """Parse one CStrippedTransaction; return its txid in internal byte order."""
+    flags = r.u8()
+    stored = r.take(32) if (flags & 0x01) else None
+    start = r.i                                  # non-witness preimage begins at the version field
+    r.i32()                                      # version
+    for _ in range(r.compact()):                 # inputs
+        r.take(32); r.u32()                      # prevout
+        n = r.compact()                          # scriptSig length — always 0 in a stripped block
+        r.take(n)
+        r.u32()                                  # sequence
+    for _ in range(r.compact()):                 # outputs
+        r.i64()                                  # value
+        r.take(r.compact())                      # scriptPubKey
+    r.u32()                                      # locktime
+    if stored is not None:
+        return stored                            # scriptSig/payload stripped: preimage is gone
+    return sha256d(r.b[start:r.i])               # native SegWit: scriptSig was already empty
+
+
+def parse_gsb(path, xor_key: bytes = b""):
+    """Yield (header_bytes, [txid…]) for every stripped block in a .gsb file.
+
+    Block files are XOR-obfuscated with the key in blocks/xor.dat — a Core feature that stops naive
+    virus scanners and grep from matching on chain contents at rest. It is NOT encryption and carries no
+    security weight, but nothing parses without undoing it first.
+
+    Worth knowing: this is also why the node's crash reported magic `f0542088`. That is not corruption,
+    it is the XOR key itself showing through a region of zeros that was never written.
+    """
+    data = open(path, "rb").read()
+    if xor_key:
+        data = bytes(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(data))
+    # Records are NOT contiguous from offset 0: the file is preallocated, so it opens with unwritten
+    # space and may contain gaps. Scan for the magic rather than assuming a packed sequence — the
+    # block index is what normally supplies positions, and we deliberately do not depend on it here.
+    out, magic, i = [], b"GSB\0", data.find(b"GSB\0")
+    while i != -1:
+        try:
+            r = _R(data[i:])
+            r.take(4)
+            size = r.u32()
+            body = _R(r.take(size))
+            header = body.take(80)
+            out.append((header, [_tx_txid(body) for _ in range(body.compact())]))
+        except (EOFError, ValueError, IndexError):
+            pass          # a magic-looking byte run inside payload data; skip it
+        i = data.find(magic, i + 1)
+    return out
+
+
 def pow_ok(header_hash_le: bytes, bits: int) -> bool:
     """Does the header hash meet its own difficulty target?"""
     exp, mant = bits >> 24, bits & 0xFFFFFF
@@ -86,9 +168,57 @@ def main() -> int:
     print()
 
     if a.txid_source == "gsb":
-        sys.exit("FAIL --txid-source gsb not implemented: no .gsb files exist yet and ghostd is not "
-                 "built. This tool deliberately refuses rather than silently falling back to RPC and "
-                 "reporting a pass that did not test what you asked for.")
+        if not a.gsb_dir:
+            sys.exit("FAIL --txid-source gsb needs --gsb-dir <blocks dir containing gsb*.dat>")
+        import glob, os
+        files = sorted(glob.glob(os.path.join(a.gsb_dir, "gsb*.dat")))
+        if not files:
+            sys.exit(f"FAIL no gsb*.dat under {a.gsb_dir} — nothing to verify")
+        xor_path = os.path.join(a.gsb_dir, "xor.dat")
+        xor_key = open(xor_path, "rb").read() if os.path.exists(xor_path) else b""
+        blocks = {}
+        for f in files:
+            for header, txids in parse_gsb(f, xor_key):
+                blocks[sha256d(header)] = (header, txids)
+        print(f"═══ 1+2. IDENTITY — from REAL hazed storage ({len(blocks)} stripped blocks) ═══")
+        print(f"    (txids read from {', '.join(os.path.basename(f) for f in files)} — witnesses and")
+        print("     scriptSigs are gone; these are the txids the hazed archive actually retains)")
+        # walk forward from genesis using each header's prev pointer
+        by_prev = {h[4:36]: (bh, h, t) for bh, (h, t) in blocks.items()}
+        genesis = bytes.fromhex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")[::-1]
+        cur, height, bad = genesis, 0, 0
+        while height < N and cur in by_prev:
+            bh, header, txids = by_prev[cur]
+            height += 1
+            got = merkle_root(txids)
+            if got != header[36:68]:
+                print(f"    ✗ block {height}: merkle mismatch — {got[::-1].hex()[:16]}… vs header {header[36:68][::-1].hex()[:16]}…")
+                bad += 1
+            if not pow_ok(bh, int.from_bytes(header[72:76], "little")):
+                print(f"    ✗ block {height}: PoW does not meet its stated target")
+                bad += 1
+            cur = bh
+            if height % 200 == 0 or height == N:
+                print(f"      …{height}/{N} blocks checked")
+        if height < N:
+            sys.exit(f"FAIL hazed archive only reaches height {height}, proof covers {N}")
+        if bad:
+            sys.exit(f"FAIL {bad} identity failure(s) — the hazed archive does not reconstruct")
+        print(f"    ✓ all {N} merkle roots recompute from the hazed archive's own txids")
+        print(f"    ✓ all {N} headers link, and every PoW meets its target")
+        print()
+        print("═══ 3. THE JOIN — does the hazed chain end where the proof says? ═══")
+        tip = cur[::-1].hex()
+        print(f"    hazed archive tip at {N}  {tip}")
+        print(f"    proof commits             {proven_tip}")
+        if tip != proven_tip:
+            sys.exit("FAIL the hazed archive does not end at the proven tip")
+        print("    ✓ match\n")
+        print("═══ CONCLUSION ═══")
+        print(f"    A node holding ONLY hazed blocks — witnesses and scriptSigs destroyed — established")
+        print(f"    that blocks 1..{N} are the real chain, and a {st['proof_bytes']}-byte proof established")
+        print("    that every transaction in them was valid. No signature was available to check.")
+        return 0
 
     print(f"═══ 1+2. IDENTITY — merkle roots and header chain, blocks 1..{N} ═══")
     print("    (txids from bitcoind — the stand-in for a hazed block's stored txids)")
