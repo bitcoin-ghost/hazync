@@ -223,6 +223,24 @@ def parse_range(rid):
         return None
     return lo, hi
 
+def overlapping(c, lo, hi, exclude_id):
+    """Any live range whose block interval intersects [lo, hi], other than exclude_id.
+
+    The old guard was ID-based: claim-next skipped ids already in ('claimed','verified','failed'). That
+    is only sound while every claim is the same shape. It is not — parse_range accepts BOTH a single
+    block and a RANGE_SIZE-aligned range, and those overlap: block 29664 sits inside 29000-29999, yet
+    the two ids are different strings, so both could be claimed and proved at once. Nothing detected it.
+
+    It has been latent only because claim-next exclusively serves single blocks, so the shapes are never
+    mixed in practice. Serving wider ranges (#28) is exactly what would activate it — against the ~34k
+    single-block receipts already on the board — so the check has to become interval-based first.
+
+    Note 'failed' counts as live: a parked range still owns its interval, otherwise a wide range could
+    be claimed straight over the top of the very block that is failing."""
+    return [r["id"] for r in c.execute(
+        "SELECT id FROM ranges WHERE status IN ('claimed','verified','failed') "
+        "AND id != ? AND lo <= ? AND hi >= ?", (exclude_id, hi, lo))]
+
 def pick(body):
     """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
     per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`
@@ -599,6 +617,14 @@ def claim(body):
             since = int((now - (r["last_beat"] or r["claimed_at"] or now)) / 60)
             c.close()
             return 409, {"error": f"locked — being proved by {r['handle']} ({since}m active)"}
+        # Interval overlap, not just id equality — see overlapping(). Two different ids can cover the
+        # same blocks (a single block inside an aligned range), which would duplicate proving work and
+        # race on submission. Checked under the same lock that grants the claim, so it cannot be raced.
+        clash = overlapping(c, r["lo"], r["hi"], rid)
+        if clash:
+            c.close()
+            return 409, {"error": f"overlaps {len(clash)} live range(s) already claimed/proven: "
+                                  f"{', '.join(clash[:5])}{' …' if len(clash) > 5 else ''}"}
         c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
                   (pk, handle, now))
         c.execute("UPDATE contributors SET handle=? WHERE pubkey=?", (handle, pk))
