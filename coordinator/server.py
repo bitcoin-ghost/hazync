@@ -723,9 +723,14 @@ def claim(body):
             # Claiming a parked range BY EXPLICIT ID is how an operator retries it — typically after
             # fixing whatever actually broke (in practice: GPU oversubscription, not the block). Reset
             # the counter so the retry gets a full budget rather than instantly re-parking.
-            print(f"[claim] range {rid} was parked as failed after {r['attempts']} attempts; "
-                  f"{handle} is retrying it explicitly — counter reset", flush=True)
-            c.execute("UPDATE ranges SET attempts=0 WHERE id=?", (rid,))
+            # BOTH counters, not just attempts. A range parks on whichever cap it hits, and in practice
+            # that is MAX_ENV_FAILURES — capacity incidents are what actually park ranges, while genuine
+            # block defects are rare. Resetting only `attempts` left the retry useless for the common
+            # case: the range would re-park on its very next OOM, having been handed a budget of zero.
+            print(f"[claim] range {rid} was parked as failed (attempts={r['attempts']}, "
+                  f"env_failures={r['env_failures']}); {handle} is retrying it explicitly — "
+                  f"both counters reset", flush=True)
+            c.execute("UPDATE ranges SET attempts=0, env_failures=0 WHERE id=?", (rid,))
         if r["status"] == "claimed" and r["assignee"] != pk:
             # locked to someone else and still alive (reap() already freed stale ones)
             since = int((now - (r["last_beat"] or r["claimed_at"] or now)) / 60)
