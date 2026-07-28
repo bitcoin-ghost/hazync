@@ -227,6 +227,34 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### Ride-alongs — guest changes worth batching into ANY re-baseline
+
+The board reset is the expensive part, and it costs the same whether one thing changes or five. So a
+change that is not worth a re-baseline on its own becomes free once one is happening anyway. Check this
+list whenever a re-baseline is planned:
+
+- [ ] **Journal byte-packing** (was issue #22). risc0 serde commits each `u8` as its own 32-bit word, so
+      a 32-byte Utreexo root goes on the wire as 128 bytes. Packing recovers 96 B per root: measured
+      ~20% on a genesis-anchored `[1..1000]` wrap (3,441 B -> ~2,770 B) and ~25% on a projected
+      full-chain wrap (~5,360 B -> ~4,020 B). **Deliberately NOT worth a re-baseline alone** — a few KB
+      stays a few KB, and it buys no product capability, since 4 KB and 5.4 KB are equally trivial for a
+      phone to fetch and verify. Free if the guest is changing regardless. Treat the percentages as an
+      inferred two-point fit, not a measurement.
+
+### Things that MUST be updated when the id changes
+
+Easy to miss, and each fails in a way that looks like something else:
+
+- [ ] `reproduce/METHOD_ID` — the source of truth; update it FIRST.
+- [ ] `verifier/src/main.rs` `METHOD_ID_HEX` — the standalone verifier embeds the id as a literal (it
+      cannot import it without dragging in the guest build). `scripts/check-versions.sh` fails the build
+      if this drifts, but it CANNOT check `verifier/dist/*` — rebuild and replace those binaries too.
+- [ ] `prover/testdata/snark/*.snark` — the CI Groth16 fixtures are pinned to the id and will start
+      failing `ci_snark_verify.sh`. Regenerate per `prover/testdata/snark/README.md`.
+- [ ] **the archive bridge's binary** — it produces the bundles everyone else consumes. Missing it once
+      already stalled the board dead while every other component looked healthy.
+- [ ] docs stating the current id (`docs/PROVING.md`, `SECURITY.md`, `docs/ROADMAP.md`) — `check-versions.sh` enforces.
+
 The coordinator derives the id it expects from its **own** `HAZYNC_HOST` binary (`expected_method_id()`,
 served at `/api/meta`), so the swap is: new binary in, board cleared, workers restarted.
 
