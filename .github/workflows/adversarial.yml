@@ -118,6 +118,11 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && ./test_bip68_real.sh
+      - name: Groth16 SNARK verification + genesis-pin negative control (#23)
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
+          cd prover && ./ci_snark_verify.sh
 
   dependency-audit:
     # Nothing was scanning dependencies for known advisories until now. This job fails on any NEW one.
