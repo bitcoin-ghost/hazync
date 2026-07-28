@@ -576,8 +576,22 @@ def state():
                    since=int(now - (r["last_failed_at"] or now)))
               for r in c.execute("SELECT id,lo,hi,attempts,last_error,last_failed_at FROM ranges "
                                  "WHERE status='failed' ORDER BY lo")]
-    blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges WHERE id=?",
-                        (str(fr + 1),)).fetchone()
+    # Find what covers the next needed block by INTERVAL, not by id. Looking up id == str(fr+1) is the
+    # same id-vs-interval mistake fixed in the claim path, and it reads exactly backwards once ranges
+    # can be wide: with 38000-38999 claimed and being proved, the row whose id is "38000" is a distinct,
+    # untouched single-block row, so the blocker reported "open, attempts 0, stalled_for 0" — i.e. it
+    # said nothing is happening while a worker was 200 blocks into proving it.
+    #
+    # A LIVE range covering the block is the real answer; the bare single-block row is the fallback for
+    # when nothing covers it (genuinely open, which is the interesting stall case).
+    nb = fr + 1
+    blocker = c.execute(
+        "SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges "
+        "WHERE lo <= ? AND hi >= ? AND status IN ('claimed','verified','failed') "
+        "ORDER BY (hi-lo) ASC LIMIT 1", (nb, nb)).fetchone()
+    if blocker is None:
+        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges WHERE id=?",
+                            (str(nb),)).fetchone()
     stalled_for = 0
     if blocker is not None and blocker["status"] != "verified":
         mark = blocker["last_failed_at"] or blocker["claimed_at"]
@@ -587,7 +601,11 @@ def state():
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
                      "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
         "failed": failed,
-        "frontier_blocker": {"id": str(fr + 1),
+        # `block` is the block the frontier needs next; `id` is the RANGE responsible for it, which is
+        # not the same thing once ranges can be wide — reporting str(fr+1) as the id hid a claimed
+        # 38000-38999 behind an untouched single-block row of the same name.
+        "frontier_blocker": {"block": fr + 1,
+                             "id": (blocker["id"] if blocker is not None else str(fr + 1)),
                              "status": (blocker["status"] if blocker is not None else "open"),
                              "attempts": (blocker["attempts"] if blocker is not None else 0) or 0,
                              "stalled_for": stalled_for},
