@@ -1,0 +1,74 @@
+# Fold [1..1000] -> ONE receipt -> Groth16 wrap. First end-to-end measurement of the artifact a
+# low-compute verifier would actually be handed.
+#
+# Guest:  METHOD_ID 3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e  (v0.10.0)
+# Box:    L40S GPU host (fold, GPU) + CPU Groth16 for the wrap
+# Date:   2026-07-28
+# Repro:  fold pairwise with `host fold-range` (log-depth tree, as prover/rangecluster.sh does),
+#         then `host snark-wrap <fold.bin> <out.snark>` and `host verify-snark <out.snark>`
+#
+# Context: until this run there was NO genesis->N proof. The coordinator chains ranges administratively
+# (verify_any_cmd: "...without doing any proving/folding itself"), so the board's frontier was a
+# database claim, not a single artifact. See issue #24.
+
+=== 1. FOLD: 1000 single-block receipts -> one RangeState ===
+
+  999 folds in 3766s          avg 3.76 s/fold      (log-depth tree, GPU exclusive)
+  inputs   227,049,472 bytes  (1000 receipts)
+  output       226,170 bytes  (ONE receipt)        -> 1004x reduction
+
+  >>> RANGE PROOF [1..1000] VERIFIED — genesis-anchored, one succinct receipt.
+      out_tip_hash 09edf646d13d2a7e1da8bdad14d249b037eccd8af23aa704379837c900000000
+      range_work 4295032833000   total_cum_work 4299327865833   UTXO leaves 998
+
+Fold cost is FLAT in range length (a fold verifies two receipts and checks the seam, regardless of
+span). Earlier evidence (rangefold_1_176.log, 2xL40S) suggested ~2 s/fold; on this box at the current
+default segment po2 it is 3.76 s. Extrapolating: ~23 GPU-hours to fold the current ~22k board, ~1,025
+GPU-hours for the full 958,301-block chain — i.e. 0.07% of the ~1.56M GPU-hours needed to PROVE it.
+Folding is a rounding error next to proving.
+
+NOTE: the fold needs the GPU EXCLUSIVELY. Run against the live board it dies with
+`hash_rows ... "out of memory"` (it did, at level 1 idx 13, before this run paused the workers).
+
+=== 2. WRAP: STARK -> Groth16 ===
+
+  input      226,170 bytes
+  wrapped      3,441 bytes    in 76.6 s, 1.4 GB peak RSS     -> 66x smaller
+  >>> SNARK RANGE PROOF [1..1000] VERIFIED — genesis-anchored, 3441 bytes.
+      out_tip_hash / range_work / cum_work / UTXO leaves all preserved
+
+  End to end: 227,049,472 -> 3,441 bytes = 65,983x
+
+WRAP COST IS ESSENTIALLY FLAT IN CHAIN LENGTH. Compare groth16_snark_wrap.txt: a SINGLE block-170
+chain step took 825.7 s, while this 1000-block fold took 76.6 s — ~10x faster on ~1000x more chain.
+Groth16 cost is dominated by the fixed `stark_verify` circuit, not by what is being proven. This
+removes the main worry in #24 that wrapping a genesis->N fold might be impractical: it is not.
+
+=== 3. NEGATIVE CONTROL: the genesis pin must survive the wrap ===
+
+  wrapped a VALID but NON-genesis range [500..500] -> 5,633 bytes
+  verify-snark: REJECTED, and specifically ON THE GENESIS PIN (not a missing file, not a generic error)
+
+This is the assertion the whole pair is built around. A smaller artifact that checks LESS would be
+worse than the thing it replaces — a fabricated-anchor range in a more shareable package. It checks
+the same things `verify-range` does, including assert_genesis_in_boundary.
+
+=== 4. SIZE IS DRIVEN BY BOUNDARY CONTENT, NOT RANGE LENGTH ===
+
+  [1..1000]  genesis-anchored   3,441 bytes
+  [500..500] mid-chain          5,633 bytes   <- SINGLE block, yet LARGER
+
+A genesis-anchored range has an EMPTY in-boundary (in_leaves 0, in_roots empty); a mid-chain range
+commits full non-empty in- AND out-boundaries, so it carries two populated root vectors. Range length
+barely matters; what the boundaries contain does.
+
+Consequence for any published figure: a full-chain wrap will be LARGER than 3,441 B, because its
+out-boundary carries ~log2(UTXO leaves) roots (~28 at mainnet scale) rather than the ~10 here. Do not
+quote 3,441 B as "the" size. See #21 (the docs' ~200-300 B describes the Groth16 PROOF, not the
+receipt) and #22 (the journal is not byte-packed; each [u8;32] costs 128 B instead of 36).
+
+=== SCOPE ===
+
+[1..1000] is 0.1% of the chain and its UTXO set is tiny (998 leaves vs ~200M at the tip). The MECHANISM
+is proven end to end; the numbers are not a full-chain projection. The wrap being flat is the finding
+that generalises; the sizes are not.
