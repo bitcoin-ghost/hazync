@@ -62,10 +62,24 @@ A genesis-anchored range has an EMPTY in-boundary (in_leaves 0, in_roots empty);
 commits full non-empty in- AND out-boundaries, so it carries two populated root vectors. Range length
 barely matters; what the boundaries contain does.
 
-Consequence for any published figure: a full-chain wrap will be LARGER than 3,441 B, because its
-out-boundary carries ~log2(UTXO leaves) roots (~28 at mainnet scale) rather than the ~10 here. Do not
-quote 3,441 B as "the" size. See #21 (the docs' ~200-300 B describes the Groth16 PROOF, not the
-receipt) and #22 (the journal is not byte-packed; each [u8;32] costs 128 B instead of 36).
+CORRECTION to an earlier claim of mine: the root count is popcount(leaves), NOT log2(leaves). log2 is
+the number of possible root SLOTS (~28 at mainnet scale); the actual number of roots is the popcount,
+which for ~200M leaves is 12, and over random leaf counts in that range runs min 7 / mean 14.5 / max 22.
+I had quoted ~28, which is the worst case, not the typical one.
+
+Calibrating per-root cost from the two REAL measurements here (roots = popcount(in_leaves) +
+popcount(out_leaves); genesis-anchored ranges have an empty in-boundary):
+
+  [1..1000]   in 0 + out 998   ->  0 + 7 =  7 roots  ->  3,441 B measured
+  [500..500]  in ~502 + out 503 -> 7 + 8 = 15 roots  ->  5,633 B measured
+  => ~274 B per root, ~1,523 B fixed (seal + claim + non-root journal + framing)
+
+Projected full-chain wrap (genesis-anchored, so in-boundary empty):
+  best 7 roots ~3.4 KB   typical ~14 roots ~5.4 KB   worst 22 roots ~7.6 KB
+
+Two data points is a FIT, not a law — treat as inferred until instrumented. But the order is right, and
+"a few KB" is the honest characterisation. Do not quote 3,441 B as "the" size. See #21 (the docs'
+~200-300 B describes the Groth16 PROOF, not the receipt) and #22 (the journal is not byte-packed).
 
 === SCOPE ===
 
