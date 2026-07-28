@@ -53,6 +53,16 @@ jobs:
             exit 1
           fi
           echo "verifier rejects the non-genesis range ✓"
+      - name: FFI verifier links from C++ and rejects what it must (#31)
+        # ghostd will call THIS, not a C++ reimplementation of risc0 verification. Proves the static
+        # library links from C++ and that every rejection path returns its own code — a caller that
+        # adopted state on a non-zero return would be adopting a fabricated anchor.
+        run: |
+          cargo build --release --manifest-path verifier-ffi/Cargo.toml
+          g++ -O2 -I verifier-ffi/include prover/testdata/ffi_smoke.cpp \
+              verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_smoke
+          /tmp/ffi_smoke prover/testdata/snark/fold_1000.snark 0   # genesis-anchored -> HAZYNC_OK
+          /tmp/ffi_smoke prover/testdata/snark/neg500.snark   -5   # valid but NOT anchored
       - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
         run: ./scripts/check-rangestate.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)

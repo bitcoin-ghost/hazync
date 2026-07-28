@@ -1,0 +1,22 @@
+[package]
+name = "hazync-verify-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI over the Hazync proof verifier, for linking into ghostd"
+license = "Apache-2.0"
+
+# staticlib so a C++ consumer links one .a with no runtime dependency on Rust.
+[lib]
+name = "hazync_verify"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+hazync-rangestate = { path = "../rangestate" }
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
+bincode = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
