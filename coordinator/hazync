@@ -211,6 +211,23 @@ def _seg_ladder(env):
         return (None, 20, 19, 18)
     return (None, *range(top - 1, _SEG_MIN - 1, -1))
 
+# Lines that carry no information about WHY something failed. `note: run with RUST_BACKTRACE=1` is
+# almost always the LAST line rustc-built binaries emit, so taking splitlines()[-1] — as this did —
+# reliably captured the one line that says nothing.
+#
+# That was not merely unhelpful. The reason travels to the coordinator with the release and is what
+# decides whether a failure is environmental (OOM, capacity) or block-implicating: an out-of-memory
+# recorded as "note: run with RUST_BACKTRACE=1" is invisible to that classifier, so a capacity blip
+# would be counted against the block and could park perfectly good work.
+_NOISE = ("note:", "stack backtrace", "run with `rust_backtrace", "warning:")
+
+def _err_tail(stderr, keep=4):
+    """The most informative trailing lines of a failed prove, noise dropped."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    signal = [l for l in lines if not any(n in l.lower() for n in _NOISE)]
+    picked = (signal or lines)[-keep:]
+    return " | ".join(picked) if picked else "(no error output)"
+
 def _run_with_seg_retry(argv, env, work, label):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
@@ -233,11 +250,10 @@ def _run_with_seg_retry(argv, env, work, label):
             return
         last = (r.stderr or "").strip()
         if any(h in last for h in _HARD_ERR):           # smaller segments won't help — fail fast, loudly
-            tail = last.splitlines()[-1] if last else "(no error output)"
+            tail = _err_tail(last)
             sys.exit(f"{label}: {tail}\n(not a segment-size issue — retrying smaller won't help; check the "
                      f"bundle/witness and that `host method-id` matches reproduce/METHOD_ID)")
-    tail = last.splitlines()[-1] if last else "(no error output)"
-    sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {tail}")
+    sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {_err_tail(last)}")
 
 def cmd_prove(args):
     rng = args[0]
