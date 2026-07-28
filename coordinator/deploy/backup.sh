@@ -95,12 +95,48 @@ fi
 echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1))"
 
 # 4. Offsite copy (optional but strongly recommended — a same-disk backup dies with the box).
+#
+# Each run ships a FULL snapshot to its own $STAMP directory, so the remote must be rotated too or it
+# grows without bound until the target fills and every subsequent backup fails. $BACKUP_KEEP used to be
+# applied only to the local $OUT below, which meant configuring an offsite target quietly converted a
+# same-disk problem into a full-disk one. Snapshots track the proof set and are not a fixed size — this
+# one is 5.7G and growing ~10G/day while the board re-proves — so an unrotated remote does not degrade
+# slowly, it fills in days.
+#
+# Note --link-dest would NOT help here: the receipts are archived into a single proofs.tar.gz that
+# differs every run, so there are no unchanged files to hardlink. Making that work would mean syncing
+# the receipts directory instead of a tarball — a layout change, deliberately not done here.
 if [ -n "$REMOTE" ]; then
     case "$REMOTE" in
-        rclone:*) rclone copy "$DEST" "${REMOTE#rclone:}/$STAMP" ;;
-        *)        rsync -a "$DEST/" "$REMOTE/$STAMP/" ;;
+        rclone:*)
+            _rc="${REMOTE#rclone:}"
+            rclone copy "$DEST" "$_rc/$STAMP"
+            # Prune oldest-first, keeping $KEEP. `lsf --dirs-only` sorts lexically, and the stamp format
+            # (UTC %Y%m%dT%H%M%SZ) is lexically ordered, so this is chronological.
+            _old=$(rclone lsf --dirs-only "$_rc" 2>/dev/null | sed 's:/$::' | sort | head -n -"$KEEP")
+            for _d in $_old; do
+                rclone purge "$_rc/$_d" >/dev/null 2>&1 \
+                    && echo "[backup] pruned remote snapshot $_d" \
+                    || echo "[backup] WARNING: could not prune remote snapshot $_d" >&2
+            done
+            ;;
+        *:*)
+            rsync -a "$DEST/" "$REMOTE/$STAMP/"
+            # user@host:/path — prune over ssh on the same host. Split on the FIRST colon only, so
+            # paths containing colons still work.
+            _host="${REMOTE%%:*}"; _path="${REMOTE#*:}"
+            if ! ssh -o BatchMode=yes "$_host" \
+                    "ls -1d '$_path'/*/ 2>/dev/null | sort | head -n -$KEEP | xargs -r rm -rf"; then
+                echo "[backup] WARNING: remote prune failed on $_host — $_path will grow unbounded" >&2
+            fi
+            ;;
+        *)
+            # A bare local path (no host): rsync it, then prune in place.
+            rsync -a "$DEST/" "$REMOTE/$STAMP/"
+            ls -1dt "$REMOTE"/*/ 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -rf
+            ;;
     esac
-    echo "[backup] copied offsite → $REMOTE/$STAMP"
+    echo "[backup] copied offsite → $REMOTE/$STAMP (keeping newest $KEEP)"
 else
     echo "[backup] WARNING: BACKUP_REMOTE unset — this snapshot is on the SAME DISK as the data it backs up."
 fi
