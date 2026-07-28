@@ -565,7 +565,9 @@ genesis→tip, no explorer, real metadata, and it's the same node that would run
 
 ### Build order to get to tip use
 1. Real STARK proving of one block + the 2-step recursive fold (256 GB box / GPU).
-2. SNARK-wrap the ChainState proof (STARK→Groth16, ~200–300 B) so verification is trivial everywhere.
+2. SNARK-wrap the ChainState proof (STARK→Groth16) so verification is trivial everywhere — three BN254
+   pairings. The proof itself is ~200–300 B; the full receipt measured 2033 B on block 170 and grows
+   with chain size (see `prover/evidence/groth16_snark_wrap.txt`).
 3. Chain-proof gossip + proof-frontier tracker in the node (verify-only path first).
 4. Gate pruning on the proof frontier; wire the divergence canary.
 5. Fast-IBD path: verify proof → validate unproven tail.

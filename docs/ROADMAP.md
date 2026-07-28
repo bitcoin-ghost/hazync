@@ -130,7 +130,9 @@ experts (who verify) and everyone else (who spread the word, contribute compute,
   verification API, and shows an attribution leaderboard. Self-verifying (contributors can't cheat) and
   fault-tolerant. This produces the full genesis→tip proof as a community effort.
 - [ ] Sponsored tip-proving cluster (small committed GPU set; ~5–30 L40S-equivalents to keep pace).
-- [ ] SNARK-wrap the final chain proof (~200–300 B) for universal/on-chain verification.
+- [ ] SNARK-wrap the final chain proof for universal/on-chain verification. The Groth16 *proof* is
+  ~200–300 B, but the shippable *receipt* measured **2033 B** on block 170 and grows with chain size
+  (issues #21, #22); CUDA Groth16 is currently broken (#20).
 
 ## 5. Parking lot
 

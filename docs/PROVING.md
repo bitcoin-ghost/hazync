@@ -165,8 +165,29 @@ the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 
-Wrap a tip/range STARK to Groth16 (~200–300 B, verifiable on a phone or on-chain). The capability is
-validated (block 170); applying it to the chain/range output is future work.
+Wrap a tip/range STARK to Groth16, so verification becomes three BN254 pairings instead of a STARK
+check — milliseconds, no chain data, no peers.
+
+**Measured** (block 170, CPU path, guest `3f52baff`; log in
+[`prover/evidence/groth16_snark_wrap.txt`](../prover/evidence/groth16_snark_wrap.txt)):
+
+| | |
+|---|---|
+| wall clock | **825.7 s** (~14 min, CPU) |
+| peak RSS | 9.7 GB |
+| **whole serialised receipt** | **2033 bytes** |
+| Groth16 proof proper (2×G1 + 1×G2, BN254) | ~128–256 bytes |
+
+Mind the distinction: **~200–300 B describes the Groth16 proof**; the artifact you actually ship and
+verify is the whole `Receipt` — seal **plus journal plus claim metadata** — which measured 2033 bytes
+here. The journal dominates, because risc0 serde commits each `u8` as its own 32-bit word (a `[u8; 32]`
+is 128 bytes on the wire) — the same 4× bloat fixed for *witnesses* in v0.9.0 and never applied to the
+journal (issue #22). The receipt also **grows with chain size**, since a Utreexo forest carries
+~log₂(leaves) roots, so a genesis→N wrap will exceed this; no fixed-size claim is safe.
+
+⚠️ **Groth16 currently fails on CUDA builds** (issue #20) — `sppark` illegal memory access, reproduced on
+the released binary with the GPU idle. The CPU path works. Applying the wrap to a folded range/chain
+output is still future work (issues #19, #24).
 
 ```
 ./target/release/host prove-snark
@@ -210,5 +231,9 @@ the host bytes need not be. Build both in a container so the binary links agains
   Confirm coverage with `cuobjdump --list-elf <host>` (expect `sm_80 sm_86 sm_89 sm_90`).
 
 Before publishing, smoke-test each binary: `host method-id` (== `reproduce/METHOD_ID`), `host
-bundle-roundtrip-test`, and `host verify-any` on a served proof. `prover/e2e_bundle_test.sh` runs the full
+bundle-roundtrip-test`, `host verify-any` on a served proof, and — for CUDA binaries — **`host
+prove-snark`**. That last one is not optional: Groth16 has no CI coverage (no GPU on the runners), so
+the release gate is the only thing that can catch it, and it shipped broken from v0.8.0 to v0.10.0
+precisely because nothing exercised it (issues #20, #23). Confirming the binary *contains* Groth16
+support is not sufficient — it must actually wrap and verify. `prover/e2e_bundle_test.sh` runs the full
 served-bundle → prove → verify path on a spend-block — the coverage the in-memory suite doesn't reach.
