@@ -18,6 +18,21 @@ Note `neg500.snark` is **larger** than `fold_1000.snark` despite covering one bl
 thousand: a genesis-anchored range has an empty in-boundary, while a mid-chain range commits two
 populated Utreexo root vectors. Size tracks boundary content, not range length.
 
+## They can only be verified by a CANONICAL host
+
+The gate runs in the **`reproducible-image-id`** job, inside the fixed-path container — not in
+`soundness-suite`. That is not incidental: a RISC0 guest image id absorbs the build's `$HOME/.cargo`
+paths, so a host built on a CI runner (`$HOME=/home/runner`) has a **non-canonical** METHOD_ID and
+rejects these fixtures. The first attempt put the check in `soundness-suite` and failed with
+
+```
+proof's guest id:      3f52baff…   (canonical)
+this host's METHOD_ID: f55ca518…   (the runner's build)
+```
+
+which reads like a broken proof and is actually a build-path mismatch. Verify these with a container
+build, never with an ad-hoc one.
+
 ## These are tied to a METHOD_ID
 
 Both were wrapped under guest image id `3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e`

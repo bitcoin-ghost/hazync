@@ -118,11 +118,6 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && ./test_bip68_real.sh
-      - name: Groth16 SNARK verification + genesis-pin negative control (#23)
-        run: |
-          . "$HOME/.cargo/env"
-          export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
-          cd prover && ./ci_snark_verify.sh
 
   dependency-audit:
     # Nothing was scanning dependencies for known advisories until now. This job fails on any NEW one.
@@ -175,3 +170,13 @@ jobs:
             exit 1
           fi
           echo "reproducible METHOD_ID matches canonical ✓"
+      - name: Groth16 SNARK verification + genesis-pin negative control (#23)
+        # Runs HERE, not in soundness-suite, and the reason is not incidental: a RISC0 guest image id
+        # absorbs the build's $HOME/.cargo paths, so the host that soundness-suite builds on the runner
+        # ($HOME=/home/runner) has a NON-canonical METHOD_ID. The checked-in fixtures are pinned to the
+        # canonical id, so only the fixed-path container build can verify them — this job is the one
+        # place a canonical host exists. Putting the check in soundness-suite failed with an image-id
+        # mismatch that looked like a broken proof and was actually a build-path mismatch.
+        run: |
+          docker run --rm hazync-repro sh -c \
+            'cd /hazync-zkvm/prover && HAZYNC_HOST=/hazync-zkvm/prover/target/release/host ./ci_snark_verify.sh'
