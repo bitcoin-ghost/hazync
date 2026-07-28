@@ -26,12 +26,16 @@ paths, so a host built on a CI runner (`$HOME=/home/runner`) has a **non-canonic
 rejects these fixtures. The first attempt put the check in `soundness-suite` and failed with
 
 ```
-proof's guest id:      3f52baff…   (canonical)
-this host's METHOD_ID: f55ca518…   (the runner's build)
+proof's guest id:      <the canonical id>
+this host's METHOD_ID: <a different id, from the runner's own build paths>
 ```
 
 which reads like a broken proof and is actually a build-path mismatch. Verify these with a container
 build, never with an ad-hoc one.
+
+(Deliberately not quoting the runner's actual id here: `scripts/check-versions.sh` fails the build on
+any guest id in the docs that is neither canonical nor listed in `reproduce/METHOD_ID`, and it should —
+a stale or foreign id in documentation is exactly the drift it exists to catch. It caught this.)
 
 ## These are tied to a METHOD_ID
 
