@@ -91,6 +91,22 @@ else
     note "skip release-vs-tag check (no tags in this clone)"
 fi
 
+# The standalone verifier EMBEDS the guest image id as a literal — it deliberately does not depend on
+# the `methods` crate, because that would drag in the guest build and defeat the point of a 1.6 MB
+# artifact. That literal is invisible to the doc scan above, so without this a re-baseline would ship a
+# verifier that silently rejects every current proof.
+V=verifier/src/main.rs
+if [ -f "$V" ]; then
+    emb=$(grep -oE 'METHOD_ID_HEX: &str = "[0-9a-f]{64}"' "$V" | grep -oE '[0-9a-f]{64}')
+    if [ -z "$emb" ]; then
+        bad "$V has no METHOD_ID_HEX literal to check"
+    elif [ "$emb" != "$CANON" ]; then
+        bad "$V embeds ${emb:0:8}… but canonical is ${CANON:0:8}… — the verifier would reject every current proof"
+    else
+        note "ok   verifier embeds the canonical id"
+    fi
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo
     echo "Version/id drift detected. If this was an intentional re-baseline, update reproduce/METHOD_ID"

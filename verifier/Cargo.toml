@@ -1,0 +1,26 @@
+[package]
+name = "hazync-verify"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal standalone verifier for a Hazync genesis-anchored SNARK range proof"
+license = "Apache-2.0"
+
+# DELIBERATELY not a member of the prover workspace, and deliberately NOT depending on the `methods`
+# crate. `methods` builds the RISC0 guest, which is the bulk of the 69 MB (CPU) / 312 MB (CUDA) host
+# binary. A verifier needs the guest's IMAGE ID, not the guest — so the id is embedded as a hex literal
+# and checked against reproduce/METHOD_ID by scripts/check-versions.sh.
+#
+# `default-features = false` drops the prover entirely; this build can verify a proof and nothing else,
+# which is exactly the point (issues #19, #24).
+
+[dependencies]
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[profile.release]
+opt-level = "z"       # optimise for SIZE — this artifact's whole reason to exist is being small
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

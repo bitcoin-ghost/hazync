@@ -38,6 +38,21 @@ jobs:
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
         run: ./prover/check_seg_guards.sh
+      - name: Standalone verifier — builds, verifies, and rejects a non-genesis proof (#19, #24)
+        # The product claim is that a phone can check a few-KB proof. This builds the verify-only
+        # binary (no prover, no guest ELF) and runs it against the same fixtures the host is gated on.
+        # It must ACCEPT the genesis-anchored proof and REJECT the non-genesis one — a verifier that
+        # checked less would make a fabricated-anchor range MORE shareable, not less.
+        run: |
+          cargo build --release --manifest-path verifier/Cargo.toml
+          B=verifier/target/release/hazync-verify
+          echo "verifier size: $(stat -c%s "$B") bytes"
+          "$B" prover/testdata/snark/fold_1000.snark
+          if "$B" prover/testdata/snark/neg500.snark 2>/dev/null; then
+            echo "::error::verifier ACCEPTED a non-genesis range — the genesis pin is not enforced"
+            exit 1
+          fi
+          echo "verifier rejects the non-genesis range ✓"
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
