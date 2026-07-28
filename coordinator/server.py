@@ -38,6 +38,7 @@ GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many failed attempts
+SERVE_WIDE = os.environ.get("SERVE_WIDE", "0") == "1"    # claim-next hands out RANGE_SIZE chunks, not single blocks (#28)
 MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
 MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
 RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes (POST) per IP per window
@@ -590,13 +591,45 @@ def claim(body):
             # 'failed' is excluded too: a parked range must not be handed straight back out by
             # claim-next, or MAX_ATTEMPTS achieves nothing. It stays claimable by EXPLICIT id, which is
             # the operator's deliberate retry path.
-            taken = set(row["id"] for row in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified','failed')"))
-            n = max(1, fr + 1); rid = None
-            for _ in range(2_000_000):
-                if n >= TIP: break
-                cand = str(n)
-                if cand not in taken: rid = cand; break
-                n += 1
+            # Find the first genuinely FREE block by walking INTERVALS, not ids. 'failed' counts as live
+            # so a parked range is not handed straight back out (or MAX_ATTEMPTS achieves nothing); it
+            # stays claimable by EXPLICIT id, which is the operator's retry path.
+            #
+            # Ids are not sufficient once ranges can be wide: "id 3000 is not taken" does not mean block
+            # 3000 is free, because 3000-3999 covers it under a different id. Scanning by id handed out
+            # a block that overlapping() then rejected, so a second worker got a 409 instead of work.
+            live = sorted((row["lo"], row["hi"]) for row in c.execute(
+                "SELECT lo,hi FROM ranges WHERE status IN ('claimed','verified','failed')"))
+            n = max(1, fr + 1)
+            for lo_, hi_ in live:
+                if hi_ < n: continue                              # entirely below the search point
+                if lo_ > n: break                                 # gap: n is free
+                n = hi_ + 1                                       # n is covered — jump past this range
+            rid = str(n) if n < TIP else None
+
+            if SERVE_WIDE and rid is not None:
+                # Upgrade that single block to a whole RANGE_SIZE-aligned chunk when it starts exactly on
+                # a boundary and the chunk is entirely free. `hazync prove` folds a multi-block range
+                # locally before submitting, so ~99% of the fold work happens DISTRIBUTED across every
+                # worker and overlapped with proving, instead of being deferred into one serial
+                # exclusive-GPU pass at the end (#28): ~28h of paused proving becomes a final board fold
+                # of ~34 receipts instead of ~34,000.
+                #
+                # Anchoring on the FIRST FREE BLOCK (rather than scanning ahead for any free chunk) is
+                # what keeps this safe. Scanning ahead would skip a partially-covered region and orphan
+                # it — nothing would ever claim those blocks, and since the frontier is the lowest
+                # unproven block it would stall there forever while workers proved chunks far ahead.
+                # Anchoring here also lets several workers take CONSECUTIVE chunks: once one claims
+                # [n, n+999], the next worker's first free block is n+1000, still aligned.
+                #
+                # Mid-re-baseline the board holds tens of thousands of single-block receipts, so chunks
+                # over that region are not free and it degrades to per-block automatically.
+                # No separate "is this id already taken?" check: if the chunk id were live its interval
+                # would be in `live`, so n would have jumped past it. n == base implies the id is free.
+                if n % RANGE_SIZE == 0 and n + RANGE_SIZE - 1 < TIP:
+                    cand = f"{n}-{n + RANGE_SIZE - 1}"
+                    if not overlapping(c, n, n + RANGE_SIZE - 1, cand):
+                        rid = cand
             if rid is None: c.close(); return 404, {"error": "no open block available"}
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         if not r:
