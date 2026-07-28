@@ -1,0 +1,57 @@
+### hazync #20 — Groth16 CUDA crash, full backtrace
+### date: 2026-07-28T15:51:27Z
+### host: gpu-ubuntu-16cpu-192gb-fi-hel2  CUDA: 
+### driver/GPU:
+name, compute_cap, driver_version, memory.total [MiB]
+NVIDIA L40S, 8.9, 595.58.03, 46068 MiB
+NVIDIA L40S, 8.9, 595.58.03, 46068 MiB
+### risc0 components:
+Installed components:
+--------------------
+
+cargo-risczero
+* 3.0.5
+
+cpp
+* 2024.1.5
+
+r0vm
+* 3.0.5
+
+rust
+* 1.94.1
+
+risc0-groth16
+* 0.1.0
+
+rzup home: /root/.risc0
+### METHOD_ID: 3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e
+### NVCC flags at build time: <unset>
+
+=== RUST_BACKTRACE=full host snark-wrap receipts/1.bin ===
+=== SNARK-wrapping range [1..1] (STARK -> Groth16) ===
+  input receipt: 224490 bytes
+Inputs loaded in 49ns
+Graph loaded in 480.899357ms
+Inputs populated in 20ns
+generic typed graph calculated in 940.901351ms
+terminate called after throwing an instance of 'sppark_error'
+  what():  cudaStreamSynchronize(stream)@sppark-0.1.15/sppark/util/gpu_t.cuh:158 failed: "an illegal memory access was encountered"
+timeout: the monitored command dumped core
+bash: line 15: 56893 Aborted                 RUST_BACKTRACE=full timeout 300 $H snark-wrap /root/.hazync/receipts/1.bin bt.snark 2>&1
+### exit=134
+
+### NOTE ON THE ABSENCE OF A RUST BACKTRACE
+### This was run with RUST_BACKTRACE=full and there is still no Rust stack, which is expected rather
+### than a capture failure: sppark throws a C++ exception that reaches terminate(), so the process
+### dies on SIGABRT (exit 134) before Rust can unwind. Do not go looking for a Rust backtrace here —
+### the fault is inside the CUDA/C++ layer (risc0-groth16-3.0.5/src/prove/cuda.rs ->
+### kernels/cuda/groth16_prover.cuh -> sppark-0.1.15). A useful next step upstream would be
+### compute-sanitizer, not RUST_BACKTRACE.
+###
+### WHAT THIS ENVIRONMENT RULES OUT (see issue #20 for the full matrix):
+###   - our NVCC flags       : none are set here, -arch=native applied, still crashes
+###   - a faulty card        : CUDA_VISIBLE_DEVICES=1 crashes identically
+###   - multi-GPU handling   : RISC0_DEFAULT_PROVER_NUM_GPUS=1 crashes
+###   - GPU/driver/toolkit   : fold-range on this SAME binary works in 3.1s
+### Only the CUDA Groth16 path fails. The CUDA STARK path is healthy.
