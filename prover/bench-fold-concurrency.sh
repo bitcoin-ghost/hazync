@@ -42,7 +42,8 @@ echo
 
 # One concurrency level. Echoes exactly one result line, always.
 run_level() {                       # $1=K  $2=CUDA_VISIBLE_DEVICES ("" = default)  $3=label
-    local K=$1 dev=$2 label=$3 W="$WORK/k$K"
+    local K=$1 dev=$2 label=$3
+    local W="$WORK/k$K"
     rm -rf "$W"; mkdir -p "$W"
     local i; for i in $(seq 1 $((K * 2))); do cp "$RECEIPTS/$i.bin" "$W/r$i.bin" 2>/dev/null || die "missing $RECEIPTS/$i.bin"; done
 
@@ -57,8 +58,13 @@ run_level() {                       # $1=K  $2=CUDA_VISIBLE_DEVICES ("" = defaul
     t0=$(date +%s)
     for j in $(seq 0 $((K - 1))); do
         a=$((j * 2 + 1)); b=$((j * 2 + 2))
-        ( cd "$W" && CUDA_VISIBLE_DEVICES="${dev:-${CUDA_VISIBLE_DEVICES:-}}" \
-            "$HOST" fold-range "r$a.bin" "r$b.bin" "o$j.bin" >"$W/e$j" 2>&1 ) &
+        # NOTE: exporting CUDA_VISIBLE_DEVICES="" hides EVERY device — the fold aborts with a core
+        # dump and a 0 MiB peak, which reads like a mysterious crash. Only set it when pinning.
+        if [ -n "$dev" ]; then
+            ( cd "$W" && CUDA_VISIBLE_DEVICES="$dev" "$HOST" fold-range "r$a.bin" "r$b.bin" "o$j.bin" >"$W/e$j" 2>&1 ) &
+        else
+            ( cd "$W" && "$HOST" fold-range "r$a.bin" "r$b.bin" "o$j.bin" >"$W/e$j" 2>&1 ) &
+        fi
         pids+=($!)
     done
     for p in "${pids[@]}"; do wait "$p" || rc=1; done

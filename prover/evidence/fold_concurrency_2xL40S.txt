@@ -1,0 +1,47 @@
+# Fold concurrency on 2x L40S — sizing the whole-board fold (#24 Phase 2)
+#
+# Date:  2026-07-28
+# Box:   UpCloud 16-core / 192 GB / 2x NVIDIA L40S (46,068 MiB each, 92 GiB total)
+# Guest: METHOD_ID 3f52baff… (v0.10.0), host built on-box, id verified == canonical
+# Tool:  prover/bench-fold-concurrency.sh
+
+=== SINGLE GPU (device 0) ===
+
+  K=1   3.00 s/fold    peak  6,472 MiB
+  K=2   2.50 s/fold    peak 23,374 MiB
+  K=3   2.00 s/fold    peak 36,868 MiB    <- ceiling
+  K=4   OOM            peak 36,914 MiB    panicked, risc0-zkp cuda.rs:170
+
+=== THE FINDING THAT MATTERS: risc0 uses ONE device ===
+
+K=4 OOM'd at 36.9 GiB peak on a box with 92 GiB installed. That is not a memory shortage — the
+second L40S was completely idle. risc0 binds device 0 unless CUDA_VISIBLE_DEVICES says otherwise,
+so the VRAM ceiling is PER CARD, not total, and extra cards buy nothing by default.
+
+Pinned, each card carries its own load:
+
+  K=2 [gpu 0]  2.00 s/fold   peak 12,094 MiB
+  K=2 [gpu 1]  2.00 s/fold   peak 11,742 MiB
+
+=== BOTH CARDS SIMULTANEOUSLY (the number that counts) ===
+
+  K=3 on gpu 0 AND K=3 on gpu 1, at the same time:
+  6 folds in 7 s  ->  1.16 s effective per fold, 6/6 outputs produced, rc=0
+
+Measured simultaneously, not inferred by adding two separate runs — running both cards at once could
+have contended on CPU or PCIe, and this shows it does not meaningfully.
+
+=== WHOLE-BOARD PROJECTION ===
+
+  1 GPU,  K=3         2.00 s/fold
+  2 GPUs, K=3 each    1.16 s/fold    ~1.7x
+
+Multiply by (receipts - 1). The board grows continuously, so this cost RISES the longer the fold is
+deferred — at ~2,500 blocks/hr the projection gains roughly an hour per day of delay.
+
+=== CAVEAT ===
+
+Folds here are over EARLY receipts (blocks 1-12), whose UTXO boundaries are small. A fold verifies two
+receipts and checks the seam, so cost is flat in span — but per-fold VRAM at high-UTXO heights has not
+been measured, and the K=3 ceiling sits close to the OOM point (36,868 vs 36,914 MiB). K=2 is the
+safer setting for an unattended multi-hour run; K=3 buys ~20% and risks losing the level.
