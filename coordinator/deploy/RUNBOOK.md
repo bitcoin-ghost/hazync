@@ -126,7 +126,7 @@ All default to the previous behaviour, so deploying changes nothing until one is
 |---|---|---|---|
 | `MAX_ATTEMPTS` | coordinator | `3` | Park a range as `failed` after this many **block-implicating** failures |
 | `MAX_ENV_FAILURES` | coordinator | `12` | Looser cap for **capacity** failures (OOM, worker restarts) |
-| `SERVE_WIDE` | coordinator | `0` | `1` = claim-next hands out `RANGE_SIZE` chunks instead of single blocks |
+| `CLAIM_WIDTH` | coordinator | `1` | blocks per claim-next assignment; `1` = per-block |
 | `CLAIM_TTL` | coordinator | `1800` | Reap a claim with no heartbeat for this long |
 | `HAZYNC_FOLD_CONCURRENCY` | worker CLI | `1` | Folds run concurrently within a tree level |
 
@@ -153,9 +153,17 @@ Deploy in this order, verifying each before the next. Each stage is independentl
    previous coordinator runs unchanged against the migrated schema, so rollback is a file swap and a
    restart, *not* a backup restore. Verify: claims granted, submits verified, frontier advancing, and
    `/api/state` returning the new `failed[]` and `frontier_blocker` fields.
-4. **`SERVE_WIDE=1`** — as its own change, never on the same restart as step 3, or a regression is
-   ambiguous between the two. Verify: watch the **first** wide claim go end to end — claim `[n..n+999]`,
-   prove, fold locally, submit, frontier advances by 1000.
+4. **`CLAIM_WIDTH`** — as its own change, never on the same restart as step 3, or a regression is
+   ambiguous between the two. Verify by watching a range **COMPLETE**: claim, prove, fold locally,
+   submit, frontier advances by the full width.
+
+   ⚠️ **Widening was tried at 1000 on 2026-07-28 and stalled the board.** A 1000-block range is a
+   ~67-minute commitment; a hard failure anywhere in it discards the entire range, and with OOMs
+   occurring regularly not one range completed. Throughput fell from 2,220 blocks/hr to 1 block in 40
+   minutes while the GPUs stayed busy, because the frontier cannot advance until a range COMPLETES.
+   Failure probability scales with duration — pick a width the board can reliably finish (start at
+   100, not 1000), and treat "a worker is progressing through a range" as NOT the same evidence as
+   "a range completed".
 
 Before deploying to a live coordinator, dry-run the migration against a **copy of the real DB** (the
 newest backup snapshot works). A migration that fails on production is the worst place to discover it.

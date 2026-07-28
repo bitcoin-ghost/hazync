@@ -57,7 +57,22 @@ _ENV_ERR = ("out of memory", "oom", "cudaerror", "cuda error", "hash_rows",
 def is_env_failure(err):
     e = (err or "").lower()
     return any(s in e for s in _ENV_ERR)
-SERVE_WIDE = os.environ.get("SERVE_WIDE", "0") == "1"    # claim-next hands out RANGE_SIZE chunks, not single blocks (#28)
+# Width of a claim-next assignment, in blocks. 1 = per-block (the default and the safe operating point).
+#
+# This replaces the earlier boolean SERVE_WIDE, which implicitly meant RANGE_SIZE (1000). That was tried
+# in production on 2026-07-28 and STALLED THE BOARD: a 1000-block range is a ~67-minute commitment, a
+# hard failure anywhere in it discards the whole range, and with OOMs occurring regularly not one range
+# ever completed — throughput went from 2,220 blocks/hr to 1 block in 40 minutes while the GPUs stayed
+# busy. The frontier cannot advance until a range COMPLETES, so a width you cannot reliably finish is
+# worse than no widening at all.
+#
+# The fold-distribution argument for widening still holds (#28) — it is the reliability that has to be
+# earned. Failure probability scales with duration, so the width must be short enough to survive the
+# board's actual failure rate. Raise it deliberately and watch a range COMPLETE before trusting it.
+try:
+    CLAIM_WIDTH = max(1, int(os.environ.get("CLAIM_WIDTH", "1")))
+except ValueError:
+    CLAIM_WIDTH = 1
 MAX_BODY   = int(os.environ.get("MAX_BODY", str(8 << 20)))   # reject POST bodies larger than this (8 MiB)
 MAX_HANDLE = int(os.environ.get("MAX_HANDLE", "48"))         # cap contributor handle length
 RATE_MAX   = int(os.environ.get("RATE_MAX", "120"))          # max writes (POST) per IP per window
@@ -239,9 +254,16 @@ def parse_range(rid):
     if len(parts) != 2:
         return None
     lo, hi = parts
-    if hi - lo + 1 != RANGE_SIZE or lo % RANGE_SIZE != 0 or lo < 0 or hi >= TIP:
+    if lo < 0 or hi >= TIP or hi < lo:
         return None
-    return lo, hi
+    width = hi - lo + 1
+    # Two accepted grids: the legacy RANGE_SIZE one (existing board ids) and the current CLAIM_WIDTH.
+    # Both require alignment, so ids on the same grid can never PARTIALLY overlap. Full containment
+    # across grids is still possible and is caught by overlapping(), which is interval-based.
+    for g in {RANGE_SIZE, CLAIM_WIDTH}:
+        if g > 1 and width == g and lo % g == 0:
+            return lo, hi
+    return None
 
 _SRC_SHA = {"v": None}
 def source_sha256():
@@ -666,7 +688,7 @@ def claim(body):
                 n = hi_ + 1                                       # n is covered — jump past this range
             rid = str(n) if n < TIP else None
 
-            if SERVE_WIDE and rid is not None:
+            if CLAIM_WIDTH > 1 and rid is not None:
                 # Upgrade that single block to a whole RANGE_SIZE-aligned chunk when it starts exactly on
                 # a boundary and the chunk is entirely free. `hazync prove` folds a multi-block range
                 # locally before submitting, so ~99% of the fold work happens DISTRIBUTED across every
@@ -685,9 +707,9 @@ def claim(body):
                 # over that region are not free and it degrades to per-block automatically.
                 # No separate "is this id already taken?" check: if the chunk id were live its interval
                 # would be in `live`, so n would have jumped past it. n == base implies the id is free.
-                if n % RANGE_SIZE == 0 and n + RANGE_SIZE - 1 < TIP:
-                    cand = f"{n}-{n + RANGE_SIZE - 1}"
-                    if not overlapping(c, n, n + RANGE_SIZE - 1, cand):
+                if n % CLAIM_WIDTH == 0 and n + CLAIM_WIDTH - 1 < TIP:
+                    cand = f"{n}-{n + CLAIM_WIDTH - 1}"
+                    if not overlapping(c, n, n + CLAIM_WIDTH - 1, cand):
                         rid = cand
             if rid is None: c.close(); return 404, {"error": "no open block available"}
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
