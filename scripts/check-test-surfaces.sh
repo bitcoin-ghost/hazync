@@ -29,6 +29,7 @@ declare -A EXCLUDED=(
   [cluster.sh]="multi-GPU prove fan-out, not a test"
   [rangecluster.sh]="multi-GPU prove fan-out, not a test"
   [build-release.sh]="release build tool, not a test"
+  [ci_snark_prove.sh]="Groth16 PROVING is minutes-to-hours on CPU (76.6s for a 1000-block fold, 825.7s for one block) and crashes on CUDA (#20) — too slow for per-push CI; run before cutting a release. The verification half, ci_snark_verify.sh, DOES run on every push."
 )
 
 echo "== 1. every Rust crate that has tests is run by CI =="
