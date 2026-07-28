@@ -118,6 +118,48 @@ data-durability gaps a public write endpoint exposes:
   (default `127.0.0.1,::1`); set it to the proxy's address if the proxy is remote, else the rate limit
   is bypassable.
 
+## Tunables (claim lifecycle, folding, wide ranges)
+
+All default to the previous behaviour, so deploying changes nothing until one is set deliberately.
+
+| Variable | Where | Default | Effect |
+|---|---|---|---|
+| `MAX_ATTEMPTS` | coordinator | `3` | Park a range as `failed` after this many **block-implicating** failures |
+| `MAX_ENV_FAILURES` | coordinator | `12` | Looser cap for **capacity** failures (OOM, worker restarts) |
+| `SERVE_WIDE` | coordinator | `0` | `1` = claim-next hands out `RANGE_SIZE` chunks instead of single blocks |
+| `CLAIM_TTL` | coordinator | `1800` | Reap a claim with no heartbeat for this long |
+| `HAZYNC_FOLD_CONCURRENCY` | worker CLI | `1` | Folds run concurrently within a tree level |
+
+Two counters, not one, because attempt counting alone cannot tell *"this block is unprovable"* from
+*"this box was full"*. An OOM signature or a deliberate shutdown is evidence about the machine; a parse
+error or image-id mismatch is evidence about the block. Without the split, a capacity incident parks
+perfectly good blocks — which is backwards, since parking exists to stop burning GPU on blocks that
+genuinely cannot be proved.
+
+`HAZYNC_FOLD_CONCURRENCY` is bounded by **GPU VRAM** and overcommitting does not degrade gracefully — it
+OOMs mid-fold. Measured on a 46 GB L40S: K=1 → 8,949 MiB peak; K=2 → 11,742 MiB and 1.5x faster; K=4 →
+OOM. A single fold already drives the GPU to 100% utilisation, so the win is scheduling-gap sized, not
+linear in K. There is no safe auto-detect across card sizes; raise it per box.
+
+### Staged rollout
+
+Deploy in this order, verifying each before the next. Each stage is independently reversible.
+
+1. **`backup.sh`** — inert until `BACKUP_REMOTE` is set. Verify: the next nightly run still writes a
+   snapshot. Rollback: restore the file.
+2. **Worker CLI** — deploy to **one** worker first, leave the others on the old build. Verify: that
+   worker proves and submits several blocks. Rollback: restore `/root/v10_hazync_cli`.
+3. **Coordinator** — take a fresh DB backup first. The schema migration is **additive**, and the
+   previous coordinator runs unchanged against the migrated schema, so rollback is a file swap and a
+   restart, *not* a backup restore. Verify: claims granted, submits verified, frontier advancing, and
+   `/api/state` returning the new `failed[]` and `frontier_blocker` fields.
+4. **`SERVE_WIDE=1`** — as its own change, never on the same restart as step 3, or a regression is
+   ambiguous between the two. Verify: watch the **first** wide claim go end to end — claim `[n..n+999]`,
+   prove, fold locally, submit, frontier advances by 1000.
+
+Before deploying to a live coordinator, dry-run the migration against a **copy of the real DB** (the
+newest backup snapshot works). A migration that fails on production is the worst place to discover it.
+
 ## Backup & restore
 
 The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (the re-verifiable STARK
