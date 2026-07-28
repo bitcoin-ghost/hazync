@@ -1,0 +1,42 @@
+═══ 1. VERIFY THE PROOF ═══
+    (no node, no peers, no chain data — just 3441 bytes)
+    ✓ verified, genesis-anchored, blocks 1..1000
+
+═══ 2. DOES IT AGREE WITH THE REAL CHAIN? ═══
+    node says   block 1000 = 00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    proof says  block 1000 = 00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    ✓ tip hash matches the node
+    node chainwork  4299327865833
+    proof cum. work 4299327865833
+    ✓ cumulative work matches the node
+
+═══ 3. STATE A NODE CAN ADOPT ═══
+    height              1000
+    tip                 00000000c937983704a73af28acdec37b049d214adbda81d7e2a3dd146f6ed09
+    cumulative work     4299327865833
+    UTXO set            998 leaves, 7 accumulator roots  (popcount of 998)
+    next-block target   0x1d00ffff
+
+    With this a node can begin validating block 1001 immediately:
+    the UTXO commitment lets it check spends, and the difficulty and
+    median-time context let it check the next header.
+
+═══ 4. WHAT ADOPTING IT REPLACES ═══
+    blocks not downloaded   1000
+    blocks not validated    1000
+    signatures not checked  (every input in blocks 1..1000)
+    instead, verified       3441 bytes, in under a millisecond
+
+A node that trusts this proof — and nothing else — arrives at exactly the chain state a
+full validator reaches by processing every block from genesis. Confirmed against a real node.
+
+# Run 2026-07-28 against a live mainnet bitcoind (the coordinator's own node).
+# Proof: prover/testdata/snark/fold_1000.snark, guest 3f52baff (v0.10.0).
+#
+# The cross-check in section 2 is the point. A proof that is only internally consistent could
+# commit to a fabricated chain and still verify; matching the tip hash AND cumulative work
+# against a full node is what makes this a demonstration rather than a tautology.
+#
+# NOT shown: a real node actually skipping validation. This proves the STATE a node would
+# adopt is correct and agrees with reality; wiring that state into a node's startup path is
+# the larger piece of #19 and is not done.

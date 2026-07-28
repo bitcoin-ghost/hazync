@@ -93,13 +93,20 @@ fn u128_be(b: &[u8; 32]) -> u128 {
 }
 
 fn main() {
-    let path = match std::env::args().nth(1) {
-        Some(p) => p,
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let json = args.iter().any(|a| a == "--json");
+    let path = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
         None => {
-            eprintln!("usage: hazync-verify <proof.snark>");
+            eprintln!("usage: hazync-verify [--json] <proof.snark>");
             eprintln!();
             eprintln!("Verifies a genesis-anchored Hazync range proof. Needs no node, no peers, no");
             eprintln!("chain data — just the file. Guest image id {}", &METHOD_ID_HEX[..8]);
+            eprintln!();
+            eprintln!("  --json   emit the chain state a node can ADOPT from this proof, as JSON.");
+            eprintln!("           Everything a node needs to resume at height+1 without validating");
+            eprintln!("           anything below it: tip, cumulative work, UTXO commitment, and the");
+            eprintln!("           difficulty/median-time context. See prover/node-sync-demo.sh.");
             std::process::exit(2);
         }
     };
@@ -162,6 +169,37 @@ fn main() {
     }
 
     let total = GENESIS_WORK + u128_be(&rs.range_work);
+
+    if json {
+        // The state a node can ADOPT. Everything here is committed by the proof, so a node that
+        // verifies the proof can start at height+1 without downloading or validating anything below
+        // it — it needs the UTXO commitment to check spends, and the difficulty/median-time context
+        // to check the next header. Block hashes are emitted in DISPLAY order (byte-reversed), which
+        // is what `bitcoin-cli getblockhash` returns, so the two can be compared directly.
+        let disp: String = hex(&rs.out_tip_hash.iter().rev().copied().collect::<Vec<u8>>());
+        let roots: Vec<String> = rs
+            .out_roots
+            .iter()
+            .filter_map(|r| r.as_ref().map(|h| hex(h)))
+            .collect();
+        println!("{{");
+        println!("  \"verified\": true,");
+        println!("  \"guest_image_id\": \"{METHOD_ID_HEX}\",");
+        println!("  \"genesis_anchored\": true,");
+        println!("  \"height\": {},", rs.hi);
+        println!("  \"tip_hash\": \"{disp}\",");
+        println!("  \"cumulative_work\": {total},");
+        println!("  \"utxo_leaves\": {},", rs.out_leaves);
+        println!("  \"utxo_roots\": [{}],", roots.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(", "));
+        println!("  \"next_bits\": {},", rs.out_nbits);
+        println!("  \"epoch_start_time\": {},", rs.out_epoch_start);
+        println!("  \"recent_times\": [{}],", rs.out_recent.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+        println!("  \"proof_bytes\": {},", bytes.len());
+        println!("  \"blocks_not_validated\": {}", rs.hi);
+        println!("}}");
+        return;
+    }
+
     println!(
         ">>> SNARK RANGE PROOF [1..{}] VERIFIED — genesis-anchored, {} bytes.",
         rs.hi,

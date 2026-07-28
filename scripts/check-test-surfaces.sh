@@ -29,6 +29,7 @@ declare -A EXCLUDED=(
   [cluster.sh]="multi-GPU prove fan-out, not a test"
   [rangecluster.sh]="multi-GPU prove fan-out, not a test"
   [build-release.sh]="release build tool, not a test"
+  [node-sync-demo.sh]="needs a live mainnet bitcoind to cross-check the proof against the real chain (#19). Runs by hand or before a release; it exits NON-ZERO if no node is reachable rather than passing quietly, so it cannot report a partial run as success."
   [bench-fold-concurrency.sh]="benchmark, not a test — measures fold concurrency/VRAM to size a whole-board fold (#24). It has no pass/fail semantics beyond its own dependency checks, needs a GPU and a receipt set, and is run by hand before a fold. NOTE it does fail loudly if it measures nothing."
   [ci_snark_prove.sh]="Groth16 PROVING is minutes-to-hours on CPU (76.6s for a 1000-block fold, 825.7s for one block) and crashes on CUDA (#20) — too slow for per-push CI; run before cutting a release. The verification half, ci_snark_verify.sh, DOES run on every push."
 )
