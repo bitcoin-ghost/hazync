@@ -53,6 +53,8 @@ jobs:
             exit 1
           fi
           echo "verifier rejects the non-genesis range ✓"
+      - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
+        run: ./scripts/check-rangestate.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)

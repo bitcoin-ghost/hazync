@@ -1,0 +1,17 @@
+[package]
+name = "hazync-rangestate"
+version = "0.1.0"
+edition = "2021"
+description = "The RangeState journal type and chain constants, shared by every consumer of a Hazync proof"
+license = "Apache-2.0"
+
+# DELIBERATELY dependency-light: serde only. Anything that verifies or consumes a Hazync proof must be
+# able to depend on this without pulling in a prover, a guest build, or a node.
+#
+# The GUEST does not depend on this crate, and must not. Moving code into a crate the guest links
+# changes the compiled ELF and therefore METHOD_ID, which forces a full re-baseline of the board. The
+# guest keeps its own copy until the next re-baseline (tracked in coordinator/deploy/RUNBOOK.md), and
+# scripts/check-rangestate.sh fails the build if the two ever drift apart.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
