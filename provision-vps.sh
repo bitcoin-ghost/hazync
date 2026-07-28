@@ -45,6 +45,11 @@ rzup install --force rust 1.94.1
 rzup install --force cpp 2024.1.5
 rzup install --force cargo-risczero 3.0.5
 rzup install --force r0vm 3.0.5
+# Groth16 (SNARK-wrapping a STARK) needs its own rzup component and is NOT pulled in by the others.
+# Without it `host snark-wrap` dies with "Missing required `risc0-groth16` rzup component" — so a
+# freshly provisioned box cannot wrap at all, which is not obvious until you try. Pinned like the rest,
+# because an unpinned component is how the guest id drifts.
+rzup install --force risc0-groth16 0.1.0
 export PATH="$HOME/.risc0/bin:$PATH"
 # the riscv g++/gcc + libstdc++/libgcc/newlib come with the rzup cpp toolchain extension.
 
