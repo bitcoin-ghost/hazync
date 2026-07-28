@@ -21,3 +21,6 @@ roadmap.md
 bridge-design.md
 README.reframe-draft.md
 verifier/target/
+
+# rescued box identities / key material — NEVER commit (see also key.hex above)
+secrets/
