@@ -66,9 +66,12 @@ reject every current proof. CI fails the build if it drifts.
 
 ## Limitations, stated plainly
 
-- **x86-64 Linux only, so far.** Nothing here is platform-specific and the dependency surface is tiny,
-  but ARM/Android/iOS builds are not yet done or measured — so "runs on a phone" remains an inference
-  from size and dependencies, not a demonstration.
+- **ARM64 is demonstrated; a handset is not.** It cross-compiles to `aarch64-unknown-linux-gnu` with
+  no source changes (1,643,112 bytes) and, executed as ARM64 code under `qemu-aarch64-static`, both
+  verifies a genuine genesis-anchored proof and rejects a non-genesis one on the pin — see
+  `prover/evidence/verifier_aarch64.txt`. What is still *not* shown is execution on physical phone
+  hardware or an Android/iOS package; the latter needs the NDK, which is packaging rather than
+  portability. Timing under emulation is not representative and is deliberately not quoted.
 - It verifies **range** proofs (`KIND_RANGE`) that are genesis-anchored. It is not a general receipt
   verifier; `host verify-any` remains the tool for un-anchored ranges.
 - The `RangeState` layout is mirrored from the guest by hand. Field order is load-bearing — the journal

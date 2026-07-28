@@ -107,10 +107,29 @@ echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1))"
 # differs every run, so there are no unchanged files to hardlink. Making that work would mean syncing
 # the receipts directory instead of a tarball — a layout change, deliberately not done here.
 if [ -n "$REMOTE" ]; then
+    # BACKUP_REMOTE_DB_ONLY=1 ships the LEDGER offsite but leaves the proofs local.
+    #
+    # The two halves are not comparable. coordinator.db is ~37 MB and is the record of who proved what —
+    # lose it and the contributor history is gone at any price. proofs/ is 7.7 GB growing to ~165 GB and
+    # IS regenerable, deterministically, from the guest plus chain data (expensively, but recoverable).
+    #
+    # So when no target is large enough for both — which is the common case — copying only the ledger
+    # closes most of the actual risk for 0.5% of the bytes. "We cannot back up the proofs" is not the
+    # same constraint as "we cannot back up anything", and conflating them leaves the irreplaceable
+    # half on a single disk.
+    SRC="$DEST"
+    if [ "${BACKUP_REMOTE_DB_ONLY:-0}" = "1" ]; then
+        SRC="$DEST/.db-only"
+        mkdir -p "$SRC"
+        cp -- "$DEST/coordinator.db" "$SRC/" 2>/dev/null || { echo "[backup] FATAL: no ledger to ship offsite" >&2; exit 1; }
+        cp -- "$DEST/MANIFEST.txt" "$SRC/" 2>/dev/null || true
+        ( cd "$SRC" && sha256sum ./coordinator.db > SHA256SUMS 2>/dev/null || true )
+        echo "[backup] offsite copy is LEDGER-ONLY ($(du -h "$SRC/coordinator.db" | cut -f1)); proofs stay local"
+    fi
     case "$REMOTE" in
         rclone:*)
             _rc="${REMOTE#rclone:}"
-            rclone copy "$DEST" "$_rc/$STAMP"
+            rclone copy "$SRC" "$_rc/$STAMP"
             # Prune oldest-first, keeping $KEEP. `lsf --dirs-only` sorts lexically, and the stamp format
             # (UTC %Y%m%dT%H%M%SZ) is lexically ordered, so this is chronological.
             _old=$(rclone lsf --dirs-only "$_rc" 2>/dev/null | sed 's:/$::' | sort | head -n -"$KEEP")
@@ -121,7 +140,7 @@ if [ -n "$REMOTE" ]; then
             done
             ;;
         *:*)
-            rsync -a "$DEST/" "$REMOTE/$STAMP/"
+            rsync -a "$SRC/" "$REMOTE/$STAMP/"
             # user@host:/path — prune over ssh on the same host. Split on the FIRST colon only, so
             # paths containing colons still work.
             _host="${REMOTE%%:*}"; _path="${REMOTE#*:}"
@@ -132,10 +151,11 @@ if [ -n "$REMOTE" ]; then
             ;;
         *)
             # A bare local path (no host): rsync it, then prune in place.
-            rsync -a "$DEST/" "$REMOTE/$STAMP/"
+            rsync -a "$SRC/" "$REMOTE/$STAMP/"
             ls -1dt "$REMOTE"/*/ 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -rf
             ;;
     esac
+    rm -rf "$DEST/.db-only"
     echo "[backup] copied offsite → $REMOTE/$STAMP (keeping newest $KEEP)"
 else
     echo "[backup] WARNING: BACKUP_REMOTE unset — this snapshot is on the SAME DISK as the data it backs up."
