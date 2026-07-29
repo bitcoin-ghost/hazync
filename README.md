@@ -8,11 +8,26 @@ The proofs fold: verified block by block, a stretch of the chain collapses into 
 
 ## Verify a proof
 
-No GPU, no build, no clone. The prebuilt binary needs Linux x86-64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+):
+No GPU, no build, no clone. The prebuilt binaries need Linux x86-64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+).
+
+**The 1.7 MB verifier** — this is the whole point of the project, so it is a small download and nothing else:
+
+```bash
+curl -L -o hazync-verify https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu && chmod +x hazync-verify
+curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
+./hazync-verify proof.bin          # → SNARK RANGE PROOF [1..1] VERIFIED — genesis-anchored
+```
+
+An `aarch64` build is published too, so "a phone can check this" is a file you can download rather than
+a claim. It exits `0` when the proof is genesis-anchored, `2` when the SNARK is valid but the range is
+a mid-chain **segment** (most proofs on the board are segments — that is not a failure), and `1` when
+the proof is actually bad.
+
+**The 71 MB host** does everything else — proving, and `verify-any`, which accepts *any* single proof
+rather than only genesis-anchored ones:
 
 ```bash
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
-curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin        # → prints a line starting with RANGE-OK
 ```
 
