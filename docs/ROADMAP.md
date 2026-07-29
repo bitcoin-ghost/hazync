@@ -5,6 +5,10 @@ in a zkVM; the method is built and demonstrated on real mainnet data, and what r
 self-found soundness gaps, (2) presenting it credibly, (3) external review, and (4) actually producing
 the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 
+> **Goals live in [`GOALS.md`](GOALS.md).** That document states the six technical goals, where each
+> actually stands (measured), and what would count as done. This file is the task inventory and the
+> record of what has been completed — it answers "what has been done", not "what are we for".
+
 ## 1. Security fixes — from the self-audit (see `SECURITY.md`)
 
 These are the findings from an adversarial pass over the guest. They must be fixed before any
