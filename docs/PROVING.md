@@ -108,7 +108,9 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.10.0** at `METHOD_ID 3f52baff` (libsecp's ecmult
+either way. **Releases:** the current release is **v0.11.0**, still at `METHOD_ID 3f52baff` — v0.11.0 does not
+touch the guest, so **every proof made against v0.10.0 remains valid**. The id was last re-baselined in
+v0.10.0 (libsecp's ecmult
 window raised to its measured optimum — see `reproduce/METHOD_ID`), on top of the real-Core `pow.cpp`
 difficulty retarget carved into the guest, every consensus constant sourced from Core's own
 `chainparams.cpp`, and the v0.9.0 witness wire format. Both the

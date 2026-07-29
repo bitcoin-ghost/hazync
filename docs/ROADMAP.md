@@ -134,6 +134,39 @@ experts (who verify) and everyone else (who spread the word, contribute compute,
   ~200–300 B, but the shippable *receipt* measured **2033 B** on block 170 and grows with chain size
   (issues #21, #22); CUDA Groth16 is currently broken (#20).
 
+## 4b. Consuming a proof in a node
+
+The proving side answers "is this chain valid?". This section is about a node *acting* on the answer,
+which is where the work actually pays off.
+
+- [x] **Standalone verifier** — `verifier/`, 1.6 MB, no node, no peers, no chain data. Checks the
+  SNARK, pins recursion to the canonical guest id, and asserts genesis anchoring. An ARM64 build is
+  committed at `verifier/dist/`.
+- [x] **C ABI** (`verifier-ffi/`) so ghostd calls this verifier rather than reimplementing it. A second
+  implementation of the anchoring rules is a second place for them to be subtly wrong.
+- [x] **ghostd startup adoption** — `-hazyncproof=<file>` verifies and reports. Reporting only: a proof
+  alone changes nothing a node validates. (ghost#543)
+- [x] **Proof-gated script skip** — `-hazyncskipvalidation` elides script and signature verification for
+  blocks the proof covers. Demonstrated at height 1000: 1000 blocks elided, UTXO set byte-identical to
+  full validation from genesis (#33). Eight adversarial cases — corrupt, truncated, empty, missing,
+  and non-genesis-anchored proofs, plus each flag without the other — all elided nothing and still
+  reached the correct chainstate (#34).
+- [ ] Adversarial cases still open: a proof for a *competing* chain, and a reorg below the proven
+  height. Both need a regtest proof, so both need a fixture generator (#34).
+- [ ] Measure the speed benefit. Blocks 1..1000 hold ~1020 transactions, so #33 could establish
+  equivalence but not saving. Needs a proof over a range with real signature load (#30).
+- [ ] Start *from* a proof rather than validating-with-elision: begin at height N+1 from the committed
+  UTXO set, without downloading blocks 1..N at all. Much larger change; not started.
+
+> **The framing that matters.** Bitcoin Core already ships this exact elision. Its `assumevalid` hash
+> sits near the tip, so a default node today skips signature verification for almost the whole chain on
+> the authority of a hash the developers chose. Hazync does not introduce trusting-something-other-than-
+> verification; it replaces a developer-asserted anchor with a proven one. That is a strictly smaller
+> trust assumption than the status quo.
+>
+> It is also a live testing hazard: any benchmark of script-skipping must pass `-assumevalid=0` to
+> **both** arms, or the control skips too and the comparison measures nothing.
+
 ## 5. Parking lot
 
 - **Acceleration** (`ACCELERATION.md`): the naive "route the multiply through the precompile" is
