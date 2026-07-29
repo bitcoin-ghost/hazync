@@ -53,11 +53,13 @@ jobs:
           #   0 = verified and genesis-anchored
           #   1 = the proof is invalid (forged/tampered/corrupt/wrong guest)
           #   2 = the SNARK is valid but the range is not genesis-anchored
-          "$B" prover/testdata/snark/fold_1000.snark; rc=$?
+          # `cmd; rc=$?` does NOT work here: GitHub runs these under `bash -e`, so a non-zero exit
+          # kills the step before rc is ever assigned. `|| rc=$?` is the form that survives set -e.
+          rc=0; "$B" prover/testdata/snark/fold_1000.snark || rc=$?
           if [ $rc -ne 0 ]; then
             echo "::error::verifier REJECTED the genesis-anchored proof (exit $rc)"; exit 1
           fi
-          "$B" prover/testdata/snark/neg500.snark >/dev/null 2>&1; rc=$?
+          rc=0; "$B" prover/testdata/snark/neg500.snark >/dev/null 2>&1 || rc=$?
           if [ $rc -eq 0 ]; then
             echo "::error::verifier ACCEPTED a non-genesis range — the genesis pin is not enforced"; exit 1
           fi
