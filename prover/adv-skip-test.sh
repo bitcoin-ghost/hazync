@@ -65,7 +65,7 @@ run_case() {
     "$GHOSTD" -datadir="$dir" -port=18444 -rpcport=18443 -rpcuser=t -rpcpassword=t \
         -connect=0 -listen=0 -assumevalid=0 -daemon "$@" >/dev/null 2>&1
     local q="$CLI -datadir=$dir -rpcport=18443 -rpcuser=t -rpcpassword=t"
-    local i; for i in $(seq 60); do $q getblockcount >/dev/null 2>&1 && break; sleep 1; done
+    for _ in $(seq 60); do $q getblockcount >/dev/null 2>&1 && break; sleep 1; done
     while [ "$($q getblockcount 2>/dev/null || echo 0)" -gt "$H" ]; do
         $q invalidateblock "$($q getblockhash $((H+1)))" >/dev/null 2>&1 || break
     done

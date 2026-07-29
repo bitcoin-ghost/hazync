@@ -43,7 +43,7 @@ run() {
     # Re-open with no peers so the chainstate cannot advance while we read it.
     "$GHOSTD" -datadir="$dir" -port=18444 -rpcport=18443 -rpcuser=t -rpcpassword=t \
         -connect=0 -listen=0 -assumevalid=0 -daemon "$@" >/dev/null 2>&1
-    for i in $(seq 60); do
+    for _ in $(seq 60); do
         "$CLI" -datadir="$dir" -rpcport=18443 -rpcuser=t -rpcpassword=t getblockcount >/dev/null 2>&1 && break
         sleep 1
     done
