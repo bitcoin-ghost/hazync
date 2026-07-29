@@ -39,6 +39,29 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// The proof VERIFIED cryptographically but describes a range this tool does not accept.
+///
+/// Kept separate from `die` on purpose. The proof-party board links every range to its proof, so the
+/// most common way anyone runs this binary is on a mid-chain segment — and telling them "VERIFICATION
+/// FAILED" for a perfectly good proof reads as "this is forged" and makes the whole board look broken.
+/// It still exits non-zero: there is no verified-but-not-anchored success path, by design.
+fn not_anchored(lo: u32, hi: u32, detail: &str) -> ! {
+    eprintln!("NOT A GENESIS-ANCHORED CHAIN PROOF");
+    eprintln!();
+    eprintln!("  The SNARK is VALID and was produced by guest {}.", &METHOD_ID_HEX[..8]);
+    eprintln!("  It proves blocks {lo}..{hi} — a mid-chain SEGMENT, not a chain from genesis.");
+    eprintln!("  {detail}");
+    eprintln!();
+    eprintln!("  This tool accepts only genesis-anchored proofs, because only those establish that");
+    eprintln!("  the chain is valid FROM THE START. A segment proof is sound but says nothing about");
+    eprintln!("  the blocks below it, so accepting one would reduce the claim to \"someone proved a");
+    eprintln!("  thousand blocks somewhere\".");
+    eprintln!();
+    eprintln!("  Segment proofs are what the proof party produces; they are folded together into a");
+    eprintln!("  single genesis-anchored proof, and THAT is what this verifies.");
+    std::process::exit(2);
+}
+
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -101,11 +124,11 @@ fn main() {
     }
     // 4 + 5. genesis anchoring — the assertion the whole artifact is built around
     if rs.lo != 1 {
-        die(&format!("range starts at block {}, not 1 — NOT genesis-anchored", rs.lo));
+        not_anchored(rs.lo, rs.hi, "Its range starts above block 1.");
     }
     let genesis_le: Vec<u8> = hex_to_bytes(GENESIS_HASH).into_iter().rev().collect();
     if rs.in_tip_hash.as_slice() != genesis_le.as_slice() {
-        die("in-boundary tip is not the genesis block hash");
+        not_anchored(rs.lo, rs.hi, "Its in-boundary tip is not the genesis block hash.");
     }
     if rs.in_leaves != 0 {
         die("in-boundary UTXO set is not empty — the range does not start from nothing");
