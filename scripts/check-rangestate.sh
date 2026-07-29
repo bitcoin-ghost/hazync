@@ -28,18 +28,33 @@ SRC = {
 }
 
 def fields(path):
-    """Field names, in declaration order, from `struct RangeState { … }`.
+    """(name, type) pairs in declaration order, from `struct RangeState { … }`.
+
+    TYPES ARE COMPARED, not just names. An earlier version matched names and order only, and a change
+    of `in_leaves: u64` to `u32` passed cleanly — which would silently corrupt every decode, i.e.
+    exactly the failure this check exists to prevent. Names alone are not enough.
 
     Fields are NOT one per line — the guest and host pack several onto a line (`lo: u32, hi: u32,`),
-    which an earlier line-anchored regex silently truncated to 10 of 19 and made every mirror look
-    broken. Match every `ident:` that is not part of a `::` path instead.
+    which a line-anchored regex truncated to 10 of 19 and made every mirror look broken.
     """
     src = open(path).read()
     m = re.search(r"struct RangeState\s*\{(.*?)\n\}", src, re.S)
     if not m:
         return None
     body = re.sub(r"//.*", "", m.group(1))                 # strip line comments
-    return re.findall(r"(?:^|[,{\s])(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:(?!:)", body)
+    out = []
+    # name: type, where type runs to the next top-level comma (depth-aware: Vec<Option<[u8; 32]>>
+    # contains both commas and brackets).
+    for mm in re.finditer(r"(?:^|[,{\s])(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:(?!:)", body):
+        name, i, depth, buf = mm.group(1), mm.end(), 0, []
+        while i < len(body):
+            c = body[i]
+            if c in "<([": depth += 1
+            elif c in ">)]": depth -= 1
+            elif c == "," and depth <= 0: break
+            buf.append(c); i += 1
+        out.append((name, re.sub(r"\s+", "", "".join(buf))))
+    return out
 
 ref = fields(SRC["guest"])
 if not ref or len(ref) < 15:
@@ -57,8 +72,11 @@ for who in ("host", "verifier", "crate"):
         print(f"  ok   {who:<9} matches the guest field-for-field ({len(got)})")
     else:
         print(f"FAIL {who} ({SRC[who]}) does not match the guest's RangeState")
-        print(f"       guest: {ref}")
-        print(f"       {who}: {got}")
+        for a, b in zip(ref, got):
+            if a != b:
+                print(f"       guest has {a[0]}: {a[1]}   but {who} has {b[0]}: {b[1]}")
+        if len(ref) != len(got):
+            print(f"       field COUNT differs: guest {len(ref)}, {who} {len(got)}")
         print("     The journal decodes POSITIONALLY — this would MISREAD a valid proof, not reject it.")
         bad = 1
 sys.exit(bad)
