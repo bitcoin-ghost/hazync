@@ -5,11 +5,14 @@
 # misinterprets a valid proof, which is worse than a crash: a verifier reading `out_leaves` where
 # `in_leaves` belongs reports confident nonsense and nothing flags it.
 #
-# The struct lives in four places and cannot simply be deduplicated:
+# The struct lives in three places and cannot simply be deduplicated:
 #   prover/methods/guest/src/main.rs   AUTHORITATIVE — this is what is committed to the journal
 #   prover/host/src/main.rs            mirror
-#   verifier/src/main.rs               mirror
-#   rangestate/src/lib.rs              the shared crate, for NEW consumers (ffi, ghostd)
+#   rangestate/src/lib.rs              the shared crate — verifier, verifier-ffi and ghostd import it
+#
+# IMPORTERS are checked differently: they must not quietly grow a private copy again. Re-declaring the
+# struct locally is how a consumer leaves the crate's orbit without anyone noticing, so for those files
+# the check is "imports the crate AND declares no RangeState of its own".
 #
 # The guest deliberately does NOT depend on the crate: moving code into a crate the guest links
 # changes the compiled ELF and therefore METHOD_ID, forcing a full re-baseline. So the guest keeps its
@@ -23,8 +26,13 @@ import re, sys
 SRC = {
     "guest":    "prover/methods/guest/src/main.rs",
     "host":     "prover/host/src/main.rs",
-    "verifier": "verifier/src/main.rs",
     "crate":    "rangestate/src/lib.rs",
+}
+
+# Consumers that must IMPORT the crate rather than mirror it (#32 stage 1).
+IMPORTERS = {
+    "verifier":     "verifier/src/main.rs",
+    "verifier-ffi": "verifier-ffi/src/lib.rs",
 }
 
 def fields(path):
@@ -66,8 +74,12 @@ if not ref or len(ref) < 15:
 print(f"authoritative (guest): {len(ref)} fields")
 
 bad = 0
-for who in ("host", "verifier", "crate"):
+for who in ("host", "crate"):
     got = fields(SRC[who])
+    if got is None:
+        print(f"FAIL {who} ({SRC[who]}) has no RangeState at all — the mirror vanished.")
+        bad = 1
+        continue
     if got == ref:
         print(f"  ok   {who:<9} matches the guest field-for-field ({len(got)})")
     else:
@@ -79,5 +91,20 @@ for who in ("host", "verifier", "crate"):
             print(f"       field COUNT differs: guest {len(ref)}, {who} {len(got)}")
         print("     The journal decodes POSITIONALLY — this would MISREAD a valid proof, not reject it.")
         bad = 1
+
+for who, path in IMPORTERS.items():
+    src = open(path).read()
+    imports = re.search(r"use\s+hazync_rangestate::", src) is not None
+    own = fields(path) is not None
+    if imports and not own:
+        print(f"  ok   {who:<12} imports the shared crate (no private copy)")
+    elif own:
+        print(f"FAIL {who} ({path}) declares its OWN RangeState — it has left the shared crate.")
+        print("     That is how a fourth hand-maintained mirror reappears. Import the crate instead.")
+        bad = 1
+    else:
+        print(f"FAIL {who} ({path}) neither imports hazync_rangestate nor declares a RangeState.")
+        bad = 1
+
 sys.exit(bad)
 PY

@@ -20,43 +20,19 @@
 //! (5) is the one that matters most. Without it a valid proof of some *arbitrary* mid-chain range would
 //! pass, and the whole claim collapses to "someone proved a thousand blocks somewhere".
 
-use serde::{Deserialize, Serialize};
+// The journal decodes POSITIONALLY, so a field reordered in a private copy of this struct does not
+// fail — it silently misreads a valid proof and reports confident nonsense. Importing the shared
+// definition removes one of the hand-maintained mirrors that could drift (#32).
+use hazync_rangestate::{
+    normalize_roots, work_u128, RangeState, GENESIS_BITS, GENESIS_HASH, GENESIS_TIME, GENESIS_WORK,
+    KIND_RANGE,
+};
 
 /// Canonical guest image id (v0.10.0). Embedded rather than imported from the `methods` crate, which
 /// would drag in the guest build. `scripts/check-versions.sh` fails the build if this drifts from
 /// `reproduce/METHOD_ID`, which is the source of truth.
 const METHOD_ID_HEX: &str = "3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e";
 
-const KIND_RANGE: u32 = 0xC4A1_0006;
-const GENESIS_HASH: &str = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
-const GENESIS_TIME: u32 = 1_231_006_505;
-const GENESIS_BITS: u32 = 0x1d00_ffff;
-const GENESIS_WORK: u128 = 4_295_032_833; // GetBlockProof(0x1d00ffff): cumulative work through block 0
-
-/// Mirror of the guest's `RangeState`. Field order is load-bearing — the journal decodes positionally,
-/// so a reordering here silently misinterprets a valid proof rather than failing loudly.
-#[derive(Serialize, Deserialize)]
-struct RangeState {
-    kind: u32,
-    lo: u32,
-    hi: u32,
-    in_tip_hash: [u8; 32],
-    in_roots: Vec<Option<[u8; 32]>>,
-    in_leaves: u64,
-    in_nbits: u32,
-    in_time: u32,
-    in_epoch_start: u32,
-    in_recent: Vec<u32>,
-    out_tip_hash: [u8; 32],
-    out_roots: Vec<Option<[u8; 32]>>,
-    out_leaves: u64,
-    out_nbits: u32,
-    out_time: u32,
-    out_epoch_start: u32,
-    out_recent: Vec<u32>,
-    range_work: [u8; 32],
-    self_id: [u32; 8],
-}
 
 fn die(msg: &str) -> ! {
     eprintln!("VERIFICATION FAILED: {msg}");
@@ -72,24 +48,6 @@ fn hex_to_bytes(s: &str) -> Vec<u8> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// Trailing empty root slots are not significant — an accumulator with 0 leaves may serialise with or
-/// without them, so compare in normalised form.
-fn normalize(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
-    while v.last() == Some(&None) {
-        v.pop();
-    }
-    v
-}
-
-fn u128_be(b: &[u8; 32]) -> u128 {
-    // range_work is a 256-bit little-endian counter; real chain work fits comfortably in the low 128.
-    let mut acc: u128 = 0;
-    for i in (0..16).rev() {
-        acc = (acc << 8) | b[i] as u128;
-    }
-    acc
 }
 
 fn main() {
@@ -152,7 +110,7 @@ fn main() {
     if rs.in_leaves != 0 {
         die("in-boundary UTXO set is not empty — the range does not start from nothing");
     }
-    if !normalize(rs.in_roots.clone()).is_empty() {
+    if !normalize_roots(rs.in_roots.clone()).is_empty() {
         die("in-boundary UTXO roots are not empty");
     }
     if rs.in_nbits != GENESIS_BITS {
@@ -168,7 +126,7 @@ fn main() {
         die("in-boundary recent-times != [genesis time]");
     }
 
-    let total = GENESIS_WORK + u128_be(&rs.range_work);
+    let total = GENESIS_WORK + work_u128(&rs.range_work);
 
     if json {
         // The state a node can ADOPT. Everything here is committed by the proof, so a node that
@@ -208,7 +166,7 @@ fn main() {
     println!(
         "  out_tip_hash {}  range_work {}  total_cum_work {}  UTXO leaves {}",
         hex(&rs.out_tip_hash),
-        u128_be(&rs.range_work),
+        work_u128(&rs.range_work),
         total,
         rs.out_leaves
     );
