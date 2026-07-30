@@ -29,10 +29,17 @@ SRC = {
     "crate":    "rangestate/src/lib.rs",
 }
 
-# Consumers that must IMPORT the crate rather than mirror it (#32 stage 1).
+# Consumers that must reach the shared definition rather than mirror it (#32 stage 1), and the crate
+# each is expected to reach it THROUGH.
+#
+# verifier-wasm goes through `hazync_verify`, not `hazync_rangestate` directly — a stronger position
+# than importing, because it never names a RangeState field at all and so cannot misread one. The
+# expected path is stated per-consumer rather than allowed blanket-wide: "imports something" is not a
+# check, and a consumer that quietly stopped importing would otherwise pass by declaring nothing.
 IMPORTERS = {
-    "verifier":     "verifier/src/main.rs",
-    "verifier-ffi": "verifier-ffi/src/lib.rs",
+    "verifier":      ("verifier/src/lib.rs",      "hazync_rangestate"),
+    "verifier-wasm": ("verifier-wasm/src/lib.rs", "hazync_verify"),
+    "verifier-ffi":  ("verifier-ffi/src/lib.rs",  "hazync_rangestate"),
 }
 
 def fields(path):
@@ -46,7 +53,12 @@ def fields(path):
     which a line-anchored regex truncated to 10 of 19 and made every mirror look broken.
     """
     src = open(path).read()
-    m = re.search(r"struct RangeState\s*\{(.*?)\n\}", src, re.S)
+    # Stop at the FIRST `}`, not at one that begins a line. Requiring `\n}` meant a struct written on
+    # a single line — `struct RangeState { kind: u32, lo: u32 }` — matched nothing, so `fields()`
+    # returned None and the consumer was reported as carrying no private copy. That is the precise
+    # thing this gate exists to catch, evadable by reformatting. No field type contains a brace
+    # (`[u8; 32]`, `Vec<Option<[u8; 32]>>` use brackets), so the first `}` is always the struct's.
+    m = re.search(r"struct RangeState\s*\{(.*?)\}", src, re.S)
     if not m:
         return None
     body = re.sub(r"//.*", "", m.group(1))                 # strip line comments
@@ -92,18 +104,19 @@ for who in ("host", "crate"):
         print("     The journal decodes POSITIONALLY — this would MISREAD a valid proof, not reject it.")
         bad = 1
 
-for who, path in IMPORTERS.items():
+for who, (path, via) in IMPORTERS.items():
     src = open(path).read()
-    imports = re.search(r"use\s+hazync_rangestate::", src) is not None
+    imports = re.search(r"use\s+" + via + r"::", src) is not None
     own = fields(path) is not None
     if imports and not own:
-        print(f"  ok   {who:<12} imports the shared crate (no private copy)")
+        detail = "no private copy" if via == "hazync_rangestate" else f"via {via}, never names a field"
+        print(f"  ok   {who:<12} reaches the shared crate ({detail})")
     elif own:
         print(f"FAIL {who} ({path}) declares its OWN RangeState — it has left the shared crate.")
         print("     That is how a fourth hand-maintained mirror reappears. Import the crate instead.")
         bad = 1
     else:
-        print(f"FAIL {who} ({path}) neither imports hazync_rangestate nor declares a RangeState.")
+        print(f"FAIL {who} ({path}) does not import {via} — it has left the shared definition.")
         bad = 1
 
 sys.exit(bad)

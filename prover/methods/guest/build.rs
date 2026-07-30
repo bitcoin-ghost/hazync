@@ -162,6 +162,24 @@ fn main() {
         .include(&shim).include(&core).include(format!("{secp}/include"));
     for tu in core_tus { b.file(format!("{core}/{tu}")); }
     b.file("verify_input.cpp");
+
+    // Tell cargo what this build actually depends on. Without these the C++ dependency is INVISIBLE:
+    // on 2026-07-30 a change to verify_input.cpp's leaf commitment did not recompile — the guest ELF
+    // was relinked from a verify_input.o three days stale, so the Rust half of the change took effect
+    // and the C++ half did not. METHOD_ID still changed (the Rust did rebuild), which is the dangerous
+    // part: a new id looked like proof the guest had been rebuilt, and it is not. The regression caught
+    // it only because the two halves then disagreed about leaf hashes.
+    //
+    // Core's sources live outside this package, so cargo cannot infer them at all; the guest's own
+    // files are covered by the default fingerprint but are listed anyway, because relying on a default
+    // is what produced a three-day-old object.
+    println!("cargo:rerun-if-changed=verify_input.cpp");
+    println!("cargo:rerun-if-changed=cshims.c");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src");
+    for tu in core_tus { println!("cargo:rerun-if-changed={core}/{tu}"); }
+    println!("cargo:rerun-if-changed={shim}");
+
     b.compile("bitcoinconsensus");
 
     // 3) C++ runtime: libstdc++ + libgcc (unwinder, dormant) + newlib libc/nosys.

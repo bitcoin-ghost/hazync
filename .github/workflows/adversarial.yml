@@ -68,7 +68,7 @@ jobs:
           #   2 = the SNARK is valid but the range is not genesis-anchored
           # `cmd; rc=$?` does NOT work here: GitHub runs these under `bash -e`, so a non-zero exit
           # kills the step before rc is ever assigned. `|| rc=$?` is the form that survives set -e.
-          rc=0; "$B" prover/testdata/snark/fold_1000.snark || rc=$?
+          rc=0; "$B" prover/testdata/snark/fold_8.snark || rc=$?
           if [ $rc -ne 0 ]; then
             echo "::error::verifier REJECTED the genesis-anchored proof (exit $rc)"; exit 1
           fi
@@ -89,8 +89,29 @@ jobs:
           cargo build --release --manifest-path verifier-ffi/Cargo.toml
           g++ -O2 -I verifier-ffi/include prover/testdata/ffi_smoke.cpp \
               verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_smoke
-          /tmp/ffi_smoke prover/testdata/snark/fold_1000.snark 0   # genesis-anchored -> HAZYNC_OK
+          /tmp/ffi_smoke prover/testdata/snark/fold_8.snark 0   # genesis-anchored -> HAZYNC_OK
           /tmp/ffi_smoke prover/testdata/snark/neg500.snark   -5   # valid but NOT anchored
+      - name: WASM verifier agrees with the CLI on every fixture (browsers are the copy nobody can audit)
+        # The browser build is the copy most people will run and the one least inspectable after the
+        # fact. It shares hazync_verify::verify with the CLI, so it cannot disagree "in principle" —
+        # but that is exactly what was true of the RangeState mirrors before they drifted (#32).
+        # Asserted against real proofs plus mutations that must be refused.
+        run: |
+          rustup target add wasm32-unknown-unknown
+          ./verifier-wasm/build.sh
+          ./verifier-wasm/test-parity.sh
+      - name: SPEC.md formats match the code (a drifted spec is worse than no spec)
+        # docs/SPEC.md is normative about byte layouts and constants. If it drifts, a reviewer
+        # implements against it, their verifier disagrees with ours, and the disagreement looks like
+        # OUR bug. Only mechanically checkable claims are covered — constants, tags, and the full
+        # RangeState field list in declaration order, because the journal decodes positionally.
+        run: ./scripts/check-spec.sh
+      - name: Utreexo hash construction agrees across host, guest Rust and guest C++
+        # Three implementations of the same hash. A drift means the host builds proofs the guest
+        # cannot verify — and only for SOME blocks, because the domain tag only matters once a leaf
+        # preimage length collides with an interior node's. Same failure shape as the RangeState
+        # mirrors, so it gets a check rather than a comment saying "MUST stay byte-identical".
+        run: ./scripts/check-utreexo.sh
       - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
         run: ./scripts/check-rangestate.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)

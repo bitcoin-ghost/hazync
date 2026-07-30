@@ -108,9 +108,15 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.11.0**, still at `METHOD_ID 3f52baff` — v0.11.0 does not
-touch the guest, so **every proof made against v0.10.0 remains valid**. The id was last re-baselined in
-v0.10.0 (libsecp's ecmult
+either way. **Releases:** the current release is **v0.11.0**, which shipped `METHOD_ID 3f52baff` —
+v0.11.0 does not touch the guest, so every proof made against v0.10.0 remains valid *under that id*.
+
+> **The canonical id is now `85dc0b56`, ahead of the newest release.** The accumulator's leaf and
+> interior hashes are domain-separated (`reproduce/METHOD_ID` records why), which changes every leaf
+> hash. Proofs are **not** interchangeable across the two ids: a `3f52baff` proof is still valid under
+> `3f52baff` and will be correctly rejected by an `85dc0b56` verifier. The board restarts from genesis.
+
+The id was previously re-baselined in v0.10.0 (libsecp's ecmult
 window raised to its measured optimum — see `reproduce/METHOD_ID`), on top of the real-Core `pow.cpp`
 difficulty retarget carved into the guest, every consensus constant sourced from Core's own
 `chainparams.cpp`, and the v0.9.0 witness wire format. Both the
@@ -244,7 +250,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`3f52baff…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`85dc0b56…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

@@ -8,6 +8,10 @@ the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 > **Goals live in [`GOALS.md`](GOALS.md).** That document states the six technical goals, where each
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
+>
+> **The finishing plan lives in [`RELEASE_PLAN.md`](RELEASE_PLAN.md).** Six workstreams to get the
+> project shipped and ready to absorb outside compute, and the gate that must hold before money is
+> spent on proving. It answers "what is left to build, and in what order".
 
 ## 1. Security fixes — from the self-audit (see `SECURITY.md`)
 
@@ -74,7 +78,8 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening) →
   `ffdc6095…` (real-Core `pow.cpp` retarget carve) → `7a8b29e0…` (chainparams-sourced constants; v0.8.0) →
-  `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0/v0.9.1) → `3f52baff…` (ecmult window 19; v0.10.0).
+  `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0/v0.9.1) → `3f52baff…` (ecmult window 19; v0.10.0)
+  → `85dc0b56…` (accumulator leaf/interior domain separation; unreleased).
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

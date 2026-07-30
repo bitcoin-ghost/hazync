@@ -51,9 +51,17 @@ jobs:
       - name: Write SHA256SUMS over the binaries
         run: |
           cd dist
-          # every host binary present, deterministic order; fail if there are none to sign
-          bins=$(ls hazync-host-* hazync-verify-* 2>/dev/null | sort)
-          if [ -z "$bins" ]; then echo "::error::no hazync-* binaries on the release to sign"; exit 1; fi
+          # every shipped artifact, deterministic order; fail if there are none to sign.
+          #
+          # hazync-worker is here because it is the artifact that CLAIMS AND SUBMITS WORK. It was
+          # previously repo-only, so joining the proof party meant cloning — and an unsigned worker is
+          # the worst thing on this list to leave unattested: it holds the contributor's signing key
+          # and decides what gets submitted under their name.
+          #
+          # hazync-verify.wasm is the browser verifier. It is served from a web page, which is exactly
+          # the delivery path where a substituted artifact is least likely to be noticed.
+          bins=$(ls hazync-host-* hazync-verify-* hazync-worker hazync-verify.wasm 2>/dev/null | sort)
+          if [ -z "$bins" ]; then echo "::error::no hazync-* artifacts on the release to sign"; exit 1; fi
           sha256sum $bins > ../SHA256SUMS.txt
           cat ../SHA256SUMS.txt
 

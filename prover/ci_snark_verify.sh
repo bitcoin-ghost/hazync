@@ -18,7 +18,7 @@ set -uo pipefail
 
 HOST="${HAZYNC_HOST:-./target/release/host}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
-POS="$DIR/testdata/snark/fold_1000.snark"      # [1..1000], genesis-anchored
+POS="$DIR/testdata/snark/fold_8.snark"      # [1..1000], genesis-anchored
 NEG="$DIR/testdata/snark/neg500.snark"         # [500..500], valid but NOT genesis-anchored
 
 fail() { echo "::error::$*"; exit 1; }

@@ -95,7 +95,7 @@ fi
 # the `methods` crate, because that would drag in the guest build and defeat the point of a 1.6 MB
 # artifact. That literal is invisible to the doc scan above, so without this a re-baseline would ship a
 # verifier that silently rejects every current proof.
-for V in verifier/src/main.rs verifier-ffi/src/lib.rs; do
+for V in verifier/src/lib.rs verifier-ffi/src/lib.rs; do
 if [ -f "$V" ]; then
     emb=$(grep -oE 'METHOD_ID_HEX: &str = "[0-9a-f]{64}"' "$V" | grep -oE '[0-9a-f]{64}')
     if [ -z "$emb" ]; then

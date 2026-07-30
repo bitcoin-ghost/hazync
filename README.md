@@ -64,9 +64,12 @@ Still to come: the full genesis→tip proving campaign and an external audit. Tr
 
 - New to zero-knowledge proofs? [`EXPLAINER.md`](docs/EXPLAINER.md) — plain English.
 - Prove blocks, join the party: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Specification** (formats, invariants, how to verify independently): [`docs/SPEC.md`](docs/SPEC.md)
 - Soundness statement (a reviewer's best first read): [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
 - Audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)
 - Adversarial fuzzing (what was fuzzed, what wasn't): [`docs/FUZZING.md`](docs/FUZZING.md)
+- What we're for, and how far along: [`docs/GOALS.md`](docs/GOALS.md) — six goals, measured status
+- What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
 - How it's built: [`docs/`](docs/)
 
 ## Licence

@@ -56,3 +56,32 @@ peak RSS, and there is no reason for ARM to be materially different, but that re
 
 An Android build additionally needs the NDK (aarch64-linux-android target + NDK linker), which was
 not available. That is packaging, not portability — the hard part is done.
+
+# ============================================================================================
+# REBUILD 2026-07-30 — canonical guest 85dc0b56af8739acac76e560fbd44141d48d753044523604dd5e2a9619224c39
+#
+# The record ABOVE is a real run and stays: it happened under guest 3f52baff and its numbers are
+# that build's. This is a new entry rather than an edit — rewriting the id in a past measurement
+# does not update a reference, it falsifies the measurement.
+#
+# Reason for rebuild: the accumulator now domain-separates leaf and interior hashes, which changes
+# every leaf hash and therefore the guest id. A published verifier EMBEDS the id, so it must be
+# rebuilt; editing the bytes is length-preserving and would yield a binary claiming the new id while
+# containing the old build.
+#
+#   built:   cross-compiled aarch64-linux-gnu in rust:1.90-bookworm container
+#   file:    ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked, stripped
+#   size:    1,708,632 bytes   (was 1,643,112 under 3f52baff)
+#   sha256:  2b4b6b64972d8e2b3500ff9768ca218c71c142822b2d8f7cfe3a094353c6cdd0
+#   old id:  0 occurrences of 3f52baff remain in the binary
+#
+# Run under qemu-aarch64-static against the regenerated fixtures:
+#
+#   >>> SNARK RANGE PROOF [1..8] VERIFIED — genesis-anchored, 1841 bytes.
+#       out_tip_hash c60ddef1b7618ca2348a46e868afc26e3efc68226c78aa47f8488c4000000000
+#       guest image id 85dc0b56af8739acac76e560fbd44141d48d753044523604dd5e2a9619224c39
+#   anchored  exit=0
+#   segment   exit=2   (rejected on the genesis pin, not on a parse error)
+#
+# STILL EMULATION. This says nothing about peak RSS or wall-clock on real ARM hardware, which is
+# exactly what G3 claims and what #41 remains open for.

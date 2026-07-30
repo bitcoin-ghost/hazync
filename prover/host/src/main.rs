@@ -270,7 +270,7 @@ fn build_block(
         let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(sp.prev_value), script_pubkey: spk }]);
         txs.push(PackedBytes(sp.raw.clone()));
         tx_prevouts.push(PackedBytes(prevouts));
-        let pos = forest.leaves.iter().position(|x| *x == coin).expect("spent coin in accumulator");
+        let pos = forest.find(&coin).expect("spent coin in accumulator");
         let last = forest.leaves.len() - 1;
         inputs.push(BlockInput {
             tx_idx: tx_i as u32, input_idx: 0,
@@ -595,7 +595,7 @@ fn build_full() -> (ChainState, BlockWitness) {
                 });
                 continue;
             }
-            let pos = forest.leaves.iter().position(|x| *x == coin).expect("input coin in accumulator");
+            let pos = forest.find(&coin).expect("input coin in accumulator");
             let last = forest.leaves.len() - 1;
             let mut global_pos = pos as u64;
             if sec2_bad && inputs.is_empty() {
@@ -938,7 +938,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                 });
             } else {
                 // EXTERNAL: prove inclusion in the carried forest, delete.
-                let pos = forest.leaves.iter().position(|x| *x == coin)
+                let pos = forest.find(&coin)
                     .expect("spent coin not in carried accumulator (bad metadata)");
                 let last = forest.leaves.len() - 1;
                 inputs.push(BlockInput {
@@ -983,7 +983,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         for v in 0..coinbase.output.len() {
             if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; }
             let l = out_leaf_of(&coinbase, &cb_txid, v, old_height, true, old_mtp);
-            let pos = forest.leaves.iter().position(|x| *x == l)
+            let pos = forest.find(&l)
                 .expect("BIP30 superseded coinbase leaf not in carried accumulator");
             let last = forest.leaves.len() - 1;
             dels.push(Bip30Del { global_pos: pos as u64, proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) });
@@ -1605,7 +1605,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
         } else {
             // external: spends C from the accumulator (real inclusion proof).
             let prevouts = serialize(&vec![TxOut { value: Amount::from_sat(5_000_001_000), script_pubkey: optrue() }]);
-            let pos = forest.leaves.iter().position(|x| *x == c_leaf).expect("C in accumulator");
+            let pos = forest.find(&c_leaf).expect("C in accumulator");
             let last = forest.leaves.len() - 1;
             wtxs.push(PackedBytes(serialize(*tx))); wtx_prevs.push(PackedBytes(prevouts));
             inputs.push(BlockInput {
@@ -1681,7 +1681,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let root_prev = wire_stump(&forest);
 
     let mk_input = |forest: &mut Forest, idx: u32, leaf: Hash| -> BlockInput {
-        let pos = forest.leaves.iter().position(|x| *x == leaf).expect("coin in accumulator");
+        let pos = forest.find(&leaf).expect("coin in accumulator");
         let last = forest.leaves.len() - 1;
         let bi = BlockInput { tx_idx: 0, input_idx: idx,
             global_pos: pos as u64, coin_height: 1, coin_is_coinbase: 0, coin_mtp: 0, tx_first: (idx == 0) as u32,
@@ -1801,7 +1801,7 @@ fn check_bip30() {
     // overwrite: delete the superseded leaves (against root_prev), then add the NEW coinbase outputs.
     let mut dels: Vec<Bip30Del> = Vec::new();
     for l in &superseded {
-        let pos = forest.leaves.iter().position(|x| *x == *l).expect("superseded coin present");
+        let pos = forest.find(l).expect("superseded coin present");
         let last = forest.leaves.len() - 1;
         dels.push(Bip30Del { global_pos: pos as u64, proof_i: wire_proof(&forest.prove(pos)), proof_last: wire_proof(&forest.prove(last)) });
         forest.delete(pos);
@@ -1992,7 +1992,7 @@ fn cmd_bridge() {
         if let Some(st) = bridge_load_state(&out_dir) {
             println!("bridge: resuming from checkpoint @ height {} ({} utxos, {} leaves)",
                 st.height, st.utxo.len(), st.leaves.len());
-            (Forest { leaves: st.leaves }, st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
+            (Forest::from_leaves(st.leaves), st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
         } else {
             println!("bridge: no checkpoint — starting from genesis");
             (Forest::new(), Utxo::new(), vec![GENESIS_TIME], vec![GENESIS_TIME],
