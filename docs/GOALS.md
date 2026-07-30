@@ -62,6 +62,39 @@ Two consequences:
   a nice-to-have.
 - **This is a fleet problem, not a procurement problem.** It is why the proof party exists.
 
+### The binding constraint is the BRIDGE, not GPU supply
+
+Measured on the coordinator, 2026-07-30. Provers consume witnesses; the archive bridge produces them,
+and it is **one single-threaded process on one core** of a 16-core box — 94.8% of one CPU, load 1.21,
+zero iowait. No amount of GPU touches it.
+
+| | |
+|---|---|
+| bundles emitted | 182,537 (22 GB) |
+| proving frontier | 39,299 |
+| runway ahead of provers | 143,238 blocks |
+| rate at h~182,000 | **~291 blocks/hr** (A/B: 100 blocks in 1,239 s) |
+| **projected serial time to tip** | **~881 days (2.4 years)** |
+
+The rate falls as blocks fatten — measured 950 → 254 blocks/hr across 176,310→182,310 while the UTXO
+count moved only 3%, so it tracks **inputs per block**, not accumulator size. Projection above uses real
+per-era input counts (600 at h=250k rising to 4,200 at tip).
+
+Today's 143k-block runway hides this. At any serious fleet size it is exhausted in days, after which
+provers idle waiting for witnesses.
+
+**Known candidate, not yet confirmed:** `Forest::prove` is **O(subtree), not O(log n)** — it copies the
+containing subtree and recomputes every parent hash to collect ~20 siblings, and is called twice per
+input. At 1.6M leaves that is ~810,000 hashes per proof where ~20 would do. A benchmark with an even
+probe distribution put this at 33 s/block against a real 12.4 s block, i.e. the distribution is
+pessimistic — but a pessimistic estimate exceeding the whole block time means it is certainly a major
+component. Confirming the real share needs a profile, not another microbenchmark.
+
+**Ruled out:** the coin-position lookup. It IS a full linear scan (O(inputs x leaves), ~22 GB scanned
+per block), and indexing it makes no difference — A/B on 100 identical blocks gave 291 vs 285
+blocks/hr. The scan is ~4% of block time. Recorded because the microbenchmark said 2,366x and that was
+measuring something off the critical path.
+
 **Done when:** a single genesis-anchored receipt covers block 1 to a current tip, and verifies against
 the canonical `METHOD_ID`.
 
@@ -149,8 +182,14 @@ L40S-equivalents are needed to hold position before proving one block of history
 
 This constrains only the **proving fleet**. Nodes consuming proofs (G3, G4, G5) are unaffected.
 
+**The bridge caps this too.** Tip-following needs a witness per block within 10 minutes. At h~182,000
+the bridge produces one per ~12.4 s, which is comfortable — but its cost grows with inputs, and it is
+single-threaded. Whether it still clears 10 min/block at tip-era input counts is **unmeasured**, and it
+is a CPU problem that adding GPUs does not solve. See G2.
+
 **Done when:** sustained proving throughput exceeds one block per 10 minutes across the fleet, measured
-over a period long enough to include large blocks.
+over a period long enough to include large blocks — AND the bridge sustains one witness per block in
+the same window.
 
 ---
 
@@ -172,3 +211,7 @@ G4 (rapid IBD) ── needs a proof at a useful height, NOT the tip
 ```
 
 Only G2 depends on G6. G3, G4 and G5 are all reachable without ever finishing the chain.
+
+**Both G2 and G6 sit behind the bridge**, which is single-threaded and ~2.4 years from tip at the
+current rate. That is the critical path for anything requiring proofs at scale, and it is a CPU
+problem, not a GPU one.
