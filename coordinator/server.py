@@ -19,7 +19,7 @@ can be tested without a GPU.
 """
 import os, json, sqlite3, hashlib, subprocess, base64, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 PORT       = int(os.environ.get("COORD_PORT", "8899"))
 BIND       = os.environ.get("COORD_BIND", "0.0.0.0")   # set to 127.0.0.1 when behind a reverse proxy
@@ -99,7 +99,11 @@ except Exception:
 _lock = threading.Lock()
 _rate = {}          # (kind, ip) -> [timestamps] sliding window, guarded by _rate_lock
 _rate_lock = threading.Lock()
-_state_cache = {"t": 0.0, "v": None}   # short-TTL cache of the serialised /api/state, guarded by _state_lock
+_state_cache = {}                      # short-TTL cache of the serialised /api/state, per slim/full, guarded by _state_lock
+# vranges is served separately (#35): it is ~99.9% of the old /api/state payload and changes only when a
+# range is verified, so a 10s cache + ETag turns a re-poll into a 304 instead of re-shipping the index.
+_vranges_cache = {"t": 0.0, "v": None, "etag": None}
+VRANGES_TTL = float(os.environ.get("VRANGES_CACHE_TTL", "10"))
 _state_lock = threading.Lock()
 # Bound concurrent STARK verifications. submit() runs verify-any OUTSIDE _lock (so it can't stall
 # claims/heartbeats), but without a cap a burst of submits would spawn unlimited concurrent `host
@@ -535,7 +539,39 @@ def timeline(fr, segs=240):
             if s * bps <= fr: per[s] = 3
     return {"segs": segs, "per_seg": list(per), "frontier_seg": fr_seg}
 
-def state():
+def build_vranges(c, blk):
+    """The full verified-range index, so a client can browse or search ANY block, not just the frontier
+    window. Extracted from state() so /api/state and /api/vranges cannot drift into two answers."""
+    out = []
+    for r in c.execute("SELECT id,lo,hi,handle,pubkey FROM vranges ORDER BY lo"):
+        v = dict(lo=r["lo"], hi=r["hi"],
+                 handle=(r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]"))
+        if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")):
+            v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
+        out.append(v)
+    return out
+
+def vranges_cached():
+    """Serialised /api/vranges with a TTL and an ETag, returned as (bytes, etag).
+
+    This is ~99.9% of what /api/state used to ship (3,393,853 of 3,397,846 bytes at 38,507 entries) and
+    it only changes when a range is verified — but the board polled it every 10 seconds, and it grows
+    with the chain. Splitting it out takes the steady-state poll from ~313 KB gzipped to a few KB, and
+    the ETag makes an unchanged index a 304 rather than a re-download."""
+    now = time.time()
+    with _state_lock:
+        if _vranges_cache["v"] is not None and now - _vranges_cache["t"] < VRANGES_TTL:
+            return _vranges_cache["v"], _vranges_cache["etag"]
+    c = db()
+    blk = blocked_pubkeys()          # same moderation list state() applies, so handles match exactly
+    payload = {"vranges": build_vranges(c, blk), "range_size": RANGE_SIZE}
+    v = json.dumps(payload).encode()
+    etag = '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
+    with _state_lock:
+        _vranges_cache["t"] = time.time(); _vranges_cache["v"] = v; _vranges_cache["etag"] = etag
+    return v, etag
+
+def state(slim=False):
     reap()
     now = time.time()
     c = db()
@@ -576,13 +612,7 @@ def state():
               for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
     # full verified + claimed lists so the client can browse/search/filter any block, not just the
     # frontier window (each is small: claims are few, verified ranges are RANGE_SIZE-coarse).
-    vranges = []
-    for r in c.execute("SELECT id,lo,hi,handle,pubkey FROM vranges ORDER BY lo"):
-        v = dict(lo=r["lo"], hi=r["hi"],
-                 handle=(r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]"))
-        if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")):
-            v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
-        vranges.append(v)
+    vranges = build_vranges(c, blk) if not slim else []
     claims = []
     for r in c.execute("SELECT lo,hi,handle,assignee,claimed_at,last_beat FROM ranges WHERE status='claimed' ORDER BY lo"):
         beat = int(now - (r["last_beat"] or r["claimed_at"] or now))
@@ -639,17 +669,22 @@ def state():
         "verify_mode": VERIFY,
     }
 
-def state_cached():
+def state_cached(slim=False):
     """Serialised /api/state with a short TTL. state() does full-table scans + a frontier walk on every
     call, so under an anonymous GET flood recomputing it per request is the cheapest way to pin the box.
-    A ~1.5s cache collapses a burst into one recompute while keeping the board effectively live."""
+    A ~1.5s cache collapses a burst into one recompute while keeping the board effectively live.
+
+    Slim and full are cached SEPARATELY: they are different payloads, and sharing one slot would serve
+    whichever was computed last to both callers."""
+    key = "slim" if slim else "full"
     now = time.time()
     with _state_lock:
-        if _state_cache["v"] is not None and now - _state_cache["t"] < STATE_TTL:
-            return _state_cache["v"]
-    v = json.dumps(state()).encode()   # compute outside the lock; a rare cold-start double-compute is harmless
+        e = _state_cache.get(key)
+        if e is not None and now - e["t"] < STATE_TTL:
+            return e["v"]
+    v = json.dumps(state(slim=slim)).encode()   # compute outside the lock; a rare cold-start double-compute is harmless
     with _state_lock:
-        _state_cache["t"] = time.time(); _state_cache["v"] = v
+        _state_cache[key] = {"t": time.time(), "v": v}
     return v
 
 def claim(body):
@@ -887,9 +922,10 @@ def submit(body):
                                   "signature": "valid" if sig_ok else "invalid", "note": note}
 
 class H(BaseHTTPRequestHandler):
-    def _send(self, code, obj=None, ctype="application/json", raw=None):
+    def _send(self, code, obj=None, ctype="application/json", raw=None, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items(): self.send_header(k, v)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -919,7 +955,17 @@ class H(BaseHTTPRequestHandler):
         if p.startswith("/api/") and not rate_ok(self._client_ip(), "r", RATE_MAX_GET):
             return self._send(429, {"error": "rate limit — slow down"})
         if p == "/api/state":
+            # ?slim=1 omits vranges — the board polls this every 10s and fetches /api/vranges only when
+            # progress moves. Default keeps vranges so existing clients are unaffected (#35).
+            if parse_qs(urlparse(self.path).query).get("slim", ["0"])[0] not in ("0", "", "false"):
+                return self._send(200, raw=state_cached(slim=True), ctype="application/json")
             return self._send(200, raw=state_cached(), ctype="application/json")
+        if p == "/api/vranges":
+            raw, etag = vranges_cached()
+            if self.headers.get("If-None-Match") == etag:
+                return self._send(304, raw=b"", headers={"ETag": etag, "Cache-Control": "no-cache"})
+            return self._send(200, raw=raw, ctype="application/json",
+                              headers={"ETag": etag, "Cache-Control": "no-cache"})
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
