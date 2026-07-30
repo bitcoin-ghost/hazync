@@ -2,14 +2,23 @@
 
 | File | Target | Size | sha256 |
 |---|---|---|---|
-| `hazync-verify-aarch64` | `aarch64-unknown-linux-gnu` | 1,643,112 B | `b89cefce8099…` (see `.sha256`) |
+| `hazync-verify-aarch64` | `aarch64-unknown-linux-gnu` | 1,708,632 B | `2b4b6b64972d…` (see `.sha256`) |
 
-Built 2026-07-28 from the tree at `f02ca11`, cross-compiled with
-`aarch64-linux-gnu-gcc`. Verified as ARM64 code under `qemu-aarch64-static` —
-accepts the genesis-anchored fixture, rejects the non-genesis one on the pin.
-Full record: `prover/evidence/verifier_aarch64.txt`.
+Rebuilt 2026-07-30 for canonical guest `85dc0b56…` (accumulator domain
+separation), cross-compiled with `aarch64-linux-gnu-gcc` in a container.
+Verified as ARM64 code under `qemu-aarch64-static` — accepts the
+genesis-anchored fixture (`fold_8.snark`, exit 0), rejects the non-genesis one
+on the pin (exit 2).
 
-Pinned to guest image id `3f52baff…`. **A re-baseline invalidates it** — it will
+The binary was REBUILT, not edited. It embeds the guest id in compiled code, and
+substituting one 64-hex string for another is length-preserving — it would have
+produced a binary claiming the new id while containing the old build, which is
+worse than a corrupt one. Confirmed: 0 occurrences of `3f52baff` remain.
+
+Still qemu, not real silicon — see #41. Full record:
+`prover/evidence/verifier_aarch64.txt`.
+
+Pinned to guest image id `85dc0b56…`. **A re-baseline invalidates it** — it will
 reject every proof made against a new guest. Rebuild and replace it as part of
 the re-baseline; `scripts/check-versions.sh` guards the source constant, but it
 cannot check a committed binary.

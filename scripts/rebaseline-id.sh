@@ -35,9 +35,25 @@ echo "  $OLD"
 echo "  -> $NEW"
 echo
 
-# Every tracked text file that names the old id. Deliberately repo-wide rather than a hardcoded list:
-# the hardcoded list is what goes stale.
-mapfile -t FILES < <(git ls-files | xargs grep -l "$OLD" 2>/dev/null)
+# Every tracked TEXT file that names the old id, excluding two categories that must never be rewritten.
+# Repo-wide rather than a hardcoded list, because the hardcoded list is what goes stale.
+#
+#   prover/evidence/**  are RECORDS OF PAST RUNS. Those runs really did happen under the old guest;
+#                       rewriting the id in them does not update a reference, it falsifies the
+#                       measurement. The first version of this script rewrote five evidence files.
+#   short forms         `3f52baff…` appears in the supersession CHAIN in ROADMAP.md and in past-tense
+#                       statements ("v0.10.0's 3f52baff changes the guest ELF again"). Those are
+#                       history and must survive. Only full 64-hex occurrences are rewritten; the
+#                       short-form sites need judgement per site, and check-versions.sh is what
+#                       catches the ones that genuinely needed updating.
+#   binaries            embed the id in compiled code. The substitution is length-preserving so it
+#                       does not visibly corrupt the file — it produces a binary that CLAIMS the new
+#                       id while containing the old build, which is worse than a corrupt one. The
+#                       aarch64 verifier in verifier/dist/ has to be REBUILT, not edited.
+mapfile -t FILES < <(git ls-files | grep -v '^prover/evidence/' | while read -r f; do
+    grep -Iq . "$f" 2>/dev/null || continue          # -I: skip binary files
+    grep -lq "$OLD" "$f" 2>/dev/null && echo "$f"
+done)
 for f in "${FILES[@]}"; do
     n=$(grep -c "$OLD" "$f")
     sed -i "s/$OLD/$NEW/g" "$f"
@@ -49,7 +65,13 @@ tail -1 reproduce/METHOD_ID | grep -qE "^$NEW$" \
     || { echo "::error::reproduce/METHOD_ID does not end with the new bare id"; exit 1; }
 
 echo
+echo "NOT touched, deliberately:"
+echo "  SHORT-form ids (3f52baff…)          they appear in HISTORY as well as in current claims"
+echo "  prover/evidence/**                  records of runs made under the OLD guest — history, not references"
+echo "  verifier/dist/hazync-verify-aarch64 a binary; it must be REBUILT, not edited"
+echo
 echo "Now, and in this order:"
 echo "  1. write WHY into reproduce/METHOD_ID (the supersession note) — it is the audit trail"
 echo "  2. regenerate prover/testdata/snark/*.snark with the NEW guest (they are old proofs)"
-echo "  3. ./scripts/check-versions.sh && ./scripts/check-utreexo.sh"
+echo "  3. rebuild verifier/dist/hazync-verify-aarch64 and refresh its .sha256"
+echo "  4. ./scripts/check-versions.sh && ./scripts/check-utreexo.sh && ./scripts/check-spec.sh"

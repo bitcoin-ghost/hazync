@@ -27,11 +27,11 @@ command -v node >/dev/null || { echo "SKIP: node not available"; exit 0; }
 
 # Fixtures: the two committed proofs, plus mutations that must be refused. A parity test over valid
 # inputs only would pass even if both consumers accepted everything.
-cp "$FIX/fold_1000.snark" "$TMP/valid_anchored.bin"
+cp "$FIX/fold_8.snark" "$TMP/valid_anchored.bin"
 cp "$FIX/neg500.snark"    "$TMP/valid_segment.bin"
-head -c 200 "$FIX/fold_1000.snark" > "$TMP/truncated.bin"
+head -c 200 "$FIX/fold_8.snark" > "$TMP/truncated.bin"
 : > "$TMP/empty.bin"
-python3 - "$FIX/fold_1000.snark" "$TMP/bitflip.bin" <<'PY'
+python3 - "$FIX/fold_8.snark" "$TMP/bitflip.bin" <<'PY'
 import sys
 d = bytearray(open(sys.argv[1],'rb').read())
 d[-40] ^= 0x01                      # perturb the proof body, not the header

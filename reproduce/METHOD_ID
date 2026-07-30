@@ -60,6 +60,30 @@
 # stays valid — v0.9.1 only rebuilds the host binaries + hardens the coordinator (release-on-failure,
 # fail-fast errors, `hazync selftest` + `/api/meta`, bundle round-trip CI regression).
 #
+# 2026-07-30 (domain separation): the accumulator now DOMAIN-SEPARATES leaf and interior hashes —
+# leaf = SHA256(0x00 || preimage), interior = SHA256(0x01 || left || right). Previously both were bare
+# SHA256 over their operands, and SECURITY.md carried this under "documented, not changed
+# (non-exploitable, deliberately deferred to avoid churn/re-prove)". The "non-exploitable" half does
+# not survive checking: a UTXO leaf preimage is 57 + |scriptPubKey| bytes, so a 7-byte scriptPubKey
+# yields a 64-byte preimage — exactly what an interior node hashes — and the stated barrier (leaf
+# preimages open with an uncontrollable txid) is a grinding cost, not a separation, because a txid is
+# the hash of a transaction an attacker composes. The accumulator is the one non-Core component and the
+# piece named for external audit, so it is the worst place to rest on an argument instead of a property.
+# Changed in all three implementations that must agree byte for byte (host oracle, guest Rust Stump,
+# and BOTH guest C++ leaf builders); scripts/check-utreexo.sh gates them. EVERY LEAF HASH CHANGES, so
+# no prior proof is valid under this id and the board restarts from genesis — accepted deliberately,
+# since the run was moving to resized hardware from genesis regardless. Validated: bundle round-trip
+# PASS and block 170 regression PASS with the tip matching, in the canonical fixed-path container.
+# Superseded the earlier id 3f52baff…
+#
+# ALSO FIXED IN THIS BUILD, and the reason the first attempt failed: prover/methods/guest/build.rs
+# emitted NO cargo:rerun-if-changed directives, so the C++ half of the guest was invisible to cargo's
+# fingerprint. The first rebuild relinked the ELF from a verify_input.o three days stale — the Rust
+# tagged interior nodes while the C++ left leaves untagged — and METHOD_ID CHANGED ANYWAY, because the
+# Rust did rebuild. A changed id proves something in the guest changed; it never proves everything did.
+# Only the block-170 regression caught it. The C++ sources, Core's translation units and the coreshim
+# are now declared dependencies.
+#
 # 2026-07-27 (v0.10.0): SPEED re-baseline — libsecp256k1's `ECMULT_WINDOW_SIZE` 15 -> 19. This is a pure
 # compile-time space/time trade inside libsecp (bigger precomputed `pre_g` table -> fewer wNAF additions
 # per scalar multiply); NO consensus code changed, and the EC algorithm, ECDSA logic and every line of
@@ -78,4 +102,4 @@
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e
+85dc0b56af8739acac76e560fbd44141d48d753044523604dd5e2a9619224c39

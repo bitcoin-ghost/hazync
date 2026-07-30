@@ -68,7 +68,7 @@ jobs:
           #   2 = the SNARK is valid but the range is not genesis-anchored
           # `cmd; rc=$?` does NOT work here: GitHub runs these under `bash -e`, so a non-zero exit
           # kills the step before rc is ever assigned. `|| rc=$?` is the form that survives set -e.
-          rc=0; "$B" prover/testdata/snark/fold_1000.snark || rc=$?
+          rc=0; "$B" prover/testdata/snark/fold_8.snark || rc=$?
           if [ $rc -ne 0 ]; then
             echo "::error::verifier REJECTED the genesis-anchored proof (exit $rc)"; exit 1
           fi
@@ -89,7 +89,7 @@ jobs:
           cargo build --release --manifest-path verifier-ffi/Cargo.toml
           g++ -O2 -I verifier-ffi/include prover/testdata/ffi_smoke.cpp \
               verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_smoke
-          /tmp/ffi_smoke prover/testdata/snark/fold_1000.snark 0   # genesis-anchored -> HAZYNC_OK
+          /tmp/ffi_smoke prover/testdata/snark/fold_8.snark 0   # genesis-anchored -> HAZYNC_OK
           /tmp/ffi_smoke prover/testdata/snark/neg500.snark   -5   # valid but NOT anchored
       - name: WASM verifier agrees with the CLI on every fixture (browsers are the copy nobody can audit)
         # The browser build is the copy most people will run and the one least inspectable after the

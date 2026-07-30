@@ -263,6 +263,13 @@ delete/proof handling and `num_leaves`/root recomputation, all primitive math (`
 - **Reference-spec doc corrected.** `accumulator/src/lib.rs` now states the guest `utreexo.rs` adds the
   SEC-2 pinning the reference oracle lacks (the proven guest is the authority).
 
+**Update 2026-07-30 — the domain-tag item below is now FIXED, and "non-exploitable" was wrong.** Leaf
+and interior hashes are domain-separated as of canonical id `85dc0b56…`. A leaf preimage is
+`57 + |scriptPubKey|` bytes, so a 7-byte scriptPubKey gives a 64-byte preimage — the width an interior
+node hashes — and the stated barrier (leaf preimages open with an uncontrollable txid) is a grinding
+cost rather than a separation, since a txid is the hash of a transaction an attacker composes. See
+`docs/SPEC.md` §3. The other two items here remain deferred.
+
 Documented, not changed (non-exploitable, deliberately deferred to avoid churn/re-prove): a trailing-byte
 `r.p==r.e` parity assert (trailing bytes are inert — txid is PoW-bound); explicit leaf/internal-node hash
 domain tags (implicit separation already holds because every leaf preimage begins with an uncontrollable

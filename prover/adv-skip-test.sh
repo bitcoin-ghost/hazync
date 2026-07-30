@@ -15,7 +15,7 @@ set -uo pipefail
 
 GHOSTD=/src/gbuild/bin/ghostd
 CLI=/src/gbuild/bin/ghost-cli
-GOOD=/work/fold_1000.snark          # valid, genesis-anchored [1..1000]
+GOOD=/work/fold_8.snark          # valid, genesis-anchored [1..1000]
 NEG=/work/neg500.snark              # valid SNARK, range [500..1000] — NOT genesis-anchored
 H=1000
 

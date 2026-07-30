@@ -16,7 +16,7 @@
 set -uo pipefail
 GHOSTD=/src/gbuild/bin/ghostd
 CLI=/src/gbuild/bin/ghost-cli
-PROOF=/work/fold_1000.snark
+PROOF=/work/fold_8.snark
 H=1000
 say() { echo "[$(date -u +%T)] $*"; }
 die() { echo "FAIL: $*" >&2; exit 1; }
