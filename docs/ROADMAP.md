@@ -9,6 +9,10 @@ the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
 >
+> **Work distribution is designed in [`DESIGN_work_distribution.md`](DESIGN_work_distribution.md)**
+> (#37 + #30): free-running provers, opportunistic tree folding, an incrementally-extended genesis
+> spine, and the storage answer — retain every per-block receipt, discard bundles behind the frontier.
+>
 > **The finishing plan lives in [`RELEASE_PLAN.md`](RELEASE_PLAN.md).** Six workstreams to get the
 > project shipped and ready to absorb outside compute, and the gate that must hold before money is
 > spent on proving. It answers "what is left to build, and in what order".
