@@ -682,6 +682,8 @@ def state_cached(slim=False):
         _state_cache[key] = {"t": time.time(), "v": v}
     return v
 
+_MID_CACHE = {"v": None}
+
 def expected_method_id():
     # The guest image id this coordinator verifies against == HOST_BIN's method-id. Exposed via /api/meta
     # so a contributor can pre-flight `host method-id` BEFORE proving, instead of discovering a mismatch
