@@ -8,6 +8,10 @@ the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 > **Goals live in [`GOALS.md`](GOALS.md).** That document states the six technical goals, where each
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
+>
+> **The finishing plan lives in [`RELEASE_PLAN.md`](RELEASE_PLAN.md).** Six workstreams to get the
+> project shipped and ready to absorb outside compute, and the gate that must hold before money is
+> spent on proving. It answers "what is left to build, and in what order".
 
 ## 1. Security fixes — from the self-audit (see `SECURITY.md`)
 
