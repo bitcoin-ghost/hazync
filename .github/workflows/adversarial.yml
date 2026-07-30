@@ -36,6 +36,19 @@ jobs:
         run: cd coordinator && python3 seam_fuzz.py --control
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
+      - name: Coordinator worker parses (nothing else imports it, so nothing else would notice)
+        # coordinator/server.py IS compiled on every push, because seam_fuzz.py and parse_fuzz.py both
+        # `import server`. coordinator/hazync is not: it has no .py extension, so it is not importable
+        # and no test touches it. 510 lines of fold/claim logic whose syntax errors would surface only
+        # when a worker runs it, mid-campaign.
+        run: |
+          python3 -c "import ast,sys; ast.parse(open('coordinator/hazync').read()); print('coordinator/hazync parses')"
+          python3 -c "import ast,sys; ast.parse(open('coordinator/server.py').read()); print('coordinator/server.py parses')"
+          # Assert the fuzzers really do import server, since that is what covers it. If this ever stops
+          # being true, server.py silently loses its only compile check.
+          grep -q '^import server' coordinator/seam_fuzz.py || { echo "::error::seam_fuzz no longer imports server — server.py has lost its compile coverage"; exit 1; }
+          grep -q '^import server' coordinator/parse_fuzz.py || { echo "::error::parse_fuzz no longer imports server — server.py has lost its compile coverage"; exit 1; }
+
       - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
         run: ./prover/check_seg_guards.sh
       - name: Standalone verifier — builds, verifies, and rejects a non-genesis proof (#19, #24)
