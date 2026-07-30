@@ -5,7 +5,7 @@
 # because the guest image id absorbs $HOME/.cargo paths and a host-built binary would carry a
 # non-canonical id. Neither artifact here contains a guest, so neither has that constraint:
 #
-#   hazync-worker       the Proof Party contributor CLI (claim -> prove -> submit)
+#   hazync-worker       the Proof Party contributor CLI (hint -> prove -> submit; #37 removed claims)
 #   hazync-verify.wasm  the browser verifier
 #
 # Both belong on the release and in the signed SHA256SUMS. The worker especially: it holds the
