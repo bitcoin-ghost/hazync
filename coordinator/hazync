@@ -3,11 +3,10 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
-  hazync pick               # ask the coordinator for the next OPEN range (near the frontier)
-  hazync claim <id>         # reserve an open range from the board (e.g. 0-999)
+  hazync pick               # ask what is most useful next (advisory — nothing is reserved)
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
-  hazync run [id]           # claim + prove + submit, end to end (id optional: picks the next open range)
+  hazync run [id]           # prove + submit (id optional: takes the coordinator's suggestion)
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
 
 The party proves the chain forward from genesis, so you take a range near the current
@@ -49,7 +48,7 @@ def _find_host():
     binary on their disk. Explicit setting still wins; this is only the fallback.
 
     CUDA is preferred when both are present: someone who downloaded the CUDA build has a GPU and
-    wants it used. If they do not, `selftest` catches it before any work is claimed.
+    wants it used. If they do not, `selftest` catches it before any work is attempted.
     """
     env = os.environ.get("HAZYNC_HOST", "")
     if env:
@@ -191,48 +190,16 @@ def cmd_id(args):
     print("(set a handle:  hazync id <name>)")
 
 def cmd_pick(args):
-    r = json.loads(get("/api/pick"))
-    if r.get("range"):
-        print("next open range:", r["range"], "  (claim it:  hazync run", r["range"] + ")")
-    else:
-        print(r.get("note", "nothing open"))
-    return r.get("range")
-
-def cmd_claim(args):
-    rng = args[0]; _, pub, handle = identity()
-    res = post("/api/claim", {"range": rng, "pubkey": pub, "handle": handle})
-    if res.get("ok"):
-        print(f"claimed {rng}"); return
-    print(f"could not claim {rng}: {res.get('error') or res}"); sys.exit(1)
-
-def _heartbeat(rng, pub, stop):
-    # keep the claim alive while proving — ping the coordinator every 30s
-    while not stop.wait(30):
-        try: post("/api/heartbeat", {"range": rng, "pubkey": pub})
-        except Exception: pass
-
-def _release(rng, pub, err=None):
-    # A prove/submit failed after we claimed — hand the block back to the pool now, so it reopens in
-    # seconds instead of sitting `claimed` until the coordinator's CLAIM_TTL reap (~30m). Best-effort:
-    # the server-side reap is the backstop if this call can't get through (e.g. the box lost the network).
-    #
-    # The reason travels with the release so the coordinator can record it against the range. Without it
-    # a parked block says only "failed 3 times" and the operator has to go log-diving on whichever box
-    # happened to hold it — which does not work once the logs have rotated.
-    body = {"range": rng, "pubkey": pub}
-    if err: body["error"] = str(err)[:500]
-    try: post("/api/release", body)
-    except Exception: pass
-
-# Failures that smaller proving segments cannot fix — a bad/mismatched bundle, a guest-id mismatch, a
-# missing input. When the host dies on one of these, surface the real error at once instead of burning all
-# three retries and hiding it behind "failed to prove" (that masking cost real debugging time on the
-# v0.9.0 bundle-parse bug — the true cause, "parse bundle: invalid type: sequence", was buried).
-_HARD_ERR = ("parse bundle", "invalid type", "deserialize", "missing field", "METHOD_ID", "image id",
-             "read bundle", "No such file", "no such file")
-
-_SEG_MIN = 18                                       # below this the segments stop repartitioning usefully
-_SEG_TOP_CACHE = {"v": False}                       # False = not yet asked (None is a valid answer)
+    """Ask the coordinator what would be most useful next. Advisory only — nothing is reserved."""
+    res = post("/api/hint", {"count": int(args[0]) if args else 5})
+    sug = (res or {}).get("suggest") or []
+    if not sug:
+        print("nothing suggested — the board may be complete, or no witness is served yet.")
+        return
+    print("suggested next blocks (advisory — you may prove any height):")
+    for h in sug:
+        print(f"  {h}")
+    print(f"\nprove one with:  hazync run {sug[0]}")
 
 def _seg_ladder(env):
     # [first attempt, then every smaller size down to _SEG_MIN]. The first attempt is None = "let the
@@ -332,7 +299,7 @@ def cmd_prove(args):
     threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
     try:
         total = hi - start + 1
-        print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step; heartbeating the claim…")
+        print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
             _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}")
@@ -441,7 +408,7 @@ def cmd_selftest(args):
     # One command a contributor runs BEFORE committing a GPU to real work: confirm the prover is present,
     # its guest id matches this coordinator (else every submit is rejected), and it can actually verify a
     # real board proof end to end. Catches the common "built a different guest" trap up front.
-    print("hazync selftest — checking your setup before you claim real work\n")
+    print("hazync selftest — checking your setup before you prove real work\n")
     ok = True
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("✗ no prover binary found.\n"
@@ -467,7 +434,7 @@ def cmd_selftest(args):
     elif want:
         print(f"✗ METHOD_ID MISMATCH — the coordinator expects {want}.\n"
               "  You built a different guest, so every proof would be rejected. Use the prebuilt release\n"
-              "  binary, or the reproducible build (reproduce/Dockerfile). (Nothing was claimed.)")
+              "  binary, or the reproducible build (reproduce/Dockerfile). (Nothing was submitted.)")
         ok = False
     try:
         proof = get("/api/proof/1")
@@ -489,61 +456,38 @@ def cmd_selftest(args):
         sys.exit("SETUP INCOMPLETE — fix the ✗ items above before `hazync run`.")
 
 def cmd_run(args):
-    # Check the prover binary FIRST — `run` claims a range (locking it under the claim TTL), so we must
-    # not claim only to bail later because HAZYNC_HOST is unset. (cmd_prove re-checks; this is the gate.)
+    # FREE-RUNNING (#37). There is no claim, no lease, no heartbeat and nothing to hand back: proving
+    # is unallocated, so a worker that dies mid-block leaves no state behind. That removes the entire
+    # class of orphaned-claim failures this function used to exist to manage.
     if not HOSTBIN or not os.path.exists(HOSTBIN):
-        sys.exit("set HAZYNC_HOST to the prover `host` binary before `run` — download it from "
-                 "https://github.com/bitcoin-ghost/hazync/releases/latest and `export HAZYNC_HOST=/path/to/host`.")
+        sys.exit("no prover binary found — run `hazync selftest` for where it looked.")
     if args:
-        # Explicit range: fail fast BEFORE claiming — the whole range must be inside the coordinator's served
-        # window (block 0 is unprovable, so clamp to 1) so a claim never locks a range we then can't fetch.
-        lo, hi = parse_range(args[0])
+        rng = args[0]
+        lo, hi = parse_range(rng)
+        # Still worth checking up front: proving a block whose witness cannot be fetched wastes the
+        # whole prove, and the coordinator serves witnesses by direct file lookup so this is cheap.
         for probe in sorted({max(lo, 1), hi}):
             if not witness_in_window(probe):
-                sys.exit(f"range {args[0]} is outside the coordinator's served window (block {probe} has no "
-                         f"witness yet) — nothing was claimed. Pick an in-window range with `hazync pick`.")
-        cmd_claim(args); rng = args[0]
+                sys.exit(f"block {probe} has no witness on the coordinator yet — nothing was started.")
     else:
-        # No range given — ATOMIC claim-next: the coordinator picks the next open window (incl the genesis
-        # window) AND locks it in one step under its lock, so parallel `hazync run` workers never race onto
-        # the same range (the old pick-then-claim left a window where two workers grabbed the same one).
-        _, pub, handle = identity()
-        res = post("/api/claim", {"range": "next", "pubkey": pub, "handle": handle})
-        if not res.get("ok"): sys.exit(f"nothing to claim: {res.get('error') or res}")
-        rng = res["range"]; print(f"claimed {rng}")
-    # From here the range is claimed. If prove or submit fails, release the claim before exiting so the
-    # block reopens immediately (a failed prove used to leave it `claimed` — an orphaned hole that stalled
-    # the genesis frontier until the ~30m reap). cmd_submit exits 0 on success (no release on the happy path).
-    _, pub, _h = identity()
-    try:
-        cmd_prove([rng]); cmd_submit([rng])
-    except SystemExit as e:
-        if e.code not in (0, None):                      # non-zero / message exit == failure after claiming
-            _release(rng, pub, e.code)                   # carry the real reason to the coordinator
-        raise
-    except BaseException as e:                           # Ctrl-C or an unexpected error — hand it back too
-        _release(rng, pub, f"{type(e).__name__}: {e}"); raise
-
-def _on_term(signum, _frame):
-    # Turn SIGTERM into a normal Python exception so the claim gets HANDED BACK.
-    #
-    # Python's default SIGTERM handling kills the interpreter outright: no `finally`, no `except`, so
-    # cmd_run's release-on-failure path never runs and the claim is orphaned until the coordinator's
-    # ~30m CLAIM_TTL reap. Since the frontier is the lowest unproven block, one orphaned claim stalls
-    # the whole board — and every routine `pkill` in restart_workers_v10.sh created one. Observed
-    # repeatedly on 2026-07-28: block 35519 sat `claimed` with a dead heartbeat for 19 minutes after a
-    # worker restart, with all of its neighbours already verified.
-    raise KeyboardInterrupt(f"received signal {signum}")
+        res = post("/api/hint", {"count": 1})
+        sug = (res or {}).get("suggest") or []
+        if not sug:
+            sys.exit("coordinator suggested nothing — the board may be complete, or no witness is served yet.")
+        rng = str(sug[0])
+        print(f"proving {rng}  (advisory suggestion; any height is accepted)")
+    cmd_prove([rng]); cmd_submit([rng])
 
 def main():
-    for _sig in ("SIGTERM", "SIGINT", "SIGHUP"):
-        try: signal.signal(getattr(signal, _sig), _on_term)
-        except (AttributeError, ValueError): pass    # not all platforms/threads allow every signal
+    # No signal handlers any more. They existed to hand a CLAIM back on SIGTERM, because Python's
+    # default SIGTERM kills the interpreter outright and an orphaned claim then stalled the board
+    # until a ~30 minute reap. Free-running proving has nothing to hand back: a worker that dies
+    # mid-block leaves no state at all, and the block is simply still unproven.
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
     c, a = argv[0], argv[1:]
-    fn = {"id": cmd_id, "pick": cmd_pick, "claim": cmd_claim, "prove": cmd_prove, "selftest": cmd_selftest,
+    fn = {"id": cmd_id, "pick": cmd_pick, "prove": cmd_prove, "selftest": cmd_selftest,
           "submit": cmd_submit, "run": cmd_run}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
