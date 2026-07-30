@@ -100,6 +100,12 @@ jobs:
           rustup target add wasm32-unknown-unknown
           ./verifier-wasm/build.sh
           ./verifier-wasm/test-parity.sh
+      - name: SPEC.md formats match the code (a drifted spec is worse than no spec)
+        # docs/SPEC.md is normative about byte layouts and constants. If it drifts, a reviewer
+        # implements against it, their verifier disagrees with ours, and the disagreement looks like
+        # OUR bug. Only mechanically checkable claims are covered — constants, tags, and the full
+        # RangeState field list in declaration order, because the journal decodes positionally.
+        run: ./scripts/check-spec.sh
       - name: Utreexo hash construction agrees across host, guest Rust and guest C++
         # Three implementations of the same hash. A drift means the host builds proofs the guest
         # cannot verify — and only for SOME blocks, because the domain tag only matters once a leaf
