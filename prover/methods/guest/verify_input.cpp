@@ -46,8 +46,18 @@ struct MiniReader {
 
 static void le(unsigned char* b, uint64_t v, int n) { for (int i = 0; i < n; i++) b[i] = (unsigned char)(v >> (8 * i)); }
 
+// Domain-separation tags — MUST equal hazync-utreexo's TAG_LEAF/TAG_NODE (accumulator/src/lib.rs) and
+// the guest Rust utreexo.rs. `scripts/check-utreexo.sh` gates all three.
+//
+// A leaf preimage is 57 + scriptPubKey bytes, so a 7-byte scriptPubKey yields a 64-byte preimage — the
+// same length an interior node hashes. Without a tag the leaf and interior domains genuinely overlap,
+// and the only barrier is that a leaf preimage opens with a txid. A txid is the hash of a transaction
+// an attacker can construct and grind, so that is a cost argument, not a separation. One tag byte
+// makes it a property of the construction instead.
+static const unsigned char TAG_LEAF = 0x00;
+
 // Canonical Hazync UTXO-leaf commitment for the coin spent by input `input_idx`:
-//   SHA256( txid || vout || value || scriptPubKey || coin_height || is_coinbase || coin_mtp ).
+//   SHA256( TAG_LEAF || txid || vout || value || scriptPubKey || coin_height || is_coinbase || coin_mtp ).
 // Height, coinbase flag, and creation median-time-past are committed so maturity + BIP68 (height AND
 // time) checks can't lie about the coin's age.
 static void coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, unsigned input_idx,
@@ -56,6 +66,7 @@ static void coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, 
     const CTxOut& coin = spent[input_idx];
     CSHA256 h;
     unsigned char b8[8];
+    h.Write(&TAG_LEAF, 1);
     h.Write(reinterpret_cast<const unsigned char*>(op.hash.begin()), 32);
     le(b8, op.n, 4); h.Write(b8, 4);
     le(b8, (uint64_t)coin.nValue, 8); h.Write(b8, 8);
@@ -105,6 +116,7 @@ extern "C" uint32_t tx_out_leaves(const uint8_t* tx_bytes, unsigned tx_len,
         const CTxOut& o = tx.vout[v];
         if (o.scriptPubKey.IsUnspendable()) continue; // not part of the UTXO set (H3)
         CSHA256 h;
+        h.Write(&TAG_LEAF, 1);
         h.Write(reinterpret_cast<const unsigned char*>(txid.begin()), 32);
         le(b8, v, 4); h.Write(b8, 4);
         le(b8, (uint64_t)o.nValue, 8); h.Write(b8, 8);

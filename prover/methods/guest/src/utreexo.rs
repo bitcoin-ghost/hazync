@@ -8,8 +8,20 @@ use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; 32];
 
+// Domain-separation tags — MUST equal `hazync-utreexo`'s (accumulator/src/lib.rs) byte for byte, or
+// the host builds proofs this guest cannot verify. `scripts/check-utreexo.sh` gates the pair.
+//
+// Without them a leaf hash and an interior hash are drawn from the same domain, so one value can be
+// valid as both — the classic Merkle type-confusion. The previous defence was that leaf preimages
+// always begin with a prover-uncontrollable txid, which is an argument about the data rather than a
+// property of the construction. This is the accumulator, the one non-Core component here, so it is
+// the piece least able to lean on an argument.
+pub const TAG_LEAF: u8 = 0x00;
+pub const TAG_NODE: u8 = 0x01;
+
 pub fn parent(left: &Hash, right: &Hash) -> Hash {
     let mut h = Sha256::new();
+    h.update([TAG_NODE]);
     h.update(left);
     h.update(right);
     h.finalize().into()

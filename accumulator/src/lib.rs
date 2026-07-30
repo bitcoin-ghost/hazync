@@ -20,19 +20,38 @@ use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; 32];
 
-/// Interior node hash: SHA256(left || right). In the guest this same op routes through the
-/// RISC0 SHA accelerator — bit-identical, so the logic developed here transfers unchanged.
+/// Domain-separation tags. A leaf hash and an interior hash MUST be drawn from disjoint domains, or
+/// a value can be valid as both — the classic Merkle type-confusion, where an attacker presents an
+/// interior node as a leaf (or vice versa) and produces a second valid path to the same root.
+///
+/// This was previously left implicit and documented as such in `SECURITY.md`: leaf preimages always
+/// begin with a txid the prover cannot control, so the domains could not collide *in practice*. That
+/// is a soundness argument resting on the shape of the data rather than on the hash construction, and
+/// it is the accumulator — the one non-Core component in the system, and the piece most likely to be
+/// challenged in review — that carried it. Making it explicit costs one byte per hash and turns an
+/// argument into a property.
+///
+/// The tags MUST match `prover/methods/guest/src/utreexo.rs` byte for byte; `scripts/check-utreexo.sh`
+/// fails the build if they drift.
+pub const TAG_LEAF: u8 = 0x00;
+pub const TAG_NODE: u8 = 0x01;
+
+/// Interior node hash: SHA256(TAG_NODE || left || right). In the guest this same op routes through
+/// the RISC0 SHA accelerator — bit-identical, so the logic developed here transfers unchanged.
 pub fn parent(left: &Hash, right: &Hash) -> Hash {
     let mut h = Sha256::new();
+    h.update([TAG_NODE]);
     h.update(left);
     h.update(right);
     h.finalize().into()
 }
 
-/// Leaf commitment for a UTXO. `data` is the caller's canonical serialization of the coin
-/// (outpoint + height/coinbase flag + CTxOut). Opaque here; the accumulator only hashes it.
+/// Leaf commitment for a UTXO: SHA256(TAG_LEAF || data). `data` is the caller's canonical
+/// serialization of the coin (outpoint + height/coinbase flag + CTxOut). Opaque here; the accumulator
+/// only hashes it.
 pub fn hash_leaf(data: &[u8]) -> Hash {
     let mut h = Sha256::new();
+    h.update([TAG_LEAF]);
     h.update(data);
     h.finalize().into()
 }
@@ -957,5 +976,72 @@ mod position_index_tests {
             assert_eq!(loaded.find(l), grown.find(l));
             assert_eq!(loaded.find(l), leaves.iter().position(|x| x == l));
         }
+    }
+}
+
+#[cfg(test)]
+mod domain_separation_tests {
+    //! The tags must actually be applied. A constant that is declared but never hashed separates
+    //! nothing, and would pass every structural check while leaving the original hole open.
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn tags_are_applied_and_change_the_hash() {
+        let data = b"a leaf preimage";
+        let untagged: Hash = {
+            let mut h = Sha256::new();
+            h.update(data);
+            h.finalize().into()
+        };
+        assert_ne!(hash_leaf(data), untagged, "TAG_LEAF is declared but not hashed");
+
+        let (l, r) = ([1u8; 32], [2u8; 32]);
+        let untagged: Hash = {
+            let mut h = Sha256::new();
+            h.update(l);
+            h.update(r);
+            h.finalize().into()
+        };
+        assert_ne!(parent(&l, &r), untagged, "TAG_NODE is declared but not hashed");
+    }
+
+    #[test]
+    fn tags_are_distinct() {
+        assert_ne!(TAG_LEAF, TAG_NODE, "a shared prefix is not domain separation");
+    }
+
+    /// The concrete collision the tags close: a leaf preimage is `57 + scriptPubKey` bytes, so a
+    /// 7-byte scriptPubKey produces a 64-byte preimage — exactly what an interior node hashes. With
+    /// no tag those two constructions are the same function over the same input length, and the only
+    /// remaining barrier is that a leaf preimage opens with a txid. A txid is the hash of a
+    /// transaction an attacker can construct and grind, so that is a cost, not a separation.
+    #[test]
+    fn a_64_byte_leaf_preimage_does_not_collide_with_an_interior_node() {
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&[0xAAu8; 32]); // "txid" — stands in for a ground one
+        preimage.extend_from_slice(&[0xBBu8; 32]); // the rest of the leaf fields
+        assert_eq!(preimage.len(), 64, "this test is only meaningful at the colliding length");
+
+        let as_leaf = hash_leaf(&preimage);
+        let as_node = parent(&[0xAAu8; 32], &[0xBBu8; 32]);
+        assert_ne!(
+            as_leaf, as_node,
+            "a 64-byte leaf preimage hashes identically to the interior node over the same bytes"
+        );
+
+        // And without the tags it WOULD collide — the property is the tags, not the field layout.
+        let raw_leaf: Hash = {
+            let mut h = Sha256::new();
+            h.update(&preimage);
+            h.finalize().into()
+        };
+        let raw_node: Hash = {
+            let mut h = Sha256::new();
+            h.update([0xAAu8; 32]);
+            h.update([0xBBu8; 32]);
+            h.finalize().into()
+        };
+        assert_eq!(raw_leaf, raw_node, "the untagged collision this defends against is real");
     }
 }
