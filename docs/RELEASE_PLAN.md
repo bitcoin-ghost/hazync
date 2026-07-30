@@ -131,6 +131,30 @@ These are the items where being wrong costs money already spent.
 
 ---
 
+## Re-baseline: what must move together
+
+The canonical guest is `85dc0b56…` (accumulator domain separation) and is **ahead of the live board**,
+which still serves `3f52baff` proofs. These artifacts are built and tested but deliberately NOT
+deployed, because deploying any of them early makes the public surface reject the public board:
+
+| artifact | state | deploy when |
+|---|---|---|
+| `hazync-verify.wasm` on bitcoinghost.org | built, parity-green, **held** | the board re-baselines |
+| `hazync-verify` / `-aarch64` release binaries | rebuilt, **unreleased** | same |
+| coordinator `hazync-host` | still `3f52baff` | same |
+| the board itself | `3f52baff`, 39,299 proven | genesis restart on new hardware |
+
+They are one atomic step, not four. A verifier pinned to `85dc0b56` refuses a `3f52baff` proof — that
+is the cross-id isolation working, and it is exactly what a visitor would experience as "the site is
+broken" if the verifier moves before the board does.
+
+Verified held: the live `.wasm` still hashes to the old build, and `/hazync/api/meta` still reports
+`3f52baff`.
+
+Also expiring at the re-baseline: the **220,000 bundles** on the coordinator (the witness format is
+unchanged but the leaf values are not — see #44), and the 38,507 receipts. Neither needs migrating;
+both regenerate.
+
 ## Sequencing
 
 ```
