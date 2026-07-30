@@ -203,23 +203,125 @@ impl Stump {
 #[derive(Clone, Debug, Default)]
 pub struct Forest {
     pub leaves: Vec<Hash>,
+
+    /// Cached internal nodes. `internals[k]` is tree level `k + 1`; `internals[k][i]` is the parent of
+    /// `level(k)[2i]` and `level(k)[2i + 1]`. Length invariant: `internals[k].len() == level(k).len() / 2`.
+    ///
+    /// WHY THIS EXISTS. Storing only leaves makes `prove` and `roots` look like algorithm problems and
+    /// they are not: with no internal nodes cached, producing one sibling at level `k` means hashing the
+    /// `2^k` leaves under it, and summing over a proof gives `2^0 + 2^1 + ... + 2^(h-1) = 2^h - 1` — the
+    /// whole subtree. That is the *information-theoretic minimum* for leaves-only storage, so the old
+    /// walk was already optimal for the structure it had. The structure was the problem. At 1.6M leaves
+    /// it meant ~810,000 hashes to collect ~20 siblings, twice per input, plus a full rebuild for every
+    /// `roots()` call — of which the bridge makes two per block.
+    ///
+    /// This costs one extra hash per leaf ever added (~2n hashes total, amortised O(1) per add) and
+    /// n more hashes of memory, and makes `prove` O(log n) and `roots` O(popcount).
+    ///
+    /// The flat pairing is safe across the forest's perfect subtrees because a subtree of height `h`
+    /// always begins at an offset that is a multiple of `2^h`. For any `k <= h` the pairs at level `k`
+    /// therefore never straddle a subtree boundary, so a single flat level array serves every tree.
+    internals: Vec<Vec<Hash>>,
 }
 
 impl Forest {
     pub fn new() -> Self {
-        Forest { leaves: Vec::new() }
+        Forest { leaves: Vec::new(), internals: Vec::new() }
+    }
+
+    /// Rebuild a forest from a bare leaf vector — the bridge's checkpoint-resume path.
+    ///
+    /// `internals` is private specifically so this cannot be bypassed: the old code resumed with the
+    /// struct literal `Forest { leaves: st.leaves }`, which under the cached representation would
+    /// produce a forest whose cache is empty while its leaves are not. Every proof and every root it
+    /// then served would be wrong. Making the field private turns that into a compile error rather
+    /// than a silent one, and this is the supported way through.
+    ///
+    /// Builds level by level rather than replaying `add` per leaf — same result, one pass.
+    pub fn from_leaves(leaves: Vec<Hash>) -> Self {
+        let mut internals: Vec<Vec<Hash>> = Vec::new();
+        {
+            let mut below: &[Hash] = &leaves;
+            while below.len() > 1 {
+                let up: Vec<Hash> =
+                    below.chunks_exact(2).map(|c| parent(&c[0], &c[1])).collect();
+                if up.is_empty() {
+                    break;
+                }
+                internals.push(up);
+                below = internals.last().unwrap();
+            }
+        }
+        Forest { leaves, internals }
+    }
+
+    /// Tree level `k`: level 0 is the leaves, level `k > 0` is `internals[k - 1]`.
+    fn level(&self, k: usize) -> &[Hash] {
+        if k == 0 { &self.leaves } else { &self.internals[k - 1] }
+    }
+
+    fn level_len(&self, k: usize) -> usize {
+        if k == 0 { self.leaves.len() } else { self.internals.get(k - 1).map_or(0, |v| v.len()) }
     }
 
     pub fn add(&mut self, leaf: Hash) {
         self.leaves.push(leaf);
+        // Completing a pair at level k creates exactly one parent, which may in turn complete a pair
+        // one level up. Amortised O(1): a leaf whose index has t trailing ones carries t levels.
+        let mut k = 0;
+        while self.level_len(k) % 2 == 0 && self.level_len(k) > 0 {
+            let n = self.level_len(k);
+            let p = parent(&self.level(k)[n - 2], &self.level(k)[n - 1]);
+            if self.internals.len() <= k {
+                self.internals.push(Vec::new());
+            }
+            self.internals[k].push(p);
+            k += 1;
+        }
     }
 
     /// Swap-and-shrink delete (ground-truth semantics): move the last leaf into slot `i`, drop the
     /// last. The [`Stump::delete`] above must reproduce the resulting roots from proofs alone.
     pub fn delete(&mut self, i: usize) {
         let last = self.leaves.len() - 1;
-        self.leaves.swap(i, last);
-        self.leaves.pop();
+        let moved = self.leaves.pop().expect("delete from empty forest");
+
+        // Losing a leaf can orphan at most one parent per level, and the shrink cascades upward. Done
+        // bottom-up so each level truncates against the already-corrected level below it — this is
+        // also what re-shapes the forest when the tree decomposition changes (n=4, one height-2 tree,
+        // becomes n=3, a height-1 tree plus a height-0 tree).
+        for k in 0..self.internals.len() {
+            let want = self.level_len(k) / 2;
+            if self.internals[k].len() > want {
+                self.internals[k].truncate(want);
+            }
+        }
+        while self.internals.last().is_some_and(|v| v.is_empty()) {
+            self.internals.pop();
+        }
+
+        if i != last {
+            self.leaves[i] = moved;
+            self.repair(i);
+        }
+    }
+
+    /// Recompute the cached ancestors of level-0 index `i`. O(log n).
+    fn repair(&mut self, i: usize) {
+        let mut idx = i;
+        for k in 0..self.internals.len() {
+            let pair = idx & !1;
+            if pair + 1 >= self.level_len(k) {
+                break;                       // no completed pair here, so no parent to fix
+            }
+            let p = parent(&self.level(k)[pair], &self.level(k)[pair + 1]);
+            let pidx = idx / 2;
+            if pidx >= self.internals[k].len() {
+                break;
+            }
+            self.internals[k][pidx] = p;
+            idx = pidx;
+        }
     }
 
     /// The (offset, height) span of each perfect tree, largest first — one per set bit of the
@@ -238,15 +340,17 @@ impl Forest {
     }
 
     /// Merkle root of a perfect subtree covering `leaves[offset .. offset + 2^height]`.
+    ///
+    /// A cache read: the subtree's root is the level-`height` node at index `offset >> height`, which
+    /// exists because the tree is perfect and `offset` is a multiple of `2^height`.
     fn subtree_root(&self, offset: usize, height: usize) -> Hash {
-        let mut level: Vec<Hash> = self.leaves[offset..offset + (1 << height)].to_vec();
-        while level.len() > 1 {
-            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
-        }
-        level[0]
+        self.level(height)[offset >> height]
     }
 
     /// Roots as a height-indexed vector — must equal the corresponding [`Stump::roots`].
+    ///
+    /// O(popcount(n)) — one cache read per set bit. Was O(n): a full rebuild of every subtree, and the
+    /// bridge calls this twice per block (`root_prev`, `root_next`).
     pub fn roots(&self) -> Vec<Option<Hash>> {
         let mut roots = vec![None; (self.leaves.len().max(1)).next_power_of_two().trailing_zeros() as usize + 1];
         for (offset, height) in self.trees() {
@@ -258,7 +362,7 @@ impl Forest {
         roots
     }
 
-    /// Inclusion proof for the leaf at global index `index`.
+    /// Inclusion proof for the leaf at global index `index`. O(log n).
     pub fn prove(&self, index: usize) -> Proof {
         // Find the containing tree.
         let (offset, height) = self
@@ -268,15 +372,12 @@ impl Forest {
             .expect("index out of range");
         let local = index - offset;
 
-        // Walk up the subtree collecting siblings.
-        let mut level: Vec<Hash> = self.leaves[offset..offset + (1 << height)].to_vec();
-        let mut pos = local;
+        // Walk up reading cached siblings. The level-`k` node above global leaf `index` is at index
+        // `index >> k`, so the sibling is `(index >> k) ^ 1` — and within a perfect subtree whose
+        // offset is a multiple of its size, that sibling is guaranteed to exist for every k < height.
         let mut siblings = Vec::with_capacity(height);
-        while level.len() > 1 {
-            let sib = if pos & 1 == 0 { level[pos + 1] } else { level[pos - 1] };
-            siblings.push(sib);
-            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
-            pos >>= 1;
+        for k in 0..height {
+            siblings.push(self.level(k)[(index >> k) ^ 1]);
         }
         Proof { leaf: self.leaves[index], position: local as u64, siblings }
     }
@@ -491,6 +592,213 @@ mod tests {
             // spot-check a random leaf
             let idx = (splitmix(&mut seed) as usize) % n;
             assert!(stump.verify(&forest.prove(idx)), "n={n} idx={idx}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cached_internals_equivalence {
+    //! The cached-internals `Forest` must be indistinguishable from the leaves-only one it replaced.
+    //!
+    //! `Stump::verify` recomputes the root from a proof and compares, so a wrong proof here fails
+    //! CLOSED — a block would refuse to prove rather than a bad proof being accepted. That bounds the
+    //! blast radius but does not make it cheap: a divergence at scale stalls the bridge. So the old
+    //! implementation is kept here verbatim as a reference oracle and diffed against, rather than
+    //! trusting that the rewrite "looks right".
+    use super::*;
+
+    /// The pre-cache implementations, verbatim. Reference only.
+    fn naive_subtree_root(leaves: &[Hash], offset: usize, height: usize) -> Hash {
+        let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
+        while level.len() > 1 {
+            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
+        }
+        level[0]
+    }
+
+    fn naive_trees(n: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for h in (0..usize::BITS as usize).rev() {
+            if (n >> h) & 1 == 1 {
+                out.push((offset, h));
+                offset += 1 << h;
+            }
+        }
+        out
+    }
+
+    fn naive_roots(leaves: &[Hash]) -> Vec<Option<Hash>> {
+        let mut roots =
+            vec![None; (leaves.len().max(1)).next_power_of_two().trailing_zeros() as usize + 1];
+        for (offset, height) in naive_trees(leaves.len()) {
+            if height >= roots.len() {
+                roots.resize(height + 1, None);
+            }
+            roots[height] = Some(naive_subtree_root(leaves, offset, height));
+        }
+        roots
+    }
+
+    fn naive_prove(leaves: &[Hash], index: usize) -> Proof {
+        let (offset, height) = naive_trees(leaves.len())
+            .into_iter()
+            .find(|&(off, h)| index >= off && index < off + (1 << h))
+            .expect("index out of range");
+        let local = index - offset;
+        let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
+        let mut pos = local;
+        let mut siblings = Vec::with_capacity(height);
+        while level.len() > 1 {
+            let sib = if pos & 1 == 0 { level[pos + 1] } else { level[pos - 1] };
+            siblings.push(sib);
+            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
+            pos >>= 1;
+        }
+        Proof { leaf: leaves[index], position: local as u64, siblings }
+    }
+
+    fn lf(i: u64) -> Hash {
+        hash_leaf(&i.to_le_bytes())
+    }
+
+    fn mix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// Every leaf count from 1..=512: roots agree, and EVERY index proves identically.
+    /// Exhaustive over sizes, because the tree decomposition changes shape at each power of two and a
+    /// bug that only appears at one boundary is exactly what a sampled test would miss.
+    #[test]
+    fn exhaustive_sizes_add_only() {
+        let mut f = Forest::new();
+        for n in 1..=512u64 {
+            f.add(lf(n));
+            assert_eq!(f.roots(), naive_roots(&f.leaves), "roots differ at n={n}");
+            for i in 0..f.leaves.len() {
+                assert_eq!(f.prove(i), naive_prove(&f.leaves, i), "proof differs at n={n} i={i}");
+            }
+        }
+    }
+
+    /// Interleaved adds and deletes — the path that actually runs in the bridge, where a delete
+    /// follows every input and re-shapes the forest under the next proof.
+    #[test]
+    fn random_add_delete_walk_matches_reference() {
+        let mut st = 0x5EED_1234_u64;
+        let mut f = Forest::new();
+        let mut added = 0u64;
+        for step in 0..4000 {
+            let n = f.leaves.len();
+            if n == 0 || mix(&mut st) % 3 != 0 {
+                added += 1;
+                f.add(lf(added));
+            } else {
+                f.delete((mix(&mut st) as usize) % n);
+            }
+            assert_eq!(f.roots(), naive_roots(&f.leaves), "roots differ at step {step}");
+            if !f.leaves.is_empty() {
+                // proving every index every step is O(n^2); probe the ends and a random interior one,
+                // and prove everything on the small sizes where exhaustive is affordable.
+                let n = f.leaves.len();
+                let mut probes = vec![0, n - 1, (mix(&mut st) as usize) % n];
+                if n <= 40 {
+                    probes = (0..n).collect();
+                }
+                for i in probes {
+                    assert_eq!(f.prove(i), naive_prove(&f.leaves, i), "proof differs step {step} i={i}");
+                }
+            }
+        }
+    }
+
+    /// The cache must never disagree with a rebuild-from-leaves, and the invariant
+    /// `internals[k].len() == level(k).len() / 2` must hold after every operation.
+    #[test]
+    fn internal_invariant_holds_through_deletes() {
+        let mut st = 0xC0FFEE_u64;
+        let mut f = Forest::new();
+        for i in 0..1000u64 {
+            f.add(lf(i));
+        }
+        for _ in 0..900 {
+            let n = f.leaves.len();
+            f.delete((mix(&mut st) as usize) % n);
+            for k in 0..f.internals.len() {
+                let below = if k == 0 { f.leaves.len() } else { f.internals[k - 1].len() };
+                assert_eq!(f.internals[k].len(), below / 2, "invariant broken at level {}", k + 1);
+            }
+            assert_eq!(f.roots(), naive_roots(&f.leaves));
+        }
+    }
+
+    /// A proof from the cached forest must still VERIFY against a Stump driven in lockstep — the
+    /// property the bridge actually depends on, as opposed to merely matching the old code.
+    #[test]
+    fn proofs_verify_against_lockstep_stump() {
+        let mut st = 0xABCD_EF01_u64;
+        let mut f = Forest::new();
+        let mut s = Stump::new();
+        let mut added = 0u64;
+        for _ in 0..600 {
+            added += 1;
+            let l = lf(added);
+            f.add(l);
+            s.add(l);
+        }
+        for _ in 0..300 {
+            let n = f.leaves.len();
+            let i = (mix(&mut st) as usize) % n;
+            let last = n - 1;
+            let pi = f.prove(i);
+            let pl = f.prove(last);
+            assert!(s.verify(&pi), "stump rejected a proof the cached forest produced");
+            assert!(s.verify(&pl), "stump rejected the rightmost proof");
+            assert!(s.delete(i as u64, &pi, &pl), "stump refused a delete built from cached-forest proofs");
+            f.delete(i);
+            // Trailing `None`s are a representation artifact, not state: the two vectors are sized
+            // by different rules (Stump grows on demand, Forest sizes from the leaf count), so one
+            // can carry padding the other does not. `normalize_roots` exists in the rangestate crate
+            // for exactly this. Compare the meaningful prefix.
+            let trim = |mut v: Vec<Option<Hash>>| {
+                while v.last() == Some(&None) {
+                    v.pop();
+                }
+                v
+            };
+            assert_eq!(
+                trim(s.roots.clone()),
+                trim(f.roots()),
+                "stump and forest diverged after delete"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod from_leaves_tests {
+    use super::*;
+
+    #[test]
+    fn from_leaves_matches_incremental_adds_at_every_size() {
+        // The checkpoint-resume path must produce a forest indistinguishable from one grown by adds,
+        // or the bridge silently serves wrong proofs for everything after a restart.
+        for n in 0..=600u64 {
+            let leaves: Vec<Hash> = (0..n).map(|i| hash_leaf(&i.to_le_bytes())).collect();
+            let mut grown = Forest::new();
+            for l in &leaves {
+                grown.add(*l);
+            }
+            let loaded = Forest::from_leaves(leaves);
+            assert_eq!(loaded.internals, grown.internals, "cache differs at n={n}");
+            assert_eq!(loaded.roots(), grown.roots(), "roots differ at n={n}");
+            for i in 0..(n as usize) {
+                assert_eq!(loaded.prove(i), grown.prove(i), "proof differs at n={n} i={i}");
+            }
         }
     }
 }

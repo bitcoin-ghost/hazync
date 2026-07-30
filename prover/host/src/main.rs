@@ -1992,7 +1992,7 @@ fn cmd_bridge() {
         if let Some(st) = bridge_load_state(&out_dir) {
             println!("bridge: resuming from checkpoint @ height {} ({} utxos, {} leaves)",
                 st.height, st.utxo.len(), st.leaves.len());
-            (Forest { leaves: st.leaves }, st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
+            (Forest::from_leaves(st.leaves), st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
         } else {
             println!("bridge: no checkpoint — starting from genesis");
             (Forest::new(), Utxo::new(), vec![GENESIS_TIME], vec![GENESIS_TIME],
