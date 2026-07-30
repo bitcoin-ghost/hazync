@@ -78,7 +78,7 @@ const rows = pairs => '<table>' +
   '</table>';
 
 let verifier = null;
-const ready = loadVerifier(fetch('./hazync_verify_wasm.wasm'))
+const ready = loadVerifier(fetch('./hazync-verify.wasm'))
   .then(v => { verifier = v; document.getElementById('mid').textContent = v.methodId(); })
   .catch(e => { out.innerHTML =
     `<div class="card bad"><p class="verdict">Could not load the verifier</p><p>${esc(e.message)}</p>

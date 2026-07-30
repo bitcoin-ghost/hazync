@@ -54,7 +54,7 @@ CLI exit 2  <->  status "not_anchored"
 ```js
 import { loadVerifier } from './hazync-verify.js';
 
-const v = await loadVerifier(fetch('./hazync_verify_wasm.wasm'));
+const v = await loadVerifier(fetch('./hazync-verify.wasm'));
 const result = v.verify(new Uint8Array(await file.arrayBuffer()));
 
 result.status  // "verified" | "invalid" | "not_anchored"
@@ -74,7 +74,7 @@ blocks WebAssembly instantiation.
 
 ```sh
 ./build.sh
-cp target/wasm32-unknown-unknown/release/hazync_verify_wasm.wasm .
+cp target/wasm32-unknown-unknown/release/hazync_verify_wasm.wasm hazync-verify.wasm
 python3 -m http.server 8000     # then open http://localhost:8000/
 ```
 

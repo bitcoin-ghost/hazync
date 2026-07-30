@@ -10,7 +10,7 @@
 //
 // Usage (browser):
 //     import { loadVerifier } from './hazync-verify.js';
-//     const v = await loadVerifier(fetch('./hazync_verify_wasm.wasm'));
+//     const v = await loadVerifier(fetch('./hazync-verify.wasm'));
 //     const result = v.verify(new Uint8Array(await file.arrayBuffer()));
 //
 // Usage (node):
