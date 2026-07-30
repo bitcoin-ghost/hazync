@@ -756,8 +756,33 @@ fn check_full() {
     b.write(&1u32).unwrap();
     b.write(&METHOD_ID).unwrap();
     let t = Instant::now();
-    let s = default_executor().execute(b.build().unwrap(), METHOD_ELF)
-        .expect("CHECK-FULL FAILED: guest asserted a consensus flag false (see message above)");
+    // Do NOT collapse every executor error into "the guest rejected the block". An environment failure
+    // and a consensus rejection need opposite responses, and reporting the first as the second sends you
+    // hunting a consensus bug that does not exist: a missing r0vm binary reported itself as "guest
+    // asserted a consensus flag false", which cost two rounds of diagnosis. IO errors name a file or a
+    // process; a guest rejection never does.
+    let s = match default_executor().execute(b.build().unwrap(), METHOD_ELF) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("No such file or directory")
+                || msg.contains("os error")
+                || msg.contains("Permission denied")
+                || msg.contains("server version")
+            {
+                eprintln!("CHECK-FULL could not RUN. This is an ENVIRONMENT failure, not a consensus");
+                eprintln!("rejection -- the block was never validated.");
+                eprintln!("  underlying: {msg}");
+                eprintln!();
+                eprintln!("  Most likely the external r0vm server is missing: default_executor() spawns");
+                eprintln!("  it unless the binary was built with an in-process prover. Run inside the");
+                eprintln!("  build container, or use a binary with the prover linked in.");
+                std::process::exit(2);
+            }
+            panic!("CHECK-FULL FAILED: the guest REJECTED the block -- a consensus flag came back false \
+                    (see the guest message above).\n  underlying: {msg}");
+        }
+    };
     let tip: ChainState = s.journal.decode().unwrap();
     println!(">>> BLOCK {} VALID (execute {:.0}s, {} cycles) — all consensus flags true.",
         w.height, t.elapsed().as_secs_f64(), s.cycles());
