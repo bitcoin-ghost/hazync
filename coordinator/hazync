@@ -17,9 +17,9 @@ arbitrary far-future block (past the served window) is not something a fresh con
 can prove yet.
 
 Config (env):
-  COORD_URL   coordinator base URL   (default http://localhost:8899;
-              the public party is https://bitcoinghost.org/hazync)
-  HAZYNC_HOST path to the prover `host` binary (required for `prove`/`run`)
+  COORD_URL   coordinator base URL   (default https://bitcoinghost.org/hazync — the public party)
+  HAZYNC_HOST path to the prover `host` binary. Optional: if unset, the binary is looked for beside
+              this script, in ~/.hazync/bin, in the current directory, then on PATH (CUDA preferred).
   BUNDLE_DIR  where fetched archive bundles live (default ~/.hazync/bundles)
   WITNESS_DIR legacy per-block witnesses, replay fallback (default ~/.hazync/witnesses)
 Identity + receipts live under ~/.hazync/.
@@ -32,8 +32,51 @@ HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
 HANDLE  = HOME / "handle"
 RCPTDIR = HOME / "receipts"
-COORD   = os.environ.get("COORD_URL", "http://localhost:8899").rstrip("/")
-HOSTBIN = os.environ.get("HAZYNC_HOST", "")
+
+# Default to the PUBLIC party, not localhost. Almost nobody running this has a coordinator of their
+# own — they downloaded a release and want to contribute — and localhost sends them to a connection
+# error that reads like the project is broken. `run-workers.sh` already defaulted this way; the two
+# disagreeing meant the answer depended on which entry point you happened to use.
+DEFAULT_COORD = "https://bitcoinghost.org/hazync"
+COORD   = os.environ.get("COORD_URL", DEFAULT_COORD).rstrip("/")
+
+
+def _find_host():
+    """Locate the prover binary without making the contributor state a path.
+
+    Requiring HAZYNC_HOST means the first thing a new contributor meets is an error about an
+    environment variable they have never heard of, immediately after a download that already put the
+    binary on their disk. Explicit setting still wins; this is only the fallback.
+
+    CUDA is preferred when both are present: someone who downloaded the CUDA build has a GPU and
+    wants it used. If they do not, `selftest` catches it before any work is claimed.
+    """
+    env = os.environ.get("HAZYNC_HOST", "")
+    if env:
+        return env                                  # explicit always wins, even if wrong — selftest reports it
+
+    names = ["hazync-host-x86_64-linux-gnu-cuda", "hazync-host-cuda",
+             "hazync-host-x86_64-linux-gnu", "hazync-host", "host"]
+    here = pathlib.Path(__file__).resolve().parent
+    for d in (here, HOME / "bin", HOME, pathlib.Path.cwd()):
+        for n in names:
+            p = d / n
+            if p.is_file() and os.access(p, os.X_OK):
+                return str(p)
+    # PATH is searched only for hazync-prefixed names. A bare `host` on PATH is BIND's DNS lookup
+    # utility on essentially every Linux box — picking it up reports "prover binary present:
+    # /usr/bin/host" and then fails on `method-id` with something that reads like a corrupt download.
+    # In a hazync-owned directory the name is unambiguous; on PATH it is not.
+    for n in names:
+        if not n.startswith("hazync-"):
+            continue
+        p = shutil.which(n)
+        if p:
+            return p
+    return ""
+
+
+HOSTBIN = _find_host()
 WITNESS = os.environ.get("WITNESS_DIR", str(HOME / "witnesses"))
 BUNDLES = os.environ.get("BUNDLE_DIR", str(HOME / "bundles"))   # archive-node bundles fetched from the coordinator
 
@@ -401,9 +444,11 @@ def cmd_selftest(args):
     print("hazync selftest — checking your setup before you claim real work\n")
     ok = True
     if not HOSTBIN or not os.path.exists(HOSTBIN):
-        sys.exit("✗ HAZYNC_HOST is not set to a prover binary.\n"
-                 "  Download it from https://github.com/bitcoin-ghost/hazync/releases/latest and\n"
-                 "  export HAZYNC_HOST=/path/to/host")
+        sys.exit("✗ no prover binary found.\n"
+                 "  Looked beside this script, in ~/.hazync/bin, in the current directory, and on PATH.\n"
+                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  (hazync-host-x86_64-linux-gnu-cuda for an NVIDIA GPU, or ...-linux-gnu for CPU),\n"
+                 "  put it next to this script and `chmod +x` it — or set HAZYNC_HOST=/path/to/host.")
     print(f"✓ prover binary present: {HOSTBIN}")
     try:
         r = subprocess.run([HOSTBIN, "method-id"], capture_output=True, text=True, timeout=30)
