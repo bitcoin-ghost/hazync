@@ -25,3 +25,5 @@ verifier/target/
 # rescued box identities / key material — NEVER commit (see also key.hex above)
 secrets/
 verifier-ffi/target/
+verifier-wasm/target/
+verifier-wasm/*.wasm

@@ -1,0 +1,145 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verify a Hazync proof — in your browser</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3;
+          --dim:#8b949e; --ok:#3fb950; --bad:#f85149; --warn:#d29922; --acc:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:2rem 1rem 4rem; background:var(--bg); color:var(--fg);
+         font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 .3rem; letter-spacing:-.02em; }
+  .sub { color:var(--dim); margin:0 0 2rem; }
+  code, .mono { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.85em; }
+  #drop { border:2px dashed var(--line); border-radius:12px; padding:2.5rem 1.5rem; text-align:center;
+          cursor:pointer; transition:border-color .15s, background .15s; background:var(--panel); }
+  #drop:hover, #drop.over { border-color:var(--acc); background:#1c2531; }
+  #drop p { margin:.3rem 0; }
+  #drop .hint { color:var(--dim); font-size:.9rem; }
+  #out { margin-top:1.5rem; }
+  .card { background:var(--panel); border:1px solid var(--line); border-left-width:4px;
+          border-radius:8px; padding:1rem 1.2rem; }
+  .card.ok   { border-left-color:var(--ok); }
+  .card.bad  { border-left-color:var(--bad); }
+  .card.warn { border-left-color:var(--warn); }
+  .verdict { font-weight:600; font-size:1.1rem; margin:0 0 .5rem; }
+  .ok .verdict{color:var(--ok);} .bad .verdict{color:var(--bad);} .warn .verdict{color:var(--warn);}
+  table { border-collapse:collapse; width:100%; margin-top:.8rem; }
+  td { padding:.3rem .6rem .3rem 0; vertical-align:top; border-top:1px solid var(--line); }
+  td:first-child { color:var(--dim); white-space:nowrap; width:11rem; }
+  td:last-child { word-break:break-all; }
+  .note { border:1px solid var(--line); border-radius:8px; padding:1rem 1.2rem; margin-top:2rem;
+          color:var(--dim); font-size:.9rem; background:var(--panel); }
+  .note strong { color:var(--fg); }
+  ol { margin:.5rem 0 0; padding-left:1.2rem; }
+  li { margin:.25rem 0; }
+  a { color:var(--acc); }
+</style>
+
+<main>
+  <h1>Verify a Bitcoin chain proof</h1>
+  <p class="sub">In this tab, on this device. Nothing is uploaded.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Choose or drop a proof file">
+    <p><strong>Drop a proof here</strong></p>
+    <p class="hint">or click to choose a <code>.snark</code> / <code>.bin</code> file</p>
+  </div>
+  <input type="file" id="file" hidden>
+
+  <div id="out"></div>
+
+  <div class="note">
+    <strong>What just happened.</strong> The proof was checked by a 1&nbsp;MB WebAssembly build of the
+    same verifier that ships as <code>hazync-verify</code>, running locally. There is no API call —
+    if a server told you a proof was valid, you would be trusting the server, which is the thing this
+    project exists to avoid.
+    <ol>
+      <li>the SNARK verifies against the canonical guest image id</li>
+      <li>the journal's <code>self_id</code> equals that id — recursion is pinned to this guest</li>
+      <li>the domain tag is <code>KIND_RANGE</code></li>
+      <li>the range starts at block&nbsp;1</li>
+      <li>the in-boundary <em>is</em> genesis — hash, empty UTXO set, nBits, epoch start, times</li>
+    </ol>
+    <p style="margin:.8rem 0 0">Guest image id <span class="mono" id="mid">…</span></p>
+  </div>
+</main>
+
+<script type="module">
+import { loadVerifier } from './hazync-verify.js';
+
+const out = document.getElementById('out');
+const drop = document.getElementById('drop');
+const file = document.getElementById('file');
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const rows = pairs => '<table>' +
+  pairs.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('') +
+  '</table>';
+
+let verifier = null;
+const ready = loadVerifier(fetch('./hazync_verify_wasm.wasm'))
+  .then(v => { verifier = v; document.getElementById('mid').textContent = v.methodId(); })
+  .catch(e => { out.innerHTML =
+    `<div class="card bad"><p class="verdict">Could not load the verifier</p><p>${esc(e.message)}</p>
+     <p class="hint">This page must be served over http(s) — opening the file directly from disk
+     blocks WebAssembly loading.</p></div>`; });
+
+async function run(f) {
+  await ready;
+  if (!verifier) return;
+  out.innerHTML = '<div class="card"><p class="verdict">Verifying…</p></div>';
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  // Yield a frame first so the "Verifying…" paint lands before we block the main thread.
+  await new Promise(r => setTimeout(r, 0));
+  const t0 = performance.now();
+  let r;
+  try {
+    r = verifier.verify(bytes);
+  } catch (e) {
+    out.innerHTML = `<div class="card bad"><p class="verdict">Verifier error</p><p>${esc(e.message)}</p></div>`;
+    return;
+  }
+  const ms = Math.round(performance.now() - t0);
+
+  if (r.status === 'verified') {
+    out.innerHTML = `<div class="card ok">
+      <p class="verdict">✓ Valid, and anchored at genesis</p>
+      <p>Every block from 1 to ${esc(r.height)} is valid under Bitcoin Core's consensus rules.
+         Checked in ${ms} ms from ${esc(r.proof_bytes)} bytes.</p>
+      ${rows([
+        ['height', r.height],
+        ['tip hash', r.tip_hash],
+        ['cumulative work', r.cumulative_work],
+        ['UTXO leaves', r.utxo_leaves],
+        ['next bits', '0x' + Number(r.next_bits).toString(16)],
+        ['proof size', r.proof_bytes + ' bytes'],
+        ['blocks not validated by you', r.blocks_not_validated],
+      ])}</div>`;
+  } else if (r.status === 'not_anchored') {
+    out.innerHTML = `<div class="card warn">
+      <p class="verdict">Valid proof — but a mid-chain segment</p>
+      <p>The SNARK is cryptographically sound and was produced by the canonical guest. It proves
+         blocks ${esc(r.lo)}–${esc(r.hi)}, which says nothing about the blocks below it, so it is not
+         a proof of <em>the chain</em>. Segments are what the proof party produces; they get folded
+         together into one genesis-anchored proof. Checked in ${ms} ms.</p>
+      ${rows([['range', r.lo + '..' + r.hi], ['detail', r.detail]])}</div>`;
+  } else {
+    out.innerHTML = `<div class="card bad">
+      <p class="verdict">✗ Verification failed</p>
+      <p>Forged, tampered with, corrupt, or produced by a different guest build. Checked in ${ms} ms.</p>
+      ${rows([['error', r.error]])}</div>`;
+  }
+}
+
+drop.onclick = () => file.click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } };
+file.onchange = () => file.files[0] && run(file.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer.files[0]) run(e.dataTransfer.files[0]);
+};
+</script>

@@ -13,6 +13,17 @@ license = "Apache-2.0"
 # `default-features = false` drops the prover entirely; this build can verify a proof and nothing else,
 # which is exactly the point (issues #19, #24).
 
+# The checks live in the library so the CLI, the C ABI and the WASM build share ONE implementation of
+# the anchoring rules. A second copy would fail OPEN — accepting a sound-but-unanchored proof — which
+# is precisely the failure this tool exists to prevent.
+[lib]
+name = "hazync_verify"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hazync-verify"
+path = "src/main.rs"
+
 [dependencies]
 hazync-rangestate = { path = "../rangestate" }
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }

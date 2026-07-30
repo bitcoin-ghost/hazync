@@ -91,6 +91,15 @@ jobs:
               verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_smoke
           /tmp/ffi_smoke prover/testdata/snark/fold_1000.snark 0   # genesis-anchored -> HAZYNC_OK
           /tmp/ffi_smoke prover/testdata/snark/neg500.snark   -5   # valid but NOT anchored
+      - name: WASM verifier agrees with the CLI on every fixture (browsers are the copy nobody can audit)
+        # The browser build is the copy most people will run and the one least inspectable after the
+        # fact. It shares hazync_verify::verify with the CLI, so it cannot disagree "in principle" —
+        # but that is exactly what was true of the RangeState mirrors before they drifted (#32).
+        # Asserted against real proofs plus mutations that must be refused.
+        run: |
+          rustup target add wasm32-unknown-unknown
+          ./verifier-wasm/build.sh
+          ./verifier-wasm/test-parity.sh
       - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
         run: ./scripts/check-rangestate.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)

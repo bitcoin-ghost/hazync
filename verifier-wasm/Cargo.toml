@@ -1,0 +1,25 @@
+[package]
+name = "hazync-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "The Hazync verifier compiled to WebAssembly — verify a chain proof in a browser, locally"
+license = "Apache-2.0"
+
+# Like `verifier/`, deliberately NOT a member of the prover workspace and deliberately not depending on
+# `methods` — that crate builds the RISC0 guest, which is the bulk of the host binary. This needs the
+# guest's image ID, not the guest.
+#
+# It depends on the verifier LIBRARY so the anchoring rules exist once. See ../verifier/src/lib.rs.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hazync-verify = { path = "../verifier" }
+
+[profile.release]
+opt-level = "z"       # a browser downloads this — size is the point
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

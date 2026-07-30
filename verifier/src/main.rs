@@ -19,20 +19,11 @@
 //!
 //! (5) is the one that matters most. Without it a valid proof of some *arbitrary* mid-chain range would
 //! pass, and the whole claim collapses to "someone proved a thousand blocks somewhere".
+//!
+//! **Those checks now live in `lib.rs`**, so that this CLI, the C ABI and the WASM build share one
+//! implementation of them. This file is only argument handling and presentation.
 
-// The journal decodes POSITIONALLY, so a field reordered in a private copy of this struct does not
-// fail — it silently misreads a valid proof and reports confident nonsense. Importing the shared
-// definition removes one of the hand-maintained mirrors that could drift (#32).
-use hazync_rangestate::{
-    normalize_roots, work_u128, RangeState, GENESIS_BITS, GENESIS_HASH, GENESIS_TIME, GENESIS_WORK,
-    KIND_RANGE,
-};
-
-/// Canonical guest image id (v0.10.0). Embedded rather than imported from the `methods` crate, which
-/// would drag in the guest build. `scripts/check-versions.sh` fails the build if this drifts from
-/// `reproduce/METHOD_ID`, which is the source of truth.
-const METHOD_ID_HEX: &str = "3f52baff7e7d4adaa328b832d6f15fffb1b35968b6636760f9d50e045bbae67e";
-
+use hazync_verify::{verify, VerifyError, METHOD_ID_HEX};
 
 fn die(msg: &str) -> ! {
     eprintln!("VERIFICATION FAILED: {msg}");
@@ -62,17 +53,6 @@ fn not_anchored(lo: u32, hi: u32, detail: &str) -> ! {
     std::process::exit(2);
 }
 
-fn hex_to_bytes(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or_else(|_| die("bad hex constant")))
-        .collect()
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
@@ -93,105 +73,29 @@ fn main() {
     };
 
     let bytes = std::fs::read(&path).unwrap_or_else(|e| die(&format!("cannot read {path}: {e}")));
-    let receipt: risc0_zkvm::Receipt =
-        bincode::deserialize(&bytes).unwrap_or_else(|e| die(&format!("not a receipt: {e}")));
 
-    let image_id = risc0_zkvm::sha::Digest::try_from(hex_to_bytes(METHOD_ID_HEX).as_slice())
-        .unwrap_or_else(|_| die("bad embedded METHOD_ID"));
-
-    // 1. the proof itself
-    if let Err(e) = receipt.verify(image_id) {
-        die(&format!(
-            "the proof is not valid for guest {} — forged, tampered, corrupt, or produced by a \
-             different guest build.\n  underlying: {e}",
-            &METHOD_ID_HEX[..8]
-        ));
-    }
-
-    let rs: RangeState = receipt
-        .journal
-        .decode()
-        .unwrap_or_else(|e| die(&format!("journal is not a RangeState: {e}")));
-
-    // 2. recursion pinned to this guest (S1)
-    let claimed = hex(&rs.self_id.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>());
-    if claimed != METHOD_ID_HEX {
-        die(&format!("journal self_id {} != guest image id {}", &claimed[..16], &METHOD_ID_HEX[..16]));
-    }
-    // 3. domain tag (H8)
-    if rs.kind != KIND_RANGE {
-        die("receipt is not a RangeState (wrong domain tag)");
-    }
-    // 4 + 5. genesis anchoring — the assertion the whole artifact is built around
-    if rs.lo != 1 {
-        not_anchored(rs.lo, rs.hi, "Its range starts above block 1.");
-    }
-    let genesis_le: Vec<u8> = hex_to_bytes(GENESIS_HASH).into_iter().rev().collect();
-    if rs.in_tip_hash.as_slice() != genesis_le.as_slice() {
-        not_anchored(rs.lo, rs.hi, "Its in-boundary tip is not the genesis block hash.");
-    }
-    if rs.in_leaves != 0 {
-        die("in-boundary UTXO set is not empty — the range does not start from nothing");
-    }
-    if !normalize_roots(rs.in_roots.clone()).is_empty() {
-        die("in-boundary UTXO roots are not empty");
-    }
-    if rs.in_nbits != GENESIS_BITS {
-        die("in-boundary nBits != genesis");
-    }
-    if rs.in_epoch_start != GENESIS_TIME {
-        die("in-boundary epoch start != genesis time");
-    }
-    if rs.in_time != GENESIS_TIME {
-        die("in-boundary prev-time != genesis time");
-    }
-    if rs.in_recent != vec![GENESIS_TIME] {
-        die("in-boundary recent-times != [genesis time]");
-    }
-
-    let total = GENESIS_WORK + work_u128(&rs.range_work);
+    let v = match verify(&bytes) {
+        Ok(v) => v,
+        Err(VerifyError::Invalid(m)) => die(&m),
+        Err(VerifyError::NotAnchored { lo, hi, detail }) => not_anchored(lo, hi, &detail),
+    };
 
     if json {
         // The state a node can ADOPT. Everything here is committed by the proof, so a node that
         // verifies the proof can start at height+1 without downloading or validating anything below
-        // it — it needs the UTXO commitment to check spends, and the difficulty/median-time context
-        // to check the next header. Block hashes are emitted in DISPLAY order (byte-reversed), which
-        // is what `bitcoin-cli getblockhash` returns, so the two can be compared directly.
-        let disp: String = hex(&rs.out_tip_hash.iter().rev().copied().collect::<Vec<u8>>());
-        let roots: Vec<String> = rs
-            .out_roots
-            .iter()
-            .filter_map(|r| r.as_ref().map(|h| hex(h)))
-            .collect();
-        println!("{{");
-        println!("  \"verified\": true,");
-        println!("  \"guest_image_id\": \"{METHOD_ID_HEX}\",");
-        println!("  \"genesis_anchored\": true,");
-        println!("  \"height\": {},", rs.hi);
-        println!("  \"tip_hash\": \"{disp}\",");
-        println!("  \"cumulative_work\": {total},");
-        println!("  \"utxo_leaves\": {},", rs.out_leaves);
-        println!("  \"utxo_roots\": [{}],", roots.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(", "));
-        println!("  \"next_bits\": {},", rs.out_nbits);
-        println!("  \"epoch_start_time\": {},", rs.out_epoch_start);
-        println!("  \"recent_times\": [{}],", rs.out_recent.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
-        println!("  \"proof_bytes\": {},", bytes.len());
-        println!("  \"blocks_not_validated\": {}", rs.hi);
-        println!("}}");
+        // it. Block hashes are emitted in DISPLAY order (byte-reversed), which is what
+        // `bitcoin-cli getblockhash` returns, so the two can be compared directly.
+        println!("{}", v.to_json());
         return;
     }
 
     println!(
         ">>> SNARK RANGE PROOF [1..{}] VERIFIED — genesis-anchored, {} bytes.",
-        rs.hi,
-        bytes.len()
+        v.height, v.proof_bytes
     );
     println!(
         "  out_tip_hash {}  range_work {}  total_cum_work {}  UTXO leaves {}",
-        hex(&rs.out_tip_hash),
-        work_u128(&rs.range_work),
-        total,
-        rs.out_leaves
+        v.tip_hash_internal, v.range_work, v.cumulative_work, v.utxo_leaves
     );
-    println!("  guest image id {}", METHOD_ID_HEX);
+    println!("  guest image id {METHOD_ID_HEX}");
 }
