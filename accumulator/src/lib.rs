@@ -222,11 +222,49 @@ pub struct Forest {
     /// always begins at an offset that is a multiple of `2^h`. For any `k <= h` the pairs at level `k`
     /// therefore never straddle a subtree boundary, so a single flat level array serves every tree.
     internals: Vec<Vec<Hash>>,
+
+    /// leaf hash -> its positions, ascending. Replaces the bridge's `leaves.iter().position(...)`.
+    ///
+    /// This was measured as NOT worth having (GOALS.md §G2, "Ruled out"): an A/B on 100 real blocks
+    /// gave 291 vs 285 blocks/hr, because the scan was ~4% of a 12.4 s block. That measurement was
+    /// correct and the conclusion was correct *at the time*. Caching internal nodes then removed 94%
+    /// of the bridge's work, and a `perf` profile of the result put 71% of the remaining time in the
+    /// scan. The same optimisation went from worthless to dominant without changing — what changed was
+    /// everything around it.
+    ///
+    /// Positions are a `Vec` rather than a single index because duplicate leaves genuinely occur:
+    /// BIP30 lets a coinbase duplicate an earlier still-unspent one (block 91842 duplicates 91812).
+    /// `position()` returns the FIRST match, so [`Forest::find`] must return the smallest position,
+    /// and collapsing this to one index would silently pick the wrong coin on exactly those blocks.
+    index: std::collections::HashMap<Hash, Vec<usize>>,
 }
 
 impl Forest {
     pub fn new() -> Self {
-        Forest { leaves: Vec::new(), internals: Vec::new() }
+        Forest { leaves: Vec::new(), internals: Vec::new(), index: Default::default() }
+    }
+
+    /// Smallest position holding `leaf`, or `None`. Exactly `leaves.iter().position(|x| *x == leaf)`,
+    /// which is what the bridge called and what the duplicate-leaf (BIP30) case depends on.
+    pub fn find(&self, leaf: &Hash) -> Option<usize> {
+        self.index.get(leaf).and_then(|v| v.first().copied())
+    }
+
+    fn index_insert(&mut self, leaf: Hash, pos: usize) {
+        let v = self.index.entry(leaf).or_default();
+        let at = v.partition_point(|&p| p < pos);
+        v.insert(at, pos);
+    }
+
+    fn index_remove(&mut self, leaf: &Hash, pos: usize) {
+        if let Some(v) = self.index.get_mut(leaf) {
+            if let Ok(at) = v.binary_search(&pos) {
+                v.remove(at);
+            }
+            if v.is_empty() {
+                self.index.remove(leaf);
+            }
+        }
     }
 
     /// Rebuild a forest from a bare leaf vector — the bridge's checkpoint-resume path.
@@ -252,7 +290,12 @@ impl Forest {
                 below = internals.last().unwrap();
             }
         }
-        Forest { leaves, internals }
+        let mut index: std::collections::HashMap<Hash, Vec<usize>> =
+            std::collections::HashMap::with_capacity(leaves.len());
+        for (i, l) in leaves.iter().enumerate() {
+            index.entry(*l).or_default().push(i);   // ascending by construction
+        }
+        Forest { leaves, internals, index }
     }
 
     /// Tree level `k`: level 0 is the leaves, level `k > 0` is `internals[k - 1]`.
@@ -265,6 +308,8 @@ impl Forest {
     }
 
     pub fn add(&mut self, leaf: Hash) {
+        // appended at the end, so its position is larger than every existing one for this key
+        self.index.entry(leaf).or_default().push(self.leaves.len());
         self.leaves.push(leaf);
         // Completing a pair at level k creates exactly one parent, which may in turn complete a pair
         // one level up. Amortised O(1): a leaf whose index has t trailing ones carries t levels.
@@ -284,7 +329,15 @@ impl Forest {
     /// last. The [`Stump::delete`] above must reproduce the resulting roots from proofs alone.
     pub fn delete(&mut self, i: usize) {
         let last = self.leaves.len() - 1;
+        let gone = self.leaves[i];
         let moved = self.leaves.pop().expect("delete from empty forest");
+        // `i == last` means `gone == moved` and the single index entry has already been accounted
+        // for by this one removal — removing twice would drop another copy of a duplicated leaf.
+        self.index_remove(&gone, i);
+        if i != last {
+            self.index_remove(&moved, last);
+            self.index_insert(moved, i);
+        }
 
         // Losing a leaf can orphan at most one parent per level, and the shrink cascades upward. Done
         // bottom-up so each level truncates against the already-corrected level below it — this is
@@ -799,6 +852,110 @@ mod from_leaves_tests {
             for i in 0..(n as usize) {
                 assert_eq!(loaded.prove(i), grown.prove(i), "proof differs at n={n} i={i}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod position_index_tests {
+    //! `find` must be indistinguishable from the linear scan it replaces — INCLUDING when the same
+    //! leaf appears twice. BIP30 permits a coinbase to duplicate an earlier still-unspent one (block
+    //! 91842 duplicates 91812), so duplicates are not hypothetical, and `position()` returns the
+    //! FIRST match. An index that returned "some position holding this leaf" would pick the wrong
+    //! coin on exactly those blocks and nowhere else.
+    use super::*;
+
+    fn lf(i: u64) -> Hash {
+        hash_leaf(&i.to_le_bytes())
+    }
+
+    fn mix(s: &mut u64) -> u64 {
+        *s = s.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = *s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// The property, over a long add/delete walk: for EVERY leaf present, `find` == `position`.
+    #[test]
+    fn find_matches_linear_scan_through_a_random_walk() {
+        let mut st = 0xFEED_BEEFu64;
+        let mut f = Forest::new();
+        let mut added = 0u64;
+        for step in 0..3000 {
+            if f.leaves.is_empty() || mix(&mut st) % 3 != 0 {
+                added += 1;
+                // deliberately draw from a small pool so duplicates arise constantly
+                f.add(lf(added % 400));
+            } else {
+                let n = f.leaves.len();
+                f.delete((mix(&mut st) as usize) % n);
+            }
+            // every distinct leaf currently present
+            let mut seen: Vec<Hash> = f.leaves.clone();
+            seen.sort();
+            seen.dedup();
+            for l in &seen {
+                let want = f.leaves.iter().position(|x| x == l);
+                assert_eq!(f.find(l), want, "find != position at step {step}");
+            }
+            // and a leaf that is NOT present must report absent
+            assert_eq!(f.find(&lf(999_999)), None, "phantom hit at step {step}");
+        }
+    }
+
+    /// The BIP30 shape explicitly: two identical leaves, and the first one must win until removed.
+    #[test]
+    fn duplicate_leaves_resolve_to_the_first_position() {
+        let mut f = Forest::new();
+        let dup = lf(42);
+        f.add(lf(1));
+        f.add(dup); // position 1
+        f.add(lf(2));
+        f.add(dup); // position 3
+        assert_eq!(f.find(&dup), Some(1));
+        assert_eq!(f.find(&dup), f.leaves.iter().position(|x| *x == dup));
+
+        // remove the FIRST copy; the second must then be found, and must match the scan
+        f.delete(1);
+        assert_eq!(f.find(&dup), f.leaves.iter().position(|x| *x == dup));
+        assert!(f.find(&dup).is_some(), "second copy vanished with the first");
+
+        // remove the remaining copy; now absent
+        let p = f.find(&dup).unwrap();
+        f.delete(p);
+        assert_eq!(f.find(&dup), None);
+        assert_eq!(f.leaves.iter().position(|x| *x == dup), None);
+    }
+
+    /// Deleting the rightmost leaf is the `i == last` path, where `gone == moved` — removing the
+    /// index entry twice there would drop a *different* copy of a duplicated leaf.
+    #[test]
+    fn deleting_rightmost_duplicate_keeps_the_other_copy() {
+        let mut f = Forest::new();
+        let dup = lf(7);
+        f.add(dup);
+        f.add(lf(8));
+        f.add(dup); // rightmost, position 2
+        assert_eq!(f.find(&dup), Some(0));
+        f.delete(2); // i == last
+        assert_eq!(f.find(&dup), Some(0), "deleting the rightmost copy removed the wrong entry");
+        assert_eq!(f.find(&dup), f.leaves.iter().position(|x| *x == dup));
+    }
+
+    /// from_leaves must produce the same index as incremental adds, duplicates included.
+    #[test]
+    fn from_leaves_index_matches_incremental() {
+        let leaves: Vec<Hash> = (0..500u64).map(|i| lf(i % 60)).collect();
+        let mut grown = Forest::new();
+        for l in &leaves {
+            grown.add(*l);
+        }
+        let loaded = Forest::from_leaves(leaves.clone());
+        for l in &leaves {
+            assert_eq!(loaded.find(l), grown.find(l));
+            assert_eq!(loaded.find(l), leaves.iter().position(|x| x == l));
         }
     }
 }
