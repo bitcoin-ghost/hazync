@@ -8,6 +8,7 @@ hazync — Proof Party contributor CLI.
   hazync submit <id>        # sign the receipt with your key and submit it for verification
   hazync run [id]           # claim + prove + submit (id optional: takes the earliest free block)
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
+  hazync fold [n]           # fold n adjacent proven ranges into wider ones (default 1) — helps everyone
   hazync spine [n]          # advance the genesis-anchored spine by absorbing the next n chunks (default: all available)
 
 The party proves the chain forward from genesis, so you take a range near the current
@@ -24,7 +25,7 @@ Config (env):
   WITNESS_DIR legacy per-block witnesses, replay fallback (default ~/.hazync/witnesses)
 Identity + receipts live under ~/.hazync/.
 """
-import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil
+import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil, random
 import signal
 import concurrent.futures
 
@@ -530,6 +531,70 @@ def cmd_run(args):
               f"if you stop, it reopens by itself)")
     cmd_prove([rng]); cmd_submit([rng])
 
+def cmd_fold(args):
+    """Fold adjacent proven ranges into wider ones — a task in its own right, not a side effect (#37).
+
+    Folding used to happen only inside `hazync run`, over the blocks of one claim. That made it
+    hostage to claim width: at width 1 there is a single receipt, `_fold_and_save` has nothing to
+    combine, and the whole fast fold path (#27) sits idle while the board accumulates unfolded
+    per-block receipts. Decoupling them means claims stay width-1 and simple — which is what fixed the
+    reliability trouble — while folding still happens.
+
+    Unallocated, like proving. The coordinator suggests adjacent pairs whose fold does not exist yet;
+    a duplicate fold is wasteful, not incorrect, and folding is far cheaper than proving.
+    """
+    if not HOSTBIN:
+        sys.exit("no prover binary found — folding is a prove operation.\n"
+                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  or set HAZYNC_HOST=/path/to/host.")
+    want = int(args[0]) if args and args[0].isdigit() else 1
+    sk, pub, handle = identity()
+    work = RCPTDIR / ".fold-work"
+    shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True, exist_ok=True)
+    done = 0
+    try:
+        while done < want:
+            try:
+                pairs = json.loads(get("/api/foldable")).get("pairs", [])
+            except Exception as e:
+                sys.exit(f"could not ask the coordinator for foldable pairs: {e}")
+            if not pairs:
+                print("nothing to fold — every adjacent pair on the board is already folded.")
+                break
+            # Choose among the candidates rather than always taking the first, so concurrent workers
+            # spread out without anything being allocated to them.
+            p = random.choice(pairs)
+            lp, rp, res = p["left"], p["right"], p["result"]
+            lf, rf = work / f"l_{lp}.bin", work / f"r_{rp}.bin"
+            try:
+                lf.write_bytes(get(f"/api/proof/{lp}")); rf.write_bytes(get(f"/api/proof/{rp}"))
+            except Exception as e:
+                print(f"  could not fetch receipts for {lp} + {rp} ({e}) — skipping.")
+                break
+            out = work / f"fold_{res}.bin"
+            print(f"folding {lp} + {rp} -> {res} …")
+            r = subprocess.run([HOSTBIN, "fold-range", str(lf), str(rf), str(out)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not out.exists():
+                both = (r.stdout or "") + (r.stderr or "")
+                sys.exit(f"fold-range failed for {lp} + {rp}:\n{both[-400:]}")
+            receipt = out.read_bytes()
+            ans = post("/api/submit", {"range": res, "pubkey": pub, "handle": handle,
+                                       "sig": sk.sign(receipt).hex(),
+                                       "receipt": base64.b64encode(receipt).decode()})
+            if ans.get("ok"):
+                print(f"✓ {res}: folded and verified on the board as '{handle}'.")
+                done += 1
+            elif "already proven" in str(ans.get("error", "")):
+                print(f"  {res} was folded by someone else first — discarded, no harm done.")
+            else:
+                print(f"✗ {res} rejected: {ans.get('error')}")
+                break
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if done:
+        print(f"folded {done} pair(s).")
+
 def cmd_spine(args):
     """Advance the genesis-anchored spine: `spine [1..N] + [N+1..N+1] -> [1..N+1]`, repeatedly (#30).
 
@@ -627,7 +692,7 @@ def main():
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
     c, a = argv[0], argv[1:]
     fn = {"id": cmd_id, "pick": cmd_pick, "prove": cmd_prove, "selftest": cmd_selftest,
-          "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine}.get(c)
+          "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine, "fold": cmd_fold}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
     if c in ("claim", "prove", "submit") and not a:  # these require a range; don't traceback on a bare call

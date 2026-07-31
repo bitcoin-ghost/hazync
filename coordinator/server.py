@@ -214,6 +214,36 @@ def init_db():
         except Exception: pass
     c.commit(); c.close()
 
+def parse_any_range(rid):
+    """Validate a range id for SUBMISSION (not for claiming). Any `n` or `lo-hi` with lo <= hi < TIP.
+
+    Claims are restricted to an aligned grid so two claim ids can never partially overlap — that is
+    what parse_range enforces, and it is right for allocation. Submissions are a different question:
+    **folding produces arbitrary widths by construction** (`[100..199] + [200..299] -> [100..299]`),
+    so requiring grid alignment here rejects the output of `hazync fold` outright. It did: a folded
+    [1..2] came back "invalid range id" after the fold had already been done.
+
+    Accepting any range costs nothing, because the id is not what is trusted — verify_receipt pins
+    the real [lo..hi] out of the receipt and rejects a submission whose id disagrees with it. An
+    invented id buys a row that then fails verification.
+
+    Still strict about SHAPE: every part must parse as an int, so this remains safe to use as the
+    path sanitiser for /api/proof/<id>.
+    """
+    try:
+        parts = [int(x) for x in str(rid).split("-")]
+    except Exception:
+        return None
+    if len(parts) == 1:
+        n = parts[0]
+        return (n, n) if 0 <= n < TIP else None
+    if len(parts) != 2:
+        return None
+    lo, hi = parts
+    if lo < 0 or hi >= TIP or hi < lo:
+        return None
+    return (lo, hi)
+
 def parse_range(rid):
     """Validate a claim id. Two accepted forms:
          'n'      → a single block n (any n in [0, TIP)) — 'I just want to do one block'.
@@ -483,6 +513,39 @@ def submit_spine(body):
         with open(tmp_js, "w") as f: json.dump(head, f)
         os.replace(tmp_js, os.path.join(SPINE_DIR, "spine.json"))
     return 200, {"ok": True, "note": note, "head": head}
+
+def foldable(limit=8):
+    """Adjacent verified ranges whose fold does not exist yet — the work `hazync fold` picks up (#37).
+
+    Folding is NOT allocated, for the same reason proving is not: allocation is coordination, and
+    coordination is where the outages have been. This is advisory. Two workers may fold the same pair;
+    the outputs are receipts of the same range, so the loser's submission is discarded as already
+    proven. Folding is far cheaper than proving, so the waste is noise.
+
+    Several candidates are returned rather than one, so workers spread out by choosing among them
+    instead of every worker racing for the leftmost pair.
+
+    Note this is a TREE, not a spine: any two adjacent ranges fold with no reference to genesis. The
+    spine (#30) is the separate, serial job that anchors at lo == 1.
+    """
+    with _lock:
+        c = db()
+        rows = c.execute("SELECT id, lo, hi FROM vranges ORDER BY lo").fetchall()
+        c.close()
+    starts, have = {}, set()
+    for r in rows:
+        starts.setdefault(r["lo"], []).append(r)
+        have.add((r["lo"], r["hi"]))
+    out = []
+    for r in rows:
+        for s in starts.get(r["hi"] + 1, ()):
+            if (r["lo"], s["hi"]) in have:
+                continue                       # already folded by someone
+            out.append({"left": r["id"], "right": s["id"], "lo": r["lo"], "hi": s["hi"],
+                        "result": (str(r["lo"]) if r["lo"] == s["hi"] else f"{r['lo']}-{s['hi']}")})
+            if len(out) >= limit:
+                return out
+    return out
 
 def _frontier_chain():
     """Select the MOST-WORK genesis-anchored chain (Bitcoin's rule), not merely the tallest one.
@@ -840,7 +903,7 @@ def submit(body):
     handle = clean_handle(body.get("handle"))
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
     if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
-    if not parse_range(rid): return 400, {"error": "invalid range id"}
+    if not parse_any_range(rid): return 400, {"error": "invalid range id"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
     if len(receipt_b64) > MAX_BODY: return 413, {"error": "receipt too large"}
@@ -859,7 +922,7 @@ def submit(body):
         # the row is created on demand from the (already validated) range id. The receipt still has to
         # prove exactly this [lo..hi] — verify_receipt checks that — so an invented id buys nothing
         # beyond a row that then fails verification.
-        lo, hi = parse_range(rid)
+        lo, hi = parse_any_range(rid)
         with _lock:
             c = db()
             c.execute("INSERT OR IGNORE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'open')", (rid, lo, hi))
@@ -958,6 +1021,11 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
                                     "reproduce": "reproduce/METHOD_ID",
                                     "source_sha256": source_sha256()})
+        if p == "/api/foldable":                           # adjacent pairs whose fold does not exist yet
+            try: n = max(1, min(32, int(parse_qs(urlparse(self.path).query).get("limit", ["8"])[0])))
+            except Exception: n = 8
+            pairs = foldable(n)
+            return self._send(200, {"pairs": pairs, "count": len(pairs)})
         if p == "/api/spine":                              # the headline artifact: genesis -> N in one receipt
             head = spine_head()
             if not head:
@@ -971,7 +1039,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(404, {"error": "no spine yet"})
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
-            if parse_range(rid):
+            if parse_any_range(rid):
                 f = os.path.join(PROOFS_DIR, f"proof_{rid}.bin")
                 if os.path.exists(f):
                     return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
