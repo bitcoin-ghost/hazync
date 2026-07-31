@@ -108,15 +108,15 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.11.0**, which shipped `METHOD_ID 3f52baff` —
-v0.11.0 does not touch the guest, so every proof made against v0.10.0 remains valid *under that id*.
+either way. **Releases:** the current release is **v0.12.0**, shipping `METHOD_ID be5e0528`.
 
-> **The canonical id is now `be5e0528`, ahead of the newest release.** Two re-baselines landed
-> together: the accumulator's leaf and interior hashes are domain-separated (which changes every leaf
-> hash), and `ruint` moved 1.19.0 → 1.20.0 for RUSTSEC-2026-0220 — a dependency bump with no Hazync
-> source change, but ruint is compiled into the circuit so the id moves anyway. `reproduce/METHOD_ID`
-> records both. Proofs are **not** interchangeable across ids: a `3f52baff` proof stays valid under
-> `3f52baff` and is correctly rejected by a `be5e0528` verifier. The board restarts from genesis.
+> **v0.12.0 re-baselines the guest twice over, and the board restarted from genesis.** The
+> accumulator's leaf and interior hashes are now domain-separated (which changes every leaf hash), and
+> `ruint` moved 1.19.0 → 1.20.0 for RUSTSEC-2026-0220 — a dependency bump with no Hazync source
+> change, but ruint is compiled into the circuit so the id moves anyway. `reproduce/METHOD_ID` records
+> both, with reasons. Proofs are **not** interchangeable across ids: a `3f52baff` proof from v0.11.0
+> stays valid *under `3f52baff`* and is correctly rejected by a `be5e0528` verifier. That is the guest
+> pin working, not a bug.
 
 The id was previously re-baselined in v0.10.0 (libsecp's ecmult
 window raised to its measured optimum — see `reproduce/METHOD_ID`), on top of the real-Core `pow.cpp`
