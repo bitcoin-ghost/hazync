@@ -46,12 +46,16 @@ chk "GET  /api/meta"      GET  /api/meta        200
 chk "GET  /api/state"     GET  /api/state       200
 chk "GET  /api/state?slim" GET "/api/state?slim=1" 200
 chk "GET  /api/vranges"   GET  /api/vranges     200
-chk "POST /api/hint"      POST /api/hint        200
+# 409, not 200: this throwaway instance serves no witnesses, so there is genuinely nothing to claim
+# and refusing is the right answer. What is being asserted is that the endpoint EXISTS and answers —
+# a 404 here would mean claims had been removed again.
+chk "POST /api/claim"     POST /api/claim       409
 chk "POST /api/submit"    POST /api/submit      400   # empty body -> validation error, not a crash
 chk "GET  /"              GET  /                200
 
-# Allocation is GONE (#37). If any of these comes back, work distribution has silently regressed.
-chk "POST /api/claim"     POST /api/claim       404
+# Claims are back at WIDTH 1 with a TTL, but the heartbeat/release machinery is NOT — a claim expires
+# on its own, so there is nothing to keep alive and nothing to hand back. If either returns, the
+# orphaned-claim failure modes have come back with it.
 chk "POST /api/heartbeat" POST /api/heartbeat   404
 chk "POST /api/release"   POST /api/release     404
 

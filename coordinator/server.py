@@ -35,7 +35,9 @@ VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
 PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file__), "proofs"))  # kept, downloadable
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
-CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "1800"))    # auto-release a claim after no heartbeat this long
+# A claim expires this long after it is TAKEN — not after a heartbeat stops, because there are no
+# heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
+CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "3600"))    # 1 hour, then anyone may take it
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many BLOCK-implicating failures
 MAX_ENV_FAILURES = int(os.environ.get("MAX_ENV_FAILURES", "12"))  # separate, looser cap for environmental (capacity) failures
@@ -211,37 +213,6 @@ def init_db():
         except Exception: pass
     c.commit(); c.close()
 
-def reap():
-    """Free stale claims: no heartbeat for CLAIM_TTL, or held longer than CLAIM_MAX. Lazy — called on
-    each state()/claim(), so an abandoned claim returns to the pool within a poll interval.
-
-    An abandoned claim is a FAILED ATTEMPT, not a fresh start: the old code reset straight back to
-    'open', so a block that could not be proved was indistinguishable from one never tried, and could
-    loop claim -> fail -> reap -> claim forever while the contiguous frontier sat pinned behind it and
-    nothing anywhere said so. Attempts are now counted and a block is parked as 'failed' once it has
-    burnt MAX_ATTEMPTS, so the pool stops spending GPU-hours re-failing it."""
-    now = time.time()
-    c = db()
-    stale = c.execute(
-        "SELECT id, handle, COALESCE(attempts,0) AS n FROM ranges WHERE status='claimed' AND ("
-        " (last_beat IS NOT NULL AND ?-last_beat > ?) OR"
-        " (claimed_at IS NOT NULL AND ?-claimed_at > ?) )",
-        (now, CLAIM_TTL, now, CLAIM_MAX)).fetchall()
-    for r in stale:
-        n = r["n"] + 1
-        parked = n >= MAX_ATTEMPTS
-        c.execute("UPDATE ranges SET status=?, attempts=?, last_assignee=assignee, last_failed_at=?, "
-                  "last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, last_beat=NULL WHERE id=?",
-                  ("failed" if parked else "open", n, now,
-                   "claim abandoned (no heartbeat within CLAIM_TTL, or held past CLAIM_MAX)", r["id"]))
-        if parked:
-            print(f"[reap] range {r['id']} PARKED as failed after {n} attempts "
-                  f"(last holder {r['handle']}) — it will not be served again until reset", flush=True)
-        else:
-            print(f"[reap] range {r['id']} reopened, attempt {n}/{MAX_ATTEMPTS} "
-                  f"(last holder {r['handle']})", flush=True)
-    c.commit(); c.close()
-
 def parse_range(rid):
     """Validate a claim id. Two accepted forms:
          'n'      → a single block n (any n in [0, TIP)) — 'I just want to do one block'.
@@ -313,7 +284,6 @@ def pick(body):
     """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
     per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`
     stays valid). Block 1 pins to genesis. A bigger aligned chunk is opt-in via `hazync run <lo>-<hi>`."""
-    reap()
     fr = frontier_hi()
     c = db()
     taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
@@ -572,7 +542,6 @@ def vranges_cached():
     return v, etag
 
 def state(slim=False):
-    reap()
     now = time.time()
     c = db()
     proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
@@ -595,7 +564,7 @@ def state(slim=False):
             if r["status"] == "claimed":
                 b["elapsed"] = int(now - (r["claimed_at"] or now))
                 b["beat"] = int(now - (r["last_beat"] or r["claimed_at"] or now))
-                b["stale"] = b["beat"] > CLAIM_TTL // 2
+                b["stale"] = b["beat"] > CLAIM_TTL
         else:
             b = {"id": rid, "lo": lo, "hi": hi, "status": "open", "handle": None}
         board.append(b)
@@ -618,7 +587,7 @@ def state(slim=False):
         beat = int(now - (r["last_beat"] or r["claimed_at"] or now))
         claims.append(dict(lo=r["lo"], hi=r["hi"],
                            handle=(r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"),
-                           elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL // 2))
+                           elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL))
     # Blocks parked after MAX_ATTEMPTS, plus how long the frontier has been stuck. Without this a stall
     # is invisible: the frontier is the lowest unproven block, so ONE bad block pins it while every other
     # signal stays green — `proven` keeps climbing as workers prove ahead of the gap, which is exactly
@@ -698,87 +667,49 @@ def expected_method_id():
     return _MID_CACHE["v"]
 
 
-def hint(body):
-    """Advisory next-block suggestion. Writes NOTHING.
+def claim(body):
+    """Hand out the earliest block that is neither proven nor already claimed.
 
-    This replaces claim allocation (#37). A worker may prove any height it likes and submit it; this
-    only answers "what would be most useful next" so a fleet does not all pile onto the same block.
-    Because no state is recorded, a worker that crashes after asking leaves nothing to expire, retry
-    or reap — which is the entire class of machinery this removes.
+    Width is ONE block. That matters: the objections that removed allocation in #37 were all
+    objections to WIDE claims — "one bad block halts everyone" and "width is a reliability bet" were
+    about a 67-minute commitment to a 1000-block range, where any failure discarded the lot. At width
+    1 a claim is a few seconds of GPU time, so a failure costs a few seconds and the block simply
+    reopens.
 
-    Chooses the lowest unproven height that has a witness available, so the spine advances soonest.
-    `count` lets a worker take a spread of heights rather than N workers all getting the same answer.
+    No heartbeat. A claim expires CLAIM_TTL seconds after it is taken, whether the worker is alive or
+    not, so a worker that dies mid-block leaves nothing to reap — the block reopens by itself. That
+    removes the machinery (expiry sweeps, retry counters, orphan detection) without removing the
+    ordering benefit that made claims worth having.
+
+    A claim is ADVISORY-ON-TOP: `submit` accepts any height regardless of who claimed it. So a bug
+    here can waste effort but can never lock a contributor out, which is the property free-running had
+    and the one worth keeping.
     """
-    try:
-        n = max(1, min(64, int(body.get("count", 1))))
-    except Exception:
-        n = 1
-
-    # OFFSET THE WINDOW BY HOW SLOW THE ASKER IS.
-    #
-    # The suggestion list is lowest-unproven-first, so everyone racing for the front means the slowest
-    # prover always loses. Measured: a CPU contributor takes ~193 s/block while the GPU fleet clears 32
-    # blocks in ~74 s, so their first contribution was already proven before they finished it — three
-    # minutes of work, and a "someone else got there first" for their trouble.
-    #
-    # So a worker may report `secs_per_block`, and gets suggestions far enough ahead that the fleet
-    # will not have reached them by the time it finishes: roughly (its own prove time x the fleet's
-    # recent rate), which is exactly the number of blocks the fleet consumes while it works.
-    #
-    # This stays ADVISORY. Nothing is reserved, nothing expires, and a worker that lies or omits the
-    # field simply gets the front of the list as before. It is a courtesy to slow provers, not an
-    # allocation.
-    try:
-        spb = float(body.get("secs_per_block", 0) or 0)
-    except Exception:
-        spb = 0.0
-    offset = 0
-    if spb > 0:
-        with _lock:
-            c = db()
-            row = c.execute("SELECT MIN(ts), MAX(ts), COUNT(*) FROM vranges WHERE ts > ?",
-                            (time.time() - 600,)).fetchone()
-            c.close()
-        lo_ts, hi_ts, cnt = row[0], row[1], row[2]
-        if cnt and cnt > 1 and hi_ts and lo_ts and hi_ts > lo_ts:
-            fleet_rate = cnt / (hi_ts - lo_ts)          # blocks per second, last 10 minutes
-            # 1.5x headroom: finishing just as the fleet arrives is still a wasted prove.
-            offset = int(spb * fleet_rate * 1.5)
-        offset = max(0, min(offset, 5000))              # never strand a worker absurdly far out
-
+    pk = body.get("pubkey", "")
+    handle = clean_handle(body.get("handle"))
+    now = time.time()
     with _lock:
         c = db()
-        rows = c.execute("SELECT lo, hi FROM vranges ORDER BY lo").fetchall()
+        proven = set()
+        for row in c.execute("SELECT lo, hi FROM vranges"):
+            proven.update(range(row["lo"], row["hi"] + 1))
+        held = {r["lo"] for r in c.execute(
+            "SELECT lo FROM ranges WHERE status='claimed' AND claimed_at > ?", (now - CLAIM_TTL,))}
+        h = 1
+        while h < TIP:
+            if h not in proven and h not in held and witness_available(h):
+                break
+            h += 1
+        else:
+            c.close()
+            return 409, {"error": "nothing available to claim"}
+        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at)"
+                  " VALUES(?,?,?,'claimed',?,?,?)", (str(h), h, h, pk, handle, now))
+        c.commit()
         c.close()
-    # Walk the ordered ranges once and collect the GAPS, rather than materialising every covered
-    # height and scanning from 1. At a 200k-block board the naive form allocates a 200k-element set
-    # and then walks past all of it on every single call, which is a per-request cost that grows with
-    # the board — the same shape of mistake as the accumulator scan in #40.
-    # `skip` implements the offset: pass over that many CANDIDATE heights (not raw heights, which
-    # would land inside already-proven runs) before collecting.
-    out, cursor, skip = [], 1, offset
-    for row in rows:
-        lo, hi = row["lo"], row["hi"]
-        while cursor < lo and len(out) < n:
-            if witness_available(cursor):
-                if skip > 0:
-                    skip -= 1
-                else:
-                    out.append(cursor)
-            cursor += 1
-        cursor = max(cursor, hi + 1)
-        if len(out) >= n:
-            break
-    h = cursor
-    while len(out) < n and h < TIP:
-        if witness_available(h):
-            if skip > 0:
-                skip -= 1
-            else:
-                out.append(h)
-        h += 1
-    return 200, {"suggest": out, "advisory": True, "offset": offset,
-                 "note": "advisory only — you may prove and submit any height"}
+    return 200, {"ok": True, "range": str(h), "ttl": CLAIM_TTL,
+                 "note": "claimed for %d minutes; submissions are accepted for any height regardless"
+                         % int(CLAIM_TTL / 60)}
 
 
 def witness_available(blk):
@@ -947,14 +878,14 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/hint"):
+        if p not in ("/api/submit", "/api/claim"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
-        fn = {"/api/submit": submit, "/api/hint": hint}[p]
+        fn = {"/api/submit": submit, "/api/claim": claim}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 
@@ -975,5 +906,5 @@ if __name__ == "__main__":
                          f"proxy, or set COORD_ALLOW_PUBLIC_INSECURE=1 to override (not for production).")
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
-    print(f"  api        GET /api/state · POST /api/hint · POST /api/submit · GET /api/witness/<h>")
+    print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<h>")
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()
