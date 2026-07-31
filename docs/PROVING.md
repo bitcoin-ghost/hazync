@@ -108,7 +108,10 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.12.0**, shipping `METHOD_ID be5e0528`.
+either way. **Releases:** the current release is **v0.12.1**, shipping `METHOD_ID be5e0528` — the same
+guest as v0.12.0. v0.12.1 changes only the contributor CLI (work is claimed one block at a time with a
+one-hour expiry, replacing the free-running sampling in v0.12.0), so **every v0.12.0 proof stays
+valid**.
 
 > **v0.12.0 re-baselines the guest twice over, and the board restarted from genesis.** The
 > accumulator's leaf and interior hashes are now domain-separated (which changes every leaf hash), and
