@@ -91,6 +91,12 @@ cp "$REPO/prover/target/release/host" "$OUT/$asset"
 # Pulled here rather than documented, because the failure only appears at the moment you try to wrap,
 # which is long after the build looked successful. ~5.2 GB; skipped if already present, and a failure
 # is a warning rather than fatal — the binary is still good, you just cannot wrap on this box yet.
+#
+# VERIFIED 2026-07-31 on a fresh GPU box: with r0vm staged (above) and this image present, the CPU
+# host wraps a real folded receipt in 60 s and the result verifies. The CUDA host still refuses with
+# "Missing required risc0-groth16 rzup component" — that is a SEPARATE, pre-existing problem with the
+# CUDA groth16 path, not something this fixes. Wrap with the CPU binary; both produce the same artifact
+# and wrapping is not the expensive step.
 # r0vm is the other half of being able to wrap: `host snark-wrap` shells out to it, and the container
 # installs it somewhere only the container can see. Staged out above; installed here.
 if [ -f "$REPO/dist/r0vm" ]; then
