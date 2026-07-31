@@ -6,10 +6,10 @@ to be handed one block and check it alone. That property is not established by t
 established by RETENTION, and retention is the part with no test.
 
 It has already failed once. `coordinator/hazync` proves `range_{h}.bin` per height and discards the
-leaves after folding, so at any CLAIM_WIDTH above 1 the per-block receipts are produced and thrown
-away. 800 blocks (38,500..39,299) were proven that way and have no individual receipt. CLAIM_WIDTH is
-1 now, which prevents a recurrence but does not DETECT one — a future change to the work-distribution
-scheme (#37) could reintroduce it silently, and nothing would notice until someone asked for a block's
+leaves after folding, so any multi-block unit produced per-block receipts and threw them away. 800
+blocks (38,500..39,299) were proven that way and have no individual receipt. Free-running proving
+(#37) makes one block the unit, which prevents a recurrence but does not DETECT one — opportunistic
+folding could reintroduce it silently, and nothing would notice until someone asked for a block's
 proof and it was not there.
 
 Run on the coordinator:
@@ -75,10 +75,28 @@ def main():
     for lo, hi in rows:
         proven.update(range(lo, hi + 1))
 
-    # A board with nothing verified would pass every check below while proving nothing. That state is
-    # not "clean", it is "no evidence", and the two must not look alike.
+    # An empty ledger has two very different causes and they must not be conflated.
+    #
+    #   nothing verified AND no receipts  -> a fresh or re-baselined board. Legitimate: there is
+    #                                        genuinely nothing proven yet, and the two halves agree.
+    #   nothing verified BUT receipts on disk -> the ledger and the proof store disagree about
+    #                                        whether anything happened. That is the failure this
+    #                                        check exists to catch, pointing the other way.
+    #
+    # The earlier version exited non-zero on any empty ledger, which meant a correctly re-baselined
+    # board failed its own G1 gate every night until someone proved a block — an alarm that is wrong
+    # by design gets muted, and then it is not an alarm.
     if not proven:
-        sys.exit("no verified ranges in the ledger — this check has nothing to assert against")
+        if have:
+            print(f"  heights marked verified : 0")
+            print(f"  per-block receipts held : {len(have):,}")
+            print()
+            print("LEDGER/STORE MISMATCH: no verified ranges, but receipts exist on disk.")
+            print("The ledger may have been reset without clearing the proof store, or restored stale.")
+            return 1
+        print("  board is empty — nothing verified and no receipts. Fresh or re-baselined board.")
+        print("  G1 holds vacuously; this becomes a real check as soon as the first block is proven.")
+        return 0
 
     missing = sorted(proven - have)
     unexpected = [h for h in missing if h not in allowed]
@@ -96,7 +114,7 @@ def main():
         print()
         print(f"G1 VIOLATION: {len(unexpected):,} proven heights have no retained per-block receipt.")
         print("The board claims these blocks are proven but cannot hand anyone the proof for one.")
-        print("Check CLAIM_WIDTH is 1 and that the fold path is not discarding leaves.")
+        print("Check the fold path is not discarding per-block leaves after folding.")
         return 1
 
     print()

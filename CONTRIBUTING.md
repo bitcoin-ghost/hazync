@@ -32,8 +32,8 @@ Download the prebuilt prover — it's the **canonical guest**, so the coordinato
 # the prover binary (canonical guest, GPU)
 curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
 chmod +x host
-# the contributor CLI + signing library
-curl -L -o hazync https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/hazync
+# the contributor CLI — a SIGNED release artifact, covered by SHA256SUMS.txt.asc
+curl -L -o hazync https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-worker
 curl -L -o run-workers.sh https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/run-workers.sh
 chmod +x hazync run-workers.sh
 sudo apt install -y python3-cryptography
@@ -44,6 +44,10 @@ sudo apt install -y python3-cryptography
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
+Take the CLI from the **release**, not from a raw source URL: it holds your ed25519 signing key and
+decides what gets submitted under your name, so it is the artifact most worth having a signature on.
+Both it and the prover are covered by the signed `SHA256SUMS.txt`.
+
 Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`SECURITY.md`](SECURITY.md#verifying-releases) — or, stronger, run `./host method-id` and confirm it matches `reproduce/METHOD_ID`.
 
 > **Building from source instead?** You *must* build the **canonical guest** (via `reproduce/Dockerfile`, or the pinned inputs at fixed paths — see the repo README) so your `METHOD_ID` matches `reproduce/METHOD_ID`. If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
@@ -51,6 +55,8 @@ Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`S
 ## Step 2: set your name and point at the party
 
 ```
+# Both of these are OPTIONAL now — the CLI defaults to the public party and finds the prover
+# beside itself. Set them only if you are pointing somewhere else.
 export COORD_URL=https://bitcoinghost.org/hazync
 export HAZYNC_HOST=$PWD/host
 export WITNESS_DIR=$PWD/w
@@ -70,14 +76,18 @@ It confirms your prover is present, its guest `METHOD_ID` matches the coordinato
 ## Step 3: prove
 
 ```
-./hazync run              # picks the next open range near the frontier
-./hazync run 0-999        # or a specific range
-./hazync run 5            # or a single block
+./hazync run              # takes the coordinator's suggestion
+./hazync run 5            # or name any block you like
 ```
 
-`run` claims the work, fetches the witnesses it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
+**Nothing is reserved and nothing is allocated.** The coordinator will *suggest* a block that would be
+most useful next, but you may prove any height you want and submit it — the suggestion is advisory.
+That means a worker that dies mid-block leaves nothing behind to expire or hand back, and a block
+nobody can prove no longer blocks anyone else.
 
-**Leaving it running, or running several at once?** One `run` proves one claim and exits, so use the
+`run` fetches the witness it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
+
+**Leaving it running, or running several at once?** One `run` proves one block and exits, so use the
 supplied loop — it keeps N workers going and, importantly, refuses to start if your guest id doesn't
 match the coordinator's:
 
@@ -90,7 +100,12 @@ That pre-flight matters: a worker on the wrong guest id proves happily and has *
 rejected, burning GPU hours for nothing. That is exactly what happens if you keep an old binary after a
 re-baseline, so the script blocks it rather than letting it run.
 
-Proving a whole range takes a while (each block is proved, then the receipts are folded together). Prove as many ranges as you like, just run it again. An arbitrary far-future block (past the coordinator's served window) is not something a fresh contributor can prove yet: the coordinator's archive bridge serves a ready-made witness for each block in its window near the frontier, and you prove a block directly from that witness — no node of your own, no chain replay.
+Prove as many blocks as you like — just run it again.
+
+**Any height the bridge has reached is provable, not only ones near the frontier.** The coordinator
+serves a ready-made witness for every block it holds, so you prove a block directly from that witness
+with no node of your own and no chain replay. Blocks the bridge has not reached yet have no witness
+to serve, and `run` tells you so before it starts rather than after a long prove.
 
 ## Just want to check a proof, not make one?
 

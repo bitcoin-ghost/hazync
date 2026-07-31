@@ -68,11 +68,8 @@ into one with `fold-range`. You need no node of your own and no local witness da
 
 - `GET /api/state` — progress, board (with per-claim `elapsed`/`beat`/`stale`), leaderboard, recent
 - `GET /api/pick` — suggest the next open range past the frontier (skips claimed/verified)
-- `POST /api/claim` `{range, pubkey, handle}` — **lock** a block/range to you; rejected if held by someone
-  else. `range` is either a **single block** (`"764321"` — "I just want one block") or a RANGE_SIZE-aligned
-  range (`"45000-45999"`); the row is auto-created on demand (no pre-seeded list). Single blocks and aligned
-  ranges are the only shapes, so two claim ids can never partially overlap
-- `POST /api/heartbeat` `{range, pubkey}` — keep your claim alive (the CLI sends one every 30s while proving)
+- `POST /api/hint` `{count}` — **advisory** next-block suggestion. Writes nothing: no lease, no
+  expiry, nothing to reap if the asker dies. A worker may prove and submit any height regardless.
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<n>` — serve block `n`'s archive **bundle** (in-boundary + the real accumulator root + inclusion proofs) from the bridge; falls back to a legacy per-block witness. Accepts a block number or a `lo-hi` range id
 - `GET /api/proof/<id>` — **download the verified proof receipt** for a block/range so anyone can

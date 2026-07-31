@@ -85,3 +85,23 @@ not available. That is packaging, not portability — the hard part is done.
 #
 # STILL EMULATION. This says nothing about peak RSS or wall-clock on real ARM hardware, which is
 # exactly what G3 claims and what #41 remains open for.
+
+# ============================================================================================
+# WASM VERIFIER — memory measured, 2026-07-31, guest 85dc0b56
+#
+# This is the G3 evidence the NATIVE aarch64 path could not give. WebAssembly linear memory is
+# architecture-independent: the module grows the same 64 KiB pages on ARM as on x86, so a figure
+# measured on an x86 host is what a phone actually needs. Native RSS is not portable that way, which
+# is why #41 stayed open on the aarch64 binary.
+#
+#   peak linear memory   1.9 MiB   (27 pages at instantiate, 30 after 20 consecutive verifies)
+#   verify wall-clock    21-46 ms  (x86-64; blocks [1..8] proof, 1,841 bytes)
+#   download             290,527 bytes gzipped / 1,063,570 raw
+#   IMPORTS              NONE — the module requires nothing from the host environment.
+#                        No WASI, no JS callbacks, no threads, no shared memory.
+#   wasm version         1 (MVP) — no post-MVP feature dependency
+#
+# Consequence: any spec-compliant WebAssembly runtime can execute it, which every current browser is,
+# and 1.9 MiB is below any plausible device ceiling. The remaining gap is that it has not been LOADED
+# IN A BROWSER or on a physical handset — a demonstration, not an unknown. The native aarch64 binary's
+# peak RSS is still unmeasured on real silicon (#41).

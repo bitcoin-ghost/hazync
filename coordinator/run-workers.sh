@@ -10,7 +10,8 @@
 #   HAZYNC_BASE   Core/secp source root                (default $HOME/hazync-build)
 #   LOG_DIR       per-worker logs                      (default $HOME/hazync-workers)
 #
-# One `hazync run` proves one claim and exits, so each worker is a loop. Several in parallel keeps a
+# One `hazync run` proves one BLOCK and exits, so each worker is a loop. Nothing is claimed, so a
+# worker that dies simply stops — there is no lease to expire and nothing to hand back. Several in parallel keeps a
 # GPU busy while others are fetching a bundle or waiting on the coordinator.
 #
 # The PRE-FLIGHT below is the important part. A worker whose guest id differs from the coordinator's

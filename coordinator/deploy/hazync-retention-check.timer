@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily G1 retention check
+
+[Timer]
+# 03:47 UTC — after the 03:17 backup, so a failure is visible next to a fresh snapshot rather than
+# racing it.
+#
+# Deliberately its OWN unit rather than a step inside backup.sh. A retention failure must surface in
+# `systemctl --failed`, where it is visible without anyone reading a log; folded into the backup it
+# would either abort the backup (wrong — the backup is what you want most when something is missing)
+# or print a warning nobody reads, which is a check that cannot fail in practice.
+OnCalendar=*-*-* 03:47:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

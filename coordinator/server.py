@@ -656,11 +656,6 @@ def state(slim=False):
         # `block` is the block the frontier needs next; `id` is the RANGE responsible for it, which is
         # not the same thing once ranges can be wide — reporting str(fr+1) as the id hid a claimed
         # 38000-38999 behind an untouched single-block row of the same name.
-        "frontier_blocker": {"block": fr + 1,
-                             "id": (blocker["id"] if blocker is not None else str(fr + 1)),
-                             "status": (blocker["status"] if blocker is not None else "open"),
-                             "attempts": (blocker["attempts"] if blocker is not None else 0) or 0,
-                             "stalled_for": stalled_for},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
@@ -687,164 +682,8 @@ def state_cached(slim=False):
         _state_cache[key] = {"t": time.time(), "v": v}
     return v
 
-def claim(body):
-    rid, pk, handle = body.get("range"), body.get("pubkey", ""), clean_handle(body.get("handle"))
-    if not pk: return 400, {"error": "pubkey required"}
-    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
-    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
-    want_next = (not rid) or rid == "next"
-    if not want_next and not parse_range(rid): return 400, {"error": "invalid range id"}
-    reap()
-    now = time.time()
-    with _lock:
-        c = db()
-        if want_next:
-            # Atomic claim-next: pick the next open BLOCK after the frontier AND claim it under the lock, so
-            # two parallel workers can never grab the same one (the old client-side pick-then-claim left a
-            # window where both did). Per-block is the default proving unit (no fold; matches the board's
-            # per-block proofs). Block 1 pins to genesis; a bigger aligned chunk is opt-in via `run <lo>-<hi>`.
-            fr = frontier_hi()
-            # 'failed' is excluded too: a parked range must not be handed straight back out by
-            # claim-next, or MAX_ATTEMPTS achieves nothing. It stays claimable by EXPLICIT id, which is
-            # the operator's deliberate retry path.
-            # Find the first genuinely FREE block by walking INTERVALS, not ids. 'failed' counts as live
-            # so a parked range is not handed straight back out (or MAX_ATTEMPTS achieves nothing); it
-            # stays claimable by EXPLICIT id, which is the operator's retry path.
-            #
-            # Ids are not sufficient once ranges can be wide: "id 3000 is not taken" does not mean block
-            # 3000 is free, because 3000-3999 covers it under a different id. Scanning by id handed out
-            # a block that overlapping() then rejected, so a second worker got a 409 instead of work.
-            live = sorted((row["lo"], row["hi"]) for row in c.execute(
-                "SELECT lo,hi FROM ranges WHERE status IN ('claimed','verified','failed')"))
-            n = max(1, fr + 1)
-            for lo_, hi_ in live:
-                if hi_ < n: continue                              # entirely below the search point
-                if lo_ > n: break                                 # gap: n is free
-                n = hi_ + 1                                       # n is covered — jump past this range
-            rid = str(n) if n < TIP else None
-
-            if CLAIM_WIDTH > 1 and rid is not None:
-                # Upgrade that single block to a whole RANGE_SIZE-aligned chunk when it starts exactly on
-                # a boundary and the chunk is entirely free. `hazync prove` folds a multi-block range
-                # locally before submitting, so ~99% of the fold work happens DISTRIBUTED across every
-                # worker and overlapped with proving, instead of being deferred into one serial
-                # exclusive-GPU pass at the end (#28): ~28h of paused proving becomes a final board fold
-                # of ~34 receipts instead of ~34,000.
-                #
-                # Anchoring on the FIRST FREE BLOCK (rather than scanning ahead for any free chunk) is
-                # what keeps this safe. Scanning ahead would skip a partially-covered region and orphan
-                # it — nothing would ever claim those blocks, and since the frontier is the lowest
-                # unproven block it would stall there forever while workers proved chunks far ahead.
-                # Anchoring here also lets several workers take CONSECUTIVE chunks: once one claims
-                # [n, n+999], the next worker's first free block is n+1000, still aligned.
-                #
-                # Mid-re-baseline the board holds tens of thousands of single-block receipts, so chunks
-                # over that region are not free and it degrades to per-block automatically.
-                # No separate "is this id already taken?" check: if the chunk id were live its interval
-                # would be in `live`, so n would have jumped past it. n == base implies the id is free.
-                if n % CLAIM_WIDTH == 0 and n + CLAIM_WIDTH - 1 < TIP:
-                    cand = f"{n}-{n + CLAIM_WIDTH - 1}"
-                    if not overlapping(c, n, n + CLAIM_WIDTH - 1, cand):
-                        rid = cand
-            if rid is None: c.close(); return 404, {"error": "no open block available"}
-        r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
-        if not r:
-            pr = parse_range(rid)                       # pick-any: auto-create a valid range on demand
-            if not pr: c.close(); return 400, {"error": "invalid range id"}
-            c.execute("INSERT INTO ranges(id,lo,hi) VALUES(?,?,?)", (rid, pr[0], pr[1]))
-            r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
-        if r["status"] == "verified": c.close(); return 409, {"error": "already proven"}
-        if r["status"] == "failed":
-            # Claiming a parked range BY EXPLICIT ID is how an operator retries it — typically after
-            # fixing whatever actually broke (in practice: GPU oversubscription, not the block). Reset
-            # the counter so the retry gets a full budget rather than instantly re-parking.
-            # BOTH counters, not just attempts. A range parks on whichever cap it hits, and in practice
-            # that is MAX_ENV_FAILURES — capacity incidents are what actually park ranges, while genuine
-            # block defects are rare. Resetting only `attempts` left the retry useless for the common
-            # case: the range would re-park on its very next OOM, having been handed a budget of zero.
-            print(f"[claim] range {rid} was parked as failed (attempts={r['attempts']}, "
-                  f"env_failures={r['env_failures']}); {handle} is retrying it explicitly — "
-                  f"both counters reset", flush=True)
-            c.execute("UPDATE ranges SET attempts=0, env_failures=0 WHERE id=?", (rid,))
-        if r["status"] == "claimed" and r["assignee"] != pk:
-            # locked to someone else and still alive (reap() already freed stale ones)
-            since = int((now - (r["last_beat"] or r["claimed_at"] or now)) / 60)
-            c.close()
-            return 409, {"error": f"locked — being proved by {r['handle']} ({since}m active)"}
-        # Interval overlap, not just id equality — see overlapping(). Two different ids can cover the
-        # same blocks (a single block inside an aligned range), which would duplicate proving work and
-        # race on submission. Checked under the same lock that grants the claim, so it cannot be raced.
-        clash = overlapping(c, r["lo"], r["hi"], rid)
-        if clash:
-            c.close()
-            return 409, {"error": f"overlaps {len(clash)} live range(s) already claimed/proven: "
-                                  f"{', '.join(clash[:5])}{' …' if len(clash) > 5 else ''}"}
-        c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
-                  (pk, handle, now))
-        c.execute("UPDATE contributors SET handle=? WHERE pubkey=?", (handle, pk))
-        c.execute("UPDATE ranges SET status='claimed', assignee=?, handle=?, claimed_at=?, last_beat=? WHERE id=?",
-                  (pk, handle, now, now, rid))
-        c.commit(); c.close()
-    wit = os.path.join(WITNESS, f"block_{r['lo']}.json")
-    return 200, {"ok": True, "range": rid,
-                 "witness": f"/api/witness/{rid}" if os.path.exists(wit) else None,
-                 "cmd": f"hazync prove {rid}", "heartbeat_ttl": CLAIM_TTL}
-
-def heartbeat(body):
-    rid, pk = body.get("range"), body.get("pubkey", "")
-    if not rid or not pk: return 400, {"error": "range and pubkey required"}
-    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
-    reap()
-    with _lock:
-        c = db()
-        r = c.execute("SELECT status, assignee FROM ranges WHERE id=?", (rid,)).fetchone()
-        if not r: c.close(); return 404, {"error": "no such range"}
-        if r["status"] != "claimed" or r["assignee"] != pk:
-            st = r["status"] if r else None
-            c.close()
-            return 409, {"ok": False, "error": "you no longer hold this claim (expired or reassigned)", "status": st}
-        c.execute("UPDATE ranges SET last_beat=? WHERE id=?", (time.time(), rid))
-        c.commit(); c.close()
-    return 200, {"ok": True, "heartbeat_ttl": CLAIM_TTL}
-
-def release(body):
-    # Voluntarily hand a claim back to the pool — called by `hazync run` when a prove/submit fails, so a
-    # failed block reopens in seconds instead of waiting out the CLAIM_TTL reap. Idempotent and ownership-
-    # checked: only the holder frees a still-claimed range; anything else (already reaped, verified, not
-    # ours) is a no-op success so the client never errors on cleanup.
-    rid, pk = body.get("range"), body.get("pubkey", "")
-    if not rid or not pk: return 400, {"error": "range and pubkey required"}
-    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
-    with _lock:
-        c = db()
-        r = c.execute("SELECT status, assignee FROM ranges WHERE id=?", (rid,)).fetchone()
-        if not r: c.close(); return 404, {"error": "no such range"}
-        if r["status"] != "claimed" or r["assignee"] != pk:
-            c.close(); return 200, {"ok": True, "noop": True}   # already freed/verified/not ours
-        # A voluntary release only ever follows a failed prove/submit, so it counts as an attempt for
-        # exactly the same reason a reap does. Without this, a client that dutifully releases on every
-        # failure would loop forever and never trip MAX_ATTEMPTS, while a client that crashed would.
-        err = str(body.get("error") or "released by holder after a failed prove/submit")[:500]
-        row = c.execute("SELECT COALESCE(attempts,0) AS a, COALESCE(env_failures,0) AS e "
-                        "FROM ranges WHERE id=?", (rid,)).fetchone()
-        # An OOM says the box was full, not that the block is bad — count it separately, against a
-        # looser cap, so a capacity incident cannot park perfectly provable blocks.
-        env = is_env_failure(err)
-        n, ef = (row["a"], row["e"] + 1) if env else (row["a"] + 1, row["e"])
-        parked = (ef >= MAX_ENV_FAILURES) if env else (n >= MAX_ATTEMPTS)
-        c.execute("UPDATE ranges SET status=?, attempts=?, env_failures=?, last_assignee=assignee, "
-                  "last_failed_at=?, last_error=?, assignee=NULL, handle=NULL, claimed_at=NULL, "
-                  "last_beat=NULL WHERE id=?",
-                  ("failed" if parked else "open", n, ef, time.time(), err, rid))
-        c.commit(); c.close()
-    if parked:
-        why = (f"{ef} environmental failures (capacity — check GPU memory/worker count, NOT the block)"
-               if env else f"{n} attempts")
-        print(f"[release] range {rid} PARKED as failed after {why}: {err}", flush=True)
-    return 200, {"ok": True, "released": rid, "attempts": n, "env_failures": ef,
-                 "environmental": env, "parked": parked}
-
 _MID_CACHE = {"v": None}
+
 def expected_method_id():
     # The guest image id this coordinator verifies against == HOST_BIN's method-id. Exposed via /api/meta
     # so a contributor can pre-flight `host method-id` BEFORE proving, instead of discovering a mismatch
@@ -857,6 +696,59 @@ def expected_method_id():
         except Exception:
             pass
     return _MID_CACHE["v"]
+
+
+def hint(body):
+    """Advisory next-block suggestion. Writes NOTHING.
+
+    This replaces claim allocation (#37). A worker may prove any height it likes and submit it; this
+    only answers "what would be most useful next" so a fleet does not all pile onto the same block.
+    Because no state is recorded, a worker that crashes after asking leaves nothing to expire, retry
+    or reap — which is the entire class of machinery this removes.
+
+    Chooses the lowest unproven height that has a witness available, so the spine advances soonest.
+    `count` lets a worker take a spread of heights rather than N workers all getting the same answer.
+    """
+    try:
+        n = max(1, min(64, int(body.get("count", 1))))
+    except Exception:
+        n = 1
+    with _lock:
+        c = db()
+        rows = c.execute("SELECT lo, hi FROM vranges ORDER BY lo").fetchall()
+        c.close()
+    # Walk the ordered ranges once and collect the GAPS, rather than materialising every covered
+    # height and scanning from 1. At a 200k-block board the naive form allocates a 200k-element set
+    # and then walks past all of it on every single call, which is a per-request cost that grows with
+    # the board — the same shape of mistake as the accumulator scan in #40.
+    out, cursor = [], 1
+    for row in rows:
+        lo, hi = row["lo"], row["hi"]
+        while cursor < lo and len(out) < n:
+            if witness_available(cursor):
+                out.append(cursor)
+            cursor += 1
+        cursor = max(cursor, hi + 1)
+        if len(out) >= n:
+            break
+    h = cursor
+    while len(out) < n and h < TIP:
+        if witness_available(h):
+            out.append(h)
+        h += 1
+    return 200, {"suggest": out, "advisory": True,
+                 "note": "advisory only — you may prove and submit any height"}
+
+
+def witness_available(blk):
+    """True if a witness for `blk` can be served. Free-running proving needs arbitrary heights, and
+    the bridge already provides them — the lookup is a direct file path with no frontier window."""
+    for f in ([os.path.join(BRIDGE_DIR, f"bundle_{blk}.json")] if BRIDGE_DIR else []) \
+             + [os.path.join(WITNESS, f"block_{blk}.json")]:
+        if os.path.exists(f):
+            return True
+    return False
+
 
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
@@ -878,7 +770,18 @@ def submit(body):
         c = db()
         r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
         c.close()
-    if not r: return 404, {"error": "no such range"}
+    if not r:
+        # FREE-RUNNING: a submission does not require a prior claim. There is no allocation any more, so
+        # the row is created on demand from the (already validated) range id. The receipt still has to
+        # prove exactly this [lo..hi] — verify_receipt checks that — so an invented id buys nothing
+        # beyond a row that then fails verification.
+        lo, hi = parse_range(rid)
+        with _lock:
+            c = db()
+            c.execute("INSERT OR IGNORE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'open')", (rid, lo, hi))
+            c.commit()
+            r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
+            c.close()
     if r["status"] == "verified": return 409, {"error": "already proven"}
     # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges run in parallel),
     #    but bounded by _verify_sem so a burst can't spawn unlimited STARK verifications and OOM the box.
@@ -1001,15 +904,16 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         p = urlparse(self.path).path
-        if p not in ("/api/claim", "/api/heartbeat", "/api/submit", "/api/release"):
+        # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
+        # unallocated, so there is nothing to lease, keep alive, or hand back.
+        if p not in ("/api/submit", "/api/hint"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
-        fn = {"/api/claim": claim, "/api/heartbeat": heartbeat, "/api/submit": submit,
-              "/api/release": release}[p]
+        fn = {"/api/submit": submit, "/api/hint": hint}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 
@@ -1030,5 +934,5 @@ if __name__ == "__main__":
                          f"proxy, or set COORD_ALLOW_PUBLIC_INSECURE=1 to override (not for production).")
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
-    print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<range>")
+    print(f"  api        GET /api/state · POST /api/hint · POST /api/submit · GET /api/witness/<h>")
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()

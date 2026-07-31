@@ -9,6 +9,10 @@ the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
 >
+> **Work distribution is designed in [`DESIGN_work_distribution.md`](DESIGN_work_distribution.md)**
+> (#37 + #30): free-running provers, opportunistic tree folding, an incrementally-extended genesis
+> spine, and the storage answer — retain every per-block receipt, discard bundles behind the frontier.
+>
 > **The finishing plan lives in [`RELEASE_PLAN.md`](RELEASE_PLAN.md).** Six workstreams to get the
 > project shipped and ready to absorb outside compute, and the gate that must hold before money is
 > spent on proving. It answers "what is left to build, and in what order".
@@ -79,7 +83,9 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening) →
   `ffdc6095…` (real-Core `pow.cpp` retarget carve) → `7a8b29e0…` (chainparams-sourced constants; v0.8.0) →
   `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0/v0.9.1) → `3f52baff…` (ecmult window 19; v0.10.0)
-  → `85dc0b56…` (accumulator leaf/interior domain separation; unreleased).
+  → `85dc0b56…` (accumulator leaf/interior domain separation)
+  → `be5e0528…` (ruint 1.19→1.20 for RUSTSEC-2026-0220; no Hazync source change, but ruint is
+  compiled into the circuit so the ELF moves).
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

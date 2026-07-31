@@ -106,21 +106,39 @@ the canonical `METHOD_ID`.
 
 **A Raspberry-Pi-class machine can check a proof. No node, no peers, no chain data, no prover.**
 
-**Status: built and published; NOT demonstrated on the target.** `hazync-verify` is **1.7 MB**, needs
-only glibc 2.34, has no libstdc++ dependency, and both x86-64 and aarch64 builds ship in v0.11.0
-covered by the signed `SHA256SUMS`.
+**Status: substantially met via WebAssembly; one demonstration outstanding.**
 
-The honest gap: `prover/evidence/verifier_aarch64.txt` records the ARM64 binary as run under
-**`qemu-aarch64-static`**, cross-compiled on an x86-64 box. It has never executed on real ARM hardware.
-Emulation says nothing about RAM ceiling, cache behaviour or wall-clock on a Pi — which is precisely
-what this goal claims.
+The binding unknown for this goal was always **memory** — whether a small device can hold what
+verification needs. For the WASM build that is now measured, and the measurement transfers:
 
-**Done when:** the aarch64 verifier is run on physical Pi-class hardware against a real proof, with
-peak RSS and wall-clock recorded in `prover/evidence/`. Until then the claim is an inference.
+| | |
+|---|---|
+| peak linear memory | **1.9 MiB** (27 pages at instantiate, 30 after 20 consecutive verifies) |
+| verify wall-clock | 21–46 ms (x86-64, `[1..8]` proof of 1,841 bytes) |
+| download | **290,527 bytes gzipped** (1,063,570 raw) |
+| imports | **none** — requires nothing from the host: no WASI, no JS callbacks, no threads |
+| wasm version | 1 (MVP) — no post-MVP feature dependency |
 
-Related: the artifact a small device should fetch is the SNARK wrap, measured at **2,033 bytes**, not
-the ~200–300 B quoted in the docs (#21, #22). CUDA Groth16 currently crashes (#20), so wrapping is
-CPU-only at 825 s.
+**Why an x86 measurement settles a phone question here.** WebAssembly linear memory is
+architecture-independent: the module grows the same 64 KiB pages on ARM as on x86. Native RSS is not
+portable that way, which is precisely why the aarch64 binary could not answer this. A module with
+zero imports, MVP-only features and a 1.9 MiB ceiling runs in any spec-compliant WASM runtime — which
+every current browser is — and 1.9 MiB is below any plausible device ceiling.
+
+Deployed at <https://bitcoinghost.org/hazync/verify/> and linked from the Proof Party page.
+
+**What is still outstanding, honestly:** the page has not been loaded in an actual browser, nor on a
+physical handset. That is a *demonstration*, not an unknown — but it is the difference between a
+measured claim and a shown one, and reviewers will reasonably want the latter. Separately, the native
+`hazync-verify-aarch64` binary's peak RSS on real silicon remains unmeasured (#41); it has only ever
+run under `qemu-aarch64-static`.
+
+**Done when:** the verifier is shown running on a real small device — a browser on a phone is
+sufficient and is now the cheapest route — with the result recorded in `prover/evidence/`.
+
+Related: the artifact a small device should fetch is the SNARK wrap, measured at **1,841 bytes** for
+`[1..8]`, not the ~200–300 B quoted in older docs (#21, #22). CUDA Groth16 crashes (#20), so wrapping
+is CPU-only.
 
 ---
 

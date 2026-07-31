@@ -1,0 +1,17 @@
+[Unit]
+Description=Hazync G1 gate — every proven height must have its own retained receipt
+After=hazync-coordinator.service
+
+[Service]
+Type=oneshot
+# ⚠️ These MUST match the coordinator's own unit, or the check reads the wrong ledger and reports a
+# clean board that isn't. Verify before enabling:
+#     systemctl cat hazync-coordinator | grep -E 'COORD_DB|COORD_PROOFS'
+Environment=COORD_DB=/root/coordinator.db
+Environment=COORD_PROOFS=/root/hazync-proofs
+Environment=HZ_REPO=/root/hazync
+# A KNOWN, accepted hole goes here so it cannot mask a NEW one. Leave unset on a clean board:
+# Environment=RETENTION_ALLOW=38500-39299
+ExecStart=/bin/sh -c 'exec "$HZ_REPO/coordinator/check-retention.py" ${RETENTION_ALLOW:+--allow "$RETENTION_ALLOW"}'
+Nice=10
+IOSchedulingClass=idle

@@ -1889,6 +1889,147 @@ fn bundle_roundtrip_test() {
     else { std::process::exit(1); }
 }
 
+
+// ============================================================================================
+// G4 — proven assumeutxo: bind a UTXO snapshot to a range proof (#42)
+// ============================================================================================
+//
+// Core already ships `assumeutxo`: a node adopts a UTXO set at height N on the authority of a hash
+// its developers chose. This replaces that authority with a proof, the same substitution Hazync makes
+// for `assumevalid`. A node that verifies the proof, rebuilds the accumulator from the snapshot, and
+// finds the roots equal can start at N+1 without validating anything beneath it.
+//
+// TWO THINGS CORE'S SNAPSHOT DOES NOT GIVE YOU, and neither is an obstacle:
+//
+//   coin_mtp   The leaf commits MTP(coin_height - 1) so BIP68 time-locks are checked against Core's
+//              own value, and Core's UTXO representation does not store it. It is a pure function of
+//              the HEADER chain, which a node doing headers-first sync already has. Verified against
+//              real mainnet data: 6/6 inputs from block 195,000 reproduce exactly.
+//
+//   leaf order The forest is an ORDERED array with swap-and-pop deletion, so its layout depends on
+//              deletion history, not just on which coins are live. Two histories ending with the same
+//              live set produce different roots. A snapshot is a set, so the order must be carried —
+//              done here by EMITTING IN FOREST-POSITION ORDER, which costs zero extra bytes. The
+//              records are exactly Core's content; only the sort is specified. (Core's own
+//              `dumptxoutset` orders by outpoint, so the two files are not byte-identical.)
+//
+// Format, little-endian, no framing beyond what is written:
+//   magic "HZSNAP01" | height u32 | count u64 | count x { txid[32] vout u32 value u64
+//                                                        spk_len u32 spk[] height u32 coinbase u8 }
+// Records appear in forest-position order: record i is the coin at accumulator position i.
+
+const SNAP_MAGIC: &[u8; 8] = b"HZSNAP01";
+
+fn snapshot_emit_cmd(dir: &str, out: &str) {
+    let st = bridge_load_state(dir).expect("no bridge checkpoint in that directory");
+    // Invert the utxo map by leaf so records can be written in forest-position order. The bridge keeps
+    // `leaves` (ordered, the accumulator) and `utxo` (metadata, unordered) separately; the leaf hash is
+    // the only thing linking them.
+    let mut by_leaf: std::collections::HashMap<[u8; 32], (&([u8; 32], u32), &(u64, Vec<u8>, u32, bool))> =
+        std::collections::HashMap::with_capacity(st.utxo.len());
+    for (op, meta) in st.utxo.iter() {
+        let mtp = mtp_at(meta.2);
+        let leaf = coin_leaf(&op.0, op.1, meta.0, &meta.1, meta.2, meta.3, mtp);
+        by_leaf.insert(leaf, (op, meta));
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(SNAP_MAGIC);
+    buf.extend_from_slice(&st.height.to_le_bytes());
+    buf.extend_from_slice(&(st.leaves.len() as u64).to_le_bytes());
+    let mut missing = 0usize;
+    for leaf in &st.leaves {
+        match by_leaf.get(leaf) {
+            Some((op, meta)) => {
+                buf.extend_from_slice(&op.0);
+                buf.extend_from_slice(&op.1.to_le_bytes());
+                buf.extend_from_slice(&meta.0.to_le_bytes());
+                buf.extend_from_slice(&(meta.1.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&meta.1);
+                buf.extend_from_slice(&meta.2.to_le_bytes());
+                buf.push(meta.3 as u8);
+            }
+            None => missing += 1,
+        }
+    }
+    // A leaf with no metadata means the two halves of the bridge state disagree. Emitting a short
+    // snapshot would produce a file that simply fails to verify later, with no clue why.
+    assert!(missing == 0, "{missing} accumulator leaves have no UTXO metadata — bridge state is inconsistent");
+    std::fs::write(out, &buf).expect("write snapshot");
+    println!("wrote {out}: height {}, {} coins, {} bytes (forest-position order)",
+             st.height, st.leaves.len(), buf.len());
+}
+
+/// MTP(h-1) from the header chain — the value the leaf commits. Cached, because a snapshot has many
+/// coins per height and each miss is 22 RPC round-trips.
+fn mtp_at(coin_height: u32) -> u32 {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
+    let mut g = CACHE.lock().unwrap();
+    let c = g.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(v) = c.get(&coin_height) { return *v; }
+    let lo = coin_height.saturating_sub(11);
+    let mut ts: Vec<u32> = Vec::new();
+    for h in lo..coin_height {
+        let hash = bcli(&["getblockhash", &h.to_string()]);
+        let hdr = bcli(&["getblockheader", &hash]);
+        let t = hdr.split("\"time\":").nth(1).and_then(|x| x.split(|ch: char| !ch.is_ascii_digit()).find(|x| !x.is_empty()))
+            .and_then(|x| x.parse::<u32>().ok()).expect("header time");
+        ts.push(t);
+    }
+    ts.sort_unstable();
+    let m = ts[ts.len() / 2];
+    c.insert(coin_height, m);
+    m
+}
+
+fn snapshot_verify_cmd(snap: &str, proof: &str) {
+    let b = std::fs::read(snap).expect("read snapshot");
+    assert!(b.len() > 20 && &b[..8] == SNAP_MAGIC, "not a HZSNAP01 snapshot");
+    let height = u32::from_le_bytes(b[8..12].try_into().unwrap());
+    let count = u64::from_le_bytes(b[12..20].try_into().unwrap()) as usize;
+
+    // Rebuild every leaf FROM THE SNAPSHOT. Taking them from the bridge would only prove the bridge
+    // agrees with itself; the whole point is to check the snapshot independently.
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(count);
+    let mut p = 20usize;
+    for _ in 0..count {
+        let txid: [u8; 32] = b[p..p + 32].try_into().unwrap(); p += 32;
+        let vout = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()); p += 4;
+        let value = u64::from_le_bytes(b[p..p + 8].try_into().unwrap()); p += 8;
+        let sl = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize; p += 4;
+        let spk = b[p..p + sl].to_vec(); p += sl;
+        let ch = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()); p += 4;
+        let cb = b[p] != 0; p += 1;
+        leaves.push(coin_leaf(&txid, vout, value, &spk, ch, cb, mtp_at(ch)));
+    }
+    assert!(p == b.len(), "trailing bytes in snapshot: parsed {p} of {}", b.len());
+
+    let forest = Forest::from_leaves(leaves);
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(proof).expect("proof")).unwrap();
+    let claimed = r.journal.decode::<RangeState>().ok().map(|rs| rs.self_id);
+    verify_receipt_ex(&r, claimed);
+    let rs: RangeState = r.journal.decode().unwrap();
+    assert!(rs.self_id == METHOD_ID, "proof was made by a different guest");
+    assert!(rs.kind == KIND_RANGE, "receipt is not a RangeState");
+
+    let ok_h = rs.hi == height;
+    let ok_n = rs.out_leaves == forest.leaves.len() as u64;
+    let ok_r = normalize_host(rs.out_roots.clone()) == normalize_host(forest.roots());
+    println!("snapshot height {height}, {} coins", forest.leaves.len());
+    println!("  proof range        [{}..{}]", rs.lo, rs.hi);
+    println!("  height matches     {ok_h}");
+    println!("  leaf count matches {ok_n}   (snapshot {} vs proof {})", forest.leaves.len(), rs.out_leaves);
+    println!("  ROOTS match        {ok_r}");
+    if ok_h && ok_n && ok_r {
+        println!(">>> SNAPSHOT BOUND TO PROOF — this is the UTXO set the proof attests to.");
+        println!("    A node may adopt it at height {height} and validate from {} onward.", height + 1);
+    } else {
+        eprintln!(">>> NOT BOUND — the snapshot is not the set this proof commits to.");
+        std::process::exit(1);
+    }
+}
+
 fn bcli(args: &[&str]) -> String {
     let dd = std::env::var("HAZYNC_BITCOIN_DATADIR").unwrap_or_else(|_| "/root/.bitcoin".into());
     let o = std::process::Command::new("bitcoin-cli").arg(format!("-datadir={dd}")).args(args)
@@ -2206,6 +2347,16 @@ fn main() {
     }
     if args.iter().any(|a| a == "script-flags-test") { script_flags_test(); return; }
     if args.iter().any(|a| a == "bundle-roundtrip-test") { bundle_roundtrip_test(); return; }
+    if let Some(p) = args.iter().position(|a| a == "snapshot-emit") {
+        snapshot_emit_cmd(args.get(p + 1).map(|s| s.as_str()).unwrap_or("/root/bridge_bundles"),
+                          args.get(p + 2).expect("snapshot-emit <bridge_dir> <out.snap>"));
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "snapshot-verify") {
+        snapshot_verify_cmd(args.get(p + 1).expect("snapshot-verify <snap> <proof>"),
+                            args.get(p + 2).expect("snapshot-verify <snap> <proof>"));
+        return;
+    }
     if let Some(p) = args.iter().position(|a| a == "verify-any") {
         verify_any_cmd(args.get(p + 1).expect("verify-any <bin>"));
         return;
