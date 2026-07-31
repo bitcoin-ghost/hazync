@@ -67,6 +67,31 @@ docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive
 '
 
 cp "$REPO/prover/target/release/host" "$OUT/$asset"
+
+# Leave the HOST able to SNARK-wrap, not just to prove.
+#
+# Everything above happens inside a --rm container, so a box that has only ever run this script ends
+# up with a working prover and no way to wrap a receipt. `host snark-wrap` shells out to the risc0
+# Groth16 prover IMAGE; without it the wrap dies with "Missing required risc0-groth16 rzup component",
+# which sends you looking for an rzup component when what is actually missing is a docker image — and
+# installing rzup needs rustc, which a container-only box also does not have. That dead end cost real
+# time on 2026-07-31.
+#
+# Pulled here rather than documented, because the failure only appears at the moment you try to wrap,
+# which is long after the build looked successful. ~5.2 GB; skipped if already present, and a failure
+# is a warning rather than fatal — the binary is still good, you just cannot wrap on this box yet.
+GROTH16_IMAGE="${GROTH16_IMAGE:-risczero/risc0-groth16-prover:v2025-04-03.1}"
+if [ "${SKIP_GROTH16_PULL:-0}" != 1 ]; then
+    if docker image inspect "$GROTH16_IMAGE" >/dev/null 2>&1; then
+        echo "== groth16 prover image already present ($GROTH16_IMAGE) =="
+    else
+        echo "== pulling the groth16 prover image so this box can snark-wrap (~5.2 GB) =="
+        docker pull "$GROTH16_IMAGE" >/dev/null 2>&1 \
+            && echo "   ok — `host snark-wrap` will work on this box" \
+            || echo "   WARNING: pull failed. The prover binary is fine, but `host snark-wrap` will not run here." >&2
+    fi
+fi
+
 echo
 echo "wrote $OUT/$asset"
 echo "  METHOD_ID : $("$OUT/$asset" method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)"
