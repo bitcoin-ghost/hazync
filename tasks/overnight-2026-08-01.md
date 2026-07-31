@@ -141,3 +141,72 @@ being rebuilt: CUDA on the box, CPU here after the fix is validated.
 
 Validating the fix by reproducing the same structural case (4th leaf) under the local guest, since the
 canonical binary in `dist/` is the buggy one.
+
+---
+
+# ALL FIVE LOOP ITEMS DONE
+
+## v0.13.0 is published, signed, and `latest`
+
+<https://github.com/bitcoin-ghost/hazync/releases/tag/v0.13.0> — 6 assets + signed `SHA256SUMS`.
+Both hosts canonical `be5e0528`, both carrying the seam fix (confirmed by string-discriminating the
+shipped bytes against the pre-fix build).
+
+**The `make_latest` trap bit again, in a NEW way.** Passing `-f draft=false -f make_latest=true` in
+ONE PATCH silently did not take — `latest` still resolved to v0.12.2. It needed a **second, separate**
+PATCH with only `make_latest=true`. The size check caught it. Memory gotcha updated.
+
+Size-verified through the documented URL: host 183,988,664 and worker 37,801 — the new bytes, not a
+stale release with a self-consistent manifest.
+
+## Stranger path passed on the published release
+
+Clean environment, no `r0vm`, no toolchain: correct sizes → `sha256sum -c` OK → **Good signature** →
+selftest (incl. proving block 1) → `run` proved block **25900** in 146.3s, submitted, coordinator
+re-verified, **credited on the public board**. `hazync-worker-init` now at 2 blocks; board 25,966 (2.71%).
+
+⚠ I nearly logged the signature step as passing when the keyring was empty and gpg had actually said
+"Can't check signature: No public key". The grep matched neither Good nor BAD, and that SILENCE was
+the only tell. Re-imported and verified properly. Worth remembering: a check that prints nothing is
+not a check that passed.
+
+## Phase 3 done — the G1 retention gate now has to be able to fail
+
+`coordinator/check-retention.py` existed and **nothing ran it** — no CI job, no script, no reference
+anywhere. It runs unattended, so the dangerous failure is reporting CLEAN while a hole exists.
+
+`coordinator/test-check-retention.sh` + a CI step. Six behaviours, the second being the point:
+complete board passes; **POSITIVE CONTROL — a proven height with no receipt FAILS and says "G1
+VIOLATION"**; `--allow` accepts a known hole without masking an unrelated one; an empty board is
+vacuous but receipts-with-empty-ledger is a mismatch; a missing proof dir refuses to report clean.
+
+Scope stated in both the script and the CI step: this tests the CHECKER against synthetic fixtures.
+It does **not** verify production retention — that needs the coordinator's real DB and proof store,
+which CI has not got and should not.
+
+---
+
+# FOR YOU IN THE MORNING
+
+## Decisions waiting
+
+1. **Deploy the coordinator.** `/api/spine` and `/api/foldable` ship in v0.13.0's source but are not
+   live, so `hazync spine` and `hazync fold` are **inert in production**. This is the single thing
+   standing between the spine existing and the spine running.
+2. **`133e908` landed after v0.13.0 shipped** — the worker was reporting a missing endpoint as
+   "✗ spine submission rejected", i.e. telling contributors their proof was refused when the server
+   simply lacks the feature. Fixed in the repo. Worth a v0.13.1, or fold into the next release?
+3. **Fold cost at scale.** Answered at small span (no growth: 105.9 → 187.9 → 172.6s), but spans of
+   1-4 blocks on CPU say little about tens of thousands. Needs a long GPU run, which would compete
+   with your workers — so I did not start one.
+
+## Unpushed commits (deliberately)
+
+`133e908` (worker message fix) and `13526a8` (CI retention gate) are **local only**. Tonight's push
+authorisation was for the release; these came after it, so they follow your standing rule and wait
+for review. The CI gate only starts running once pushed.
+
+## What did NOT happen, as instructed
+
+No ghostd, no guest change, no re-baseline, no coordinator deploy, and nothing that competed with the
+GPU box's workers — the board climbed from ~19,000 to 25,966 unattended throughout.
