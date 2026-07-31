@@ -1,0 +1,73 @@
+extend-spine — seam roots must be compared NORMALIZED (#30)
+===========================================================
+
+A false-rejection bug in the host-side seam pre-check, found by absorbing one block further than the
+plan required.
+
+THE FAILURE
+-----------
+Absorbing real board block 4 into a real [1..3] spine, canonical guest be5e0528:
+
+  $ host extend-spine s3.bin p4.bin s4.bin
+  thread 'main' panicked at host/src/main.rs:1250:5:
+  assertion `left == right` failed: seam: chunk in_roots != spine out_roots
+    left:  [Some(39cf1478…), Some(b6282a8c…), None]
+    right: [Some(39cf1478…), Some(b6282a8c…)]
+
+The roots are IDENTICAL. The vectors differ only by a trailing None.
+
+WHY
+---
+The accumulator's root vector carries empty slots for absent levels, so one UTXO set has more than
+one Vec representation — [A, B] and [A, B, None] are the same accumulator. Which one you get depends
+on how the boundary was produced, and it changes as the tree gains a level.
+
+The guest normalizes before comparing (mode 7). The host pre-check did a raw assert_eq!, so it was
+STRICTER than the check it exists to pre-empt. That is the worst way for a fail-fast guard to be
+wrong: the guard was added to turn a slow guest panic into a cheap early error, and instead it
+rejected valid work outright. In production it would have stalled the spine at the first absorption
+where the accumulator gains a level — i.e. almost immediately.
+
+`normalize_host()` already existed for exactly this (main.rs:193, "mirrors the guest normalize") and
+is used at two other comparison sites. extend-spine simply did not call it.
+
+THE FIX + PROOF IT WORKS
+------------------------
+Compare `normalize_host(chunk.in_roots)` against `normalize_host(spine.out_roots)`.
+
+Re-run of the identical case (4th leaf, the structural trigger), local guest:
+
+  proved range [4..4] from bridge bundle in 77.9s -> range_4.bin
+  === EXTEND SPINE [1..3] + [4..4] -> [1..4] ===
+    spine [1..4] in 172.6s -> spine_4.bin
+    out_tip_hash 85144a84488ea88d221c8bd6c059da090e88f8a2c99690ee55dbba4e00000000
+    total_cum_work 21475164165  UTXO leaves 4
+
+  $ host verify-range spine_4.bin
+  >>> RANGE PROOF [1..4] VERIFIED — genesis-anchored, one succinct receipt.
+
+Cross-checked against the chain, not against a recorded value:
+  - out_tip is mainnet block 4 (000000004ebadb55ee9096c9a2f8880e09da59c0d68b1c228da88e48844a1485,
+    shown internal-byte-order)
+  - total_cum_work 21475164165 == 5 x 4295032833 — genesis plus four difficulty-1 blocks
+
+The negative case still fails as it should: a non-adjacent chunk is refused in 0s, writing nothing.
+Normalizing the roots did not weaken the guard, it only stopped it rejecting equal accumulators.
+
+BONUS: THE FLAT-FOLD-COST QUESTION IS ANSWERED (n=3)
+---------------------------------------------------
+This absorption was originally run to settle whether fold cost grows with spine length, which the
+whole-chain projection (~9,580 folds) depends on.
+
+  [1..1] + [2..2] -> [1..2]   105.9s
+  [1..2] + [3..3] -> [1..3]   187.9s
+  [1..3] + [4..4] -> [1..4]   172.6s     <- LOWER than the previous one
+
+Cost does NOT grow with spine length. The apparent increase at n=2 — which showed up in BOTH the
+local-guest run (105.9 -> 187.9, 1.77x) and the real-receipt run (115.4 -> 200.4, 1.74x) — is a
+one-time step, not a trend: the left operand changes from a LEAF receipt to a FOLDED one, and a
+folded receipt costs more to carry as an assumption. After that step it is flat.
+
+HONEST LIMIT OF THIS RESULT: spans here are 1..4 blocks, on CPU. It shows no growth across a span
+change of 1 -> 3, which is weak evidence about spans of tens of thousands. It removes the alarm — the
+n=2 reading was an artifact — but a long GPU run is still what would confirm flatness at scale.

@@ -1247,7 +1247,18 @@ fn extend_spine_cmd(spine: &str, next: &str, out: &str) {
     // in_tip: nbits/time/epoch_start/recent feed the retarget and MTP, and roots/leaves are the UTXO
     // carry. A seam that matched on tip alone could still splice two incompatible chain contexts.
     assert_eq!(ns.in_tip_hash, ss.out_tip_hash, "seam: chunk in_tip != spine out_tip");
-    assert_eq!(ns.in_roots, ss.out_roots, "seam: chunk in_roots != spine out_roots");
+    // Roots must be compared NORMALIZED. The accumulator's root vector carries empty slots for absent
+    // levels, so the same UTXO set has more than one representation — [A, B] and [A, B, None] differ
+    // as Vecs and are identical as accumulators. A raw compare rejects a perfectly valid adjacent
+    // chunk whenever the two sides happen to carry different trailing padding.
+    //
+    // Found by running it: absorbing real board block 4 into [1..3] failed the seam with left
+    // [Some(A), Some(B), None] against right [Some(A), Some(B)] — same roots, different padding. The
+    // guest normalizes before comparing, so this host check was STRICTER than the thing it exists to
+    // pre-empt, which is the worst way for a fail-fast check to be wrong: it turns a cheap early
+    // warning into a false rejection of valid work.
+    assert_eq!(normalize_host(ns.in_roots.clone()), normalize_host(ss.out_roots.clone()),
+        "seam: chunk in_roots != spine out_roots (normalized)");
     assert_eq!(ns.in_leaves, ss.out_leaves, "seam: chunk in_leaves != spine out_leaves");
     assert_eq!(ns.in_nbits, ss.out_nbits, "seam: chunk in_nbits != spine out_nbits");
     assert_eq!(ns.in_time, ss.out_time, "seam: chunk in_time != spine out_time");
