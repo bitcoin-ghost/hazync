@@ -34,6 +34,7 @@ HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
 PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file__), "proofs"))  # kept, downloadable
+SPINE_DIR  = os.environ.get("COORD_SPINE", os.path.join(os.path.dirname(__file__), "spine"))    # the genesis-anchored head
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
 # A claim expires this long after it is TAKEN — not after a heartbeat stops, because there are no
 # heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
@@ -371,6 +372,117 @@ def verify_receipt(receipt: bytes, rng):
     finally:
         try: os.remove(tmp)
         except Exception: pass
+
+# ── the spine: the genesis-anchored head (#30) ────────────────────────────────────────────────────
+#
+# The board proves blocks; the spine is the single artifact that says "everything from genesis to N is
+# valid", and it ADVANCES rather than being re-folded (`spine [1..N] + chunk [N+1..M] -> [1..M]`).
+#
+# The coordinator does not build it — extending is a PROVE op and this box has no GPU. It stores,
+# verifies and serves it. Whoever advances the spine is a LIVENESS single point of failure, not a
+# soundness one: every extension is re-verified here, and because per-block receipts are retained
+# anyone can rebuild the spine from scratch without re-proving anything.
+
+def spine_head():
+    """Current spine metadata, or None. Cheap: reads a small json, never the receipt."""
+    try:
+        with open(os.path.join(SPINE_DIR, "spine.json")) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def verify_spine(receipt: bytes):
+    """Verify a submitted spine head. Returns (ok, note, meta).
+
+    TWO checks, deliberately, because they answer different questions and neither implies the other:
+
+      `verify-range`  enforces the FULL genesis in-boundary — lo == 1, in_tip == genesis, the empty
+                      accumulator, nBits, epoch start and the median-time window. Gate on its exit
+                      code only; nothing is parsed out of it, so there is no free-text to trust.
+      `verify-any`    re-verifies and prints one machine-readable RANGE-OK line, which is where lo/hi
+                      and the tips come from.
+
+    Using verify-any alone would accept a range that is valid but anchored anywhere — exactly the
+    fabricated-anchor case the genesis pin exists to refuse. Parsing verify-range's prose instead
+    would mean trusting free text for consensus-relevant numbers. So: gate on one, read from the other.
+    """
+    if VERIFY == "mock":
+        if not os.environ.get("COORD_ALLOW_MOCK"):
+            return False, "mock verification is disabled; set COORD_ALLOW_MOCK=1 (GPU-less testing only)", None
+        return True, "mock-verified (VERIFY_MODE=mock)", {"lo": 1, "hi": 0, "out_tip": "mock", "in_tip": GENESIS_TIP}
+    if not HOST_BIN or not os.path.exists(HOST_BIN):
+        return False, "no HAZYNC_HOST binary configured for real verification", None
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, f"spine_{hashlib.sha256(receipt).hexdigest()[:12]}_{threading.get_ident()}.bin")
+    with open(tmp, "wb") as f:
+        f.write(receipt)
+    try:
+        g = subprocess.run([HOST_BIN, "verify-range", tmp], capture_output=True, timeout=180)
+        if g.returncode != 0:
+            both = (g.stdout + g.stderr).decode(errors="replace")
+            if "MISMATCH" in both:
+                return False, ("spine rejected: guest image id (METHOD_ID) does not match this coordinator's — "
+                               "it was built against a different guest."), None
+            # The usual cause is a receipt that verifies but is not anchored at genesis.
+            return False, "spine rejected — not a genesis-anchored range proof: " + both[-200:], None
+        r = subprocess.run([HOST_BIN, "verify-any", tmp], capture_output=True, timeout=180)
+        line = next((l for l in r.stdout.decode(errors="replace").splitlines() if l.startswith("RANGE-OK")), None)
+        if r.returncode != 0 or line is None:
+            return False, "spine rejected — verify-any produced no RANGE-OK line", None
+        kv = dict(t.split("=", 1) for t in line[len("RANGE-OK"):].split() if "=" in t)
+        lo, hi = int(kv["lo"]), int(kv["hi"])
+        if lo != 1:
+            return False, f"spine must start at block 1, got [{lo}..{hi}]", None
+        return True, f"spine [1..{hi}] VERIFIED genesis-anchored", {
+            "lo": lo, "hi": hi, "in_tip": kv.get("in_tip", ""), "out_tip": kv.get("out_tip", ""),
+            "out_leaves": int(kv.get("out_leaves", 0)), "range_work": kv.get("range_work", "0")}
+    except Exception as e:
+        return False, f"spine verify error: {e}", None
+    finally:
+        try: os.remove(tmp)
+        except Exception: pass
+
+def submit_spine(body):
+    """Accept an extended spine. Monotonic: a head that does not advance is refused."""
+    pk, sig = body.get("pubkey", ""), body.get("sig", "")
+    receipt_b64, handle = body.get("receipt", ""), clean_handle(body.get("handle"))
+    if not receipt_b64: return 400, {"error": "receipt required"}
+    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
+    if len(receipt_b64) > MAX_BODY: return 413, {"error": "receipt too large"}
+    try: receipt = base64.b64decode(receipt_b64)
+    except Exception: return 400, {"error": "receipt must be base64"}
+    if not verify_sig(pk, sig, receipt):
+        return 403, {"error": "signature invalid"}
+
+    cur = spine_head()
+    with _verify_sem:
+        ok, note, meta = verify_spine(receipt)
+    if not ok:
+        return 400, {"error": note}
+
+    # Monotonic under the lock. Two workers may extend concurrently (duplicate spine work is harmless
+    # by design); the shorter result must not overwrite the longer one.
+    with _lock:
+        cur = spine_head()
+        if cur and meta["hi"] <= int(cur.get("hi", 0)):
+            return 409, {"error": f"spine already at [1..{cur['hi']}]; submitted [1..{meta['hi']}] does not advance it",
+                         "head": cur}
+        os.makedirs(SPINE_DIR, exist_ok=True)
+        head = {"lo": 1, "hi": meta["hi"], "out_tip": meta["out_tip"], "out_leaves": meta["out_leaves"],
+                "range_work": meta["range_work"], "sha256": hashlib.sha256(receipt).hexdigest(),
+                "bytes": len(receipt), "handle": handle, "pubkey": pk, "ts": time.time()}
+        # Write both atomically-ish: receipt first, then the json that advertises it. A crash between
+        # the two leaves a stale json pointing at a shorter spine, which is safe; the reverse would
+        # advertise a head whose bytes are absent.
+        tmp_bin = os.path.join(SPINE_DIR, ".spine.bin.tmp")
+        with open(tmp_bin, "wb") as f: f.write(receipt)
+        os.replace(tmp_bin, os.path.join(SPINE_DIR, "spine.bin"))
+        tmp_js = os.path.join(SPINE_DIR, ".spine.json.tmp")
+        with open(tmp_js, "w") as f: json.dump(head, f)
+        os.replace(tmp_js, os.path.join(SPINE_DIR, "spine.json"))
+    return 200, {"ok": True, "note": note, "head": head}
 
 def _frontier_chain():
     """Select the MOST-WORK genesis-anchored chain (Bitcoin's rule), not merely the tallest one.
@@ -846,6 +958,17 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
                                     "reproduce": "reproduce/METHOD_ID",
                                     "source_sha256": source_sha256()})
+        if p == "/api/spine":                              # the headline artifact: genesis -> N in one receipt
+            head = spine_head()
+            if not head:
+                return self._send(404, {"error": "no spine yet — nothing has been folded from genesis",
+                                        "hint": "extend one with `host extend-spine` and POST it here"})
+            return self._send(200, head)
+        if p == "/api/spine/proof":                        # the receipt itself; check it with `hazync-verify`
+            f = os.path.join(SPINE_DIR, "spine.bin")
+            if os.path.exists(f):
+                return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
+            return self._send(404, {"error": "no spine yet"})
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
             if parse_range(rid):
@@ -878,14 +1001,14 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
-        fn = {"/api/submit": submit, "/api/claim": claim}[p]
+        fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 
