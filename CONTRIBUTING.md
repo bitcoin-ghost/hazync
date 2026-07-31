@@ -30,12 +30,13 @@ Download the prebuilt prover — it's the **canonical guest**, so the coordinato
 
 ```
 # the prover binary (canonical guest, GPU)
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
-chmod +x host
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
+chmod +x hazync-host-x86_64-linux-gnu-cuda
 # the contributor CLI — a SIGNED release artifact, covered by SHA256SUMS.txt.asc
-curl -L -o hazync https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-worker
-curl -L -o run-workers.sh https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/run-workers.sh
-chmod +x hazync run-workers.sh
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-worker
+curl -LO https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/run-workers.sh
+chmod +x hazync-worker run-workers.sh
+ln -sf hazync-worker hazync      # a shorter name to type; the real file keeps the asset name
 sudo apt install -y python3-cryptography
 ```
 
@@ -43,6 +44,24 @@ sudo apt install -y python3-cryptography
 `hazync`; it looks for the CLI beside itself.)
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
+
+> **The CPU binary needs `r0vm`, the RISC0 VM, and it is not bundled.** Without it a prove dies
+> immediately with a bare `No such file or directory (os error 2)`, which says nothing about what is
+> missing. The CUDA binary links its prover in and does not need this.
+>
+> ```bash
+> curl -L https://risczero.com/install | bash     # needs rustc; installs rzup
+> "$HOME/.risc0/bin/rzup" install r0vm 3.0.5
+> command -v r0vm            # must print a path before you run `hazync run`
+> ```
+>
+> `hazync selftest` does **not** catch this today — it checks the guest id and can verify a proof,
+> neither of which needs r0vm. It is the first `hazync run` that fails.
+
+**Keep the asset filenames.** `SHA256SUMS.txt` lists them, so downloading with `-LO` means
+`sha256sum -c --ignore-missing SHA256SUMS.txt` verifies what you got. Renaming on download
+(`-o host`) makes it report *"no file was verified"* — which looks like a signature problem and is
+not. Symlink or rename afterwards if you want shorter names.
 
 Take the CLI from the **release**, not from a raw source URL: it holds your ed25519 signing key and
 decides what gets submitted under your name, so it is the artifact most worth having a signature on.
@@ -58,7 +77,7 @@ Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`S
 # Both of these are OPTIONAL now — the CLI defaults to the public party and finds the prover
 # beside itself. Set them only if you are pointing somewhere else.
 export COORD_URL=https://bitcoinghost.org/hazync
-export HAZYNC_HOST=$PWD/host
+export HAZYNC_HOST=$PWD/hazync-host-x86_64-linux-gnu-cuda
 export WITNESS_DIR=$PWD/w
 ./hazync id yourname
 ```
@@ -92,7 +111,7 @@ supplied loop — it keeps N workers going and, importantly, refuses to start if
 match the coordinator's:
 
 ```
-HAZYNC_HOST=./host ./run-workers.sh 4          # 4 parallel workers, logs in ~/hazync-workers
+HAZYNC_HOST=./hazync-host-x86_64-linux-gnu-cuda ./run-workers.sh 4          # 4 parallel workers, logs in ~/hazync-workers
 ./run-workers.sh 4 --stop
 ```
 
@@ -113,7 +132,7 @@ You never have to trust the party. Every verified proof is public — fetch any 
 
 ```
 # 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
 chmod +x host
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code

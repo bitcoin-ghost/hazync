@@ -32,6 +32,13 @@ gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature 
 sha256sum -c --ignore-missing SHA256SUMS.txt      # → hazync-host-x86_64-linux-gnu: OK
 ```
 
+**`gpg` will also warn that the key "is not certified with a trusted signature".** That is expected and
+is not a problem with the signature: it means *you* have not personally signed this key, which nobody
+has on a fresh keyring. What matters is the `Good signature` line and that the fingerprint matches the
+one above. If you want the warning to go away, sign the key locally (`gpg --lsign-key
+852C2B3190F5B928`) — but check the fingerprint against a second source first, because that is the step
+the warning is asking you to think about.
+
 `--ignore-missing` matters: the manifest covers **both** published binaries (CPU and CUDA), so a plain
 `sha256sum -c` reports `FAILED open or read` and exits non-zero for the one you didn't download. That is
 the command complaining about a missing file, not about a bad checksum — but it looks alarming, so use
