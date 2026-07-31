@@ -66,8 +66,15 @@ docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive
     echo "=== smoke ==="; $H bundle-roundtrip-test; $H regress
     # Stage r0vm into the MOUNTED repo so it survives this --rm container. `host snark-wrap` shells
     # out to it, and provision installs it in here where nothing on the host can reach it.
-    R=$(command -v r0vm || ls /root/.risc0/bin/r0vm 2>/dev/null || true)
-    if [ -n "$R" ]; then mkdir -p /repo/dist && cp "$R" /repo/dist/r0vm && echo "=== staged r0vm ($(stat -c%s "$R") bytes) ==="; fi
+    # Do not guess rzup'"'"'s layout — it has moved between versions and both guesses (PATH, and
+    # ~/.risc0/bin) came back empty on 2026-07-31 even though the log said r0vm was installed. Search.
+    R=$(command -v r0vm 2>/dev/null || find /root/.risc0 -name r0vm -type f 2>/dev/null | head -1)
+    if [ -n "$R" ]; then
+        mkdir -p /repo/dist && cp "$R" /repo/dist/r0vm && echo "=== staged r0vm from $R ($(stat -c%s "$R") bytes) ==="
+    else
+        echo "=== WARNING: no r0vm found in the container; snark-wrap will not work on this host ===" >&2
+        find /root/.risc0 -maxdepth 3 -type d 2>/dev/null | head -10 >&2
+    fi
 '
 
 cp "$REPO/prover/target/release/host" "$OUT/$asset"
