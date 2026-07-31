@@ -112,11 +112,30 @@ mv -f "$OUT/.$asset.tmp.$$" "$OUT/$asset"
 # and wrapping is not the expensive step.
 # r0vm is the other half of being able to wrap: `host snark-wrap` shells out to it, and the container
 # installs it somewhere only the container can see. Staged out above; installed here.
+# /usr/local/bin needs root, and this script is deliberately runnable as an ordinary user (it only
+# needs docker). Rather than warn and leave the box unable to wrap, fall back to a user-writable
+# directory and SAY what to do about it — the previous message ("could not install r0vm (need
+# root?)") named the failure but left the reader to work out the remedy, and it fires on every
+# non-root build, so it read as noise and got ignored.
 if [ -f "$REPO/dist/r0vm" ]; then
     if [ ! -x /usr/local/bin/r0vm ] || ! cmp -s "$REPO/dist/r0vm" /usr/local/bin/r0vm; then
-        install -m 0755 "$REPO/dist/r0vm" /usr/local/bin/r0vm 2>/dev/null \
-            && echo "== installed r0vm -> /usr/local/bin/r0vm ==" \
-            || echo "   WARNING: could not install r0vm (need root?); snark-wrap will not run here." >&2
+        if install -m 0755 "$REPO/dist/r0vm" /usr/local/bin/r0vm 2>/dev/null; then
+            echo "== installed r0vm -> /usr/local/bin/r0vm =="
+        else
+            FALLBACK="${R0VM_DEST:-$HOME/.local/bin}"
+            if mkdir -p "$FALLBACK" 2>/dev/null && install -m 0755 "$REPO/dist/r0vm" "$FALLBACK/r0vm" 2>/dev/null; then
+                echo "== installed r0vm -> $FALLBACK/r0vm (no root; /usr/local/bin needs sudo) =="
+                case ":$PATH:" in
+                    *":$FALLBACK:"*) ;;
+                    *) echo "   NOTE: $FALLBACK is not on your PATH — \`host snark-wrap\` will not find r0vm."
+                       echo "         Add it:  export PATH=\"$FALLBACK:\$PATH\"" ;;
+                esac
+            else
+                echo "   NOTE: r0vm not installed (tried /usr/local/bin and $FALLBACK)." >&2
+                echo "         Proving and verifying work regardless; only \`host snark-wrap\` needs it." >&2
+                echo "         To install:  sudo install -m 0755 $REPO/dist/r0vm /usr/local/bin/r0vm" >&2
+            fi
+        fi
     fi
     rm -f "$REPO/dist/r0vm"
 fi
