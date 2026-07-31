@@ -108,12 +108,14 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.12.2**, shipping `METHOD_ID be5e0528` — the same
-guest as v0.12.0 and v0.12.1. v0.12.2 fixes a **CPU prover that could not prove**: the binary was
-built without risc0's `prove` feature, so it shelled out to `r0vm`, which the release does not ship,
-and a contributor without a GPU got `No such file or directory (os error 2)` on their first run. The
-CUDA binary was unaffected — `cuda = ["prove", ...]` links the prover in — so the GPU path worked and
-the no-GPU path did not. The guest is untouched, so **every v0.12.0 and v0.12.1 proof stays valid**.
+either way. **Releases:** the current release is **v0.13.0**, shipping `METHOD_ID be5e0528` — the same guest as
+v0.12.x, so **every existing proof stays valid**. v0.13.0 adds the two things that let volunteered
+compute accumulate rather than pile up: an **incremental genesis-anchored spine**
+(`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
+chunks instead of being re-folded from scratch, and **folding as a task in its own right**
+(`/api/foldable`, `hazync fold`) so it no longer depends on claim width — at width-1 claims nothing
+was being folded at all. The previous release, v0.12.2, fixed a CPU prover that could not prove: it
+was built without risc0's `prove` feature and shelled out to `r0vm`, which the release does not ship.
 
 > **v0.12.0 re-baselines the guest twice over, and the board restarted from genesis.** The
 > accumulator's leaf and interior hashes are now domain-separated (which changes every leaf hash), and
