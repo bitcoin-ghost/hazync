@@ -1202,6 +1202,92 @@ fn fold_range_cmd(left: &str, right: &str, out: &str) {
     println!("folded -> range [{}..{}] in {:.1}s -> {out}", rs.lo, rs.hi, t.elapsed().as_secs_f64());
 }
 
+// `extend-spine <spine.bin> <next.bin> <out.bin>`: advance the genesis-anchored spine by absorbing one
+// adjacent chunk. This is #30's whole point — the spine must EXTEND, never be re-folded from scratch.
+// Re-folding [1..N] every time the board grows makes the cost both recur and grow with the board,
+// which is what made a one-off fold look like a 21-hour job that gets worse every day you wait.
+//
+//     spine [1..N]  +  chunk [N+1..M]   ->   spine [1..M]
+//
+// Mechanically this is `fold-range`. What it adds is the checks around the fold, in both directions:
+//
+//   BEFORE — adjacency and the full seam are checked on the HOST, in milliseconds. The guest checks
+//   the seam too (mode 7), so an unchecked mismatch is caught either way — but it is caught after a
+//   multi-second GPU fold and reported as a guest panic. Absorption is the one serial step in the
+//   system; making its failures cheap and legible is worth the duplication.
+//
+//   AFTER — the result must still be genesis-anchored AND must actually have advanced. A fold that
+//   silently returned the left operand would verify perfectly and stall the spine forever, so the
+//   post-conditions assert hi/out_tip moved to the chunk's.
+fn extend_spine_cmd(spine: &str, next: &str, out: &str) {
+    use std::time::Instant;
+    let sr: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(spine).expect("spine")).unwrap();
+    let nr: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(next).expect("next")).unwrap();
+    verify_receipt(&sr);
+    verify_receipt(&nr);
+    let ss: RangeState = sr.journal.decode().expect("spine journal is not a RangeState");
+    let ns: RangeState = nr.journal.decode().expect("next journal is not a RangeState");
+
+    assert!(ss.kind == KIND_RANGE, "spine is not a RangeState (domain tag)");
+    assert!(ns.kind == KIND_RANGE, "next is not a RangeState (domain tag)");
+    assert!(ss.self_id == METHOD_ID, "spine self_id != METHOD_ID");
+    assert!(ns.self_id == METHOD_ID, "next self_id != METHOD_ID");
+
+    // The spine must be genesis-anchored. Absorbing into a non-anchored range would produce a proof
+    // that looks like a spine and attests nothing about genesis.
+    assert_eq!(ss.lo, 1, "spine must start at block 1 — {} is not a spine", ss.lo);
+    assert_genesis_in_boundary(&ss);
+
+    assert_eq!(ns.lo, ss.hi + 1,
+        "chunk is not adjacent: spine ends at {} so the chunk must start at {}, but starts at {}",
+        ss.hi, ss.hi + 1, ns.lo);
+    assert!(ns.hi >= ns.lo, "chunk has an empty range [{}..{}]", ns.lo, ns.hi);
+
+    // Full seam equality. out_tip alone is not enough for the same reason the genesis pin is not just
+    // in_tip: nbits/time/epoch_start/recent feed the retarget and MTP, and roots/leaves are the UTXO
+    // carry. A seam that matched on tip alone could still splice two incompatible chain contexts.
+    assert_eq!(ns.in_tip_hash, ss.out_tip_hash, "seam: chunk in_tip != spine out_tip");
+    assert_eq!(ns.in_roots, ss.out_roots, "seam: chunk in_roots != spine out_roots");
+    assert_eq!(ns.in_leaves, ss.out_leaves, "seam: chunk in_leaves != spine out_leaves");
+    assert_eq!(ns.in_nbits, ss.out_nbits, "seam: chunk in_nbits != spine out_nbits");
+    assert_eq!(ns.in_time, ss.out_time, "seam: chunk in_time != spine out_time");
+    assert_eq!(ns.in_epoch_start, ss.out_epoch_start, "seam: chunk in_epoch_start != spine out_epoch_start");
+    assert_eq!(ns.in_recent, ss.out_recent, "seam: chunk in_recent != spine out_recent");
+
+    println!("=== EXTEND SPINE [1..{}] + [{}..{}] -> [1..{}] ===", ss.hi, ns.lo, ns.hi, ns.hi);
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.add_assumption(sr.clone());
+    b.add_assumption(nr.clone());
+    b.write(&7u32).unwrap();
+    b.write(&METHOD_ID).unwrap();
+    b.write(&sr.journal.bytes).unwrap();
+    b.write(&nr.journal.bytes).unwrap();
+    let t = Instant::now();
+    let receipt = default_prover()
+        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
+        .expect("extend spine").receipt;
+    receipt.verify(METHOD_ID).expect("extended spine failed to verify");
+    let rs: RangeState = receipt.journal.decode().expect("folded journal is not a RangeState");
+
+    // Post-conditions: still a spine, and it moved.
+    assert!(rs.kind == KIND_RANGE, "folded receipt is not a RangeState");
+    assert_eq!(rs.lo, 1, "extended spine no longer starts at block 1");
+    assert_genesis_in_boundary(&rs);
+    assert_eq!(rs.hi, ns.hi, "extended spine ends at {} but the chunk ended at {}", rs.hi, ns.hi);
+    assert_eq!(rs.out_tip_hash, ns.out_tip_hash, "extended spine out_tip != chunk out_tip");
+    assert!(rs.hi > ss.hi, "spine did not advance: still ends at {}", rs.hi);
+
+    std::fs::write(out, bincode::serialize(&receipt).unwrap()).unwrap();
+    let mut total = arr_u128(GENESIS_WORK);
+    add256_host(&mut total, &rs.range_work);
+    println!("  spine [1..{}] in {:.1}s -> {out}", rs.hi, t.elapsed().as_secs_f64());
+    println!("  out_tip_hash {}  total_cum_work {}  UTXO leaves {}",
+        hex(&rs.out_tip_hash), work_u128(&total), rs.out_leaves);
+    println!("  absorbed {} block(s); the spine is genesis-anchored and shippable as it stands.",
+        ns.hi - ns.lo + 1);
+}
+
 // Pin the FULL genesis in-boundary of a range proof. in_tip alone is not enough: in_epoch_start feeds
 // the first retarget (block 2016) via calc_next_bits and propagates unchanged across fold seams, so an
 // unpinned value forges that retarget's difficulty (up to 4x easier) and understates cum_work; in_roots
@@ -2342,6 +2428,13 @@ fn main() {
     if let Some(p) = args.iter().position(|a| a == "fold-range") {
         let (l, r, o) = (args.get(p + 1).expect("left"), args.get(p + 2).expect("right"), args.get(p + 3).expect("out"));
         fold_range_cmd(l, r, o);
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "extend-spine") {
+        let (s, n, o) = (args.get(p + 1).expect("extend-spine <spine.bin> <next.bin> <out.bin>"),
+                         args.get(p + 2).expect("extend-spine <spine.bin> <next.bin> <out.bin>"),
+                         args.get(p + 3).expect("extend-spine <spine.bin> <next.bin> <out.bin>"));
+        extend_spine_cmd(s, n, o);
         return;
     }
     if let Some(p) = args.iter().position(|a| a == "verify-range") {

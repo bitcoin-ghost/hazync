@@ -1,0 +1,70 @@
+extend-spine — incremental genesis-anchored spine (#30)
+=======================================================
+
+Host built locally (NON-canonical guest id 72fb6608 — HOME=/home/defenwycke, not the container's
+/root). That is fine for a logic test: every receipt below was proved by THIS binary, so the ids are
+self-consistent. It does mean these receipts cannot be folded with board receipts, which are be5e0528.
+
+Inputs: blocks 1, 2, 3 proved from archive bundles fetched from the live coordinator
+(`/api/witness/<h>`), via `prove-range-bridge` — 79.2s, 80.2s, 80.0s on 16-core CPU.
+
+NEGATIVE — non-adjacent chunk must be refused host-side, before any proving
+--------------------------------------------------------------------------
+$ host extend-spine range_1.bin range_3.bin bad.bin
+thread 'main' panicked at host/src/main.rs:1241:5:
+assertion `left == right` failed: chunk is not adjacent: spine ends at 1 so the chunk must start at 2, but starts at 3
+
+  elapsed 0s; no output file written.
+
+This is the point of the host-side checks. The guest checks the seam too (mode 7), but it does so
+AFTER a fold — here a ~100-190s CPU fold, ~2s on an L40S — and reports it as a guest panic. Absorption
+is the one serial step in the system, so its failures are made cheap and legible.
+
+POSITIVE — the spine extends, twice
+-----------------------------------
+$ host extend-spine range_1.bin range_2.bin spine_2.bin
+=== EXTEND SPINE [1..1] + [2..2] -> [1..2] ===
+  spine [1..2] in 105.9s -> spine_2.bin
+  out_tip_hash bddd99ccfda39da1b108ce1a5d70038d0a967bacb68b6b63065f626a00000000  total_cum_work 12885098499  UTXO leaves 2
+
+$ host extend-spine spine_2.bin range_3.bin spine_3.bin
+=== EXTEND SPINE [1..2] + [3..3] -> [1..3] ===
+  spine [1..3] in 187.9s -> spine_3.bin
+  out_tip_hash 4944469562ae1c2c74d9a535e00b6f3e40ffbad4f2fda3895501b58200000000  total_cum_work 17180131332  UTXO leaves 3
+
+The second call consumed the OUTPUT of the first. That is the whole point of #30: the spine extends,
+it is never re-folded from scratch.
+
+VERIFIED as genesis-anchored
+----------------------------
+$ host verify-range spine_3.bin
+>>> RANGE PROOF [1..3] VERIFIED — genesis-anchored, one succinct receipt.
+  out_tip_hash 4944469562ae1c2c74d9a535e00b6f3e40ffbad4f2fda3895501b582 00000000
+  range_work 12885098499  total_cum_work 17180131332  UTXO leaves 3
+
+Cross-checks against the real chain (not against a recorded value):
+  - out_tip is mainnet block 3 (0000000082b5015589a3fdf2d4baff403e6f0be035a5d9742c1cae6295464449,
+    shown internal-byte-order with the zeros at the back)
+  - total_cum_work 17180131332 == 4 x 4295032833 — genesis plus three blocks at difficulty 1
+  - UTXO leaves 3 — one coinbase output per block, none spent this early
+
+Receipt size does not grow with span
+------------------------------------
+  range_1.bin  224490 B   [1..1]
+  spine_2.bin  224506 B   [1..2]
+  spine_3.bin  224770 B   [1..3]
+
+A succinct receipt, so the artifact stays ~224 KB whatever the span. (SNARK-wrapping takes it to
+~1.8 KB — measured separately, #21/#22.)
+
+UNRESOLVED — fold cost may not be flat in span
+----------------------------------------------
+105.9s then 187.9s. The design states fold cost is flat in range length, because a fold verifies two
+receipts and checks a seam regardless of span, and that is measured at 2.00 s/fold on an L40S. These
+two points go the other way, and n=2 on CPU is not evidence of a trend — the second fold's left
+operand is itself a folded receipt, which may cost more to verify as an assumption than a leaf
+receipt does.
+
+Not a conclusion, an open question. It matters at scale: if absorption cost grows with spine length,
+the ~9,580-fold projection for the whole chain is wrong. Measure on GPU across a long run of
+absorptions before relying on the flat-cost assumption.
