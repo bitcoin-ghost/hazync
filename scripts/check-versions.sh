@@ -81,10 +81,20 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -n "$(git tag -l 'v*
     claimed=$(grep -ohE 'current release is \*\*(v[0-9]+\.[0-9]+\.[0-9]+)\*\*' docs/PROVING.md 2>/dev/null \
               | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -n "$claimed" ]; then
+        # AHEAD is legitimate; BEHIND is the bug. Requiring exact equality made the check fail in both
+        # directions, so there was no way to stage a release: updating the doc first failed (doc ahead
+        # of tag), and tagging first failed (doc behind tag). The only passing state was doc and tag
+        # landing in the same push, which is not how a reviewable change works.
+        #
+        # A doc naming a version NEWER than the newest tag is a release in preparation. A doc naming an
+        # OLDER one is finding #2 above — PROVING said v0.9.1 after v0.10.0 shipped — and still fails.
+        newer=$(printf '%s\n%s\n' "$claimed" "$NEWEST" | sort -V | tail -1)
         if [ "$claimed" = "$NEWEST" ]; then
             note "ok   docs/PROVING.md current release ($claimed) == newest tag"
+        elif [ "$newer" = "$claimed" ]; then
+            note "ok   docs/PROVING.md names $claimed, ahead of the newest tag $NEWEST (release in preparation)"
         else
-            bad "docs/PROVING.md says the current release is $claimed but the newest tag is $NEWEST"
+            bad "docs/PROVING.md says the current release is $claimed but the newest tag is $NEWEST — stale"
         fi
     fi
 else
