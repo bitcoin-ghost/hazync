@@ -492,8 +492,18 @@ def cmd_run(args):
         sug = (res or {}).get("suggest") or []
         if not sug:
             sys.exit("coordinator suggested nothing — the board may be complete, or no witness is served yet.")
-        rng = str(random.choice(sug))
-        print(f"proving {rng}  (sampled from {len(sug)} suggestions; any height is accepted)")
+        # Sample with a strong bias toward the FRONT of the list.
+        #
+        # /api/hint returns the lowest unproven heights first, so index 0 is whatever is blocking the
+        # frontier. Uniform sampling gives that block a 1/32 chance while 31 forward blocks compete
+        # with it, so the fleet outruns its own holes: measured at 218 proofs spanning 1..239 with 21
+        # holes and a frontier of 58 — 160 proofs stranded above it, uncounted, because the frontier
+        # only advances through a contiguous run.
+        #
+        # u**2 keeps the decorrelation that stops workers colliding while putting most picks near the
+        # front: roughly half of all picks land in the first quarter of the list.
+        rng = str(sug[min(len(sug) - 1, int(len(sug) * random.random() ** 2))])
+        print(f"proving {rng}  (front-biased pick from {len(sug)}; any height is accepted)")
     cmd_prove([rng]); cmd_submit([rng])
 
 def main():
