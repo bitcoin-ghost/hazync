@@ -31,6 +31,7 @@ HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
 HANDLE  = HOME / "handle"
 RCPTDIR = HOME / "receipts"
+SPEEDF  = HOME / "secs_per_block"   # measured prove time, so the coordinator can suggest work we can finish
 
 # Default to the PUBLIC party, not localhost. Almost nobody running this has a coordinator of their
 # own — they downloaded a release and want to contribute — and localhost sends them to a connection
@@ -307,6 +308,7 @@ def cmd_prove(args):
         print(f"archive bundles unavailable — replaying from genesis for blocks {start}..{hi}")
     # No heartbeat thread. It existed to keep a CLAIM alive while a long prove ran; with nothing
     # allocated there is no lease to renew, and a worker that dies simply stops.
+    _t_start = time.time()
     try:
         total = hi - start + 1
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) — the expensive step…")
@@ -317,6 +319,14 @@ def cmd_prove(args):
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
         _fold_and_save(parts, out, work, env)
+        # Remember how long a block actually takes US. The coordinator uses it to suggest work far
+        # enough ahead that the rest of the fleet will not have taken it by the time we finish — a
+        # slow prover racing for the frontier loses every time and wastes the whole prove.
+        try:
+            per = (time.time() - _t_start) / max(1, total)
+            SPEEDF.write_text(f"{per:.1f}")
+        except Exception:
+            pass
         print("receipt:", out)
     finally:
         pass
@@ -492,7 +502,13 @@ def cmd_run(args):
         # lock or allocation. Duplicates still happen and are still harmless; they just stop being the
         # common case.
         import random
-        res = post("/api/hint", {"count": 32})
+        req = {"count": 32}
+        try:
+            if SPEEDF.exists():
+                req["secs_per_block"] = float(SPEEDF.read_text().strip())
+        except Exception:
+            pass
+        res = post("/api/hint", req)
         sug = (res or {}).get("suggest") or []
         if not sug:
             sys.exit("coordinator suggested nothing — the board may be complete, or no witness is served yet.")
@@ -507,7 +523,9 @@ def cmd_run(args):
         # u**2 keeps the decorrelation that stops workers colliding while putting most picks near the
         # front: roughly half of all picks land in the first quarter of the list.
         rng = str(sug[min(len(sug) - 1, int(len(sug) * random.random() ** 2))])
-        print(f"proving {rng}  (front-biased pick from {len(sug)}; any height is accepted)")
+        off = (res or {}).get("offset") or 0
+        note = f"; offset {off} for your measured pace" if off else ""
+        print(f"proving {rng}  (front-biased pick from {len(sug)}{note}; any height is accepted)")
     cmd_prove([rng]); cmd_submit([rng])
 
 def main():

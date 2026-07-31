@@ -713,6 +713,39 @@ def hint(body):
         n = max(1, min(64, int(body.get("count", 1))))
     except Exception:
         n = 1
+
+    # OFFSET THE WINDOW BY HOW SLOW THE ASKER IS.
+    #
+    # The suggestion list is lowest-unproven-first, so everyone racing for the front means the slowest
+    # prover always loses. Measured: a CPU contributor takes ~193 s/block while the GPU fleet clears 32
+    # blocks in ~74 s, so their first contribution was already proven before they finished it — three
+    # minutes of work, and a "someone else got there first" for their trouble.
+    #
+    # So a worker may report `secs_per_block`, and gets suggestions far enough ahead that the fleet
+    # will not have reached them by the time it finishes: roughly (its own prove time x the fleet's
+    # recent rate), which is exactly the number of blocks the fleet consumes while it works.
+    #
+    # This stays ADVISORY. Nothing is reserved, nothing expires, and a worker that lies or omits the
+    # field simply gets the front of the list as before. It is a courtesy to slow provers, not an
+    # allocation.
+    try:
+        spb = float(body.get("secs_per_block", 0) or 0)
+    except Exception:
+        spb = 0.0
+    offset = 0
+    if spb > 0:
+        with _lock:
+            c = db()
+            row = c.execute("SELECT MIN(ts), MAX(ts), COUNT(*) FROM vranges WHERE ts > ?",
+                            (time.time() - 600,)).fetchone()
+            c.close()
+        lo_ts, hi_ts, cnt = row[0], row[1], row[2]
+        if cnt and cnt > 1 and hi_ts and lo_ts and hi_ts > lo_ts:
+            fleet_rate = cnt / (hi_ts - lo_ts)          # blocks per second, last 10 minutes
+            # 1.5x headroom: finishing just as the fleet arrives is still a wasted prove.
+            offset = int(spb * fleet_rate * 1.5)
+        offset = max(0, min(offset, 5000))              # never strand a worker absurdly far out
+
     with _lock:
         c = db()
         rows = c.execute("SELECT lo, hi FROM vranges ORDER BY lo").fetchall()
@@ -721,12 +754,17 @@ def hint(body):
     # height and scanning from 1. At a 200k-block board the naive form allocates a 200k-element set
     # and then walks past all of it on every single call, which is a per-request cost that grows with
     # the board — the same shape of mistake as the accumulator scan in #40.
-    out, cursor = [], 1
+    # `skip` implements the offset: pass over that many CANDIDATE heights (not raw heights, which
+    # would land inside already-proven runs) before collecting.
+    out, cursor, skip = [], 1, offset
     for row in rows:
         lo, hi = row["lo"], row["hi"]
         while cursor < lo and len(out) < n:
             if witness_available(cursor):
-                out.append(cursor)
+                if skip > 0:
+                    skip -= 1
+                else:
+                    out.append(cursor)
             cursor += 1
         cursor = max(cursor, hi + 1)
         if len(out) >= n:
@@ -734,9 +772,12 @@ def hint(body):
     h = cursor
     while len(out) < n and h < TIP:
         if witness_available(h):
-            out.append(h)
+            if skip > 0:
+                skip -= 1
+            else:
+                out.append(h)
         h += 1
-    return 200, {"suggest": out, "advisory": True,
+    return 200, {"suggest": out, "advisory": True, "offset": offset,
                  "note": "advisory only — you may prove and submit any height"}
 
 
