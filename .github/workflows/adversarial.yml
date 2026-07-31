@@ -36,6 +36,15 @@ jobs:
         run: cd coordinator && python3 seam_fuzz.py --control
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
+      - name: G1 retention gate still detects a missing receipt (positive control)
+        # check-retention.py is what separates "the board says this block is proven" from "we can
+        # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
+        # the dangerous failure is not it reporting a hole, it is reporting CLEAN while one exists.
+        #
+        # This tests the CHECKER against synthetic fixtures. It deliberately does NOT verify
+        # production retention: that needs the coordinator's real DB and proof store, which CI has
+        # not got and should not have. Its job is to prove the gate can still fail.
+        run: ./coordinator/test-check-retention.sh
       - name: Coordinator worker parses (nothing else imports it, so nothing else would notice)
         # coordinator/server.py IS compiled on every push, because seam_fuzz.py and parse_fuzz.py both
         # `import server`. coordinator/hazync is not: it has no .py extension, so it is not importable
