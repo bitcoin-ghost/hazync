@@ -185,9 +185,13 @@ def parse_range(rng):
 
 def cmd_id(args):
     _, pub, handle = identity()
-    if args: HANDLE.write_text(args[0]); handle = args[0]
+    if args:
+        HANDLE.write_text(args[0]); handle = args[0]
     print("handle :", handle); print("pubkey :", pub); print("coord  :", COORD)
-    print("(set a handle:  hazync id <name>)")
+    # Only prompt when there is nothing to prompt for. Printing "set a handle" straight after the user
+    # HAS set one reads as though it did not take.
+    if not args:
+        print("(set a handle:  hazync id <name>)")
 
 def cmd_pick(args):
     """Ask the coordinator what would be most useful next. Advisory only — nothing is reserved."""
@@ -305,7 +309,7 @@ def cmd_prove(args):
     # allocated there is no lease to renew, and a worker that dies simply stops.
     try:
         total = hi - start + 1
-        print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step…")
+        print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) — the expensive step…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
             _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}")
