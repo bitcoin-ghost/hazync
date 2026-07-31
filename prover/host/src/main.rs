@@ -2286,8 +2286,10 @@ fn main() {
     // naming nothing. It affected the CPU binary specifically: the CUDA build links its prover in, so
     // the GPU path worked and the "no GPU still works" path did not.
     //
-    // The local prover is compiled into this binary already; it just was not being selected. Set only
-    // when unset, so RISC0_PROVER=ipc / bonsai still work for anyone who wants them.
+    // The binary is now built with risc0-zkvm's `prove` feature (see Cargo.toml), so the local prover
+    // is linked in and default_prover() already selects it when RISC0_PROVER is unset. This makes the
+    // intent explicit and survives a future features change; set only when unset, so RISC0_PROVER=ipc
+    // / bonsai still work for anyone who wants them.
     if std::env::var_os("RISC0_PROVER").is_none() {
         std::env::set_var("RISC0_PROVER", "local");
     }

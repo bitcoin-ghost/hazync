@@ -45,18 +45,12 @@ sudo apt install -y python3-cryptography
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
-> **The CPU binary needs `r0vm`, the RISC0 VM, and it is not bundled.** Without it a prove dies
-> immediately with a bare `No such file or directory (os error 2)`, which says nothing about what is
-> missing. The CUDA binary links its prover in and does not need this.
->
-> ```bash
-> curl -L https://risczero.com/install | bash     # needs rustc; installs rzup
-> "$HOME/.risc0/bin/rzup" install r0vm 3.0.5
-> command -v r0vm            # must print a path before you run `hazync run`
-> ```
->
-> `hazync selftest` does **not** catch this today — it checks the guest id and can verify a proof,
-> neither of which needs r0vm. It is the first `hazync run` that fails.
+> **Both binaries prove in-process — there is nothing else to install.** Up to and including
+> v0.12.1 the CPU binary did not: it was built without risc0's `prove` feature, so it shelled out to
+> `r0vm`, a ~109 MB VM the release does not ship, and the first `hazync run` died on a bare
+> `No such file or directory (os error 2)`. The CUDA build linked its prover in, so the GPU path
+> worked and the "no GPU still works" path did not. Fixed — the CPU binary now links the prover in
+> too. You only need `r0vm` if you deliberately set `RISC0_PROVER=ipc`.
 
 **Keep the asset filenames.** `SHA256SUMS.txt` lists them, so downloading with `-LO` means
 `sha256sum -c --ignore-missing SHA256SUMS.txt` verifies what you got. Renaming on download

@@ -6,7 +6,12 @@ edition = "2021"
 [dependencies]
 serde_json = "1"
 methods = { path = "../methods" }
-risc0-zkvm = { version = "=3.0.5" }
+# `prove` is NOT a default feature (default = ["client", "bonsai"]), and without it risc0's
+# default_prover() falls back to ExternalProver — which shells out to `r0vm`, a ~109 MB binary this
+# release does not ship. That is why the CPU host could not prove for a fresh contributor while the
+# CUDA host could: `cuda = ["prove", ...]` pulls it in, so the GPU path had a linked-in prover and the
+# "No GPU still works" path had a missing dependency and an OS errno.
+risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 bitcoin = "0.32"
