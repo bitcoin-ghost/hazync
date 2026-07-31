@@ -118,6 +118,33 @@ if [ -f "$V" ]; then
 fi
 done
 
+# ── 6. committed verifier BINARIES must embed the canonical id ────────────────────────────────────
+# Check 5 guards the source literal; this guards the compiled artifact in the tree, which is a
+# separate thing that can drift on its own. It did: the be5e0528 re-baseline rebuilt the published
+# release asset but not verifier/dist/hazync-verify-aarch64, so the tree carried an 85dc0b56 verifier
+# that was self-consistent with its own .sha256 and would have rejected every current proof. The
+# binary is unreproducible here without a cross-toolchain, so nothing else was going to notice.
+#
+# grep on the raw bytes: the id is a &str literal, so it survives as ASCII in the compiled binary.
+# That is a weaker check than rebuilding — it proves the current id is present, not that the build is
+# otherwise fresh — but it is the check that catches the failure that actually happened.
+for B in verifier/dist/hazync-verify-aarch64; do
+if [ -f "$B" ]; then
+    if grep -aq "$CANON8" "$B"; then
+        note "ok   $B embeds the canonical id"
+    else
+        stale=$(for k in $KNOWN; do grep -aq "$k" "$B" && echo "$k"; done | head -1)
+        bad "$B does not embed the canonical id $CANON8…${stale:+ (it embeds $stale… — stale, rebuild it)}"
+    fi
+    if [ -f "$B.sha256" ]; then
+        want=$(grep -oE '^[0-9a-f]{64}' "$B.sha256")
+        got=$(sha256sum "$B" | grep -oE '^[0-9a-f]{64}')
+        [ "$want" = "$got" ] && note "ok   $B matches its .sha256" \
+            || bad "$B sha256 is ${got:0:12}… but $B.sha256 says ${want:0:12}…"
+    fi
+fi
+done
+
 if [ "$fail" -ne 0 ]; then
     echo
     echo "Version/id drift detected. If this was an intentional re-baseline, update reproduce/METHOD_ID"
