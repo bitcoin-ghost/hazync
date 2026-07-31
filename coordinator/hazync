@@ -556,6 +556,14 @@ def cmd_fold(args):
         while done < want:
             try:
                 pairs = json.loads(get("/api/foldable")).get("pairs", [])
+            except urllib.error.HTTPError as e:
+                # 404 means the coordinator predates this feature, not that anything went wrong here.
+                # Saying "could not ask ... HTTP Error 404" sends the reader looking at their own setup.
+                if e.code == 404:
+                    sys.exit("this coordinator does not support folding yet (GET /api/foldable -> 404).\n"
+                             "  The endpoint ships in v0.13.0 but has to be deployed on the coordinator side.\n"
+                             "  Nothing is wrong with your setup.")
+                sys.exit(f"could not ask the coordinator for foldable pairs: {e}")
             except Exception as e:
                 sys.exit(f"could not ask the coordinator for foldable pairs: {e}")
             if not pairs:
@@ -623,6 +631,14 @@ def cmd_spine(args):
             print(f"✓ spine now [1..{absorbed_to}] — genesis-anchored, {len(receipt)} bytes, as '{handle}'.")
             return True
         err = str(res.get("error", ""))
+        # "not found" here is the coordinator lacking /api/spine, not a judgement on the receipt.
+        # Reporting it as "submission rejected" tells a contributor their proof was refused when
+        # nothing of the sort happened — the server simply predates this feature.
+        if err.strip().lower() in ("not found", "404"):
+            print("this coordinator does not support the spine yet (POST /api/spine -> 404).\n"
+                  "  The endpoint ships in v0.13.0 but has to be deployed on the coordinator side.\n"
+                  "  Nothing is wrong with your setup or your receipt.")
+            return False
         if "does not advance" in err:
             # Benign race: another extender got there first. Not a failure — duplicate spine work is
             # harmless by design, and their head is at least as long as ours.
