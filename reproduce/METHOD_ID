@@ -60,6 +60,21 @@
 # stays valid — v0.9.1 only rebuilds the host binaries + hardens the coordinator (release-on-failure,
 # fail-fast errors, `hazync selftest` + `/api/meta`, bundle round-trip CI regression).
 #
+# 2026-07-31 (RUSTSEC-2026-0220): dependency-only re-baseline. `ruint` 1.19.0 -> 1.20.0, fixing
+# "Uint shift operations: incorrect overflow flags and truncated shift amounts" (advisory published
+# 2026-07-08, surfaced when the RustSec database updated). NO Hazync source changed — not one line of
+# guest code — but ruint IS compiled for riscv32im (libruint-*.rlib sits under the guest target beside
+# ark_bn254 / ark_ff / ark_groth16, reached through risc0's in-circuit assumption verification), so the
+# ELF changes and the id moves with it. Measured rather than assumed: the same tree at ruint 1.19.0
+# produced 85dc0b56, at 1.20.0 it produces this id.
+#
+# Taken deliberately and immediately. The board had 0 blocks proven at the time, so the cost was a few
+# hours of rebuild; a week of contributed GPU time later it would have cost all of it. Bundles are
+# NOT affected — leaf hashing is SHA-256 in the host and the guest C++, and touches no bignum
+# arithmetic — so the witness corpus carries across unchanged. Validated: bundle round-trip PASS and
+# the block-170 regression PASS with the tip matching, in the canonical fixed-path container.
+# Superseded the earlier id 85dc0b56…
+#
 # 2026-07-30 (domain separation): the accumulator now DOMAIN-SEPARATES leaf and interior hashes —
 # leaf = SHA256(0x00 || preimage), interior = SHA256(0x01 || left || right). Previously both were bare
 # SHA256 over their operands, and SECURITY.md carried this under "documented, not changed
@@ -102,4 +117,4 @@
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-85dc0b56af8739acac76e560fbd44141d48d753044523604dd5e2a9619224c39
+be5e05280e108bdeeb6747b231df375f946a8530300525b5d4c523abe5b7c246
