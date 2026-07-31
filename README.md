@@ -13,10 +13,15 @@ No GPU, no build, no clone. The prebuilt binaries need Linux x86-64, glibc 2.34+
 **The 1.7 MB verifier** — this is the whole point of the project, so it is a small download and nothing else:
 
 ```bash
-curl -L -o hazync-verify https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu && chmod +x hazync-verify
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+chmod +x hazync-verify-x86_64-linux-gnu
 curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
-./hazync-verify proof.bin          # → SNARK RANGE PROOF [1..1] VERIFIED — genesis-anchored
+./hazync-verify-x86_64-linux-gnu proof.bin   # → SNARK RANGE PROOF [1..1] VERIFIED — genesis-anchored
 ```
+
+`-LO` keeps the asset's own filename, which is what `SHA256SUMS.txt` lists. Renaming it on download
+(`-o hazync-verify`) makes `sha256sum -c` report *"no file was verified"* — which looks like a broken
+signature and is not. Rename it afterwards if you like.
 
 An `aarch64` build is published too, so "a phone can check this" is a file you can download rather than
 a claim. It exits `0` when the proof is genesis-anchored, `2` when the SNARK is valid but the range is
@@ -27,17 +32,18 @@ the proof is actually bad.
 rather than only genesis-anchored ones:
 
 ```bash
-curl -L -o host https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu && chmod +x host
-./host verify-any proof.bin        # → prints a line starting with RANGE-OK
+curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
+chmod +x hazync-host-x86_64-linux-gnu
+./hazync-host-x86_64-linux-gnu verify-any proof.bin   # → prints a line starting with RANGE-OK
 ```
 
 **On an older distro** (Ubuntu 20.04, Debian 11 — glibc < 2.34), run the *same* binary in a container, no rebuild:
 
 ```bash
-docker run --rm -v "$PWD":/w -w /w ubuntu:22.04 ./host verify-any proof.bin
+docker run --rm -v "$PWD":/w -w /w ubuntu:22.04 ./hazync-host-x86_64-linux-gnu verify-any proof.bin
 ```
 
-(Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).) Want to trust the binary itself? Verify its SHA256 + PGP signature first — [`SECURITY.md`](SECURITY.md#verifying-releases). The stronger guarantee, though, is reproducibility: `host method-id` prints the guest image id, and it matches `reproduce/METHOD_ID` byte for byte.
+(Or build from source — see [`docs/PROVING.md`](docs/PROVING.md).) Want to trust the binary itself? Verify its SHA256 + PGP signature first — [`SECURITY.md`](SECURITY.md#verifying-releases). The stronger guarantee, though, is reproducibility: `method-id` prints the guest image id, and it matches `reproduce/METHOD_ID` byte for byte.
 
 `RANGE-OK` means the STARK checks out and the receipt is a valid proof that block *n* is a correct consensus transition between its stated boundaries. **Genesis-anchoring** — that those boundaries chain all the way back to the real genesis — is what the connected chain establishes (the board's frontier, or `host verify-chain` on a folded chain proof, which pins the genesis anchor); a single isolated proof attests its own step, not the whole history. Every proof on the [board](https://bitcoinghost.org/hazync) is public. The binary is the canonical guest — rebuild it yourself (`reproduce/Dockerfile`) and you get the same image id, byte for byte (`reproduce/METHOD_ID`).
 
