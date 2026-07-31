@@ -1,6 +1,10 @@
 target/
 *.log
-dist/                      # prover/build-release.sh output (70-330MB binaries)
+# prover/build-release.sh output (184-330MB binaries).
+# NB: .gitignore has no trailing comments — a comment after the pattern becomes PART of the pattern.
+# This line used to read `dist/    # ...` and therefore ignored nothing at all, leaving the release
+# binaries one `git add -A` away from being committed.
+dist/
 bitcoin-core/
 secp256k1/
 __pycache__/
