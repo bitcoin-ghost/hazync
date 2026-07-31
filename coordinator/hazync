@@ -8,6 +8,7 @@ hazync — Proof Party contributor CLI.
   hazync submit <id>        # sign the receipt with your key and submit it for verification
   hazync run [id]           # claim + prove + submit (id optional: takes the earliest free block)
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
+  hazync spine [n]          # advance the genesis-anchored spine by absorbing the next n chunks (default: all available)
 
 The party proves the chain forward from genesis, so you take a range near the current
 frontier. The coordinator serves a ready-made witness bundle for each block in its window,
@@ -529,6 +530,93 @@ def cmd_run(args):
               f"if you stop, it reopens by itself)")
     cmd_prove([rng]); cmd_submit([rng])
 
+def cmd_spine(args):
+    """Advance the genesis-anchored spine: `spine [1..N] + [N+1..N+1] -> [1..N+1]`, repeatedly (#30).
+
+    This is the ONE serial job in the system. Proving is embarrassingly parallel and folding is
+    opportunistic, but only the leftmost range can be anchored, because anchoring means lo == 1.
+
+    It is also the cheap job: absorption folds two receipts and checks a seam, it does not re-prove
+    anything. Everything it consumes already exists — the retained per-block receipts (G1) — so a
+    spine can be rebuilt from scratch by anyone without re-proving a single block. Whoever runs this
+    is a liveness single point of failure, never a soundness one.
+    """
+    if not HOSTBIN:
+        sys.exit("no prover binary found — `hazync spine` folds receipts, which is a prove operation.\n"
+                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  or set HAZYNC_HOST=/path/to/host.")
+    want = int(args[0]) if args and args[0].isdigit() else None
+    sk, pub, handle = identity()
+    work = RCPTDIR / ".spine-work"
+    shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True, exist_ok=True)
+
+    def submit_head(path, absorbed_to):
+        receipt = path.read_bytes()
+        res = post("/api/spine", {"pubkey": pub, "handle": handle, "sig": sk.sign(receipt).hex(),
+                                  "receipt": base64.b64encode(receipt).decode()})
+        if res.get("ok"):
+            print(f"✓ spine now [1..{absorbed_to}] — genesis-anchored, {len(receipt)} bytes, as '{handle}'.")
+            return True
+        err = str(res.get("error", ""))
+        if "does not advance" in err:
+            # Benign race: another extender got there first. Not a failure — duplicate spine work is
+            # harmless by design, and their head is at least as long as ours.
+            print(f"  another extender is ahead ({err}) — nothing to do.")
+            return False
+        print(f"✗ spine submission rejected: {err}")
+        return False
+
+    done = 0
+    try:
+        while want is None or done < want:
+            head = None
+            try:
+                head = json.loads(get("/api/spine"))
+            except SystemExit:
+                raise
+            except Exception:
+                head = None
+            if head and "hi" in head:
+                nxt = int(head["hi"]) + 1
+            else:
+                nxt = 1        # bootstrap: no spine yet, so the first head IS the [1..1] receipt
+
+            # The chunk is a retained per-block receipt from the board — nothing is re-proved here.
+            try:
+                chunk_bytes = get(f"/api/proof/{nxt}")
+            except Exception:
+                print(f"  block {nxt} is not proven yet (no retained receipt) — the spine is up to date at "
+                      f"[1..{head['hi']}]." if head else f"  block {nxt} is not proven yet — nothing to absorb.")
+                break
+            chunk = work / f"chunk_{nxt}.bin"; chunk.write_bytes(chunk_bytes)
+
+            if not head:
+                # [1..1] is already genesis-anchored; it becomes the head with no fold at all.
+                print(f"no spine yet — seeding it with the block 1 receipt ({len(chunk_bytes)} bytes)")
+                if not submit_head(chunk, 1):
+                    break
+                done += 1
+                continue
+
+            cur = work / "spine_head.bin"
+            cur.write_bytes(get("/api/spine/proof"))
+            out = work / f"spine_{nxt}.bin"
+            print(f"absorbing block {nxt} into [1..{head['hi']}] — one fold, no re-proving…")
+            r = subprocess.run([HOSTBIN, "extend-spine", str(cur), str(chunk), str(out)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not out.exists():
+                both = (r.stdout or "") + (r.stderr or "")
+                # A seam failure here is information, not noise: it means the board's receipt for this
+                # height does not continue the spine, which is worth surfacing loudly.
+                sys.exit(f"extend-spine failed for block {nxt}:\n{both[-400:]}")
+            if not submit_head(out, nxt):
+                break
+            done += 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if done:
+        print(f"absorbed {done} block(s) into the spine.")
+
 def main():
     # No signal handlers any more. They existed to hand a CLAIM back on SIGTERM, because Python's
     # default SIGTERM kills the interpreter outright and an orphaned claim then stalled the board
@@ -539,7 +627,7 @@ def main():
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
     c, a = argv[0], argv[1:]
     fn = {"id": cmd_id, "pick": cmd_pick, "prove": cmd_prove, "selftest": cmd_selftest,
-          "submit": cmd_submit, "run": cmd_run}.get(c)
+          "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
     if c in ("claim", "prove", "submit") and not a:  # these require a range; don't traceback on a bare call
