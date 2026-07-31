@@ -41,15 +41,44 @@ fi
 # PINNED toolchain versions. With the risc0 crates (=3.0.5) these determine the guest image id
 # (METHOD_ID). Bare `rzup install` grabs whatever is *latest* — which drifts the METHOD_ID over time
 # and, unauthenticated, hits GitHub's API rate limit. rzup authenticates via $GITHUB_TOKEN when set.
-rzup install --force rust 1.94.1
-rzup install --force cpp 2024.1.5
-rzup install --force cargo-risczero 3.0.5
-rzup install --force r0vm 3.0.5
+#
+# Each install is wrapped, because rzup has NO download timeout and these are large artifacts fetched
+# from a CDN that is not always well. Both failure modes have cost a full build:
+#   - a truncated body ("error decoding response body"), which at least exits;
+#   - a silent hang, which does not — one release build sat at 0% CPU for an hour on
+#     `risc0-groth16` before anyone looked, having already spent 20 minutes on the toolchain.
+# A stall is the expensive one: `set -e` cannot see it, and a build that never returns looks exactly
+# like a build that is being slow. Bound it and retry.
+rzup_install() {
+    local what="$*" attempt
+    for attempt in 1 2 3; do
+        # shellcheck disable=SC2086
+        if timeout "${RZUP_TIMEOUT:-600}" rzup install --force $what; then
+            return 0
+        fi
+        echo "   rzup install $what failed or stalled (attempt $attempt/3) — retrying" >&2
+        sleep $(( attempt * 10 ))
+    done
+    echo "rzup install $what failed three times. This is a network/CDN problem, not a build problem." >&2
+    return 1
+}
+rzup_install rust 1.94.1
+rzup_install cpp 2024.1.5
+rzup_install cargo-risczero 3.0.5
+rzup_install r0vm 3.0.5
 # Groth16 (SNARK-wrapping a STARK) needs its own rzup component and is NOT pulled in by the others.
 # Without it `host snark-wrap` dies with "Missing required `risc0-groth16` rzup component" — so a
 # freshly provisioned box cannot wrap at all, which is not obvious until you try. Pinned like the rest,
 # because an unpinned component is how the guest id drifts.
-rzup install --force risc0-groth16 0.1.0
+#
+# Unlike the others this one is NOT needed to build or to prove — only to wrap — so a box that cannot
+# reach the CDN for it should still finish provisioning with a working prover. Set SKIP_GROTH16=1 to
+# skip it deliberately; otherwise a failure here warns rather than aborts.
+if [ "${SKIP_GROTH16:-0}" = 1 ]; then
+    echo "== skipping risc0-groth16 (SKIP_GROTH16=1) — this box will prove but not snark-wrap =="
+elif ! rzup_install risc0-groth16 0.1.0; then
+    echo "   WARNING: no risc0-groth16 component. Proving works; \`host snark-wrap\` will not." >&2
+fi
 export PATH="$HOME/.risc0/bin:$PATH"
 # the riscv g++/gcc + libstdc++/libgcc/newlib come with the rzup cpp toolchain extension.
 

@@ -77,7 +77,15 @@ docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive
     fi
 '
 
-cp "$REPO/prover/target/release/host" "$OUT/$asset"
+# Install atomically. `cp` writes THROUGH an existing file, and on this project the destination is
+# routinely a binary that live prover processes are executing right now — the GPU box runs the board
+# campaign straight out of dist/. Overwriting a running executable's inode corrupts its text pages
+# under it (SIGBUS), and the damage lands on whatever range that worker was midway through proving.
+# Observed on 2026-07-31: a release rebuild replaced the binary two active workers were running.
+# They survived; that was luck. rename(2) onto the same filesystem swaps the directory entry and
+# leaves the old inode alone until its last user exits.
+install -m 0755 "$REPO/prover/target/release/host" "$OUT/.$asset.tmp.$$"
+mv -f "$OUT/.$asset.tmp.$$" "$OUT/$asset"
 
 # Leave the HOST able to SNARK-wrap, not just to prove.
 #
