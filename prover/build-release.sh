@@ -64,6 +64,10 @@ docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive
       [ -n "$CB" ] && echo "=== SASS ===" && $CB --list-elf $H 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " " && echo
     fi
     echo "=== smoke ==="; $H bundle-roundtrip-test; $H regress
+    # Stage r0vm into the MOUNTED repo so it survives this --rm container. `host snark-wrap` shells
+    # out to it, and provision installs it in here where nothing on the host can reach it.
+    R=$(command -v r0vm || ls /root/.risc0/bin/r0vm 2>/dev/null || true)
+    if [ -n "$R" ]; then mkdir -p /repo/dist && cp "$R" /repo/dist/r0vm && echo "=== staged r0vm ($(stat -c%s "$R") bytes) ==="; fi
 '
 
 cp "$REPO/prover/target/release/host" "$OUT/$asset"
@@ -80,6 +84,17 @@ cp "$REPO/prover/target/release/host" "$OUT/$asset"
 # Pulled here rather than documented, because the failure only appears at the moment you try to wrap,
 # which is long after the build looked successful. ~5.2 GB; skipped if already present, and a failure
 # is a warning rather than fatal — the binary is still good, you just cannot wrap on this box yet.
+# r0vm is the other half of being able to wrap: `host snark-wrap` shells out to it, and the container
+# installs it somewhere only the container can see. Staged out above; installed here.
+if [ -f "$REPO/dist/r0vm" ]; then
+    if [ ! -x /usr/local/bin/r0vm ] || ! cmp -s "$REPO/dist/r0vm" /usr/local/bin/r0vm; then
+        install -m 0755 "$REPO/dist/r0vm" /usr/local/bin/r0vm 2>/dev/null \
+            && echo "== installed r0vm -> /usr/local/bin/r0vm ==" \
+            || echo "   WARNING: could not install r0vm (need root?); snark-wrap will not run here." >&2
+    fi
+    rm -f "$REPO/dist/r0vm"
+fi
+
 GROTH16_IMAGE="${GROTH16_IMAGE:-risczero/risc0-groth16-prover:v2025-04-03.1}"
 if [ "${SKIP_GROTH16_PULL:-0}" != 1 ]; then
     if docker image inspect "$GROTH16_IMAGE" >/dev/null 2>&1; then
