@@ -201,6 +201,12 @@ def cmd_pick(args):
         print(f"  {h}")
     print(f"\nprove one with:  hazync run {sug[0]}")
 
+_HARD_ERR = ("parse bundle", "invalid type", "deserialize", "missing field", "METHOD_ID", "image id",
+             "read bundle", "No such file", "no such file")
+
+_SEG_MIN = 18                                       # below this the segments stop repartitioning usefully
+_SEG_TOP_CACHE = {"v": False}                       # False = not yet asked (None is a valid answer)
+
 def _seg_ladder(env):
     # [first attempt, then every smaller size down to _SEG_MIN]. The first attempt is None = "let the
     # binary (or the operator's HAZYNC_SEG_PO2) decide"; the rest walk down from whatever that was, with
@@ -295,8 +301,8 @@ def cmd_prove(args):
         env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
         prove_cmd = "prove-range"
         print(f"archive bundles unavailable — replaying from genesis for blocks {start}..{hi}")
-    stop = threading.Event()
-    threading.Thread(target=_heartbeat, args=(rng, pub, stop), daemon=True).start()  # keep the claim alive
+    # No heartbeat thread. It existed to keep a CLAIM alive while a long prove ran; with nothing
+    # allocated there is no lease to renew, and a worker that dies simply stops.
     try:
         total = hi - start + 1
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) on your GPU — the expensive step…")
@@ -309,7 +315,7 @@ def cmd_prove(args):
         _fold_and_save(parts, out, work, env)
         print("receipt:", out)
     finally:
-        stop.set()
+        pass
         shutil.rmtree(work, ignore_errors=True)          # drop the range_*/fold_* intermediates
 
 def _fold_conc():
@@ -373,6 +379,11 @@ def _fold_level(parts, rnd, work, env, conc):
     return nxt
 
 def _fold_and_save(parts, out, work, env):
+    # Guard first: if a prove failed, its receipt is absent and the rename below raises a
+    # FileNotFoundError that hides the actual failure. Say what is missing instead.
+    missing = [p for p in parts if not os.path.exists(os.path.join(work, p))]
+    if missing:
+        sys.exit(f"prove produced no receipt for {', '.join(missing)} — see the error above; nothing was submitted.")
     # Recursively fold the per-block receipts into one; all I/O is inside `work` (cwd=work). fold-range hits
     # the same risc0 segment-boundary bug as the block prove, so it goes through the same seg-retry path.
     conc = _fold_conc()
@@ -451,7 +462,7 @@ def cmd_selftest(args):
         print(f"! could not fetch/verify a sample proof ({e}) — skipping the verify check")
     print()
     if ok:
-        print("ALL GOOD — you're ready. Claim work with `hazync run`.")
+        print("ALL GOOD — you're ready. Start proving with `hazync run`.")
     else:
         sys.exit("SETUP INCOMPLETE — fix the ✗ items above before `hazync run`.")
 
@@ -470,12 +481,19 @@ def cmd_run(args):
             if not witness_in_window(probe):
                 sys.exit(f"block {probe} has no witness on the coordinator yet — nothing was started.")
     else:
-        res = post("/api/hint", {"count": 1})
+        # Ask for a SPREAD and pick at random. The hint is deterministic, so every worker asking for
+        # one block gets the same answer and the fleet piles onto a single height — measured at ~50%
+        # wasted proves with just two workers on one box. Nothing coordinates this: each worker
+        # independently samples from the same small window, which decorrelates them without any lease,
+        # lock or allocation. Duplicates still happen and are still harmless; they just stop being the
+        # common case.
+        import random
+        res = post("/api/hint", {"count": 32})
         sug = (res or {}).get("suggest") or []
         if not sug:
             sys.exit("coordinator suggested nothing — the board may be complete, or no witness is served yet.")
-        rng = str(sug[0])
-        print(f"proving {rng}  (advisory suggestion; any height is accepted)")
+        rng = str(random.choice(sug))
+        print(f"proving {rng}  (sampled from {len(sug)} suggestions; any height is accepted)")
     cmd_prove([rng]); cmd_submit([rng])
 
 def main():
