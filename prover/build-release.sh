@@ -50,7 +50,12 @@ fi
 echo "== building $MODE release from $REPO (HOME=/root inside $IMAGE) =="
 # The repo is mounted, so prover/target persists on the host between runs: re-running after a host-only
 # source change recompiles just the host crate instead of the whole guest + CUDA kernels.
+# SKIP_GROTH16 must be forwarded EXPLICITLY: the build runs in a container, so a variable exported in
+# the caller's shell reaches provision-vps.sh only if named here. Setting it and assuming it applied
+# cost a release build 30 minutes — two bounded-but-real stalls fetching a component that is only
+# needed to snark-wrap, which this build does not do.
 docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
+    -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" -e "RZUP_TIMEOUT=${RZUP_TIMEOUT:-600}" \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1

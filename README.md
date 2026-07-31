@@ -28,8 +28,10 @@ a claim. It exits `0` when the proof is genesis-anchored, `2` when the SNARK is 
 a mid-chain **segment** (most proofs on the board are segments — that is not a failure), and `1` when
 the proof is actually bad.
 
-**The 71 MB host** does everything else — proving, and `verify-any`, which accepts *any* single proof
-rather than only genesis-anchored ones:
+**The 184 MB host** does everything else — proving, and `verify-any`, which accepts *any* single proof
+rather than only genesis-anchored ones. (It was 71 MB up to v0.12.1, when it did not actually contain
+a prover: it shelled out to `r0vm`, which the release does not ship, so the CPU binary could not prove
+at all. The prover is linked in from v0.12.2 — that is the extra 113 MB, and it is why this one works.)
 
 ```bash
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
