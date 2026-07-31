@@ -458,6 +458,40 @@ def cmd_selftest(args):
             print(f"✗ verify-any failed: {(vr.stdout + vr.stderr).strip()[-200:]}"); ok = False
     except Exception as e:
         print(f"! could not fetch/verify a sample proof ({e}) — skipping the verify check")
+    # ACTUALLY PROVE SOMETHING.
+    #
+    # Everything above passes without the prover ever running: method-id reads a constant, verify-any
+    # checks a receipt. So selftest reported "ALL GOOD" to a contributor whose very first `hazync run`
+    # then died on a missing r0vm — a clean bill of health precisely where it mattered. A pre-flight
+    # that cannot fail the way the real thing fails is not a pre-flight.
+    #
+    # Block 1 is the cheapest real prove there is: one coinbase, no spends.
+    try:
+        wit = get("/api/witness/1")
+        wd = pathlib.Path(WITNESS); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "bundle_1.json").write_bytes(wit)
+        work = RCPTDIR / ".selftest"; work.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, HAZYNC_BRIDGE_OUT=str(wd))
+        print("… proving block 1 as a real pre-flight (this is the step that actually exercises the prover)")
+        r = subprocess.run([HOSTBIN, "prove-range-bridge", "1"], cwd=str(work), env=env,
+                           capture_output=True, text=True, timeout=1800)
+        if r.returncode == 0 and (work / "range_1.bin").exists():
+            print("✓ proved a real block end to end — your prover works")
+            try: (work / "range_1.bin").unlink()
+            except OSError: pass
+        else:
+            tail = _err_tail(r.stderr or r.stdout)
+            print("✗ PROVING FAILED — this is what `hazync run` would have hit:")
+            for line in tail.splitlines()[:4]:
+                print("   ", line)
+            if "No such file or directory" in (r.stderr or ""):
+                print("    Looks like a missing `r0vm`. This binary proves in-process by default;")
+                print("    if you set RISC0_PROVER=ipc you must install r0vm separately.")
+            ok = False
+    except Exception as e:
+        print(f"! could not run the prove check ({e}) — treating as a FAILURE, not a skip")
+        ok = False
+
     print()
     if ok:
         print("ALL GOOD — you're ready. Start proving with `hazync run`.")

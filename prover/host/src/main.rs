@@ -2278,6 +2278,19 @@ fn script_flags_test() {
 }
 
 fn main() {
+    // Prove IN-PROCESS unless the operator asked for something else.
+    //
+    // risc0's default backend shells out to `r0vm`, a separate ~109 MB binary that is not part of this
+    // release. A contributor who downloads only the prebuilt host — which is exactly what CONTRIBUTING
+    // tells them to do — therefore gets `No such file or directory (os error 2)` on their first prove,
+    // naming nothing. It affected the CPU binary specifically: the CUDA build links its prover in, so
+    // the GPU path worked and the "no GPU still works" path did not.
+    //
+    // The local prover is compiled into this binary already; it just was not being selected. Set only
+    // when unset, so RISC0_PROVER=ipc / bonsai still work for anyone who wants them.
+    if std::env::var_os("RISC0_PROVER").is_none() {
+        std::env::set_var("RISC0_PROVER", "local");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .init();
