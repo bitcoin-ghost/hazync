@@ -120,6 +120,39 @@ serves a ready-made witness for every block it holds, so you prove a block direc
 with no node of your own and no chain replay. Blocks the bridge has not reached yet have no witness
 to serve, and `run` tells you so before it starts rather than after a long prove.
 
+## Step 4: two other ways to help, both cheaper than proving
+
+Proving is the expensive job. These two turn what has already been proved into something a stranger
+can check in one download, and both cost seconds rather than minutes.
+
+```
+./hazync fold          # combine two adjacent proven ranges into one wider proof
+./hazync fold 20       # do twenty of them
+```
+
+The board holds a receipt per block. Folding merges adjacent ones — `[100..199] + [200..299]` becomes
+`[100..299]` — and the result can be folded again with *its* neighbour. It is a tree, so any adjacent
+pair may be folded in any order and any number of people may do it at once. Nothing is allocated: the
+coordinator suggests pairs whose fold does not exist yet, and if someone beats you to one your
+submission is simply discarded. A fold verifies two receipts and checks the seam; it does not re-prove
+anything.
+
+```
+./hazync spine 5       # absorb the next 5 chunks into the genesis-anchored head
+```
+
+The **spine** is the one artifact that says *"every block from genesis to N is valid"*. It advances by
+absorbing the next adjacent chunk rather than being rebuilt, so it is complete after every step. This
+is the only job in the whole system that has to happen in order — anchoring means starting at block 1
+— so one machine at a time makes progress on it, and duplicate effort is harmless but wasted.
+
+Absorbing wide chunks is far better than absorbing single blocks: it is **one fold either way**. So
+folding first (above) and then absorbing is how the spine catches up quickly.
+
+Whoever advances the spine cannot corrupt it. Every absorption is re-verified against the canonical
+guest id and pinned to genesis, and because every per-block receipt is retained, anyone can rebuild
+the spine from scratch without re-proving anything.
+
 ## Just want to check a proof, not make one?
 
 You never have to trust the party. Every verified proof is public — fetch any proven block from `https://bitcoinghost.org/hazync/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.34+ / Ubuntu 22.04+):

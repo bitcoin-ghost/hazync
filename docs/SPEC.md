@@ -224,6 +224,39 @@ Each proof commits `self_id`, the image id of the guest that produced it, and th
 inputs against that same id. A proof therefore cannot absorb an assumption produced by a different
 guest, and the recursion cannot be re-pointed at a weaker circuit.
 
+### 10.1 The spine
+
+Because composition is a tree but anchoring is sequential, exactly one artifact at a time is the
+**genesis-anchored head** — the *spine*. It is the range proof `[1..N]` with the largest `N`, and it
+is what "everything from genesis to N is valid" means concretely.
+
+The spine **advances by absorption**, never by re-folding:
+
+```
+spine [1..N]  +  chunk [N+1..M]   ->   spine [1..M]
+```
+
+Absorption is ordinary composition (§10) in which the left operand is genesis-anchored, so the result
+is too. It is one fold per absorbed chunk regardless of the chunk's width, which is why the chunk
+should be as wide as the tree can make it: the tree does the parallel work, the spine takes the
+result.
+
+Three properties follow, and they are the reason the spine is defined this way rather than as a
+periodic re-fold of everything proven:
+
+1. **It is always shippable.** After every absorption there exists a complete genesis-anchored proof
+   of the chain up to the head. There is no state in which the artifact is half-built.
+2. **Advancing it is the only sequential step.** Proving and folding are unbounded in parallelism;
+   only absorption must happen in order, because only the leftmost range can satisfy `lo == 1`.
+3. **Whoever advances it cannot corrupt it.** Every absorption is a fold that any verifier re-checks
+   against the canonical `METHOD_ID` and the genesis pin (§9). A wrong absorption does not verify. If
+   per-block receipts are retained, the spine is also *rebuildable from scratch by anyone* without
+   re-proving a single block — so a stalled or absent spine costs time, never soundness.
+
+A verifier is not required to know that a proof is "the spine": the spine is an operational role, and
+what it is checked against is exactly §11.1. Nothing in the format distinguishes it from any other
+genesis-anchored range proof.
+
 ---
 
 ## 11. Verification

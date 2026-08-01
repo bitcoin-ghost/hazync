@@ -77,6 +77,20 @@ into one with `fold-range`. You need no node of your own and no local witness da
   the `vranges` list in `/api/state` carries a `proof` pointer for each. (Receipts are ~0.2–1.7 MB each,
   so full-chain retention is archive-scale — a rolling window for launch; a `verify-anywhere` Groth16
   wrap is the later upgrade so a proof checks with no RISC0 runtime.)
+- `GET /api/foldable` — adjacent verified pairs whose fold does not exist yet, for `hazync fold`.
+  Advisory and stateless: several candidates are returned so concurrent workers spread out without
+  anything being leased. A duplicate fold is wasteful, not incorrect — the loser's submission is
+  discarded as already proven, and folding is far cheaper than proving.
+- `GET /api/spine` — metadata for the **genesis-anchored head**: how far it reaches, its out-tip,
+  work, size and who last advanced it.
+- `GET /api/spine/proof` — the head receipt itself. This is the headline artifact: one file attesting
+  that every block from 1 to N is valid, checkable with `hazync-verify` and nothing else.
+- `POST /api/spine` `{pubkey, handle, sig, receipt(base64)}` — submit an extended spine. The
+  coordinator does **not** build it: extending is a prove operation and this box has no GPU. It
+  verifies (`verify-range` for the full genesis pin, then `verify-any` for the machine-readable
+  boundary), stores it, and refuses anything that does not advance the head. Advancing the spine is a
+  liveness single point of failure and never a soundness one — a wrong absorption does not verify, and
+  because per-block receipts are retained anyone can rebuild the spine from scratch.
 
 **Claim-lock + auto-release:** a claim locks the range to one contributor. The prover heartbeats while
 working; if heartbeats stop for `CLAIM_TTL` (or the claim exceeds `CLAIM_MAX`), the coordinator

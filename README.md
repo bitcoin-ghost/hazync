@@ -15,9 +15,18 @@ No GPU, no build, no clone. The prebuilt binaries need Linux x86-64, glibc 2.34+
 ```bash
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
-./hazync-verify-x86_64-linux-gnu proof.bin   # → SNARK RANGE PROOF [1..1] VERIFIED — genesis-anchored
+curl https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
+./hazync-verify-x86_64-linux-gnu proof.bin   # → SNARK RANGE PROOF [1..N] VERIFIED — genesis-anchored
 ```
+
+That file is the **spine**: the current genesis-anchored head, one receipt attesting that *every*
+block from 1 to N is valid under Bitcoin Core's own consensus code. It advances by absorbing new
+blocks rather than being rebuilt, so it is always complete as it stands — check
+[`/hazync/api/spine`](https://bitcoinghost.org/hazync/api/spine) for how far it currently reaches.
+
+`/api/proof/<n>` serves the receipt for a single block instead, if you would rather be handed one
+block and check it alone. It exits `2` — the SNARK is valid but a single mid-chain block is not
+genesis-anchored, which is the correct answer, not a failure.
 
 `-LO` keeps the asset's own filename, which is what `SHA256SUMS.txt` lists. Renaming it on download
 (`-o hazync-verify`) makes `sha256sum -c` report *"no file was verified"* — which looks like a broken
