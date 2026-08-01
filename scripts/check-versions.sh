@@ -128,7 +128,10 @@ done
 # grep on the raw bytes: the id is a &str literal, so it survives as ASCII in the compiled binary.
 # That is a weaker check than rebuilding — it proves the current id is present, not that the build is
 # otherwise fresh — but it is the check that catches the failure that actually happened.
-for B in verifier/dist/hazync-verify-aarch64; do
+# An array, not a bare word: shellcheck SC2043 correctly objects to a for-loop over a single literal,
+# and the loop is here because more prebuilt verifiers may be committed later (an x86_64 copy, say).
+DIST_BINS=(verifier/dist/hazync-verify-aarch64)
+for B in "${DIST_BINS[@]}"; do
 if [ -f "$B" ]; then
     if grep -aq "$CANON8" "$B"; then
         note "ok   $B embeds the canonical id"
