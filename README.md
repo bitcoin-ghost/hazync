@@ -1,32 +1,93 @@
 # Hazync
 
-**Bitcoin Core's own consensus code, proven in a zero-knowledge VM.** Hazync runs the *actual, unmodified* Core code for the hard, edge-case-heavy part of validation — the script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`, `ComputeMerkleRoot`, the transaction/weight/sigop machinery, the difficulty retarget (`pow.cpp`'s `CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1` — inside a zkVM, not a reimplementation, and proves each block valid under real consensus. That's where prior validity-proof efforts inherit the question "does your rewrite match Core in every edge case, forever?" — and where Hazync doesn't. What remains outside compiled Core is a thin, self-contained slice — the subsidy halving schedule and the script-flag activation heights — each differentially tested against Core (the flag schedule is proven a sound superset of Core's `GetBlockScriptFlags`). And even the compiled retarget is belt-and-suspenders: cross-checked against the *actual on-chain nBits* at every one of the 476 mainnet retargets.
+**Bitcoin's consensus rules, proven — using Bitcoin Core's own code, inside a zero-knowledge VM.**
 
-The proofs fold: verified block by block, a stretch of the chain collapses into one succinct receipt you check in a moment — no re-execution, no trusting peers. The end it builds toward: **verify the whole chain from a single proof — a full node that syncs in minutes.**
+Not a reimplementation of the rules. The actual `interpreter.cpp`, the actual `SignatureHash`, the
+actual `libsecp256k1`, compiled to RISC-V and executed inside a prover. Every prior validity-proof
+effort inherits the question *"does your rewrite match Core in every edge case, forever?"* This one
+does not have to answer it.
 
-**Status — proving the chain, live.** The board shows the frontier climbing from genesis, in the open — [watch it](https://bitcoinghost.org/hazync). We're not at the tip yet; this is early-stage research, shared for review. Real Bitcoin Core code in a zkVM is the hard part, and it's done and hardened across nine rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md), [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)) and empirically validated across the segwit, taproot, big-block, and pre-BIP34 eras on real mainnet data — no external audit yet. The rest is the compute campaign to prove the chain forward: a **long-horizon, GPU-intensive** effort (proving real Core crypto is deliberately expensive — that's the moat), which is exactly why it's an open, distributed proof-party rather than something we finish alone.
+---
 
-## Verify a proof
-
-No GPU, no build, no clone. The prebuilt binaries need Linux x86-64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+).
-
-**The 1.7 MB verifier** — this is the whole point of the project, so it is a small download and nothing else:
+### Check one yourself. It takes about thirty seconds.
 
 ```bash
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
 curl https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
-./hazync-verify-x86_64-linux-gnu proof.bin   # → SNARK RANGE PROOF [1..N] VERIFIED — genesis-anchored
+./hazync-verify-x86_64-linux-gnu proof.bin
 ```
 
-That file is the **spine**: the current genesis-anchored head, one receipt attesting that *every*
-block from 1 to N is valid under Bitcoin Core's own consensus code. It advances by absorbing new
-blocks rather than being rebuilt, so it is always complete as it stands — check
-[`/hazync/api/spine`](https://bitcoinghost.org/hazync/api/spine) for how far it currently reaches.
+```
+>>> SNARK RANGE PROOF [1..N] VERIFIED — genesis-anchored
+```
 
-`/api/proof/<n>` serves the receipt for a single block instead, if you would rather be handed one
-block and check it alone. It exits `2` — the SNARK is valid but a single mid-chain block is not
-genesis-anchored, which is the correct answer, not a failure.
+A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
+consensus rules — checked in **milliseconds**, on a laptop, with no node, no peers, no chain data and
+nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
+verifier is a 290 KB WebAssembly module that peaks at **1.9 MiB of memory** — small enough for a
+phone.
+
+N is however far the anchored proof currently reaches, and it grows as the board does. Swap the URL
+for `/api/proof/<height>` to be handed one block instead and check that alone.
+
+That is the whole idea. Proving is expensive and done by a few; **verifying is cheap and done by
+everyone.**
+
+---
+
+### The proofs combine
+
+Two adjacent proofs fold into one, and the result folds again. A stretch of chain collapses into a
+single succinct receipt — the same size whether it covers two blocks or two hundred thousand. One
+receipt, one check, no re-execution.
+
+The end this builds toward: **a node that verifies the whole chain from a single proof, instead of
+re-executing sixteen years of it.**
+
+### Where it actually is
+
+The hard part is done: real Core consensus code, proving real mainnet blocks, hardened across nine
+rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md)) and validated across the segwit,
+taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** — CI rebuilds it from
+scratch and checks it matches.
+
+What remains is scale, and we are honest about it: **~40,000 of 958,301 blocks proven so far**, on an
+open board anyone can join. Proving Bitcoin's real cryptography is deliberately expensive — that cost
+*is* the security argument — which is why this is a public proof party rather than something finished
+quietly. **There is no external audit yet.**
+
+[**Watch the board**](https://bitcoinghost.org/hazync) · [**Join in**](CONTRIBUTING.md) ·
+[**Read the spec**](docs/SPEC.md)
+
+---
+
+## What is actually compiled from Core
+
+The script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`,
+`ComputeMerkleRoot`, the transaction/weight/sigop machinery, the difficulty retarget (`pow.cpp`'s
+`CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1` — unmodified,
+with two narrow portability shims and zero consensus-logic changes.
+
+What is *not* compiled from Core is a thin, self-contained slice: the subsidy halving schedule and the
+script-flag activation heights, each differentially tested against Core (the flag schedule is proven a
+sound superset of `GetBlockScriptFlags`). Even the compiled retarget is belt-and-suspenders —
+cross-checked against the actual on-chain `nBits` at every one of the 476 mainnet retargets.
+
+## Verifying, in detail
+
+The command above is the whole story for most people. This section is the rest of it.
+
+The file it downloads is the **spine**: the current genesis-anchored head, one receipt attesting that
+*every* block from 1 to N is valid under Core's own consensus code. It advances by absorbing new
+blocks rather than being rebuilt, so it is always complete as it stands — check
+[`/hazync/api/spine`](https://bitcoinghost.org/hazync/api/spine) for how far it reaches.
+
+`/api/proof/<n>` serves the receipt for a single block instead. That one exits **`2`**, not `0`: the
+SNARK is valid, but one mid-chain block is not genesis-anchored. That is the correct answer rather
+than a failure, and the verifier says so rather than pretending otherwise.
+
+Prebuilt binaries need Linux x86-64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+). No GPU, no build, no clone.
 
 `-LO` keeps the asset's own filename, which is what `SHA256SUMS.txt` lists. Renaming it on download
 (`-o hazync-verify`) makes `sha256sum -c` report *"no file was verified"* — which looks like a broken
