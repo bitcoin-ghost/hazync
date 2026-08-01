@@ -5,10 +5,24 @@ name: adversarial
 # asserts that a witness exploiting each known hole (host-controlled height, in-block double-spend /
 # ordering, malformed coinbase) is REJECTED, alongside an honest baseline that must be accepted.
 
+# `push:` was unqualified, so every branch with an open PR ran the whole suite TWICE — once for the
+# push and once for the pull_request. soundness-suite is a 45+ minute job, so on a night with five
+# PRs open that was five wasted hours of runner time and a queue nothing could get through.
+#
+# Now: branches are covered by `pull_request`, and `main` by `push` — which still matters, because
+# some jobs only ever run on main and a green PR is not a green main.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# Superseding a branch makes its in-flight run pointless; let it be cancelled rather than sit in the
+# queue ahead of the run that matters. NOT applied to main: those runs are the record of what the
+# released tree actually does, and cancelling one leaves a commit with no verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   accumulator-tests:
