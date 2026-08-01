@@ -49,6 +49,45 @@
 > *downward* (21→20→19→18), so a smaller GPU that OOMs at 21 completes anyway. Receipts are identical
 > either way — this is executor configuration, not guest logic.
 >
+> **Update 2026-07-30 — GPU concurrency measured and REJECTED, and this doc's po2 figure does not
+> transfer to modern blocks.** Both measured on one 46 GB L40S, block 741000 (670 inputs), 16 chunks:
+>
+> | config | wall | vs best | peak VRAM |
+> |---|---|---|---|
+> | **po2=21, CONC=1** | **3,784 s** | — | 22,925 MiB |
+> | po2=20, CONC=1 | 4,651 s | +22.9% | 13,835 MiB |
+> | po2=20, CONC=2 | 4,443 s | +17.4% | 27,538 MiB |
+> | po2=21, CONC=2 | — | **OOM** | 42,942 MiB |
+>
+> **1. There is no free throughput on this card.** A single prove at po2=21 peaks at 22.9 GB — half the
+> card — so two do not fit (OOM in `risc0-zkp` `cuda.rs:246`, on a 128 MB allocation). Dropping to po2=20
+> halves the segment and makes room, but concurrency then returns only **1.047x** while po2=20 itself
+> costs 22.9%: it needed **1.229x** to break even and delivered a fifth of that. `po2=21, CONC=1` is
+> optimal here. `HAZYNC_GPU_CONC` exists for cards where this arithmetic differs; default 1.
+>
+> The experiment was motivated by `nvidia-smi` showing 29-81% utilisation mid-proof, read as headroom.
+> It is not: that figure means "a kernel was resident during the sample", not "the card is saturated".
+> It reads 100% at CONC=1 and CONC=2 alike. **Do not tune concurrency from utilisation — only wall time
+> settles it.**
+>
+> **2. The po2 sweep above (~6%) was measured on block 130000, a 10-INPUT block. On block 741000 the
+> po2 20 -> 21 gap is 22.9%.** Smaller segments mean more segments, and per-segment recursion overhead
+> scales with block size, so the penalty grows with the work. The sweep is not wrong; it is narrow.
+>
+> **3. The pattern, stated because it recurred three times in one day.** `ECMULT_WINDOW_SIZE` was swept
+> only downward and declared optimal. The cycle profile was taken on a small block and missed that a
+> tenth of a modern block is SHA marshalling. The po2 sweep was taken on a 10-input block and understates
+> the penalty by 4x. **Parameters tuned on early blocks do not transfer to modern ones** — early blocks
+> are nearly empty (block 20000 holds 19,023 UTXOs in total), so they exercise none of the cost that
+> dominates at scale. Sweep on a signature-heavy block, or the result is about the wrong workload.
+>
+> **4. What is left, given the above.** Scheduling is closed off. Guest compute is closed off (69.5% is
+> Core's own field arithmetic; the SHA marshalling win was 3.8% and was rejected as not worth touching
+> Core). That leaves exactly two levers, both procurement rather than engineering: **more cards**
+> (linear, and chunks are independent so it is near-perfect scaling) and **a faster card**. The latter is
+> unmeasured and worth an hour of cloud rental: proving is NTT-bandwidth-heavy and the L40S has ~864 GB/s
+> against ~2,039 GB/s on an A100 and ~3,350 GB/s on an H100 SXM.
+
 > Remaining maximal-Core levers: host-side tree-fold (log-depth aggregation, the rest of the ~14% fold
 > overhead), and multi-GPU throughput (safe — every parallel proof is independently verified). The bigint2
 > field backend below stays **out of scope** (reimplements Core's field layer → the exact equivalence
