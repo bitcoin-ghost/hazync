@@ -145,6 +145,35 @@ if [ -f "$B" ]; then
 fi
 done
 
+# ── 7. a superseded id must not appear inside a fenced CODE BLOCK ─────────────────────────────────
+# Check 2 asks "is this token a real id?" and a documented predecessor passes — correctly, because
+# prose legitimately discusses lineage ("supersedes 3f52baff"). What it cannot see is a stale id
+# presented as CURRENT EVIDENCE.
+#
+# That happened: GOALS.md — the document that says "measured, not asserted" — carried a G1 evidence
+# block showing `hazync-verify` output citing guest 3f52baff, two re-baselines after it was retired.
+# It read as a live verification of the current system and was a transcript of a dead one. Nothing
+# flagged it, because 3f52baff is a documented predecessor.
+#
+# A fenced block is a claim that something was RUN. So: inside one, the only guest id allowed is the
+# canonical one. Prose is untouched — discuss history freely there. Measured across the repo when
+# added: zero legitimate occurrences, so this is enforceable rather than aspirational.
+while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    f=${hit%%:*}; rest=${hit#*:}; ln=${rest%%:*}; tok=${rest##*:}
+    bad "$f:$ln shows superseded id '$tok' inside a code block — evidence quoting a retired guest reads as current"
+done < <(git ls-files '*.md' 2>/dev/null | while read -r f; do
+             awk -v known="$KNOWN" -v canon="$CANON8" -v file="$f" '
+                 /^[[:space:]]*```/ { infence = !infence; next }
+                 infence {
+                     while (match($0, /[0-9a-f]{8}/)) {
+                         tok = substr($0, RSTART, 8); $0 = substr($0, RSTART + 8)
+                         if (tok != canon && index(known, tok) > 0) print file ":" NR ":" tok
+                     }
+                 }' "$f"
+         done)
+[ "$fail" -eq 0 ] && note "ok   no superseded id is presented as evidence inside a code block"
+
 if [ "$fail" -ne 0 ]; then
     echo
     echo "Version/id drift detected. If this was an intentional re-baseline, update reproduce/METHOD_ID"

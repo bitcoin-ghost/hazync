@@ -16,19 +16,33 @@ marked otherwise.
 Not an intermediate to be folded and deleted. A sceptic must be able to be handed one block and check
 it alone, rather than being told "we proved a range".
 
-**Status: achieved, and at risk.** 38,499 per-block receipts exist. Verified on a live artifact:
+**Status: achieved, and at risk.** A receipt exists and is served for each proven height. Verified on
+a live artifact, fetched from the board and checked with the released binaries (2026-08-01):
 
 ```
 $ hazync-verify proof_20000.bin
-  The SNARK is VALID and was produced by guest 3f52baff
-  It proves blocks 20000..20000
+NOT A GENESIS-ANCHORED CHAIN PROOF
+
+  The SNARK is VALID and was produced by guest be5e0528.
 $ host verify-any proof_20000.bin
 RANGE-OK lo=20000 hi=20000 out_leaves=19023 range_work=4295032833
 ```
 
-The risk is that folding deletes them. `coordinator/hazync` proves `range_{h}.bin` per height and
-discards the leaves after folding, so at any claim width above 1 the per-block proofs are produced and
-thrown away. Retention is a **storage decision, not a compute one** — ~215 GB at tip.
+(`hazync-verify` exits 2 here: the SNARK is valid but this is a mid-chain **segment**, not a
+genesis-anchored proof. That is the expected result for a per-block receipt, and is what G1 asks for
+— one block, checkable alone.)
+
+The count of retained receipts is not restated here, because it is a property of the coordinator's
+proof store rather than of this document, and quoting it goes stale on every re-baseline.
+`coordinator/check-retention.py` reports it against the ledger, and CI now proves that checker can
+still fail (`coordinator/test-check-retention.sh`).
+
+The risk is that folding deletes them. `coordinator/hazync` proved `range_{h}.bin` per height and
+discarded the leaves after folding, so at any claim width above 1 the per-block proofs were produced
+and thrown away. Since v0.13.0 folding is a separate task over already-submitted receipts
+(`hazync fold`), so the leaves it consumes are retained ones — but nothing prevents a future scheme
+reintroducing the old behaviour, which is why the gate exists. Retention is a **storage decision, not
+a compute one** — ~215 GB at tip.
 
 **Done when:** per-block receipts are retained and served for every proven block, and this survives
 whatever work-distribution scheme is in force (#37).
@@ -40,18 +54,22 @@ whatever work-distribution scheme is in force (#37).
 **One receipt attesting that every block from genesis to the chain tip is valid under Core consensus.**
 
 **Status: mechanism proven, scale is the entire problem.** `fold_1000` is a genesis-anchored proof of
-blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. The board stands at 39,299 of 958,301
-blocks — **4.1% of blocks, and well under 0.1% of the work.**
+blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. The board stands at **26,637 of
+958,301 blocks — 2.78% of blocks, and well under 0.1% of the work** (measured 2026-08-01).
+
+> The board was at 39,299 (4.1%) before two guest re-baselines — `85dc0b56`, then `be5e0528` for the
+> `ruint` RUSTSEC bump — each of which resets it to genesis. Those receipts were made against a
+> superseded guest and do not verify today. It is re-proving from genesis under `be5e0528`.
 
 That gap is the important part and it has been consistently understated:
 
 | | measured |
 |---|---|
 | block 741,000 (post-taproot, 670 inputs) | **3,275 s = 55 min** of GPU time, 16 chunks |
-| blocks below 39,299 | nearly empty — block 20,000 holds 19,023 UTXOs in total |
+| blocks below the frontier | nearly empty — block 20,000 holds 19,023 UTXOs in total (re-confirmed 2026-08-01) |
 | historical board rate | 2,220 blocks/hr — **measured on those empty blocks only** |
 
-Extrapolating the 2,220 blocks/hr figure to the remaining 919,002 blocks gives ~17 GPU-days and is
+Extrapolating the 2,220 blocks/hr figure to the remaining 931,664 blocks gives ~17 GPU-days and is
 wrong by orders of magnitude. At even a 10-minute average — generous, given 55 min for a *modest*
 modern block — the remainder is **~17 GPU-years**.
 

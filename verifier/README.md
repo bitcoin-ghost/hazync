@@ -54,7 +54,7 @@ $ hazync-verify neg500.snark          # valid proof, but [500..500]
 VERIFICATION FAILED: range starts at block 500, not 1 — NOT genesis-anchored
 
 $ hazync-verify bitflipped.snark      # one byte changed
-VERIFICATION FAILED: the proof is not valid for guest 3f52baff — forged, tampered, corrupt, …
+VERIFICATION FAILED: the proof is not valid for guest be5e0528 — forged, tampered, corrupt, …
 ```
 
 ## The embedded image id
