@@ -36,6 +36,16 @@ jobs:
         run: cd coordinator && python3 seam_fuzz.py --control
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
+      - name: Spine + fold logic (#30, #37)
+        # foldable() pair selection, the range-id grammar, and the spine's store/monotonic/serve path.
+        # NOT covered, deliberately and stated in the script: real STARK verification (needs the
+        # 184 MB host binary) and actual folding (a prove op; CI has no GPU). Those are verified by
+        # hand against real board receipts under prover/evidence/.
+        run: cd coordinator && python3 test_spine_fold.py
+      - name: Spine + fold POSITIVE CONTROL (already-folded check removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_spine_fold.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so

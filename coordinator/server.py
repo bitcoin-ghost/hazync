@@ -439,7 +439,13 @@ def verify_spine(receipt: bytes):
     if VERIFY == "mock":
         if not os.environ.get("COORD_ALLOW_MOCK"):
             return False, "mock verification is disabled; set COORD_ALLOW_MOCK=1 (GPU-less testing only)", None
-        return True, "mock-verified (VERIFY_MODE=mock)", {"lo": 1, "hi": 0, "out_tip": "mock", "in_tip": GENESIS_TIP}
+        # Must carry EVERY key submit_spine reads, or mock mode dies on a KeyError deep inside the
+        # commit path — which is the one mode that exists specifically for boxes without a GPU.
+        # verify_receipt's mock already returns the full shape; this one did not, and nothing noticed
+        # until a test drove it.
+        return True, "mock-verified (VERIFY_MODE=mock)", {"lo": 1, "hi": 0, "out_tip": "mock",
+                                                          "in_tip": GENESIS_TIP, "out_leaves": 0,
+                                                          "range_work": "0"}
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
