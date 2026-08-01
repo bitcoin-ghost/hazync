@@ -29,13 +29,33 @@ jobs:
   sign:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve tag
+      - name: Resolve and validate tag
         id: tag
-        run: echo "tag=${{ github.event.release.tag_name || inputs.tag }}" >> "$GITHUB_OUTPUT"
+        # The tag arrives through the ENVIRONMENT, never spliced into shell text.
+        #
+        # A `${{ }}` expression is substituted by GitHub into the script BEFORE bash parses it, so a
+        # tag containing shell metacharacters is executed as code — in this job, which imports the
+        # release-signing private key and holds `contents: write`. `workflow_dispatch` makes that
+        # input directly attacker-supplied for anyone with write access, so the payoff is the signing
+        # key itself and the ability to sign forged binaries with it. An env value is data: bash
+        # expands "$RAW_TAG" after parsing and never re-parses its contents.
+        #
+        # Belt and braces: the value is also shape-checked, so anything that is not a release tag is
+        # refused before it reaches `gh` at all.
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::refusing to sign: '$RAW_TAG' is not a vMAJOR.MINOR.PATCH release tag"
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download the release binaries
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p dist && cd dist
           # Sign whatever host binaries the release actually carries (CPU-only, or CPU+CUDA) — a release
@@ -44,7 +64,7 @@ jobs:
           # verifier (hazync-verify-*), which is the artifact most people will actually download —
           # it is the thing that lets someone CHECK a proof without a prover. Signing the host
           # binaries but not the verifier would leave the widely-used one unattested.
-          gh release download "${{ steps.tag.outputs.tag }}" -R "${{ github.repository }}" \
+          gh release download "$RELEASE_TAG" -R "$REPO" \
             -p 'hazync-*' --clobber
           ls -la
 
@@ -83,7 +103,9 @@ jobs:
       - name: Upload signed manifest to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" SHA256SUMS.txt SHA256SUMS.txt.asc \
-            -R "${{ github.repository }}" --clobber
-          echo "Signed SHA256SUMS + .asc uploaded to ${{ steps.tag.outputs.tag }}."
+          gh release upload "$RELEASE_TAG" SHA256SUMS.txt SHA256SUMS.txt.asc \
+            -R "$REPO" --clobber
+          echo "Signed SHA256SUMS + .asc uploaded to $RELEASE_TAG."

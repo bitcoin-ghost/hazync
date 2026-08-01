@@ -135,6 +135,13 @@ jobs:
         run: ./scripts/check-rangestate.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
+      - name: No workflow splices an expression into a shell block (arbitrary code where the signing key lives)
+        # GitHub splices ${{ }} into the script before bash parses it, so a value with shell
+        # metacharacters executes as code. release-sign.yml did this with the release tag while
+        # holding GPG_PRIVATE_KEY and contents: write, and workflow_dispatch let any write-access
+        # account supply that tag. Found by external review 2026-08-01; the gate exists so it cannot
+        # come back one hurried `gh release upload` at a time.
+        run: ./scripts/check-workflow-injection.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
         run: ./scripts/check-versions.sh
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
