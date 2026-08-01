@@ -36,6 +36,25 @@ STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__
 PROOFS_DIR = os.environ.get("COORD_PROOFS", os.path.join(os.path.dirname(__file__), "proofs"))  # kept, downloadable
 SPINE_DIR  = os.environ.get("COORD_SPINE", os.path.join(os.path.dirname(__file__), "spine"))    # the genesis-anchored head
 GENESIS_TIP = os.environ.get("GENESIS_TIP", "6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000")
+
+
+def is_genesis_anchored(in_tip, lo):
+    """Does this range descend from the real genesis, rather than merely being a valid transition?
+
+    ONE definition, used by both the frontier rule (which decides what may advance the chain) and the
+    `anchored` label reported to clients (#59). They were written out separately, and two copies of a
+    security-relevant predicate drift — the dangerous direction being a label that says "anchored"
+    for something the frontier would refuse.
+
+    Sound because `verify-any` pins the full genesis in-boundary (`assert_genesis_in_boundary`)
+    whenever `in_tip` is the genesis tip, so a range cannot fabricate its way into this by asserting a
+    genesis in-tip with an invented UTXO set or difficulty. `lo == 1` is required as well: block 0 is
+    unprovable, so a genesis-descended range starts at 1.
+    """
+    try:
+        return in_tip == GENESIS_TIP and int(lo) == 1
+    except (TypeError, ValueError):
+        return False
 # A claim expires this long after it is TAKEN — not after a heartbeat stops, because there are no
 # heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "3600"))    # 1 hour, then anyone may take it
@@ -363,7 +382,10 @@ def verify_receipt(receipt: bytes, rng):
     if VERIFY == "mock":
         if not os.environ.get("COORD_ALLOW_MOCK"):  # S2: fail closed — never silently accept-everything in prod
             return False, "mock verification is disabled; set COORD_ALLOW_MOCK=1 to allow (GPU-less testing only)", None
-        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"], "out_leaves": 0, "range_work": "0", "in_bhash": "0", "out_bhash": "0"}
+        # anchored=False, not omitted: a missing key would default to False anyway, but stating it
+        # keeps the mock's shape identical to the real path — the drift the comment at the other mock
+        # records having happened once already.
+        return True, "mock-verified (VERIFY_MODE=mock)", {"in_tip": "mock:%d" % rng["lo"], "out_tip": "mock:%d" % rng["hi"], "out_leaves": 0, "range_work": "0", "in_bhash": "0", "out_bhash": "0", "anchored": False}
     if not HOST_BIN or not os.path.exists(HOST_BIN):
         return False, "no HAZYNC_HOST binary configured for real verification", None
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -394,9 +416,20 @@ def verify_receipt(receipt: bytes, rng):
         genesis_seed = (rng["lo"] == 0 and lo == 1 and hi == rng["hi"])
         if not genesis_seed and (lo != rng["lo"] or hi != rng["hi"]):
             return False, f"receipt proves [{lo}..{hi}], not the claimed [{rng['lo']}..{rng['hi']}]", None
+        # "verified" and "genesis-anchored" are DIFFERENT claims, and callers conflate them (#59).
+        # A verified mid-chain range attests a correct transition between the boundaries it states —
+        # not that those boundaries descend from the real genesis. Surface which one this is.
+        #
+        # Derived here rather than read from the host's `anchored=` token on purpose: this is the
+        # SAME condition _frontier_chain uses to decide what may advance the frontier (in_tip ==
+        # GENESIS_TIP and lo == 1), so the label cannot drift from the rule that actually governs.
+        # It also does not depend on which host binary is installed — an older one omits the token,
+        # and defaulting a missing token to "not anchored" would mislabel genuinely anchored ranges.
+        anchored = is_genesis_anchored(kv["in_tip"], lo)
         return True, f"range [{lo}..{hi}] VERIFIED", {"lo": lo, "hi": hi, "in_tip": kv["in_tip"], "out_tip": kv["out_tip"],
                 "out_leaves": int(kv.get("out_leaves", 0)), "range_work": kv.get("range_work", "0"),
-                "in_bhash": kv.get("in_bhash", ""), "out_bhash": kv.get("out_bhash", "")}
+                "in_bhash": kv.get("in_bhash", ""), "out_bhash": kv.get("out_bhash", ""),
+                "anchored": anchored}
     except Exception as e:
         return False, f"verify error: {e}", None
     finally:
@@ -609,7 +642,7 @@ def _frontier_chain():
     for r in rows:
         if not r["in_bhash"]:
             continue  # F3: no boundary digest (pre-migration / NULL) — not chainable
-        if r["in_tip"] == GENESIS_TIP and r["lo"] == 1:
+        if is_genesis_anchored(r["in_tip"], r["lo"]):
             cw = rwork(r)                      # genesis-anchored: verify-any pinned its full in-boundary (H9 lo==1)
         else:
             best_pred = None
@@ -1051,8 +1084,18 @@ def submit(body):
             except Exception:
                 pass
         c.commit(); c.close()
-    return (200 if ok else 422), {"ok": ok, "range": rid, "receipt_sha": sha,
-                                  "signature": "valid" if sig_ok else "invalid", "note": note}
+    # `"ok": true` means the receipt verified and was accepted for THIS range — it does NOT mean the
+    # range is genesis-anchored, and a client that reads it as "this proves the chain from genesis"
+    # is wrong for every mid-chain receipt (which is most of them). Report the distinction instead of
+    # leaving it to be inferred (#59). Fields are additive; older clients ignore them.
+    resp = {"ok": ok, "range": rid, "receipt_sha": sha,
+            "signature": "valid" if sig_ok else "invalid", "note": note}
+    if ok and meta:
+        resp.update({"anchored": bool(meta.get("anchored", False)),
+                     "lo": int(meta.get("lo", r["lo"])), "hi": int(meta.get("hi", r["hi"])),
+                     "in_bhash": str(meta.get("in_bhash", "")),
+                     "out_bhash": str(meta.get("out_bhash", ""))})
+    return (200 if ok else 422), resp
 
 class H(BaseHTTPRequestHandler):
     def _send(self, code, obj=None, ctype="application/json", raw=None, headers=None):

@@ -1408,15 +1408,38 @@ fn verify_any_cmd(bin: &str) {
     if rs.in_tip_hash == arr(rev(hx(GENESIS_HASH))) {
         assert_genesis_in_boundary(&rs);
     }
+    // Whether this receipt proves anything about the chain FROM GENESIS, as opposed to proving a
+    // correct transition between two boundaries it states itself.
+    //
+    // Both conditions are required. `in_tip_hash == genesis` alone is what triggers the pin above,
+    // but a receipt could carry the genesis in-tip while claiming lo != 1; the standalone verifier
+    // (verifier/src/lib.rs) requires lo == 1 as one of its five assertions, so this agrees with it
+    // rather than inventing a second, weaker notion of "anchored".
+    let anchored = rs.in_tip_hash == arr(rev(hx(GENESIS_HASH))) && rs.lo == 1;
     // Expose FULL-boundary digests so the coordinator chains on `out_bhash(k) == in_bhash(k+1)` — the
     // complete seam check the guest fold does (tip + UTXO roots + leaves + difficulty + MTP window), not
     // just tip-hash. Without this a mid-chain range can fabricate its in-boundary UTXO set / difficulty.
     // in-boundary = the chain state after block lo-1; out-boundary = after block hi (H9 height binding).
     let in_bh = boundary_digest(rs.lo.saturating_sub(1), &rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent);
     let out_bh = boundary_digest(rs.hi, &rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent);
-    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_bhash={} out_bhash={}",
+    // `anchored` is APPENDED, never inserted: the coordinator parses this line as
+    // `dict(t.split("=",1) for t in line[len("RANGE-OK"):].split() if "=" in t)`, so a new key=value
+    // token is picked up by older coordinators as an extra key and by newer ones as the flag. Moving
+    // or renaming an existing token would not be safe; adding one is.
+    println!("RANGE-OK lo={} hi={} in_tip={} out_tip={} out_leaves={} range_work={} in_bhash={} out_bhash={} anchored={}",
         rs.lo, rs.hi, hex(&rs.in_tip_hash), hex(&rs.out_tip_hash), rs.out_leaves, work_u128(&rs.range_work),
-        hex(&in_bh), hex(&out_bh));
+        hex(&in_bh), hex(&out_bh), if anchored { "yes" } else { "no" });
+    // Say it in prose too. `RANGE-OK` reads as unqualified success, and for a mid-chain receipt that
+    // is a stronger claim than the proof supports: it attests a correct transition between the
+    // boundaries it states, NOT that those boundaries descend from the real genesis. A reader who
+    // treats it as "this proves the chain from genesis" is wrong, and the exit code alone (0 here,
+    // because the SNARK is valid) does not tell them so. Raised by external review 2026-08-01 (L-1).
+    if !anchored {
+        println!("NOTE: this range is NOT genesis-anchored — it proves a correct transition between");
+        println!("      its own stated boundaries, not that they descend from the real genesis.");
+        println!("      Anchoring is established by the connected chain (the board's frontier) or by");
+        println!("      `verify-range` / `verify-chain`, which pin genesis. Use those to conclude more.");
+    }
 }
 
 // `verify-chain <bin>`: verify a bare ChainState (mode-2/mode-5) receipt and PIN its committed anchor to

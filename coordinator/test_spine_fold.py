@@ -253,6 +253,37 @@ try:
 finally:
     server.CLAIM_TTL = _ttl
 
+# ── genesis-anchoring label (#59) ────────────────────────────────────────────────────────────────
+# "verified" and "genesis-anchored" are different claims, and the API now reports which one a receipt
+# is. The risk being tested is NOT that the predicate is complicated — it is two lines — but that the
+# label and the frontier rule could disagree, with the dangerous direction being a receipt labelled
+# `anchored: true` that the frontier would refuse to build on.
+GT = server.GENESIS_TIP
+check(server.is_genesis_anchored(GT, 1) is True, "genesis tip at lo=1 IS anchored")
+check(server.is_genesis_anchored(GT, 2) is False, "genesis tip at lo=2 is NOT anchored (block 0 is unprovable)")
+check(server.is_genesis_anchored("00" * 32, 1) is False, "lo=1 with a non-genesis in-tip is NOT anchored")
+check(server.is_genesis_anchored("", 1) is False, "an empty in-tip is NOT anchored")
+check(server.is_genesis_anchored(GT, "1") is True, "lo arrives as a string from sqlite and still counts")
+check(server.is_genesis_anchored(GT, None) is False, "a missing lo is refused, not crashed")
+check(server.is_genesis_anchored(GT, "abc") is False, "an unparseable lo is refused, not crashed")
+
+# The label must agree with the rule that actually governs the frontier. Seed a genesis-anchored
+# range and a mid-chain one, and assert the frontier advances over exactly the ranges the label
+# calls anchored.
+c = server.db()
+c.execute("DELETE FROM vranges"); c.execute("DELETE FROM ranges")
+for rid, lo, hi, itip, otip in [("1-4", 1, 4, GT, "tipA"), ("5-8", 5, 8, "tipA", "tipB")]:
+    c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')", (rid, lo, hi))
+    c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work)"
+              " VALUES(?,?,?,?,?,'','t',0,0,'0')", (rid, lo, hi, itip, otip))
+c.commit()
+rows = [dict(r) for r in c.execute("SELECT lo,in_tip FROM vranges ORDER BY lo").fetchall()]
+c.close()
+check(server.is_genesis_anchored(rows[0]["in_tip"], rows[0]["lo"]) is True,
+      "the range the frontier starts from is the one labelled anchored")
+check(server.is_genesis_anchored(rows[1]["in_tip"], rows[1]["lo"]) is False,
+      "a mid-chain continuation is NOT labelled anchored, even though it is verified")
+
 print()
 if CONTROL:
     if fails:
