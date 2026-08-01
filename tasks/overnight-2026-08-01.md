@@ -206,6 +206,48 @@ which CI has not got and should not.
 authorisation was for the release; these came after it, so they follow your standing rule and wait
 for review. The CI gate only starts running once pushed.
 
+## Items 6-8 also done (after the first handover was written)
+
+**6 — `docs/GOALS.md` refreshed to measured reality.** It is the document that says *"measured, not
+asserted"*, and it was asserting: the G1 evidence block showed `hazync-verify` output citing guest
+`3f52baff`, two re-baselines after that guest was retired, so it read as a live verification of the
+current system while being a transcript of a dead one. Board figures said 39,299 / 4.1% against an
+actual 26,637 / 2.78%. Replaced with output run today against a proof fetched from the live board.
+The receipt COUNT is now not restated at all — it is a property of the coordinator's proof store, goes
+stale on every re-baseline, and `check-retention.py` reports it. Goals and done-conditions untouched.
+
+**7 — `check-versions.sh` check 7: stale evidence.** Check 2 asks "is this a real id?" and a
+documented predecessor passes, correctly, because prose legitimately discusses lineage. It cannot see
+a retired id presented as CURRENT EVIDENCE. New rule: inside a fenced code block, the only guest id
+allowed is the canonical one — a fenced block is a claim that something was run.
+
+⚠ It immediately caught a second case I had missed: `verifier/README.md` showed a rejection transcript
+naming `3f52baff`. My own pre-check had declared the repo clean, because it only collected ids written
+in full 64-hex form while the gate also knows short forms. **The gate was stricter than the scan I
+used to justify it** — right way round, but my "zero occurrences" claim was wrong when I made it.
+
+**8 — CI coverage for spine and fold** (`coordinator/test_spine_fold.py`, plus a positive control).
+Covers `foldable()` pair selection, the range-id grammar, and the spine store/monotonic/serve path.
+Explicitly does NOT cover real STARK verification or actual folding — CI has no GPU — and says so in
+both the script and the CI step rather than implying coverage that does not exist.
+
+⚠ Writing it found a defect: `verify_spine`'s mock branch omitted `out_leaves` and `range_work`, both
+read by `submit_spine`, so **mock mode died on a KeyError** — breaking precisely the GPU-less setup
+mock mode exists for. And the first version of the test signed with dummy hex, so every spine
+assertion "passed" against a 403, vacuously. Both fixed.
+
+## Defects found tonight, all by running things rather than reading them
+
+| # | defect | would have caused |
+|---|---|---|
+| 1 | `extend-spine` seam compared roots unnormalized | spine stalls at the first accumulator level change — **in the shipped binary** |
+| 2 | `parse_range` refused arbitrary-width ranges | folded ranges rejected *after* the GPU work was done |
+| 3 | worker reported a missing endpoint as "submission rejected" | contributors hunting a fault in their own prover |
+| 4 | `verify_spine` mock missing keys | mock mode (the GPU-less path) crashes |
+| 5 | `dist/hazync-worker` was the v0.12.2 copy | release advertising `fold`/`spine` while shipping a worker without them |
+| 6 | `make_latest` in the same PATCH as `draft=false` | `/releases/latest` serving the OLD binaries, checksums and signature both passing |
+| 7 | stale evidence in GOALS.md and verifier/README.md | reviewers shown a dead guest's output as current |
+
 ## What did NOT happen, as instructed
 
 No ghostd, no guest change, no re-baseline, no coordinator deploy, and nothing that competed with the
