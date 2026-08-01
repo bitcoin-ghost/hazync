@@ -50,15 +50,21 @@ SERVED="coordinator/server.py"
 echo "== deploying $TAG into $REPO =="
 say "currently at: $(git describe --tags --always 2>/dev/null || echo unknown) ($(git rev-parse --short HEAD 2>/dev/null))"
 
-# ── refuse to paper over drift ────────────────────────────────────────────────────────────────────
+# ── drift: report it in a dry run, refuse it in a real one ────────────────────────────────────────
+#
+# The order here matters and it was wrong to begin with. The refusal used to run BEFORE the dry-run
+# branch, so `DRY_RUN=1` exited 1 on a drifted checkout without saying what a deploy would do — which
+# is backwards, because a drifted box is precisely the one you most want to preview before touching.
+# A dry run must be read-only and must always answer the question it was asked.
 drift=$(git status --porcelain --untracked-files=no | wc -l)
-if [ "$drift" -ne 0 ] && [ "$FORCE" != 1 ]; then
+if [ "$drift" -ne 0 ] && [ "$DRY_RUN" != 1 ] && [ "$FORCE" != 1 ]; then
     echo "REFUSING: $drift tracked file(s) modified in the checkout:" >&2
     git status --porcelain --untracked-files=no >&2
     echo >&2
     echo "Someone edited the deployment in place. That is exactly the state this script exists to" >&2
     echo "end, and discarding it blind could throw away a production fix." >&2
     echo "  · inspect:  git -C $REPO diff" >&2
+    echo "  · preview:  DRY_RUN=1 $0 $TAG   (read-only; works even in this state)" >&2
     echo "  · keep it:  commit it upstream, then deploy the tag that contains it" >&2
     echo "  · drop it:  re-run with --force (it is backed up below either way)" >&2
     exit 1
@@ -75,6 +81,19 @@ if [ "$DRY_RUN" = 1 ]; then
     say "$SERVED after:  ${after_sha:0:16}"
     [ "$before_sha" = "$after_sha" ] && say "-> served file UNCHANGED: no restart would be needed" \
                                      || say "-> served file CHANGES: a restart would be required"
+    if [ "$drift" -ne 0 ]; then
+        say ""
+        say "-> $drift tracked file(s) are modified in this checkout, so a real deploy would REFUSE:"
+        git status --porcelain --untracked-files=no | sed 's/^/       /'
+        # Whether that drift matters is answerable, so answer it rather than leaving it as a warning.
+        if git diff --quiet "$TAG" -- "$SERVED" 2>/dev/null; then
+            say "   the local $SERVED is IDENTICAL to $TAG — the edit is already committed upstream,"
+            say "   so --force would discard nothing."
+        else
+            say "   the local $SERVED DIFFERS from $TAG — inspect before forcing:"
+            say "     git -C $REPO diff $TAG -- $SERVED"
+        fi
+    fi
     echo "== dry run only, nothing done =="
     exit 0
 fi
