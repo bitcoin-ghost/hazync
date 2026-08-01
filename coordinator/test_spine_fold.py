@@ -81,15 +81,22 @@ print("== foldable() ==")
 seed([])
 check(server.foldable() == [], "an empty board offers nothing to fold")
 
+# Only ALIGNED siblings fold. With 1,2,3 the sole tree pair is (1,2): [2..3] is not aligned to its
+# own width, and block 3's sibling (block 4) does not exist yet. The earlier version of this test
+# asserted {(1,2),(2,3)} because that is what the buggy implementation did — it was written from the
+# code rather than from the property, so it passed against behaviour that did not converge.
 seed([(1, 1), (2, 2), (3, 3)])
-check(pairs() == {("1", "2"), ("2", "3")}, "three adjacent blocks offer both adjacent pairs")
+check(pairs() == {("1", "2")}, "only the aligned sibling pair is offered, not every adjacent pair")
+
+seed([(1, 1), (2, 2), (3, 3), (4, 4)])
+check(pairs() == {("1", "2"), ("3", "4")}, "four blocks offer both sibling pairs at the leaf level")
 
 seed([(1, 1), (3, 3)])
 check(server.foldable() == [], "non-adjacent ranges are not a foldable pair")
 
 # The one that matters: a pair whose fold ALREADY EXISTS must not be offered again, or workers burn
 # GPU time re-folding what the board already has.
-seed([(1, 1), (2, 2), (3, 3), (1, 2)])
+seed([(1, 1), (2, 2), (3, 3), (4, 4), (1, 2), (3, 4)])
 got = pairs()
 if CONTROL:
     # Break exactly that rule — the pre-check that skips already-folded pairs — and prove this test
@@ -115,10 +122,40 @@ if CONTROL:
     server.foldable = _broken
     got = pairs()
 check(("1", "2") not in got, "a pair whose fold already exists is not offered again")
-check(("1-2", "3") in got, "the folded range itself becomes foldable with its neighbour (tree, not chain)")
+check(("1-2", "3") not in got,
+      "a folded range does NOT pair with a bare neighbour — different widths are not siblings")
+check(("1-2", "3-4") in got, "two folded siblings DO fold into their parent")
 
 seed([(i, i) for i in range(1, 12)])
 check(len(server.foldable(3)) == 3, "the limit is respected")
+
+# CONVERGENCE. This is the property that was missing and it cost 486 redundant folds on the live
+# board before anyone noticed — 581 folds to cover 96 blocks, where a tree needs 95. Offering "any
+# adjacent pair whose span does not exist" wanders into every (start, width) combination, because
+# each fold creates a new operand. Assert the tree instead: N blocks must fold in exactly N-1 steps
+# and terminate.
+seed([(i, i) for i in range(1, 17)])
+folds = 0
+while True:
+    ps = server.foldable(32)
+    if not ps:
+        break
+    p = ps[0]
+    c = server.db()
+    c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work)"
+              " VALUES(?,?,?,'','','','t',0,0,'0')", (p["result"], p["lo"], p["hi"]))
+    c.commit(); c.close()
+    folds += 1
+    if folds > 100:
+        break                                   # runaway: the old behaviour never terminated
+check(folds == 15, f"16 blocks fold in exactly 15 steps and stop (got {folds})")
+c = server.db()
+built = {(r["lo"], r["hi"]) for r in c.execute("SELECT lo,hi FROM vranges WHERE hi>lo")}
+c.close()
+check((1, 16) in built and (1, 8) in built and (9, 16) in built,
+      "it builds the aligned tree, up to the full [1..16] root")
+check(all(server._tree_node(lo, hi) for lo, hi in built),
+      "every range it produced is an aligned power-of-two tree node — no stray widths")
 
 
 # ── range ids: the collision that broke a real fold ───────────────────────────────────────────────

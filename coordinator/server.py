@@ -520,19 +520,31 @@ def submit_spine(body):
         os.replace(tmp_js, os.path.join(SPINE_DIR, "spine.json"))
     return 200, {"ok": True, "note": note, "head": head}
 
+def _tree_node(lo, hi):
+    """True if [lo..hi] is a node of the canonical fold tree.
+
+    Width must be a power of two and the range must be ALIGNED to its own width (blocks are numbered
+    from 1, so [1..2] and [3..4] are nodes; [2..3] is not). This is what makes folding converge.
+    """
+    w = hi - lo + 1
+    return w > 0 and (w & (w - 1)) == 0 and (lo - 1) % w == 0
+
 def foldable(limit=8):
-    """Adjacent verified ranges whose fold does not exist yet — the work `hazync fold` picks up (#37).
+    """Sibling pairs of the canonical fold tree whose parent does not exist yet (#37).
 
-    Folding is NOT allocated, for the same reason proving is not: allocation is coordination, and
-    coordination is where the outages have been. This is advisory. Two workers may fold the same pair;
-    the outputs are receipts of the same range, so the loser's submission is discarded as already
-    proven. Folding is far cheaper than proving, so the waste is noise.
+    THIS USED TO OFFER ANY ADJACENT PAIR, AND THAT DOES NOT CONVERGE. Every fold produces a range that
+    immediately becomes a new operand, so "any adjacent pair whose exact span is missing" wanders into
+    every (start, width) combination instead of building a tree. Measured on the live board before this
+    was fixed: **581 folds covering 96 blocks**, where a tree needs 95 — 486 of them redundant, and the
+    widths produced were 8 ranges of width 2, 8 of width 3, 8 of width 4 … which is O(n^2) by
+    inspection. Every one of those proofs is VALID; they are just work nobody needed.
 
-    Several candidates are returned rather than one, so workers spread out by choosing among them
-    instead of every worker racing for the leftmost pair.
+    So: only two aligned siblings of equal width may fold, and their parent is the next node up. That
+    is N-1 folds for N blocks, at log depth, which is what the design assumed all along.
 
-    Note this is a TREE, not a spine: any two adjacent ranges fold with no reference to genesis. The
-    spine (#30) is the separate, serial job that anchors at lo == 1.
+    Still unallocated and still advisory — several candidates are returned so concurrent workers spread
+    out, and a duplicate fold is discarded as already proven. Cheap waste is fine; unbounded waste is
+    not.
     """
     with _lock:
         c = db()
@@ -544,11 +556,19 @@ def foldable(limit=8):
         have.add((r["lo"], r["hi"]))
     out = []
     for r in rows:
-        for s in starts.get(r["hi"] + 1, ()):
-            if (r["lo"], s["hi"]) in have:
-                continue                       # already folded by someone
-            out.append({"left": r["id"], "right": s["id"], "lo": r["lo"], "hi": s["hi"],
-                        "result": (str(r["lo"]) if r["lo"] == s["hi"] else f"{r['lo']}-{s['hi']}")})
+        lo, hi = r["lo"], r["hi"]
+        if not _tree_node(lo, hi):
+            continue                      # not a tree node — folding from it does not converge
+        w = hi - lo + 1
+        if ((lo - 1) // w) % 2 != 0:
+            continue                      # right-hand sibling; its left partner drives the fold
+        for s in starts.get(hi + 1, ()):
+            if s["hi"] - s["lo"] + 1 != w:
+                continue                  # siblings must be the same width
+            if (lo, s["hi"]) in have:
+                continue                  # parent already exists
+            out.append({"left": r["id"], "right": s["id"], "lo": lo, "hi": s["hi"],
+                        "result": (str(lo) if lo == s["hi"] else f"{lo}-{s['hi']}")})
             if len(out) >= limit:
                 return out
     return out
