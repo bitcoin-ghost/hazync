@@ -108,7 +108,7 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.13.1**, shipping `METHOD_ID be5e0528` — the same guest as
+either way. **Releases:** the current release is **v0.13.2**, shipping `METHOD_ID be5e0528` — the same guest as
 v0.12.x, so **every existing proof stays valid**. v0.13.0 adds the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
 (`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
