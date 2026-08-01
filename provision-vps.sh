@@ -82,10 +82,21 @@ rzup_install r0vm 3.0.5
 # Unlike the others this one is NOT needed to build or to prove — only to wrap — so a box that cannot
 # reach the CDN for it should still finish provisioning with a working prover. Set SKIP_GROTH16=1 to
 # skip it deliberately; otherwise a failure here warns rather than aborts.
+#
+# ⚠ risc0-groth16 0.1.0 HANGS ON DOWNLOAD. Observed 2026-08-01 on three machines across two networks:
+# rzup prints "Downloading risc0-groth16 version 0.1.0" and then emits nothing at all — no progress,
+# no error, no completion — indefinitely. For contrast, the 488 MB rust toolchain downloads and
+# reports "✓ Downloaded" in ~13 minutes on the same link in the same run, so this is not bandwidth.
+#
+# Because it is OPTIONAL, it gets a short timeout of its own rather than the full one: waiting an hour
+# (times three attempts) for a component that never arrives cost three hours of a from-source build
+# before this was measured. Fail fast, say what is lost, carry on.
 if [ "${SKIP_GROTH16:-0}" = 1 ]; then
     echo "== skipping risc0-groth16 (SKIP_GROTH16=1) — this box will prove but not snark-wrap =="
-elif ! rzup_install risc0-groth16 0.1.0; then
-    echo "   WARNING: no risc0-groth16 component. Proving works; \`host snark-wrap\` will not." >&2
+elif ! RZUP_TIMEOUT="${GROTH16_TIMEOUT:-300}" rzup_install risc0-groth16 0.1.0; then
+    echo "   NOTE: risc0-groth16 did not install (it is known to hang; see the comment above)." >&2
+    echo "   Nothing else is affected: the guest, the prover and every verifier work without it." >&2
+    echo "   Only \`host snark-wrap\` needs it. Retry with GROTH16_TIMEOUT=3600 if you want to wait." >&2
 fi
 export PATH="$HOME/.risc0/bin:$PATH"
 # the riscv g++/gcc + libstdc++/libgcc/newlib come with the rzup cpp toolchain extension.
