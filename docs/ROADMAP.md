@@ -9,7 +9,7 @@ the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
 >
-> **Work distribution is designed in [`DESIGN_work_distribution.md`](DESIGN_work_distribution.md)**
+> **Work distribution is specified in [`SPEC.md`](SPEC.md) §10.1**
 > (#37 + #30): free-running provers, opportunistic tree folding, an incrementally-extended genesis
 > spine, and the storage answer — retain every per-block receipt, discard bundles behind the frontier.
 >

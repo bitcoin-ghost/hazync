@@ -35,6 +35,16 @@ of one.
 **The critical path.** No other workstream matters if contributors cannot join. This is the only thing
 that converts strangers into throughput, and throughput is the only route to G2.
 
+> **STATUS 2026-08-01 — Workstream 1 is COMPLETE and this section describes the v0.11.0 state it was
+> written against.** The worker ships as a signed release artifact (1.1), `selftest` proves a real
+> block before joining (1.3), failures name the variable to change (1.4), and the done-condition below
+> was demonstrated end to end: a fresh user went from the release page to a verified proof credited on
+> the public board, with no repo checkout and no help. Also complete since: **2.3** (`/api/proof/<id>`
+> and `/api/spine/proof`), **3.x** (G3 met, #47), **6.3** (G1 retention gated in CI), **6.4** (#30,
+> the spine), **6.5** (#40, the bridge). Left live in this plan: **6.1** (proof-store backups),
+> **6.2** (accumulator audit), **6.6** (bridge checkpoints), and Workstream 4, which is ghostd work
+> tracked in #42/#31/#46.
+
 **Today a contributor cannot do this.** v0.11.0 ships four binaries — two host/prover, two verifier —
 and **the worker is not among them**. `coordinator/hazync` is the claim → prove → submit loop, and it
 exists only inside the repo. The documented path is therefore: clone, read `CONTRIBUTING.md`, install
