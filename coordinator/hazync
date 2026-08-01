@@ -494,6 +494,35 @@ def cmd_selftest(args):
         print(f"! could not run the prove check ({e}) — treating as a FAILURE, not a skip")
         ok = False
 
+    # Which JOBS this coordinator supports. Proving works against every coordinator; `fold` and
+    # `spine` need endpoints that only exist from v0.13.0, and a coordinator that predates them
+    # answers 404. That is not a fault in the contributor's setup, but it reads like one at the
+    # moment of failure — v0.13.0 shipped a worker that reported a missing /api/spine as
+    # "✗ spine submission rejected", sending people to look for a problem with their own proof.
+    #
+    # Reporting it HERE, in the pre-flight, is the difference between knowing up front which jobs are
+    # available and finding out after fetching a receipt. Never fails the selftest: proving is the
+    # job that matters and it does not depend on either endpoint.
+    jobs = []
+    for name, path in (("fold", "/api/foldable"), ("spine", "/api/spine")):
+        try:
+            get(path)
+            jobs.append(name)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # /api/spine 404s BOTH when the endpoint is absent and when no spine exists yet, and
+                # the two are indistinguishable from here. Say what is actually known.
+                print(f"· `hazync {name}` unavailable on this coordinator ({path} → 404)"
+                      + (" — either it predates the spine, or none has been started yet"
+                         if name == "spine" else " — it predates fold distribution"))
+            else:
+                print(f"· `hazync {name}` check inconclusive ({path} → HTTP {e.code})")
+        except Exception:
+            print(f"· `hazync {name}` check inconclusive (coordinator unreachable)")
+    if jobs:
+        print("✓ this coordinator also accepts: " + ", ".join(f"`hazync {j}`" for j in jobs)
+              + " — cheaper than proving, and they are what make the board checkable in one download")
+
     print()
     if ok:
         print("ALL GOOD — you're ready. Start proving with `hazync run`.")
