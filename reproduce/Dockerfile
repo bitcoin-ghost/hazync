@@ -32,9 +32,14 @@ COPY . /hazync-zkvm
 # unauthenticated, which is fine for a one-off build — but only EXPORT the token when the secret is
 # actually present and non-empty: an empty GITHUB_TOKEN makes rzup send an empty credential and get a
 # 401. If you hit the rate limit locally, run: docker build --secret id=gh_token,env=GITHUB_TOKEN ...
+# SKIP_GROTH16: this build exists to compute the guest image id, and the groth16 component has no
+# bearing on it — it is needed only by `host snark-wrap`, which is not part of reproducing an id.
+# Measured 2026-08-01: without this, a from-source build spent TWO HOURS timing out on that one
+# component (3600s x 3 attempts) after every other part had succeeded. Three hours of a stranger's
+# time, for a file the build does not use. Anyone wanting to wrap can install it separately.
 RUN --mount=type=secret,id=gh_token,required=false \
     if [ -s /run/secrets/gh_token ]; then export GITHUB_TOKEN="$(cat /run/secrets/gh_token)"; fi && \
-    ./provision-vps.sh
+    SKIP_GROTH16=1 ./provision-vps.sh
 
 # Default: emit the guest image id. Run this container on any machine; the id must match.
 CMD ["/hazync-zkvm/prover/target/release/host", "method-id"]
