@@ -439,6 +439,87 @@ true: **segwit** (500000), **taproot** (750000), **big-block** (741000, ~6.4k in
 collision** case (130000), plus the COV/SEC reject-path suite. The in-block-leaf bug above is the only
 defect the pass surfaced.
 
+## Rounds 10 & 11 (2026-08-01/02) — the first EXTERNAL reviews
+
+The first reviews by people outside the project. Two independent passes, both AI-assisted full-source
+reviews rather than a commissioned professional audit — that distinction matters and is kept
+throughout. **Neither found a soundness break in the guest, the verifier or the coordinator frontier.**
+
+Both landed on the same two places as the highest residual risk: the C++ bridge compiled into the
+guest, and the accumulator. That agreement is itself a finding — it is where outside eyes go first.
+
+### Round 10 — review #1 (Kimi)
+
+No defect found in the Rust. Its largest stated unknown was the two files it could not read,
+`verify_input.cpp` and `cshims.c`, observing that a missing domain tag in the C++ leaf builder *"would
+undermine the entire security claim"*. Both were then read directly.
+
+**`verify_input.cpp` — not a defect.** The C++ leaf builders do apply `TAG_LEAF`, and
+`scripts/check-utreexo.sh` has been asserting agreement across host Rust, guest Rust and guest C++ in
+CI since the domain-separation re-baseline. The stronger argument is structural: the host builds
+witnesses with Rust leaves and commits `root_next`, the guest rebuilds them in C++ and asserts
+`root_matches` — so a tag mismatch would change every leaf hash and no proof would verify at all.
+Every proof on the board is an execution of that check.
+
+**`cshims.c` — two real defects, both latent.** `_sbrk` checked only its upper bound while
+`_malloc_trim_r` calls it with negative increments (confirmed in the linked guest ELF), and `strtoul`
+ignored its `base` argument entirely. Neither can produce a false proof: all four `strtoul` call sites
+are libstdc++/newlib scaffolding with none on the consensus path, and heap exhaustion is fail-closed
+(1 MiB heap, `-fexceptions`, no `catch` anywhere in the guest validator, so `bad_alloc` reaches
+`std::terminate`). **Fix prepared in #56 but NOT yet merged** — `cshims.c` compiles into the guest, so
+it forces a `METHOD_ID` re-baseline that invalidates every proof on the board, and neither defect is
+live enough to justify that alone. It is staged to ride the next planned guest change.
+
+Also filed from this round: the BIP30 structural argument's hard ceiling at height ~1,983,702 (#54),
+and `std::random_device` being linked into the guest though never called (#55).
+
+### Round 11 — review #2 (opencode)
+
+Verdict: consensus-critical core sound. One High, one Medium, three Low.
+
+| ID | Finding | Status |
+|----|---------|--------|
+| **H-1** | Script injection in `release-sign.yml` — the release tag was interpolated into three `run:` blocks in the job holding `GPG_PRIVATE_KEY` and `contents: write` | **FIXED** (#57) |
+| **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
+| **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
+| **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#64) |
+
+**H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
+into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
+code — and `workflow_dispatch` made that input directly supplyable by any account with write access.
+The payoff was the release-signing private key and, with it, forged `SHA256SUMS.txt.asc` for every
+published binary: the artefacts this document tells people to verify. The tag now arrives through
+`env:` and is shape-checked, and `scripts/check-workflow-injection.sh` bans `${{ }}` in any `run:`
+block repo-wide, with a positive control.
+
+Note the limit of reproducibility as a defence here: it protects anyone who rebuilds the guest and
+checks `METHOD_ID`, and does nothing for someone who does exactly what this document says and verifies
+the signature.
+
+**L-2 was larger than reported.** Beyond the three panic paths, `delete` could *mutate before
+rejecting* — the disjoint-tree branch set a root and only then discovered a malformed rightmost proof,
+leaving a corrupted Stump behind a `false` return. Worse than the panic, because the caller believes
+nothing happened. Every rejection path now returns before touching state.
+
+The report also asked to "confirm the fork `hazync-utreexo` stays in sync". **There is no fork** —
+`hazync-utreexo` is `accumulator/`, consumed by path from `prover/host` and `audit-fuzz`. The guest
+does not use it at all; it has its own `prover/methods/guest/src/utreexo.rs`.
+
+### Found by us while fixing the above, not by either reviewer
+
+- **`hazync-coordinator.service` sets `ProtectHome=true` while reading `/root/bridge_bundles`** —
+  which `ProtectHome` makes inaccessible. `can_serve_witness` probes with `os.path.exists`, so it
+  fails silently to the legacy witness window: no exception, no log (#60).
+- **`verify-any` had no CI coverage at all** — the command the coordinator runs on *every* submission
+  (#65). The standalone verifier was well covered, but it is a different path with a different genesis
+  condition.
+- **A test that passed its own positive control.** The first draft of the L-2 tests passed against the
+  unfixed code, because fully random proofs never get past `verify()` and so never reached the paths.
+  They now build genuine proofs and perturb one field.
+- **`build-release.sh` bind-mounts the live working tree**, so switching branches mid-build silently
+  produces a binary that is a mixture of them, with `METHOD_ID` and the smoke tests all reporting fine.
+
 ## Earlier findings (2026-07-15 self-audit) — status
 
 - **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call
