@@ -47,7 +47,22 @@ else
     want_po2=20
 fi
 
+# ⚠ DO NOT CHECKOUT ANOTHER BRANCH WHILE THIS RUNS.
+#
+# The repo is bind-MOUNTED (below), not copied, so the container compiles whatever is in the working
+# tree AT THE MOMENT each crate is built — not what was checked out when you started. A CPU build is
+# tens of minutes and a CUDA build far longer, which is exactly the window in which switching
+# branches feels harmless.
+#
+# The failure is silent and the artifact looks fine: METHOD_ID prints, the smoke tests pass, and you
+# get a binary that is a MIXTURE of the branches that were checked out during the run. Observed
+# 2026-08-02 — a build started on a feature branch produced a host with none of that branch's changes
+# in it, and nothing in the output said so.
+#
+# If you need to work while this builds, use a separate worktree or clone.
 echo "== building $MODE release from $REPO (HOME=/root inside $IMAGE) =="
+echo "   NOTE: $REPO is mounted live — do not switch branches in it until this finishes."
+echo "   HEAD: $(git -C "$REPO" describe --tags --always 2>/dev/null || echo unknown) ($(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown))"
 # The repo is mounted, so prover/target persists on the host between runs: re-running after a host-only
 # source change recompiles just the host crate instead of the whole guest + CUDA kernels.
 # SKIP_GROTH16 must be forwarded EXPLICITLY: the build runs in a container, so a variable exported in
