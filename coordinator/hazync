@@ -244,6 +244,48 @@ def _err_tail(stderr, keep=4):
     picked = (signal or lines)[-keep:]
     return " | ".join(picked) if picked else "(no error output)"
 
+import contextlib, fcntl
+
+@contextlib.contextmanager
+def gpu_lock(what="prove"):
+    """Serialise GPU work across every worker on this box.
+
+    Two risc0 jobs on one card do not fail politely. They fail when their allocation PEAKS happen to
+    coincide, which is intermittent and looks like nothing else: on 2026-08-01 a prover on a 46 GB
+    L40S could not allocate 268 MB while `nvidia-smi` showed 30 GB free a second later. Peak, not
+    average, is what has to fit — and running a prover and a folder concurrently means adding two
+    peaks that were each measured alone.
+
+    Lowering HAZYNC_SEG_PO2 shrinks the peak but does not stop them colliding; it only makes the
+    collision rarer, which is worse than fixing it because it turns a hard failure into an occasional
+    one. So: one GPU job at a time, per box. Both jobs still run, interleaved, and the card is busy
+    either way — proving is not idle while a fold holds the lock, it is queued.
+
+    Set HAZYNC_GPU_LOCK=none to disable (a box with genuinely independent GPUs per worker), or point
+    it at a per-device path when pinning workers with CUDA_VISIBLE_DEVICES.
+    """
+    path = os.environ.get("HAZYNC_GPU_LOCK", "/tmp/hazync-gpu.lock")
+    if path == "none":
+        yield
+        return
+    fh = None
+    try:
+        fh = open(path, "a+")
+        t0 = time.time()
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        waited = time.time() - t0
+        if waited > 5:
+            print(f"  (waited {waited:.0f}s for the GPU — another worker was {what}ing)", flush=True)
+        yield
+    except OSError:
+        yield                      # cannot lock (odd filesystem) — proceed rather than refuse to work
+    finally:
+        if fh is not None:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+            except Exception:
+                pass
+
 def _run_with_seg_retry(argv, env, work, label):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
@@ -258,7 +300,8 @@ def _run_with_seg_retry(argv, env, work, label):
     last = ""
     for _po2 in _seg_ladder(env):
         _env = dict(env) if _po2 is None else dict(env, HAZYNC_SEG_PO2=str(_po2))
-        r = subprocess.run([HOSTBIN, *argv], env=_env,
+        with gpu_lock("prov"):
+            r = subprocess.run([HOSTBIN, *argv], env=_env,
                            cwd=work, stderr=subprocess.PIPE, text=True)
         if r.stderr:                                    # keep the host's real output in the worker log
             sys.stderr.write(r.stderr); sys.stderr.flush()
@@ -610,8 +653,9 @@ def cmd_fold(args):
                 break
             out = work / f"fold_{res}.bin"
             print(f"folding {lp} + {rp} -> {res} …")
-            r = subprocess.run([HOSTBIN, "fold-range", str(lf), str(rf), str(out)],
-                               capture_output=True, text=True)
+            with gpu_lock("fold"):
+                r = subprocess.run([HOSTBIN, "fold-range", str(lf), str(rf), str(out)],
+                                   capture_output=True, text=True)
             if r.returncode != 0 or not out.exists():
                 both = (r.stdout or "") + (r.stderr or "")
                 sys.exit(f"fold-range failed for {lp} + {rp}:\n{both[-400:]}")
@@ -712,8 +756,9 @@ def cmd_spine(args):
             cur.write_bytes(get("/api/spine/proof"))
             out = work / f"spine_{nxt}.bin"
             print(f"absorbing block {nxt} into [1..{head['hi']}] — one fold, no re-proving…")
-            r = subprocess.run([HOSTBIN, "extend-spine", str(cur), str(chunk), str(out)],
-                               capture_output=True, text=True)
+            with gpu_lock("absorb"):
+                r = subprocess.run([HOSTBIN, "extend-spine", str(cur), str(chunk), str(out)],
+                                   capture_output=True, text=True)
             if r.returncode != 0 or not out.exists():
                 both = (r.stdout or "") + (r.stderr or "")
                 # A seam failure here is information, not noise: it means the board's receipt for this

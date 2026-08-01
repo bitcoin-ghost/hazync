@@ -894,8 +894,19 @@ def claim(body):
         proven = set()
         for row in c.execute("SELECT lo, hi FROM vranges"):
             proven.update(range(row["lo"], row["hi"] + 1))
+        # A claim held by SOMEONE ELSE blocks; one held by the requester does not. That is not
+        # contention, it is a retry — and treating it as contention is what left holes behind the
+        # frontier. Observed 2026-08-01: a prover OOMed on block 39,318, moved on, and its own claim
+        # then locked it out of that block for the full hour of CLAIM_TTL. The frontier sat at 39,317
+        # while the board climbed past 40,000, because the frontier is contiguous-from-genesis and one
+        # missing block stalls it however much is proven ahead.
+        #
+        # So a worker now re-picks the earliest hole, including one it just failed. If the block is
+        # genuinely unprovable it will retry it rather than advance — which is the right trade at
+        # width 1 (a few seconds per attempt) and is visible in the log, where a silent hole was not.
         held = {r["lo"] for r in c.execute(
-            "SELECT lo FROM ranges WHERE status='claimed' AND claimed_at > ?", (now - CLAIM_TTL,))}
+            "SELECT lo FROM ranges WHERE status='claimed' AND claimed_at > ? AND assignee != ?",
+            (now - CLAIM_TTL, pk))}
         h = 1
         while h < TIP:
             if h not in proven and h not in held and witness_available(h):
