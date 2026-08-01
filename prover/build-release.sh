@@ -105,6 +105,13 @@ mv -f "$OUT/.$asset.tmp.$$" "$OUT/$asset"
 # which is long after the build looked successful. ~5.2 GB; skipped if already present, and a failure
 # is a warning rather than fatal — the binary is still good, you just cannot wrap on this box yet.
 #
+# RE-VERIFIED 2026-08-01, and worth stating outright because the error message implies otherwise:
+# wrapping needs the DOCKER IMAGE + r0vm and does NOT need the `risc0-groth16` rzup component at all.
+# Measured on a box with no such component installed — the genesis-anchored spine wrapped in 55.9 s
+# from 224,506 bytes to 1,777 (126x) and verified as `[1..2] VERIFIED — genesis-anchored`. That
+# matters because that component HANGS on download (see provision-vps.sh), so anyone who believes the
+# error message will wait hours for something wrapping never wanted.
+#
 # VERIFIED 2026-07-31 on a fresh GPU box: with r0vm staged (above) and this image present, the CPU
 # host wraps a real folded receipt in 60 s and the result verifies. The CUDA host still refuses with
 # "Missing required risc0-groth16 rzup component" — that is a SEPARATE, pre-existing problem with the
