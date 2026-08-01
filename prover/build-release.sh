@@ -54,8 +54,13 @@ echo "== building $MODE release from $REPO (HOME=/root inside $IMAGE) =="
 # the caller's shell reaches provision-vps.sh only if named here. Setting it and assuming it applied
 # cost a release build 30 minutes — two bounded-but-real stalls fetching a component that is only
 # needed to snark-wrap, which this build does not do.
+#
+# RZUP_TIMEOUT is forwarded ONLY when the caller set it. It used to be passed with a `:-600` default,
+# which silently overrode provision-vps.sh's own default and pinned every release build to 600s — less
+# than the 488 MB rust toolchain needs on a domestic link, so raising the default there would have had
+# no effect here at all. A wrapper that hardcodes a default defeats the default it wraps.
 docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
-    -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" -e "RZUP_TIMEOUT=${RZUP_TIMEOUT:-600}" \
+    -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
