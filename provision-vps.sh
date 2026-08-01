@@ -42,8 +42,12 @@ fi
 # (METHOD_ID). Bare `rzup install` grabs whatever is *latest* — which drifts the METHOD_ID over time
 # and, unauthenticated, hits GitHub's API rate limit. rzup authenticates via $GITHUB_TOKEN when set.
 #
-# Each install is wrapped, because rzup has NO download timeout and these are large artifacts fetched
-# from a CDN that is not always well. Both failure modes have cost a full build:
+# Each install is wrapped, because rzup has NO download timeout and these are large artifacts (the
+# rust toolchain is 488 MB). Three failure modes have each cost a full build:
+#   - a timeout set too TIGHT, which kills a download that is progressing perfectly well. The first
+#     version of this used 600s, which at a measured 766 KB/s allows only 449 MB — less than the
+#     toolchain itself, so the reproduce build could never succeed on a domestic link, and the error
+#     blamed the CDN. A timeout must exceed the artifact over the SLOWEST link you care about;
 #   - a truncated body ("error decoding response body"), which at least exits;
 #   - a silent hang, which does not — one release build sat at 0% CPU for an hour on
 #     `risc0-groth16` before anyone looked, having already spent 20 minutes on the toolchain.
@@ -53,13 +57,17 @@ rzup_install() {
     local what="$*" attempt
     for attempt in 1 2 3; do
         # shellcheck disable=SC2086
-        if timeout "${RZUP_TIMEOUT:-600}" rzup install --force $what; then
+        if timeout "${RZUP_TIMEOUT:-3600}" rzup install --force $what; then
             return 0
         fi
-        echo "   rzup install $what failed or stalled (attempt $attempt/3) — retrying" >&2
+        echo "   rzup install $what failed or timed out after ${RZUP_TIMEOUT:-3600}s (attempt $attempt/3)" >&2
         sleep $(( attempt * 10 ))
     done
-    echo "rzup install $what failed three times. This is a network/CDN problem, not a build problem." >&2
+    echo "rzup install $what failed three times." >&2
+    echo "  These artifacts are LARGE — the rust toolchain alone is 488 MB — so on a slow link the" >&2
+    echo "  download can be killed by the timeout while it is still making progress. That is not a" >&2
+    echo "  network fault and retrying will not help: raise it, e.g. RZUP_TIMEOUT=7200." >&2
+    echo "  At 766 KB/s (a domestic connection) 488 MB needs ~11 minutes; the default allows 60." >&2
     return 1
 }
 rzup_install rust 1.94.1
