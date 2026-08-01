@@ -286,7 +286,7 @@ def gpu_lock(what="prove"):
             except Exception:
                 pass
 
-def _run_with_seg_retry(argv, env, work, label):
+def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
     # proving segments; smaller segments repartition the work and clear the boundary, and the receipt is
@@ -312,9 +312,38 @@ def _run_with_seg_retry(argv, env, work, label):
         # "failed, retried at a smaller segment, then moved on".
         try:
             with gpu_lock("prov"):
-                r = subprocess.run([HOSTBIN, *argv], env=_env, cwd=work,
-                                   stderr=subprocess.PIPE, text=True,
-                                   timeout=float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "5400")))
+                # A prove is SILENT until it returns: stderr is captured, so nothing reaches the log
+                # while the GPU works. That makes a slow block and a hung one indistinguishable, and
+                # on 2026-08-01 it cost real work — three healthy provers on block 39,318 (381 inputs,
+                # ~31 min of legitimate GPU) were mistaken for hangs and killed.
+                #
+                # A ticker is not progress from inside the prover, and does not pretend to be: it says
+                # "this process is alive and has been at it for N minutes", which is the fact that was
+                # missing. Compare the elapsed time against the block's input count before concluding
+                # anything is wrong — roughly 5 seconds per input on an L40S.
+                _done = threading.Event()
+                def _tick(t0=time.time()):
+                    while not _done.wait(60):
+                        mins = int(time.time() - t0) // 60
+                        print(f"  … {label}: still proving, {mins}m elapsed", flush=True)
+                        # Beat the claim while we work. Without this a prove longer than CLAIM_TTL
+                        # has its block handed to someone else mid-flight and the same GPU-hours are
+                        # spent twice — block 741,000 is a measured 55 min against a 60 min expiry,
+                        # so this is the normal path for real blocks, not an edge case.
+                        # Best-effort: a coordinator that predates /api/beat 404s, which is the old
+                        # behaviour and no worse than not trying.
+                        if _beat_range:
+                            try:
+                                post("/api/beat", {"range": _beat_range, "pubkey": _beat_pk})
+                            except Exception:
+                                pass
+                threading.Thread(target=_tick, daemon=True).start()
+                try:
+                    r = subprocess.run([HOSTBIN, *argv], env=_env, cwd=work,
+                                       stderr=subprocess.PIPE, text=True,
+                                       timeout=float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "5400")))
+                finally:
+                    _done.set()
         except subprocess.TimeoutExpired:
             # subprocess.run kills the child on timeout, so the GPU memory is released with it.
             print(f"  {label}: no result after "
@@ -362,14 +391,18 @@ def cmd_prove(args):
         env = dict(os.environ, HAZYNC_WITNESS_DIR=WITNESS)
         prove_cmd = "prove-range"
         print(f"archive bundles unavailable — replaying from genesis for blocks {start}..{hi}")
-    # No heartbeat thread. It existed to keep a CLAIM alive while a long prove ran; with nothing
-    # allocated there is no lease to renew, and a worker that dies simply stops.
+    # The claim IS beaten while a prove runs — see the ticker in _run_with_seg_retry. The comment
+    # that used to sit here said there was no lease to renew, which was true under free-running and
+    # stopped being true when v0.12.1 brought claims back: a prove longer than CLAIM_TTL loses its
+    # block mid-flight and the work is done twice.
     try:
+        _sk, _pk, _ = identity()
         total = hi - start + 1
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) — the expensive step…")
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
-            _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}")
+            _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}",
+                                _beat_range=rng, _beat_pk=_pk)
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)

@@ -904,8 +904,24 @@ def claim(body):
         # else. The hour-long lockout is not an oversight, it is the rate limit that keeps one bad
         # block from consuming a worker: the hole persists, but the fleet makes progress, which is the
         # trade #37 argued for in the first place.
+        # A claim is held while the worker is ALIVE, not for a fixed wall-clock hour.
+        #
+        # Expiry used to be measured from when the claim was taken, with no heartbeat, on the
+        # reasoning that at width 1 a claim is a few seconds of GPU. That holds for early blocks and
+        # breaks for real ones: block 741,000 (670 inputs) is a MEASURED 3,275s = 55 min, which
+        # finishes five minutes inside a 3600s expiry. Anything larger expired mid-prove, the
+        # coordinator handed the same block to someone else, and two provers burned identical
+        # GPU-hours — invisibly, because the loser's submission is discarded as "already proven".
+        #
+        # So: liveness from last_beat (refreshed by POST /api/beat while a prove is in flight), and
+        # CLAIM_MAX as a hard ceiling so a wedged-but-beating worker cannot hold a block forever.
+        # A worker that dies stops beating and the block reopens in CLAIM_TTL, exactly as before.
+        # Workers that predate the beat send none, so COALESCE falls back to claimed_at and they keep
+        # the old behaviour rather than breaking.
         held = {r["lo"] for r in c.execute(
-            "SELECT lo FROM ranges WHERE status='claimed' AND claimed_at > ?", (now - CLAIM_TTL,))}
+            "SELECT lo FROM ranges WHERE status='claimed'"
+            " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
+            (now - CLAIM_TTL, now - CLAIM_MAX))}
         h = 1
         while h < TIP:
             if h not in proven and h not in held and witness_available(h):
@@ -922,6 +938,37 @@ def claim(body):
                  "note": "claimed for %d minutes; submissions are accepted for any height regardless"
                          % int(CLAIM_TTL / 60)}
 
+
+def beat(body):
+    """Refresh a claim the caller already holds, so a long prove is not stolen out from under it.
+
+    Deliberately the smallest thing that solves the problem: it moves one timestamp. None of the
+    machinery #37 removed comes back — no expiry sweep, no retry counters, no orphan detection. A
+    worker that stops beating simply stops holding the claim, which is the pre-existing behaviour.
+
+    Only the assignee may beat their own claim, and it cannot resurrect an expired or verified one:
+    a block that already reopened has been handed on, and quietly taking it back would produce the
+    duplicate work this exists to prevent.
+    """
+    rid, pk = body.get("range"), body.get("pubkey", "")
+    if not rid or not pk:
+        return 400, {"error": "range and pubkey required"}
+    if not parse_any_range(rid):
+        return 400, {"error": "invalid range id"}
+    now = time.time()
+    with _lock:
+        c = db()
+        r = c.execute("SELECT status, assignee, claimed_at FROM ranges WHERE id=?", (rid,)).fetchone()
+        if not r or r["status"] != "claimed" or (r["assignee"] or "") != pk:
+            c.close()
+            return 409, {"error": "not your claim (or it has expired and been handed on)"}
+        if (r["claimed_at"] or now) < now - CLAIM_MAX:
+            c.close()
+            return 409, {"error": "claim held past CLAIM_MAX — release it and re-claim"}
+        c.execute("UPDATE ranges SET last_beat=? WHERE id=?", (now, rid))
+        c.commit()
+        c.close()
+    return 200, {"ok": True, "held_for": CLAIM_TTL}
 
 def witness_available(blk):
     """True if a witness for `blk` can be served. Free-running proving needs arbitrary heights, and
@@ -1105,14 +1152,15 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim", "/api/spine"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
-        fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine}[p]
+        fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
+              "/api/beat": beat}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 

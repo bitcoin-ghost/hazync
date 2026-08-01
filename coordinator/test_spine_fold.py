@@ -220,6 +220,39 @@ code, _ = server.submit_spine({"pubkey": _pk, "sig": "cd" * 64, "handle": "t",
                                "receipt": base64.b64encode(b"receipt-9").decode()})
 check(code == 403, "a receipt with a bad signature is refused")
 
+# ── claims survive a long prove (#52) ─────────────────────────────────────────────────────────────
+# CLAIM_TTL used to be measured from when a claim was TAKEN, with no heartbeat. Block 741,000 is a
+# measured 3,275s = 55 min against a 3600s expiry, so any real block was one step from having its
+# claim handed to someone else mid-prove and the same GPU-hours spent twice — silently, since the
+# loser's submission is discarded as "already proven".
+print("== claim liveness ==")
+import time as _t
+_ttl = server.CLAIM_TTL
+server.CLAIM_TTL = 2
+try:
+    os.makedirs(server.WITNESS, exist_ok=True)
+    for _b in range(1, 6):
+        open(os.path.join(server.WITNESS, f"block_{_b}.json"), "w").write("{}")
+    c = server.db(); c.execute("DELETE FROM ranges"); c.execute("DELETE FROM vranges"); c.commit(); c.close()
+    A, Bk = "aa" * 32, "bb" * 32
+    _, r = server.claim({"pubkey": A, "handle": "A"})
+    rid = r.get("range")
+    for _ in range(3):
+        _t.sleep(1); server.beat({"range": rid, "pubkey": A})
+    _, rb = server.claim({"pubkey": Bk, "handle": "B"})
+    check(rb.get("range") != rid, "a worker that keeps beating keeps its block past CLAIM_TTL")
+
+    c = server.db(); c.execute("DELETE FROM ranges"); c.commit(); c.close()
+    _, r2 = server.claim({"pubkey": A, "handle": "A"})
+    _t.sleep(3)                                   # stops beating: the worker died
+    _, rc = server.claim({"pubkey": Bk, "handle": "B"})
+    check(rc.get("range") == r2.get("range"), "a worker that stops beating releases it")
+
+    code, _ = server.beat({"range": r2.get("range"), "pubkey": Bk})
+    check(code in (200, 409), "beat by a non-holder does not crash")
+finally:
+    server.CLAIM_TTL = _ttl
+
 print()
 if CONTROL:
     if fails:
