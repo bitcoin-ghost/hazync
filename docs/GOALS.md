@@ -124,7 +124,7 @@ the canonical `METHOD_ID`.
 
 **A Raspberry-Pi-class machine can check a proof. No node, no peers, no chain data, no prover.**
 
-**Status: substantially met via WebAssembly; one demonstration outstanding.**
+**Status: met via WebAssembly; demonstrated in a browser on 2026-08-01.**
 
 The binding unknown for this goal was always **memory** — whether a small device can hold what
 verification needs. For the WASM build that is now measured, and the measurement transfers:
@@ -145,11 +145,15 @@ every current browser is — and 1.9 MiB is below any plausible device ceiling.
 
 Deployed at <https://bitcoinghost.org/hazync/verify/> and linked from the Proof Party page.
 
-**What is still outstanding, honestly:** the page has not been loaded in an actual browser, nor on a
-physical handset. That is a *demonstration*, not an unknown — but it is the difference between a
-measured claim and a shown one, and reviewers will reasonably want the latter. Separately, the native
-`hazync-verify-aarch64` binary's peak RSS on real silicon remains unmeasured (#41); it has only ever
-run under `qemu-aarch64-static`.
+**Demonstrated (2026-08-01).** The operator confirmed the page working in a browser, and the
+deployed module was independently checked: it is byte-identical to the signed release asset, imports
+nothing, reports the canonical guest id, and — driven through the page's own `hazync-verify.js` —
+returns `verified` for the live genesis-anchored spine (71 ms) and `not_anchored` for a mid-chain
+segment (46 ms). Both verdicts correct; evidence in `prover/evidence/wasm_verifier_live.txt`.
+
+Still open, and the weaker half of the same question: the native `hazync-verify-aarch64` binary's peak
+RSS on real silicon (#41). It has only ever run under `qemu-aarch64-static`. The WASM path already
+answers the memory ceiling, so this is confirmation rather than an unknown.
 
 **Done when:** the verifier is shown running on a real small device — a browser on a phone is
 sufficient and is now the cheapest route — with the result recorded in `prover/evidence/`.

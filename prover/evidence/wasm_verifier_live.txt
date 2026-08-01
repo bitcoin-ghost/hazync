@@ -1,0 +1,53 @@
+G3 — the deployed WASM verifier works (2026-08-01)
+==================================================
+
+Operator confirmed the page working in a browser. This records the machine-checkable half: that the
+DEPLOYED module and wrapper produce the right verdicts on real, live artifacts.
+
+DEPLOYED ARTEFACTS
+------------------
+  https://bitcoinghost.org/hazync/verify/                 HTTP 200, 7,073 bytes
+  https://bitcoinghost.org/hazync/verify/hazync-verify.wasm  1,063,349 bytes
+  sha256 6c72dcd667b25da5…  ==  the v0.13.1 release asset, byte-identical
+
+So the page serves exactly the module that ships in the signed release — not a separately built copy
+that could drift from it.
+
+MODULE SHAPE (read from the binary, not from docs)
+--------------------------------------------------
+  imports: []                       <- nothing required from the host: no WASI, no JS callbacks
+  exports: memory, alloc, method_id, verify_proof, and the risc0 sys_* surface
+
+The empty import list is what makes "runs in any spec-compliant WASM runtime" a property of the
+artifact rather than a claim about it.
+
+DRIVEN THROUGH THE PAGE'S OWN CODE PATH
+---------------------------------------
+Not a bespoke harness: `hazync-verify.js` was fetched from the deployed site and called exactly as
+the page calls it (`loadVerifier` -> `.methodId()` / `.verify(bytes)`), under node 24.
+
+  methodId()          be5e05280e108bdeeb6747b231df375f946a8530300525b5d4c523abe5b7c246
+                      == reproduce/METHOD_ID, so the page checks against the canonical guest
+
+  live spine head     fetched from /api/spine/proof (genesis-anchored [1..2], 224,506 B)
+                      -> status=verified   height=2   71 ms
+
+  mid-chain segment   fetched from /api/proof/20000 (a per-block receipt)
+                      -> status=not_anchored          46 ms
+
+Both verdicts are the correct ones, and the second matters as much as the first: a verifier that
+accepted a mid-chain segment as genesis-anchored would make a fabricated-anchor range MORE shareable,
+which is the failure this artifact exists to prevent.
+
+WHAT THIS DOES AND DOES NOT SHOW
+--------------------------------
+Shows: the deployed module is the released one, needs nothing from its host, checks against the
+canonical guest id, and returns correct verdicts on live proofs in tens of milliseconds.
+
+Does not show: DOM rendering, or behaviour on a specific handset's browser. Those are the operator's
+browser check, which was done separately. WebAssembly linear memory is architecture-independent — the
+module grows the same 64 KiB pages on ARM as on x86 — so the 1.9 MiB ceiling measured earlier is the
+same ceiling on a phone.
+
+Related: #47 (closed by this), #41 (the native aarch64 binary's peak RSS on real silicon — the weaker
+half of the same question, since the WASM path already answers the memory ceiling).
