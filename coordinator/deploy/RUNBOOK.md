@@ -55,6 +55,40 @@ Set `TIP_HEIGHT` in the unit to the real chain tip. `RANGE_SIZE=1000`. The unit 
 (behind the proxy); if the web box is a different machine, set `COORD_BIND` to the private-network IP
 and firewall `:8899` to the web box only.
 
+## 1a. Updating a running coordinator
+
+**Deploy by moving the checkout to a tag. Do not copy files into it.**
+
+```bash
+DRY_RUN=1 ./coordinator/deploy/deploy-coordinator.sh v0.13.1   # what would change
+./coordinator/deploy/deploy-coordinator.sh v0.13.1             # do it
+```
+
+The script fetches, refuses if tracked files were edited in place, backs up `coordinator/`, checks
+out the tag, and **restarts only if `coordinator/server.py` actually changed** — then verifies the
+unit is active and `/api/state` answers 200. Per-box differences belong in the systemd unit's
+environment (`COORD_DB`, `COORD_PROOFS`, `HAZYNC_HOST`, `TIP_HEIGHT`, …), never in edited files.
+
+**Why this is the method, and `scp server.py` is not.** Copy-and-restart works, and it is how the box
+reached 144 commits behind its own `HEAD` with three "modified" tracked files that were really newer
+copies pasted over an old tree (#48). `git describe` then described the checkout, and the checkout
+described nothing — the box could not say what it was running.
+
+The cost of that is not untidiness. Before the spine/fold deploy the live `server.py` had to be diffed
+against every plausible commit to establish that overwriting it would not destroy a production fix. It
+happened to match `93b9bff` exactly, so the deploy was provably additive — but that was luck. The next
+time the answer could be "matches nothing", with no way to tell a stale copy from a deliberate one.
+
+**A restart is not free.** It interrupts a live proving fleet mid-submission, so the script decides on
+the served file rather than on "something changed". Checking out `v0.13.1` on 2026-08-01 changed no
+served file and the right number of restarts was zero — the unit was never touched, and the board did
+not notice.
+
+If the script refuses because someone edited in place: commit the change upstream and deploy a tag
+containing it. `--force` discards it (after the backup) and should be the rare case, not the habit.
+
+---
+
 ## 2. Wire the single domain (on the WEB box)
 
 Paste `coordinator/deploy/nginx-hazync.conf` into the `bitcoinghost.org` `server { }` block in
