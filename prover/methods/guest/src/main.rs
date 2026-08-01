@@ -1033,6 +1033,20 @@ struct SpendResult {
     tx_check: i32,
     flags: u32,
 }
+/// DEBUG EXERCISER — NOT a consensus path, and it does not prove a block.
+///
+/// It commits a bare `Vec<SpendResult>`: no `RangeState`, no `ChainState`, no accumulator root, no
+/// height binding. A receipt from this mode therefore attests nothing about any chain and cannot be
+/// folded, submitted or verified as a range — which is why the hardcoded metadata below is safe.
+///
+/// It is documented rather than deleted because the hardcoding is a TRIPWIRE: `coin_height` is fixed
+/// at 700_000, `coin_is_coinbase` and `coin_mtp` at 0, and the flag-exception block hash at all-zero.
+/// Anyone reaching for this believing it exercises real coin metadata would get script flags for a
+/// height that has nothing to do with their input, coinbase maturity never enforced, and every
+/// BIP68 time-based lock evaluated against MTP 0. Same shape as the round-9 harnesses that printed
+/// results without asserting them (see SECURITY.md): it looks like it is checking more than it is.
+///
+/// Raised by external review 2026-08-01 (opencode, L-3); see #59.
 fn multi_check() {
     let n: u32 = env::read();
     let mut out: Vec<SpendResult> = Vec::with_capacity(n as usize);
@@ -1044,6 +1058,7 @@ fn multi_check() {
             verify_input(
                 s.raw_tx.as_ptr(), s.raw_tx.len() as u32, 0,
                 s.prevouts.as_ptr(), s.prevouts.len() as u32, flags,
+                // coin_height / coin_is_coinbase / coin_mtp — PLACEHOLDERS, see the doc comment.
                 700_000, 0, 0, leaf.as_mut_ptr(),
             )
         };
