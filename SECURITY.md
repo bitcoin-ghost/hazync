@@ -483,7 +483,7 @@ Verdict: consensus-critical core sound. One High, one Medium, three Low.
 | **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
 | **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
 | **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
-| **L-3** | `multi_check` hardcodes coin metadata | **FIXED, not merged** — rides #56; see the line-number note below |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#56) — could only land with a re-baseline; see the line-number note below |
 
 **H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
 into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
