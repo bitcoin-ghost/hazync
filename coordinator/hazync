@@ -300,9 +300,27 @@ def _run_with_seg_retry(argv, env, work, label):
     last = ""
     for _po2 in _seg_ladder(env):
         _env = dict(env) if _po2 is None else dict(env, HAZYNC_SEG_PO2=str(_po2))
-        with gpu_lock("prov"):
-            r = subprocess.run([HOSTBIN, *argv], env=_env,
-                           cwd=work, stderr=subprocess.PIPE, text=True)
+        # TIMEOUT. Without one, a prover that hangs holds the worker forever — and one that hangs
+        # while holding the GPU lock holds every OTHER worker on the box too. Observed 2026-08-01:
+        # block 39,318 (bundle 1,098,218 bytes against ~4 KB for its neighbours) ran past 64 minutes
+        # with no output and no failure, and three such processes accumulated on one card. The CLI
+        # already learned this lesson for HTTP, where a missing timeout hung `run` on any network
+        # blip; the prove path never got the same treatment.
+        #
+        # Generous by default, because a big modern block legitimately takes ~55 minutes of GPU. The
+        # point is not to be tight, it is to be finite: a timeout turns "stuck forever, silently" into
+        # "failed, retried at a smaller segment, then moved on".
+        try:
+            with gpu_lock("prov"):
+                r = subprocess.run([HOSTBIN, *argv], env=_env, cwd=work,
+                                   stderr=subprocess.PIPE, text=True,
+                                   timeout=float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "5400")))
+        except subprocess.TimeoutExpired:
+            # subprocess.run kills the child on timeout, so the GPU memory is released with it.
+            print(f"  {label}: no result after "
+                  f"{os.environ.get('HAZYNC_PROVE_TIMEOUT', '5400')}s — abandoned (see HAZYNC_PROVE_TIMEOUT)",
+                  flush=True)
+            continue
         if r.stderr:                                    # keep the host's real output in the worker log
             sys.stderr.write(r.stderr); sys.stderr.flush()
         if r.returncode == 0:
