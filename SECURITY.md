@@ -466,9 +466,9 @@ Every proof on the board is an execution of that check.
 ignored its `base` argument entirely. Neither can produce a false proof: all four `strtoul` call sites
 are libstdc++/newlib scaffolding with none on the consensus path, and heap exhaustion is fail-closed
 (1 MiB heap, `-fexceptions`, no `catch` anywhere in the guest validator, so `bad_alloc` reaches
-`std::terminate`). **Fix prepared in #56 but NOT yet merged** — `cshims.c` compiles into the guest, so
-it forces a `METHOD_ID` re-baseline that invalidates every proof on the board, and neither defect is
-live enough to justify that alone. It is staged to ride the next planned guest change.
+`std::terminate`). **FIXED here (#56)**, as part of the re-baseline this change forced. `cshims.c` compiles into the
+guest, so the fix could not land without invalidating every proof on the board; it waited until a
+re-baseline was being done deliberately rather than triggering one on its own.
 
 Also filed from this round: the BIP30 structural argument's hard ceiling at height ~1,983,702 (#54),
 and `std::random_device` being linked into the guest though never called (#55).
