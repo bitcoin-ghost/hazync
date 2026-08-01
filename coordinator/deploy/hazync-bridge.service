@@ -24,5 +24,47 @@ RestartSec=10
 TimeoutStartSec=0
 Nice=5
 
+# ── hardening (#58) ───────────────────────────────────────────────────────────────────────────────
+#
+# This unit had NONE of this while hazync-coordinator.service beside it had the lot — an asymmetry
+# that read as an oversight rather than a decision. Raised by external review 2026-08-01 (M-1).
+#
+# It matters more here than for the coordinator: the bridge is the component that ingests UNTRUSTED,
+# miner-produced block data, parsing every block and witness the local bitcoind hands it. The host
+# binary is not pure Rust — it links the same C/C++ surface the guest does — and this box holds the
+# coordinator's verified-proof store.
+#
+# STAGE 1 (this block): everything that does NOT require moving files. The service still runs as
+# root, because ExecStart, the datadir and the output dir all live under /root; dropping privilege
+# means relocating them on a live box mid-campaign, which is a deploy, not a file edit.
+#
+# STAGE 2 (needs a maintenance window, see #58): binary to /usr/local/bin/hazync-host, bundles to
+# /var/lib/hazync/bridge_bundles, then User=hazync + Group=hazync and the datadir exposed read-only.
+# Doing that ALSO fixes the coordinator's ProtectHome conflict, since the bundle dir leaves /root.
+#
+# VERIFY AFTER DEPLOYING: `systemctl status` alone is not enough — confirm the bundle directory is
+# still being WRITTEN (newest bundle_<n>.json advancing). ProtectSystem=strict makes the whole
+# filesystem read-only except ReadWritePaths, and a bridge that cannot write its output would keep
+# running and log nothing useful. That exact silent-degradation shape is why #60 exists.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+# read-only rather than true: ExecStart is /root/host and the datadir is /root/.bitcoin, both of
+# which must stay READABLE. ProtectHome=true would make them inaccessible and the unit would not
+# start — the same trap the coordinator unit fell into.
+ProtectHome=read-only
+ReadWritePaths=/root/bridge_bundles
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# The bridge needs no capabilities at all: it reads blocks and writes JSON.
+CapabilityBoundingSet=
+
 [Install]
 WantedBy=multi-user.target
