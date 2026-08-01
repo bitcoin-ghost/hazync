@@ -41,7 +41,16 @@ case "$MODE" in
     prove|fold|mixed) ;;
     *) echo "MODE must be prove, fold or mixed (got: $MODE)" >&2; exit 2 ;;
 esac
-CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hazync"
+# The CLI is `hazync` in the repo and `hazync-worker` on the release — `hazync` alone is too generic
+# a name to drop into someone's PATH, so packaging renames it. This script only ever looked for the
+# repo name, so following CONTRIBUTING literally (which says `chmod +x hazync-worker run-workers.sh`)
+# produced "contributor CLI not found next to this script". Accept either.
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI=""
+for _n in hazync-worker hazync; do
+    [ -x "$_here/$_n" ] && { CLI="$_here/$_n"; break; }
+done
+[ -n "$CLI" ] || CLI="$_here/hazync"      # keep the old path for the error message below
 
 if [ "$STOP" = "--stop" ]; then
     pkill -f 'hazync-worker-loop' 2>/dev/null
@@ -92,10 +101,11 @@ for i in $(seq 1 "$N"); do
             export BUNDLE_DIR="'"$LOG_DIR"'/bundles_'"$i"'"
             mkdir -p "$BUNDLE_DIR"
             cd "$(dirname "'"$CLI"'")"
+            CLI_NAME="$(basename "'"$CLI"'")"
             # `fold` exits 0 with "nothing to fold" when the tree is fully collapsed, which on a small
             # or freshly re-baselined board is the normal state. Sleep before retrying so an idle
             # folder does not spin on the coordinator.
-            while true; do ./hazync '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1 || sleep 3; sleep 2; done
+            while true; do "./$CLI_NAME" '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1 || sleep 3; sleep 2; done
         '
     ) </dev/null >/dev/null 2>&1 &
     disown

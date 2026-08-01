@@ -40,8 +40,9 @@ ln -sf hazync-worker hazync      # a shorter name to type; the real file keeps t
 sudo apt install -y python3-cryptography
 ```
 
-(`run-workers.sh` is optional — it just runs several `hazync run` loops for you. Keep it **next to**
-`hazync`; it looks for the CLI beside itself.)
+(`run-workers.sh` is optional — it keeps several workers going for you. Keep it **next to** the
+CLI; it finds `hazync-worker` or `hazync` beside itself. `MODE=fold` runs folders instead of
+provers, `MODE=mixed` runs both.)
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
