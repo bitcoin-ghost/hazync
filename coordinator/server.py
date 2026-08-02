@@ -19,6 +19,7 @@ can be tested without a GPU.
 """
 import os, json, sqlite3, hashlib, subprocess, base64, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 PORT       = int(os.environ.get("COORD_PORT", "8899"))
@@ -330,6 +331,59 @@ def overlapping(c, lo, hi, exclude_id):
         "SELECT id FROM ranges WHERE status IN ('claimed','verified','failed') "
         "AND id != ? AND lo <= ? AND hi >= ?", (exclude_id, hi, lo))]
 
+# ── peer coordinators (hazync#69) ─────────────────────────────────────────────────────────────────
+#
+# A second coordinator is a full peer — its own archive node, bridge and board — not a mirror. Two of
+# them will hand the same height to different provers, which is WASTEFUL, not incorrect: the duplicate
+# proof is perfectly valid, it just bought nothing. At one contributor that is invisible; at scale it
+# is the whole problem.
+#
+# This is the cheap 80% of the fix: ask peers what they have already proven and stop offering those
+# heights. No protocol, no consensus, no claim gossip — just an exclusion set. Collisions shrink to the
+# in-flight window (someone proving a height a peer has claimed but not yet finished), which is bounded
+# by one proof time rather than by the whole board.
+#
+# FAILS OPEN, deliberately and in both directions:
+#   * no peers configured -> no fetch, no behaviour change at all. This is inert until someone opts in.
+#   * a peer unreachable  -> its heights are simply not excluded, and local work continues.
+# A coordinator that stalled because a PEER was down would be a worse availability story than the one
+# this feature exists to improve. The cost of getting it wrong is a duplicate proof; the cost of
+# blocking is an idle fleet.
+#
+# NOT trusted, and it does not need to be: an entry here only ever REMOVES a height from what we offer.
+# A malicious peer's worst case is withholding work from our provers — a denial of service against
+# ourselves, visible as an idle board — never accepting a proof we should have rejected. Nothing here
+# touches verification, the frontier, or what lands on the board.
+PEERS = [u.strip().rstrip("/") for u in os.environ.get("PEER_COORDINATORS", "").split(",") if u.strip()]
+PEER_TTL = int(os.environ.get("PEER_TTL", "300"))
+_peer_cache = {"t": 0.0, "heights": set()}
+
+def peer_proven_heights():
+    """Heights peers report as proven. Empty set when no peers, unreachable, or malformed."""
+    if not PEERS:
+        return set()
+    now = time.time()
+    with _state_lock:
+        if now - _peer_cache["t"] < PEER_TTL:
+            return _peer_cache["heights"]
+    got = set()
+    for base in PEERS:
+        try:
+            req = urllib.request.Request(f"{base}/api/vranges", headers={"User-Agent": "hazync-coordinator"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                # Bound the read: a peer (or something impersonating one) must not be able to make us
+                # allocate unbounded memory just by answering.
+                doc = json.loads(r.read(64 * 1024 * 1024).decode())
+            for v in doc.get("vranges", []):
+                lo, hi = int(v["lo"]), int(v["hi"])
+                if 0 <= lo <= hi and hi - lo < 1_000_000:
+                    got.update(range(lo, hi + 1))
+        except Exception:
+            continue          # unreachable or junk: contribute nothing, never raise
+    with _state_lock:
+        _peer_cache.update(t=now, heights=got)
+    return got
+
 def pick(body):
     """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
     per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`
@@ -338,12 +392,13 @@ def pick(body):
     c = db()
     taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
     c.close()
+    peers = peer_proven_heights()          # empty unless PEER_COORDINATORS is set
     n = max(1, fr + 1)
     for _ in range(2_000_000):
         if n >= TIP:
             break
         rid = str(n)
-        if rid not in taken:
+        if rid not in taken and n not in peers:
             return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
         n += 1
     return 404, {"error": "no open block available"}
