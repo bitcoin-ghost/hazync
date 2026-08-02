@@ -58,6 +58,20 @@ jobs:
           rustup target add riscv32im-unknown-none-elf
           cargo build --release --manifest-path coinbase-smt/Cargo.toml \
                 --no-default-features --target riscv32im-unknown-none-elf
+      - name: Bridge <-> guest BIP30 agreement (host unit tests)
+        # The bridge emits the SMT proofs and the guest consumes them, and the two must agree about
+        # which intermediate root each proof is taken against. Both halves are individually
+        # well-formed, so a disagreement fails CLOSED — it looks like a board that stopped advancing,
+        # not like a wrong answer. These are the only #[test]s in prover/host; without this step the
+        # test-surfaces gate is right to call them a rotting surface.
+        run: cargo test --manifest-path prover/host/Cargo.toml --release
+      - name: Coinbase SMT no_std build for the GUEST target, WITH serde
+        # `Proof` crosses the wire, so its serde impls have to build for bare metal too — the guest
+        # deserialises the same type the bridge serialises. The default no_std check above does not
+        # cover it, since serde is off by default.
+        run: |
+          cargo build --release --manifest-path coinbase-smt/Cargo.toml \
+                --no-default-features --features serde --target riscv32im-unknown-none-elf
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Coordinator seam fuzz (soundness — must find NOTHING)
