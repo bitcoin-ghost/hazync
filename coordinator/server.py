@@ -853,8 +853,16 @@ def state(slim=False):
         stalled_for = int(now - mark) if mark else 0
     c.close()
     return {
+        # spine_hi sits NEXT TO frontier deliberately. The spine is the only shippable artifact — the
+        # single genesis-anchored proof /api/spine/proof serves and the README's 30-second demo
+        # downloads — and it is driven by one serial job that, until hazync#74, nothing ran. A stalled
+        # spine is INVISIBLE from every other signal: proven climbs, frontier climbs, every gate stays
+        # green, and only this number quietly stops. Reporting it beside frontier makes the gap
+        # (frontier - spine_hi) a thing you can see rather than something you have to notice.
+        # None means no spine at all, which is different from a stale one and should read differently.
         "progress": {"proven": proven, "frontier": fr, "tip": TIP,
-                     "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib},
+                     "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib,
+                     "spine_hi": (spine_head() or {}).get("hi")},
         "failed": failed,
         # `block` is the block the frontier needs next; `id` is the RANGE responsible for it, which is
         # not the same thing once ranges can be wide — reporting str(fr+1) as the id hid a claimed
