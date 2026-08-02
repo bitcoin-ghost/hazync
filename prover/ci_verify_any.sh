@@ -89,7 +89,23 @@ nlo=$(kv_get "$neg_out" lo); nhi=$(kv_get "$neg_out" hi)
 [ "$nlo" != 1 ] || fail "the NON-genesis fixture reports lo=1 — it is supposed to be mid-chain, so this test proves nothing"
 echo "  ok — [$plo..$phi] and [$nlo..$nhi]"
 
-echo "=== 5. NEGATIVE CONTROL: a tampered receipt must be REJECTED ==="
+echo "=== 5. the anchored/mid-chain label is reported, and is RIGHT in both directions ==="
+# "verified" and "genesis-anchored" are different claims. This asserts BOTH values, because a label
+# hardcoded to either answer passes a one-directional test — and the direction that matters is a
+# mid-chain range being reported as anchored, which a client would read as "proves the chain from
+# genesis". The coordinator derives its own label from GENESIS_TIP + lo rather than this token, so
+# this covers the operator-facing half.
+pa=$(kv_get "$pos_out" anchored); na=$(kv_get "$neg_out" anchored)
+[ "$pa" = yes ] || fail "the genesis-anchored fixture reports anchored=$pa, expected yes"
+[ "$na" = no ]  || fail "the NON-genesis fixture reports anchored=$na, expected no"
+# The prose marker matters as much as the token: RANGE-OK alone reads as unqualified success.
+grep -q "NOT genesis-anchored" <<<"$neg_out" \
+    || fail "a mid-chain range printed no 'NOT genesis-anchored' note — RANGE-OK alone reads as success"
+grep -q "NOT genesis-anchored" <<<"$pos_out" \
+    && fail "the genesis-anchored range printed the not-anchored note — the marker is unconditional"
+echo "  ok — anchored=yes / anchored=no, and the note appears only on the mid-chain range"
+
+echo "=== 6. NEGATIVE CONTROL: a tampered receipt must be REJECTED ==="
 # Without this, every assertion above is satisfied by a verifier that accepts anything. Flip bytes in
 # the middle of the receipt (not the header, so it still deserialises far enough to reach the STARK
 # check) and require refusal.
@@ -104,4 +120,4 @@ fi
 echo "  ok — tampered receipt refused"
 
 echo
-echo "verify-any gate passed (accepts anchored AND mid-chain, full key contract, tamper control)"
+echo "verify-any gate passed (accepts anchored AND mid-chain, full key contract, anchoring label, tamper control)"
