@@ -286,3 +286,15 @@ jobs:
         run: |
           docker run --rm hazync-repro sh -c \
             'cd /hazync-zkvm/prover && HAZYNC_HOST=/hazync-zkvm/prover/target/release/host ./ci_snark_verify.sh'
+      - name: verify-any gate — the command the COORDINATOR runs on every submission
+        # `host verify-any` is the sole gate between a submitted receipt and the board, and NOTHING in
+        # CI ran it. The standalone verifier is well covered, but that is a different code path with a
+        # different genesis condition — verify-any deliberately accepts valid MID-CHAIN ranges, which
+        # is exactly what the covered path refuses.
+        #
+        # Here rather than in soundness-suite for the same reason as the step above: only the
+        # fixed-path container has a canonical METHOD_ID, so only it can verify the checked-in
+        # fixtures. A runner-built host rejects them as a build mismatch.
+        run: |
+          docker run --rm hazync-repro sh -c \
+            'cd /hazync-zkvm/prover && HAZYNC_HOST=/hazync-zkvm/prover/target/release/host ./ci_verify_any.sh'
