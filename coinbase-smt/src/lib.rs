@@ -92,6 +92,15 @@ pub fn hash_node(left: &Hash, right: &Hash) -> Hash {
 
 /// `EMPTY[d]` is the root of an all-empty subtree of height `d`. Precomputing these is what makes a
 /// 256-deep sparse tree tractable: an untouched subtree costs one constant, not 2^d hashes.
+/// The root of a tree holding nothing — the state a from-genesis chain necessarily starts in.
+///
+/// Pinned by `RangeState::is_genesis_anchored`. Without that pin a prover could start from any SMT
+/// root at all, including one in which a coinbase it intends to duplicate is already recorded as
+/// fully spent, and the BIP30 check would verify happily against a history that never happened.
+pub fn empty_root() -> Hash {
+    empty_hashes()[DEPTH]
+}
+
 pub fn empty_hashes() -> [Hash; DEPTH + 1] {
     let mut e = [[0u8; 32]; DEPTH + 1];
     for d in 1..=DEPTH {

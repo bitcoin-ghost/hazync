@@ -58,6 +58,11 @@ jobs:
           rustup target add riscv32im-unknown-none-elf
           cargo build --release --manifest-path coinbase-smt/Cargo.toml \
                 --no-default-features --target riscv32im-unknown-none-elf
+      - name: Genesis-anchor pin, including the empty coinbase-SMT root
+        # `is_genesis_anchored` is the assertion the whole artifact rests on. #54 added a field to it,
+        # and a range that anchors at genesis while starting from a FABRICATED coinbase-SMT would
+        # otherwise verify happily against a history that never happened.
+        run: cargo test --manifest-path rangestate/Cargo.toml --release
       - name: Bridge <-> guest BIP30 agreement (host unit tests)
         # The bridge emits the SMT proofs and the guest consumes them, and the two must agree about
         # which intermediate root each proof is taken against. Both halves are individually
