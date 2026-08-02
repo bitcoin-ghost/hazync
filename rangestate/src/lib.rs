@@ -34,6 +34,11 @@ pub struct RangeState {
     pub in_time: u32,
     pub in_epoch_start: u32,
     pub in_recent: Vec<u32>,
+    /// Coinbase-SMT root at the IN boundary (hazync#54). Committed beside the UTXO roots because it
+    /// is the same kind of thing: a state the next range must inherit unchanged. Without it in the
+    /// journal a fold could join two ranges whose BIP30 state disagrees, which is the seam being
+    /// checked for the UTXO set but not for this one.
+    pub in_smt_root: [u8; 32],
     pub out_tip_hash: [u8; 32],
     pub out_roots: Vec<Option<[u8; 32]>>,
     pub out_leaves: u64,
@@ -41,6 +46,8 @@ pub struct RangeState {
     pub out_time: u32,
     pub out_epoch_start: u32,
     pub out_recent: Vec<u32>,
+    /// Coinbase-SMT root at the OUT boundary (hazync#54).
+    pub out_smt_root: [u8; 32],
     pub range_work: [u8; 32],
     pub self_id: [u32; 8],
 }

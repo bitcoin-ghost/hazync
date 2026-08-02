@@ -1114,8 +1114,10 @@ struct RangeState {
     lo: u32, hi: u32,
     in_tip_hash: [u8; 32], in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
+    in_smt_root: [u8; 32],
     out_tip_hash: [u8; 32], out_roots: Vec<Option<[u8; 32]>>, out_leaves: u64,
     out_nbits: u32, out_time: u32, out_epoch_start: u32, out_recent: Vec<u32>,
+    out_smt_root: [u8; 32],
     range_work: [u8; 32], self_id: [u32; 8],
 }
 

@@ -262,6 +262,11 @@ struct BlockWitness {
     new_outputs: Vec<[u8; 32]>, // leaves of the coins the block creates
     root_next: WireStump,
     bip30: Option<Bip30Overwrite>, // Some ONLY at the two grandfathered BIP30 blocks (F3)
+    // #54: coinbase-SMT root entering this block. REQUIRED, not Option — an optional consensus input
+    // is not an input, and a bundle that predates the field should fail to parse loudly rather than
+    // prove against a default. The bridge supplies it; the non-membership proofs that let the guest
+    // ADVANCE it arrive in phase 3.
+    in_smt_root: [u8; 32],
 }
 #[derive(Serialize)]
 struct BlockOutput {
@@ -799,10 +804,16 @@ struct RangeState {
     in_tip_hash: [u8; 32],
     in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
+    // Coinbase-SMT root at the in boundary (#54) — the BIP30 non-membership state a utreexo Stump
+    // cannot express. Carried in the journal for the same reason the UTXO roots are: the next range
+    // must inherit it unchanged, and a fold that did not check it could join two ranges whose BIP30
+    // state disagrees.
+    in_smt_root: [u8; 32],
     // "out" boundary — the chain state just after block hi.
     out_tip_hash: [u8; 32],
     out_roots: Vec<Option<[u8; 32]>>, out_leaves: u64,
     out_nbits: u32, out_time: u32, out_epoch_start: u32, out_recent: Vec<u32>,
+    out_smt_root: [u8; 32],
     range_work: [u8; 32], // total chainwork of blocks lo..=hi (256-bit LE)
     self_id: [u32; 8],
 }
@@ -972,12 +983,27 @@ fn prove_range() {
     out_recent.push(r.block_time);
     if out_recent.len() > 11 { let e = out_recent.len() - 11; out_recent.drain(0..e); }
 
+    // #54 PHASE 2b — PLUMBING ONLY, NOT YET A CHECK. Read this before trusting the field.
+    //
+    // The journal now carries the coinbase-SMT root and the fold seam enforces its continuity, but
+    // nothing here ADVANCES it: out == in, because the witness does not yet carry the non-membership
+    // proofs the check needs. Those come from the bridge (phase 3), and until they do, this field
+    // records a state that never changes rather than a BIP30 history.
+    //
+    // So BIP30 is still carried by the structural argument in `bip30_ok` + the F3 overwrite, exactly
+    // as before. Nothing is weaker than it was; nothing is stronger either. This MUST NOT ship in this
+    // state — a root that looks like a check and is not one is worse than no field at all — and it is
+    // why the re-baseline waits for phase 3 rather than going out with 2b.
+    let in_smt_root = w.in_smt_root;
+    let out_smt_root = in_smt_root;
     env::commit(&RangeState {
         kind: KIND_RANGE,
         lo: height, hi: height,
         in_tip_hash, in_roots, in_leaves, in_nbits, in_time, in_epoch_start, in_recent,
+        in_smt_root,
         out_tip_hash: r.tip_hash, out_roots: r.root_next_roots, out_leaves: r.root_next_leaves,
         out_nbits: r.nbits, out_time: r.block_time, out_epoch_start, out_recent,
+        out_smt_root,
         range_work, self_id,
     });
 }
@@ -1004,6 +1030,12 @@ fn fold_range() {
     assert!(l.out_nbits == rr.in_nbits && l.out_time == rr.in_time
         && l.out_epoch_start == rr.in_epoch_start && l.out_recent == rr.in_recent,
         "fold: difficulty/MTP context discontinuous at seam");
+    // #54: the BIP30 state must carry across the seam exactly as the UTXO set does. Without this a
+    // fold could join a left range that spent a coinbase to zero with a right range that still
+    // believes it unspent — or the reverse — and the joined proof would attest a BIP30 history that
+    // neither half proved. No normalisation: the SMT root is a single hash with no padding ambiguity,
+    // unlike the utreexo root vector above.
+    assert!(l.out_smt_root == rr.in_smt_root, "fold: coinbase-SMT (BIP30) state broken at seam");
 
     let mut range_work = l.range_work;
     add256(&mut range_work, &rr.range_work);
@@ -1012,8 +1044,10 @@ fn fold_range() {
         lo: l.lo, hi: rr.hi,
         in_tip_hash: l.in_tip_hash, in_roots: l.in_roots, in_leaves: l.in_leaves,
         in_nbits: l.in_nbits, in_time: l.in_time, in_epoch_start: l.in_epoch_start, in_recent: l.in_recent,
+        in_smt_root: l.in_smt_root,
         out_tip_hash: rr.out_tip_hash, out_roots: rr.out_roots, out_leaves: rr.out_leaves,
         out_nbits: rr.out_nbits, out_time: rr.out_time, out_epoch_start: rr.out_epoch_start, out_recent: rr.out_recent,
+        out_smt_root: rr.out_smt_root,
         range_work, self_id,
     });
 }
