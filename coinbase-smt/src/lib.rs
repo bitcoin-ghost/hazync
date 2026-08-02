@@ -220,9 +220,16 @@ const CACHE_DEPTH: usize = 20;
 ///
 /// A full recompute is inherently O(n · DEPTH) hashes: this is an uncollapsed 256-deep SMT, so even a
 /// subtree holding one leaf costs ~256 hashes to fold up through its empty siblings. Measured at
-/// n=50,000 in release: **1.16 s per root**. The bridge needs a root for *every block*, so a from-
-/// genesis pass would spend on the order of 290 hours inside this function alone. Incremental is not
-/// an optimisation here, it is the difference between the design working and not.
+/// n=50,000 in release: **seconds per root, against tens of microseconds for a maintained update — a
+/// ratio around 37,000x**. The bridge needs a root for *every block*, so at rebuild cost a
+/// from-genesis pass would spend *hundreds of hours* inside this function alone. Incremental is not an
+/// optimisation here, it is the difference between the design working and not.
+///
+/// The RATIO is quoted rather than absolute timings on purpose. The first version of this note carried
+/// "1.16 s" and "29 us" from one session; re-run later on a loaded machine the live numbers were ~2.7x
+/// larger while the recorded ones stayed put, which is how a true measurement becomes a misleading
+/// one. `a_maintained_root_is_orders_of_magnitude_cheaper_than_a_rebuild` measures both sides in the
+/// same run and asserts the ratio, so the comparison cannot go stale again.
 ///
 /// So the root is maintained, never recomputed: an update touches only the ~256 nodes on one key's
 /// path. `root_naive`/`prove_naive` keep the original from-scratch implementations as the reference
@@ -232,7 +239,7 @@ const CACHE_DEPTH: usize = 20;
 #[derive(Clone, Debug)]
 pub struct Smt {
     /// Ordered, not a `HashMap`: every update needs the leaves under one prefix, and a range query
-    /// gives that in O(log n + k). Re-sorting the whole map per update was the other half of the 1.16 s.
+    /// gives that in O(log n + k). Re-sorting the whole map per update was the other half of the cost.
     leaves: BTreeMap<Key, u32>,
     /// `(depth, prefix) -> hash` for depths 1..=CACHE_DEPTH. An absent entry means "empty subtree",
     /// so entries that fold back to empty are REMOVED rather than stored — otherwise the map grows
@@ -807,10 +814,21 @@ mod incremental {
         }
     }
 
-    /// Records the number the design depends on. Not a threshold test — it prints, and the assertion
-    /// is loose enough not to fail on a slow machine while still catching a return to O(n · DEPTH).
+    /// Records the number the design depends on: how much cheaper a maintained root is than a
+    /// from-scratch one at danger-set size.
+    ///
+    /// BOTH SIDES ARE MEASURED HERE, in the same run, and the assertion is on the RATIO. An earlier
+    /// version printed the incremental cost next to a from-scratch figure hardcoded from a different
+    /// session — which drifted, exactly like every other stale recorded value on this project: re-run
+    /// on a loaded machine, the live number was ~2.7x its own recorded value while the constant it was
+    /// being compared against stayed put, making the speedup look four times better than it was.
+    ///
+    /// Absolute timings here are machine- and load-dependent and mean little on their own. The ratio
+    /// is the robust quantity and the one the design actually rests on, so it is what gets asserted.
+    /// The threshold is deliberately far below the observed value — this catches a return to
+    /// O(n · DEPTH), not a slow afternoon.
     #[test]
-    fn an_update_is_cheap_at_danger_set_size() {
+    fn a_maintained_root_is_orders_of_magnitude_cheaper_than_a_rebuild() {
         let mut t = Smt::new();
         for i in 0..50_000u64 {
             t.insert(k(i), 1);
@@ -819,11 +837,24 @@ mod incremental {
         for i in 50_000..50_100u64 {
             t.insert(k(i), 1);
         }
-        let per = s.elapsed() / 100;
-        println!("COST n=50k update={per:?}  (from-scratch root was 1.16 s in release)");
+        let update = s.elapsed() / 100;
+
         let s = std::time::Instant::now();
         let _ = t.prove(&k(7));
-        println!("COST n=50k prove={:?}", s.elapsed());
-        assert!(per.as_millis() < 100, "an update took {per:?} — the incremental path is not working");
+        let prove = s.elapsed();
+
+        let s = std::time::Instant::now();
+        let _ = t.root_naive();
+        let rebuild = s.elapsed();
+
+        let ratio = rebuild.as_secs_f64() / update.as_secs_f64();
+        println!("COST n=50k  update={update:?}  prove={prove:?}  from-scratch rebuild={rebuild:?}");
+        println!("COST n=50k  rebuild/update = {ratio:.0}x");
+
+        // The bridge needs a root per block over ~900k blocks. At the rebuild cost that is hundreds of
+        // hours inside this one function; the whole point of maintaining the root is that it is not.
+        assert!(ratio > 1_000.0,
+            "a maintained update is only {ratio:.0}x cheaper than a full rebuild \
+             (update={update:?}, rebuild={rebuild:?}) — the incremental path is not working");
     }
 }
