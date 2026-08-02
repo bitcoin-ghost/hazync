@@ -1,0 +1,16 @@
+# Coinbase-only sparse Merkle tree — the structure that closes BIP30 permanently (hazync#54).
+#
+# Separate crate rather than part of `hazync-utreexo` on purpose: they answer opposite questions.
+# Utreexo proves MEMBERSHIP (this coin exists and is unspent). This proves NON-MEMBERSHIP (no unspent
+# coinbase has that txid), which a utreexo Stump structurally cannot do — and that gap is the entire
+# reason BIP30 is currently an argument with an expiry date rather than a check.
+[package]
+name = "hazync-coinbase-smt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+
+[workspace]

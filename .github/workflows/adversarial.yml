@@ -40,6 +40,14 @@ jobs:
         run: cargo test --manifest-path accumulator/Cargo.toml --release
       - name: Guest pure-Rust tests (activation heights, add256, median_time_past, utreexo SEC-2 pinning)
         run: cargo test --manifest-path guest-pure-fuzz/Cargo.toml --release
+      - name: Coinbase SMT (BIP30 non-membership) — incl. differential oracle
+        # A SECOND accumulator, so it gets the same discipline as the first from day one rather than
+        # after an audit asks: the optimised tree is checked against a deliberately naive one that
+        # shares no code, over a random walk of inserts/deletes/decrements. The optimised version
+        # prunes empty subtrees to constants and proves by descending sorted slices — exactly the kind
+        # of cleverness that yields a self-consistent WRONG answer. The first bug here was precisely
+        # that: reversed sibling order folding to a well-formed but incorrect root.
+        run: cargo test --manifest-path coinbase-smt/Cargo.toml --release
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Coordinator seam fuzz (soundness — must find NOTHING)
