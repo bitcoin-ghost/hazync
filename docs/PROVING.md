@@ -108,8 +108,12 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.13.4**, shipping `METHOD_ID be5e0528` — the same guest as
-v0.12.x, so **every existing proof stays valid**. v0.13.0 adds the two things that let volunteered
+either way. **Releases:** the current release is **v0.13.5**, shipping `METHOD_ID be5e0528` — the same guest as
+v0.12.x, so **every existing proof stays valid**. v0.13.5 is the response to the first two external
+reviews of the project: a release-signing key exposure (a tag spliced into a `run:` block in the job
+holding `GPG_PRIVATE_KEY`), accumulator panic paths reachable from untrusted proof data, and an API
+that could not distinguish a genesis-anchored range from a mid-chain one. It ships **no CUDA host** —
+that binary needs a GPU to build; v0.13.4's remains correct for proving, since the guest is unchanged. v0.13.0 adds the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
 (`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
 chunks instead of being re-folded from scratch, and **folding as a task in its own right**
