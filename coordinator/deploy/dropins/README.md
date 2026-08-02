@@ -1,7 +1,40 @@
-# systemd hardening drop-ins
+# systemd drop-ins — hardening and the /root migration
 
-Applied to the live coordinator box on 2026-08-02 in response to audit finding M-1, and kept here so
-the hardening is reproducible rather than something that exists only on one machine.
+Applied to the live coordinator box on 2026-08-02: first hardening (audit M-1), then the path
+migration off `/root` (#58) that unblocked the rest of it. Kept here so both are reproducible rather
+than existing only on one machine.
+
+## Current state (measured 2026-08-02, after the migration)
+
+| service | user | ProtectHome | ProtectSystem |
+|---|---|---|---|
+| `hazync-coordinator` | **hazync** | **true** | **strict** |
+| `hazync-bridge` | root | read-only | strict |
+
+The coordinator — the internet-facing service — is now fully unprivileged with `/root` inaccessible.
+
+**The bridge cannot drop privilege yet, and the reason is bitcoind, not the bridge.** bitcoind runs as
+root with `-datadir=/root/.bitcoin` and writes `.cookie` as `0600 root:root`, rewriting it on every
+restart. An unprivileged bridge cannot authenticate. Closing that needs either `rpcauth` credentials
+in `bitcoin.conf` or bitcoind's datadir moving out of `/root` — both are bitcoind changes, so they are
+out of scope here. `ProtectHome=read-only` is the most that can be done meanwhile.
+
+## Where things live now
+
+| | path | owner |
+|---|---|---|
+| checkout | `/opt/hazync` | root |
+| DB / state / proofs / witnesses / backups | `/var/lib/hazync/…` | hazync |
+| bridge bundles | `/var/lib/hazync/bridge_bundles` | root, `0644` (coordinator reads) |
+| host binary | `/usr/local/bin/hazync-host` | root |
+
+The migration was a same-filesystem rename of ~85 GB (73 GB of bundles, 12 GB of proofs) and took
+**0 seconds**. The 53,350 proof files were chowned *before* the outage, since chown does not disturb
+open file descriptors — so the board was down only for the renames and a daemon-reload.
+
+**Four units referenced these paths**, not two: the coordinator, the bridge, `hazync-coordinator-backup`
+and `hazync-retention-check`. Missing either of the last two would have broken backups or the G1
+retention gate silently.
 
 ## Why drop-ins and not the unit files next door
 
