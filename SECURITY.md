@@ -443,9 +443,12 @@ defect the pass surfaced.
 
 > **Outcome: re-baselined to `71790584…` (v0.14.0).** The two guest-side findings below — `cshims.c`
 > and `multi_check` — could not ship without a new `METHOD_ID`, so they were batched into one
-> deliberate re-baseline rather than triggering two. It discarded 46,177 proven blocks and 12 GB of
-> receipts (archived, not deleted), and was taken at 4.8% of the chain precisely because that cost only
-> grows. Everything else from both reviews shipped earlier in v0.13.5 under `be5e0528…`.
+> deliberate re-baseline rather than triggering two. It discarded **46,177 proven blocks**: the
+> attribution ledger was archived (`coordinator.db.be5e0528`, 52 MB — who proved what is worth keeping),
+> but the 12 GB of receipts were **deleted**, since nothing can verify them under the new id and
+> re-proving is required regardless. Taken at 4.8% of the chain precisely because that cost only grows —
+> the previous re-baseline was taken when the board held zero blocks, so this is the first with real work
+> on it. Everything else from both reviews shipped earlier in v0.13.5 under `be5e0528…`.
 
 
 The first reviews by people outside the project. Two independent passes, both AI-assisted full-source
