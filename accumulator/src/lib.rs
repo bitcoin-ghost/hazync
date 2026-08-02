@@ -300,10 +300,20 @@ pub struct Forest {
     /// scan. The same optimisation went from worthless to dominant without changing — what changed was
     /// everything around it.
     ///
-    /// Positions are a `Vec` rather than a single index because duplicate leaves genuinely occur:
-    /// BIP30 lets a coinbase duplicate an earlier still-unspent one (block 91842 duplicates 91812).
-    /// `position()` returns the FIRST match, so [`Forest::find`] must return the smallest position,
-    /// and collapsing this to one index would silently pick the wrong coin on exactly those blocks.
+    /// Positions are a `Vec` rather than a single index to PRESERVE `position()`'s first-match
+    /// semantics exactly, not because duplicates are expected.
+    ///
+    /// The BIP30 rationale this comment used to give was WRONG, and the correction is worth keeping:
+    /// a Hazync leaf commits `height` (and `mtp`), so the historical duplicate-coinbase blocks
+    /// (91842 duplicates 91812; 91880 duplicates 91722) produce DISTINCT leaves — `SECURITY.md` F3
+    /// says so explicitly, and this comment contradicted it. Byte-identical leaves cannot arise from
+    /// that case at all: identical bytes need an identical txid, which needs an identical transaction,
+    /// which is in-block duplication that `bip30_ok` already forbids.
+    ///
+    /// The Vec stays because it is the behaviour-preserving choice — a `Forest` is an oracle whose
+    /// job is to match the `Stump` exactly, and narrowing an index to "can't happen" is how an
+    /// invariant becomes a silent wrong answer if it ever stops holding. Flagged by external audit #2
+    /// (N-1) as a stale rationale that would mislead the next reviewer.
     index: std::collections::HashMap<Hash, Vec<usize>>,
 }
 
@@ -1062,7 +1072,9 @@ mod from_leaves_tests {
 mod position_index_tests {
     //! `find` must be indistinguishable from the linear scan it replaces — INCLUDING when the same
     //! leaf appears twice. BIP30 permits a coinbase to duplicate an earlier still-unspent one (block
-    //! 91842 duplicates 91812), so duplicates are not hypothetical, and `position()` returns the
+    //! 91842 duplicates 91812) — but note those produce DISTINCT leaves here, since the leaf commits
+    //! height; the Vec preserves `position()`'s first-match semantics rather than handling an expected
+    //! collision. `position()` returns the
     //! FIRST match. An index that returned "some position holding this leaf" would pick the wrong
     //! coin on exactly those blocks and nowhere else.
     use super::*;
