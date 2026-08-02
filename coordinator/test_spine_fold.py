@@ -284,6 +284,23 @@ check(server.is_genesis_anchored(rows[0]["in_tip"], rows[0]["lo"]) is True,
 check(server.is_genesis_anchored(rows[1]["in_tip"], rows[1]["lo"]) is False,
       "a mid-chain continuation is NOT labelled anchored, even though it is verified")
 
+# ── spine_hi is reported in /api/state (#74) ─────────────────────────────────────────────────────
+# A stalled spine is invisible from every other signal — proven climbs, frontier climbs, gates stay
+# green — so this field is the only place it shows. Assert BOTH states: absent means "no spine at
+# all", which must read differently from a stale one.
+c = server.db()
+c.execute("DELETE FROM vranges"); c.execute("DELETE FROM ranges"); c.commit(); c.close()
+import shutil
+shutil.rmtree(server.SPINE_DIR, ignore_errors=True)
+st = server.state()
+check("spine_hi" in st["progress"], "/api/state reports spine_hi at all")
+check(st["progress"]["spine_hi"] is None, "no spine -> spine_hi is None, not 0 (absent != stalled at genesis)")
+
+os.makedirs(server.SPINE_DIR, exist_ok=True)
+with open(os.path.join(server.SPINE_DIR, "spine.json"), "w") as f:
+    json.dump({"lo": 1, "hi": 137, "out_tip": "deadbeef"}, f)
+check(server.state()["progress"]["spine_hi"] == 137, "a present spine reports its hi")
+
 print()
 if CONTROL:
     if fails:

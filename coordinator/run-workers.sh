@@ -4,7 +4,8 @@
 #   ./coordinator/run-workers.sh 4              # start 4 workers, all proving
 #   ./coordinator/run-workers.sh 4 --stop       # stop them
 #   MODE=fold ./coordinator/run-workers.sh 2    # 2 workers FOLDING instead of proving
-#   MODE=mixed ./coordinator/run-workers.sh 4   # N-1 proving, 1 folding
+#   MODE=mixed ./coordinator/run-workers.sh 4   # N-2 proving, 1 folding, 1 advancing the spine
+#   MODE=spine ./coordinator/run-workers.sh 1   # just the spine (only ever needs ONE)
 #
 # Env:
 #   HAZYNC_HOST   path to the prover binary            (required)
@@ -38,8 +39,8 @@ COORD_URL="${COORD_URL:-https://bitcoinghost.org/hazync}"
 LOG_DIR="${LOG_DIR:-$HOME/hazync-workers}"
 MODE="${MODE:-prove}"
 case "$MODE" in
-    prove|fold|mixed) ;;
-    *) echo "MODE must be prove, fold or mixed (got: $MODE)" >&2; exit 2 ;;
+    prove|fold|mixed|spine) ;;
+    *) echo "MODE must be prove, fold, mixed or spine (got: $MODE)" >&2; exit 2 ;;
 esac
 # The CLI is `hazync` in the repo and `hazync-worker` on the release — `hazync` alone is too generic
 # a name to drop into someone's PATH, so packaging renames it. This script only ever looked for the
@@ -91,7 +92,18 @@ fi
 for i in $(seq 1 "$N"); do
     # In `mixed`, the LAST worker folds and the rest prove — so `MODE=mixed run-workers.sh 1` still
     # proves, rather than silently starting a box with nothing generating new proofs.
-    if [ "$MODE" = fold ] || { [ "$MODE" = mixed ] && [ "$i" = "$N" ] && [ "$N" -gt 1 ]; }; then
+    # SPINE is the one serial job in the system — only the leftmost range can be anchored, so a
+    # second spine worker would just contend for the same absorption. `mixed` therefore allocates
+    # exactly one, and only when there are enough workers to spare it.
+    #
+    # It gets a mode because without one NOTHING drives it: `hazync spine` absorbs what it can and
+    # RETURNS, it is not a daemon. After a board reset the spine simply stays empty, and that looks
+    # healthy from every angle — /api/state keeps advancing, the board keeps filling, every gate stays
+    # green — while /api/spine/proof, the endpoint the README's 30-second demo uses, serves nothing
+    # or something stale. Found exactly that way after the v0.14.0 re-baseline (hazync#74).
+    if [ "$MODE" = spine ] || { [ "$MODE" = mixed ] && [ "$i" = "$N" ] && [ "$N" -gt 2 ]; }; then
+        job="spine"; tag="hazync-spine-loop-$i"
+    elif [ "$MODE" = fold ] || { [ "$MODE" = mixed ] && [ "$i" = "$((N-1))" ] && [ "$N" -gt 1 ]; }; then
         job="fold"; tag="hazync-fold-loop-$i"
     else
         job="run";  tag="hazync-worker-loop-$i"
@@ -112,5 +124,5 @@ for i in $(seq 1 "$N"); do
 done
 
 sleep 3
-echo "started $(pgrep -fc "hazync-worker-loop" 2>/dev/null || true) proving + $(pgrep -fc "hazync-fold-loop" 2>/dev/null || true) folding worker(s); logs in $LOG_DIR"
+echo "started $(pgrep -fc "hazync-worker-loop" 2>/dev/null || true) proving + $(pgrep -fc "hazync-fold-loop" 2>/dev/null || true) folding + $(pgrep -fc "hazync-spine-loop" 2>/dev/null || true) spine worker(s); logs in $LOG_DIR"
 echo "stop with: $0 $N --stop"
