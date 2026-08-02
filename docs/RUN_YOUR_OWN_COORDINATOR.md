@@ -51,6 +51,10 @@ PEER_TTL=300
 — someone may be mid-proof on a height the peer has claimed but not finished — it bounds it to one
 proof time instead of the whole board.
 
+**`/api/witnesses?from=&count=` serves bundles in bulk**, as a streamed tar with a manifest, capped
+per request by `BULK_MAX` (default `RANGE_SIZE`). This is what makes seeding a new coordinator from a
+peer possible at all — with only `/api/witness/<n>` it is ~220,000 individual requests.
+
 **`sync_from_peers()` adopts proofs you do not have.** Every receipt goes through the same STARK
 verification a submission does, against *your* `METHOD_ID`. The claimed range is the peer's word; the
 receipt has to prove it.
@@ -58,9 +62,33 @@ receipt has to prove it.
 **You are not trusting the peer.** The worst a hostile one can do is waste your bandwidth serving junk
 you reject, or withhold work from your own provers. It cannot put anything on your board.
 
+## Seeding bundles from a peer instead of your own node
+
+The bridge run in step 3 below is the long pole, and it is downstream of an ~865 GB node sync. If you
+want a coordinator running *today*, you can pull the bundles from a peer:
+
+```
+python3 coordinator/sync_bundles.py https://bitcoinghost.org/hazync ./bundles --from 1 --to 220000
+python3 coordinator/sync_bundles.py ... --dry-run     # what is missing, downloads nothing
+```
+
+It walks in chunks, skips what is already on disk (so an interrupted run is *re-run*, not restarted),
+writes atomically, and reports any height the peer could not supply rather than skipping it silently —
+a gap in someone's bridge output and the end of the chain are different facts.
+
+**Bundles are witness data, not proofs, and this is not the trustless path.** Nothing downloaded here
+is verified. What limits the damage is that it *cannot* be laundered into a bad proof: a receipt
+verifies against `METHOD_ID` regardless of which witness produced it, so a hostile peer can waste your
+GPU time on bundles that fail to prove and can do nothing else. If you want the stronger property —
+that these are the bundles an archive node would have produced — run the node. That is what the rest
+of this page is about, and the shortcut does not replace it.
+
+At ~73 GB this is a large transfer either way; it is just a much shorter one than a node sync.
+
 ## Getting started
 
-1. **Sync a node.** `txindex=1`, no pruning. This is the long pole — days, not hours.
+1. **Sync a node.** `txindex=1`, no pruning. This is the long pole — days, not hours. (Or seed bundles
+   from a peer, above, and come back to this when you have the disk.)
 2. **Get the canonical host.** Either the signed release, or `docker build -f reproduce/Dockerfile .`
    and check the id matches `reproduce/METHOD_ID`. A host built outside the fixed-path container has a
    different image id and will reject published proofs — that is the build being wrong, not the proofs.

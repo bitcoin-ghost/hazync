@@ -362,6 +362,104 @@ try:
 finally:
     server.PEERS = _orig_peers
 
+# ---------------------------------------------------------------------------------------------
+# Bulk bundle sync (#69) — the endpoint that makes seeding a new coordinator from a peer possible.
+#
+# Driven over a REAL socket, not by calling the handler's helpers. The value of this endpoint is
+# entirely in its streaming behaviour, and streaming is exactly what a unit test of `bulk_plan` cannot
+# see: a version that buffers the whole archive in memory passes every pure test and OOMs the box on
+# the first 73 GB request.
+# ---------------------------------------------------------------------------------------------
+import tempfile, tarfile, io as _io, threading as _th, urllib.request as _rq
+from http.server import ThreadingHTTPServer
+
+_bdir = tempfile.mkdtemp()
+_orig_bridge, _orig_bulk = server.BRIDGE_DIR, server.BULK_MAX
+server.BRIDGE_DIR = _bdir
+server.BULK_MAX = 50
+# heights 100..109, with 105 DELIBERATELY absent — a gap in the bridge's output must be reported, not
+# silently skipped, or a syncing peer reads it as the end of the chain.
+_present = [h for h in range(100, 110) if h != 105]
+for h in _present:
+    with open(os.path.join(_bdir, f"bundle_{h}.json"), "w") as f:
+        json.dump({"height": h, "pad": "x" * 500}, f)
+
+_srv = ThreadingHTTPServer(("127.0.0.1", 0), server.H)
+_port = _srv.server_address[1]
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+try:
+    def _get(path):
+        # urllib raises on 4xx, and the 4xx responses ARE the behaviour under test here.
+        try:
+            with _rq.urlopen(f"http://127.0.0.1:{_port}{path}", timeout=20) as r:
+                return r.status, r.read()
+        except _rq.HTTPError as e:
+            return e.code, e.read()
+
+    st, body = _get("/api/witnesses?from=100&count=10")
+    check(st == 200, "bulk sync returns 200")
+
+    # Parsing to the end-of-archive marker is the completeness proof — see the endpoint's comment.
+    tf = tarfile.open(fileobj=_io.BytesIO(body), mode="r")
+    names = tf.getnames()
+    check("MANIFEST.json" in names, "the archive carries a manifest")
+    man = json.loads(tf.extractfile("MANIFEST.json").read())
+    check(man["missing"] == [105], f"the gap at 105 is REPORTED, not skipped (got {man['missing']})")
+    check(man["served"] == _present, "the manifest lists exactly what was served")
+    check(sorted(n for n in names if n != "MANIFEST.json")
+          == sorted(f"bundle_{h}.json" for h in _present),
+          "every present height is in the archive and nothing else is")
+    # Contents, not just names: an archive of correctly-named empty files would pass everything above.
+    got = json.loads(tf.extractfile("bundle_104.json").read())
+    check(got["height"] == 104, "the bytes served are the bundle's own bytes")
+
+    st, body = _get("/api/witnesses?from=100&count=999")
+    check(st == 400, "a count over BULK_MAX is refused rather than served in part")
+
+    st, body = _get("/api/witnesses?from=-1&count=5")
+    check(st == 400, "a negative `from` is a 400, not an empty archive")
+
+    # An EMPTY range must still be a well-formed archive: "nothing here yet" is a legitimate answer and
+    # a client must be able to tell it apart from a failure.
+    st, body = _get("/api/witnesses?from=9000&count=5")
+    check(st == 200, "a range with no bundles is still 200")
+    man = json.loads(tarfile.open(fileobj=_io.BytesIO(body), mode="r")
+                     .extractfile("MANIFEST.json").read())
+    check(man["served"] == [] and man["missing"] == list(range(9000, 9005)),
+          "an empty range reports every height as missing")
+
+    # STREAMING, asserted structurally and labelled as such. A version that builds the archive in
+    # memory passes every test above and OOMs on the first real 73 GB request, so this cannot be left
+    # to the behavioural tests — but nor can it honestly be called a behavioural test itself.
+    # `tarfile` mode "w|" is non-seekable stream mode; plain "w" buffers and seeks.
+    import inspect as _insp
+    _src = _insp.getsource(server.H.do_GET)
+    check('mode="w|"' in _src,
+          "the bulk archive is written in tarfile STREAM mode, not buffered")
+    check("addfile(ti, fh)" in _src,
+          "bundles are streamed from an open handle, not read() into memory first")
+
+    # A client that disconnects mid-archive must not take the server down with it. This IS behavioural:
+    # a resumable sync disconnects by design, so the broken-pipe path is ordinary operation, not an
+    # edge case — and an unhandled traceback per chunk would bury the log.
+    import socket as _sock
+    _c = _sock.create_connection(("127.0.0.1", _port), timeout=20)
+    _c.sendall(b"GET /api/witnesses?from=100&count=10 HTTP/1.0\r\n\r\n")
+    _c.recv(64)          # take the first few bytes only
+    _c.close()           # ...then walk away mid-stream
+    time.sleep(0.2)
+    st, _ = _get("/api/witnesses?from=100&count=2")
+    check(st == 200, "the server still serves after a client disconnected mid-archive")
+
+    # The single-block endpoint must serve the SAME file the bulk one does; they share bundle_path so
+    # they cannot drift, and this asserts that rather than trusting it.
+    st, one = _get("/api/witness/104")
+    check(st == 200 and json.loads(one)["height"] == 104,
+          "the single endpoint serves the same bundle the bulk endpoint does")
+finally:
+    _srv.shutdown()
+    server.BRIDGE_DIR, server.BULK_MAX = _orig_bridge, _orig_bulk
+
 print()
 if CONTROL:
     if fails:

@@ -17,7 +17,7 @@ Config via env:
 The full submit→verify→credit loop is real; VERIFY_MODE=mock only stubs the STARK check so the rest
 can be tested without a GPU.
 """
-import os, json, sqlite3, hashlib, subprocess, base64, time, threading
+import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 from urllib.parse import urlparse, parse_qs
@@ -31,6 +31,11 @@ RANGE_SIZE = int(os.environ.get("RANGE_SIZE", "1000"))
 SEED       = int(os.environ.get("SEED_RANGES", "60"))
 WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__), "witnesses"))
 BRIDGE_DIR = os.environ.get("HAZYNC_BRIDGE_OUT", "")   # archive-node bundle dir (co-located); serves bundle_<n>.json
+# Bulk bundle sync (#69). Seeding a new coordinator from a peer means ~220,000 bundles; one request
+# each is not a sync, it is a denial of service you perform on yourself. The cap is per REQUEST, not
+# per operator — a client walks it in chunks — and defaults to one RANGE_SIZE so a chunk is the same
+# unit everything else here is measured in.
+BULK_MAX   = int(os.environ.get("BULK_MAX", str(RANGE_SIZE)))
 HOST_BIN   = os.environ.get("HAZYNC_HOST", "")
 VERIFY     = os.environ.get("VERIFY_MODE", "mock" if not HOST_BIN else "real")
 STATE_DIR  = os.environ.get("COORD_STATE", os.path.join(os.path.dirname(__file__), "state"))
@@ -354,6 +359,40 @@ def overlapping(c, lo, hi, exclude_id):
 # A malicious peer's worst case is withholding work from our provers — a denial of service against
 # ourselves, visible as an idle board — never accepting a proof we should have rejected. Nothing here
 # touches verification, the frontier, or what lands on the board.
+def bundle_path(blk):
+    """The file that serves block `blk`, or None.
+
+    Same precedence as /api/witness/<h>: the archive-node bundle first (in-boundary + real root_prev +
+    inclusion proofs, provable with NO replay), then the legacy per-block witness. Kept as one function
+    so the single and bulk endpoints cannot drift into serving different files for the same height.
+    """
+    for f in ([os.path.join(BRIDGE_DIR, f"bundle_{blk}.json")] if BRIDGE_DIR else []) \
+             + [os.path.join(WITNESS, f"block_{blk}.json")]:
+        if os.path.exists(f):
+            return f
+    return None
+
+
+def bulk_plan(frm, count):
+    """Which heights a bulk request will serve, and which it cannot. Pure — no I/O beyond existence.
+
+    Returns (heights, missing, error). `error` is a string when the request itself is malformed, in
+    which case the caller returns 400 rather than an empty archive: "you asked for something invalid"
+    and "that range is genuinely empty" are different answers and a syncing client must be able to
+    tell them apart. Silently returning nothing for a bad `from` would look like the end of the chain.
+    """
+    if frm is None or frm < 0:
+        return [], [], "from must be a non-negative integer"
+    if count is None or count < 1:
+        return [], [], "count must be at least 1"
+    if count > BULK_MAX:
+        return [], [], f"count exceeds BULK_MAX ({BULK_MAX}) — request the range in chunks"
+    heights, missing = [], []
+    for h in range(frm, frm + count):
+        (heights if bundle_path(h) else missing).append(h)
+    return heights, missing, None
+
+
 PEERS = [u.strip().rstrip("/") for u in os.environ.get("PEER_COORDINATORS", "").split(",") if u.strip()]
 PEER_TTL = int(os.environ.get("PEER_TTL", "300"))
 _peer_cache = {"t": 0.0, "heights": set()}
@@ -1314,16 +1353,64 @@ class H(BaseHTTPRequestHandler):
                 if os.path.exists(f):
                     return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
             return self._send(404, {"error": "proof not available"})
+        if p == "/api/witnesses":
+            # Bulk bundle sync (#69). Seeding a new coordinator from a peer is ~220,000 bundles; with
+            # only /api/witness/<n> that is 220,000 requests, which is why nobody has done it.
+            #
+            # STREAMED, never buffered. One RANGE_SIZE chunk is a few hundred MB and the whole set is
+            # ~73 GB — building an archive in memory would OOM the coordinator on the first request.
+            # `tarfile` in "w|" mode writes straight to the socket and never seeks.
+            #
+            # TAR SPECIFICALLY, and not for convenience. This server speaks HTTP/1.0, so a response
+            # with no Content-Length ends at connection close — which makes a TRUNCATED transfer look
+            # exactly like a complete one. A tar ends with two zero blocks, so a client that parses the
+            # archive to completion has proof it received all of it. A bare concatenation would not.
+            q = parse_qs(urlparse(self.path).query)
+            def _int(name, default=None):
+                v = q.get(name, [None])[0]
+                if v is None: return default
+                return int(v) if v.lstrip("-").isdigit() else None
+            heights, missing, err = bulk_plan(_int("from"), _int("count", BULK_MAX))
+            if err:
+                return self._send(400, {"error": err})
+            manifest = json.dumps({
+                "from": _int("from"), "count": _int("count", BULK_MAX),
+                "served": heights, "missing": missing,
+                # A client compares this against what it extracted. `missing` is reported rather than
+                # skipped silently: a gap in the bridge's output and the end of the chain are different
+                # facts, and a syncing peer must not read one as the other.
+                "note": "verify the archive parses to its end-of-archive marker; a truncated stream is "
+                        "otherwise indistinguishable from a complete one over HTTP/1.0",
+            }, indent=1).encode()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-tar")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            try:
+                with tarfile.open(fileobj=self.wfile, mode="w|") as tf:
+                    ti = tarfile.TarInfo("MANIFEST.json"); ti.size = len(manifest); ti.mtime = 0
+                    tf.addfile(ti, io.BytesIO(manifest))
+                    for h in heights:
+                        f = bundle_path(h)
+                        if not f:            # raced with a bridge rotation between plan and send
+                            continue
+                        ti = tarfile.TarInfo(os.path.basename(f))
+                        ti.size = os.path.getsize(f); ti.mtime = 0
+                        with open(f, "rb") as fh:
+                            tf.addfile(ti, fh)
+            except (BrokenPipeError, ConnectionResetError):
+                # The client walked away mid-chunk. Normal for a resumable sync; not an error here, and
+                # letting it propagate would spam the log with tracebacks for ordinary behaviour.
+                pass
+            return
         if p.startswith("/api/witness/"):
             seg = p.rsplit("/", 1)[-1]
             blk = int(seg) if seg.isdigit() else (parse_range(seg) or [None])[0]  # block number or range id
             if blk is not None:
-                # Prefer the archive-node bridge bundle (in-boundary + real root_prev + inclusion proofs,
-                # provable with NO replay); fall back to the legacy per-block witness for old provers.
-                for f in ([os.path.join(BRIDGE_DIR, f"bundle_{blk}.json")] if BRIDGE_DIR else []) \
-                         + [os.path.join(WITNESS, f"block_{blk}.json")]:
-                    if os.path.exists(f):
-                        return self._send(200, raw=open(f, "rb").read())
+                f = bundle_path(blk)
+                if f:
+                    return self._send(200, raw=open(f, "rb").read())
             return self._send(404, {"error": "witness not available"})
         # static frontend
         rel = "index.html" if p in ("/", "") else p.lstrip("/")
@@ -1368,5 +1455,5 @@ if __name__ == "__main__":
                          f"proxy, or set COORD_ALLOW_PUBLIC_INSECURE=1 to override (not for production).")
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
-    print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<h>")
+    print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<h> · GET /api/witnesses?from=&count=")
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()
