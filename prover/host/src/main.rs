@@ -1,7 +1,7 @@
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash as _;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-use hazync_utreexo::{hash_leaf, Forest, Hash};
+use hazync_utreexo::{coin_leaf, hash_leaf, Forest, Hash};
 use hazync_coinbase_smt::{Proof as SmtProof, Smt};
 use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
@@ -178,19 +178,6 @@ fn verify_receipt_ex(r: &risc0_zkvm::Receipt, claimed_id: Option<[u32; 8]>) {
 fn rev(mut v: Vec<u8>) -> Vec<u8> { v.reverse(); v }
 fn arr(v: Vec<u8>) -> [u8; 32] { v.try_into().unwrap() }
 
-fn coin_leaf(txid_internal: &[u8; 32], vout: u32, value_sat: u64, spk: &[u8], height: u32, is_coinbase: bool, coin_mtp: u32) -> Hash {
-    let mut b = Vec::with_capacity(57 + spk.len());
-    b.extend_from_slice(txid_internal);
-    b.extend_from_slice(&vout.to_le_bytes());
-    b.extend_from_slice(&value_sat.to_le_bytes());
-    // N2: length-prefix scriptPubKey — MUST match the guest C++ coin_leaf / tx_out_leaves byte-for-byte.
-    b.extend_from_slice(&(spk.len() as u32).to_le_bytes());
-    b.extend_from_slice(spk);
-    b.extend_from_slice(&height.to_le_bytes());
-    b.push(is_coinbase as u8);
-    b.extend_from_slice(&coin_mtp.to_le_bytes());
-    hash_leaf(&b)
-}
 fn wire_proof(p: &hazync_utreexo::Proof) -> WireProof {
     WireProof { leaf: p.leaf, position: p.position, siblings: p.siblings.clone() }
 }
