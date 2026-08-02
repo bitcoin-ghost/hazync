@@ -277,6 +277,24 @@ list whenever a re-baseline is planned:
 
 ### Things that MUST be updated when the id changes
 
+**The browser verifier is on this list and is easy to forget.** `verifier-wasm` embeds `METHOD_ID_HEX`
+via the verifier crate, so the `.wasm` served at `/hazync/verify/` is a pinned artifact exactly like the
+native binaries. Left stale it rejects every new proof, on the page the README leads with.
+
+⚠ **Size is not a staleness signal for ANY of these.** Swapping one 64-hex literal for another is
+length-preserving: the correct post-re-baseline `.wasm` is byte-for-byte the same size as the stale one
+(1,063,349 B both sides, measured 2026-08-02). Check the embedded id, never the size:
+
+```bash
+strings <artifact> | grep -c <new-id>   # want 1
+strings <artifact> | grep -c <old-id>   # want 0
+```
+
+**Deploy the wasm in the SAME cutover as the coordinator binary swap and board reset.** Earlier and the
+browser rejects the still-live old board; later and it rejects the new one. There is no safe order
+other than together.
+
+
 Easy to miss, and each fails in a way that looks like something else:
 
 - [ ] `reproduce/METHOD_ID` — the source of truth; update it FIRST.
@@ -298,15 +316,22 @@ Read the real paths off the unit first — they are env-driven, so do not assume
 systemctl cat hazync-coordinator | grep -E 'WorkingDirectory|COORD_DB|COORD_PROOFS|HAZYNC_HOST'
 ```
 
-On the production coordinator those are `COORD_DB=/root/coordinator.db`,
-`COORD_PROOFS=/root/hazync-proofs`, `HAZYNC_HOST=/root/hazync-host-x86_64-linux-gnu`. Substitute yours.
+On the production coordinator those are `COORD_DB=/var/lib/hazync/coordinator.db`,
+`COORD_PROOFS=/var/lib/hazync/proofs`, `HAZYNC_HOST=/usr/local/bin/hazync-host`, with the checkout at
+`/opt/hazync`. Substitute yours — and note these MOVED on 2026-08-02 (#58): everything used to live
+under `/root`, which is `0700 root` and therefore blocked `User=`, `ProtectHome=` and
+`ProtectSystem=strict` on both units.
+
+**Both services now resolve the same binary** (`/usr/local/bin/hazync-host`). That is not cosmetic: it
+structurally removes the split-binary failure described in step 2 below, where the bridge was left on
+an old guest while the coordinator was upgraded. There is now one path to swap, not two.
 
 ```bash
 # 1. BACK UP FIRST — the old ledger + receipts are the historical record of the previous baseline.
 #    backup.sh honours COORD_DB/COORD_PROOFS, so pass them if they are not under $HZ_HOME.
-COORD_DB=/root/coordinator.db COORD_PROOFS=/root/hazync-proofs \
-  BACKUP_DIR=/root/hazync-backups /root/hazync/coordinator/deploy/backup.sh
-cd /root/hazync-backups/<STAMP> && sha256sum -c SHA256SUMS       # verify before relying on it
+COORD_DB=/var/lib/hazync/coordinator.db COORD_PROOFS=/var/lib/hazync/proofs \
+  BACKUP_DIR=/var/lib/hazync/backups /opt/hazync/coordinator/deploy/backup.sh
+cd /var/lib/hazync/backups/<STAMP> && sha256sum -c SHA256SUMS    # verify before relying on it
 ```
 
 ⚠️ Without `BACKUP_REMOTE` the snapshot sits on the **same disk** as the data. For a re-baseline that is
@@ -322,14 +347,17 @@ it is the attribution ledger and it is small.
 #    `txs` field, and every prover panicked with "missing field `txs`" the moment the board reached
 #    the first bundle it had written. Swap BOTH, then run scripts/check-deployment.sh --local.
 systemctl stop hazync-coordinator hazync-bridge
-cp /root/hazync-host-x86_64-linux-gnu /root/hazync-host.bak.<OLD_ID_PREFIX>
-install -m755 ./host-new /root/hazync-host-x86_64-linux-gnu
-/root/hazync-host-x86_64-linux-gnu method-id                     # MUST equal reproduce/METHOD_ID
+cp /usr/local/bin/hazync-host /root/hazync-host.bak.<OLD_ID_PREFIX>   # KEEP: re-verifies archived proofs
+install -m755 ./host-new /usr/local/bin/hazync-host
+/usr/local/bin/hazync-host method-id                             # MUST equal reproduce/METHOD_ID
 
 # 3. Clear the board. Archive, never delete — proofs/ is the artifact the "don't trust us" claim
 #    rests on, and the old ledger stays re-verifiable with the archived binary.
-mv /root/coordinator.db /root/coordinator.db.<OLD_ID_PREFIX>
-mv /root/hazync-proofs /root/hazync-proofs.<OLD_ID_PREFIX> && mkdir /root/hazync-proofs
+mv /var/lib/hazync/coordinator.db /var/lib/hazync/coordinator.db.<OLD_ID_PREFIX>
+mv /var/lib/hazync/proofs /var/lib/hazync/proofs.<OLD_ID_PREFIX>
+mkdir /var/lib/hazync/proofs && chown hazync:hazync /var/lib/hazync/proofs
+# ⚠ the services run as USER hazync since #58 — anything you recreate by hand must be chowned, or the
+#   coordinator starts, serves reads, and silently fails every write.
 
 # 4. Start BOTH — init_db() reseeds the open ranges; the frontier restarts at 0.
 systemctl start hazync-coordinator hazync-bridge
