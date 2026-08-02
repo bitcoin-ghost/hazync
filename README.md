@@ -55,7 +55,10 @@ scratch and checks it matches.
 What remains is scale, and we are honest about it: **~40,000 of 958,301 blocks proven so far**, on an
 open board anyone can join. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
-quietly. **There is no external audit yet.**
+quietly. **Two independent external reviews ran in August 2026 and neither found a soundness break in
+the guest, the verifier or the coordinator; both flagged the same two places as the residual risk, and
+everything they raised is fixed or tracked ([`SECURITY.md`](SECURITY.md)). Those were code reviews,
+not a commissioned professional audit — that has still not happened.**
 
 [**Watch the board**](https://bitcoinghost.org/hazync) · [**Join in**](CONTRIBUTING.md) ·
 [**Read the spec**](docs/SPEC.md)
@@ -121,7 +124,7 @@ docker run --rm -v "$PWD":/w -w /w ubuntu:22.04 ./hazync-host-x86_64-linux-gnu v
 
 ## What it proves
 
-A verified chain proof attests: **every block from genesis to the tip is valid under Core consensus, the UTXO set equals the committed root, and the work is as committed** — with no re-execution. That covers scripts of every type, real ECDSA and Schnorr through `libsecp256k1`, no inflation, proof-of-work and difficulty, merkle and witness commitments, weight, sigops, and the locktime/BIP rules, under Core's exact flags. The one non-Core piece is the Utreexo UTXO accumulator — our own code (the proven version is the guest's `prover/methods/guest/src/utreexo.rs`), differentially fuzzed ~900k executions against a reference model (`audit-fuzz/`). It has not yet had an external audit — it's the most likely place for a hidden bug, and the thing we most want outside eyes on.
+A verified chain proof attests: **every block from genesis to the tip is valid under Core consensus, the UTXO set equals the committed root, and the work is as committed** — with no re-execution. That covers scripts of every type, real ECDSA and Schnorr through `libsecp256k1`, no inflation, proof-of-work and difficulty, merkle and witness commitments, weight, sigops, and the locktime/BIP rules, under Core's exact flags. The one non-Core piece is the Utreexo UTXO accumulator — our own code (the proven version is the guest's `prover/methods/guest/src/utreexo.rs`), differentially fuzzed ~900k executions against a reference model (`audit-fuzz/`). Both August 2026 reviewers independently named it one of the two most likely places for a hidden bug — and one found real panic paths in the reference crate, now fixed. It still has not had a commissioned audit, and it remains the thing we most want outside eyes on.
 
 ## How it works
 
@@ -136,7 +139,7 @@ Prove each block with real Core in the zkVM, fold blocks recursively into one re
 
 Built and demonstrated on real mainnet data — single blocks, recursive chains, tip operation, parallel backfill; every tip hash and UTXO count matches mainnet. Hardened across **nine rounds** of adversarial self-audit ([`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)) and empirically validated across the segwit, taproot, big-block, and pre-BIP34 eras on real mainnet data.
 
-Still to come: the full genesis→tip proving campaign and an external audit. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
+Two external reviews ran in August 2026 — findings, fixes and what each could *not* verify are recorded in [`SECURITY.md`](SECURITY.md). Still to come: the full genesis→tip proving campaign and a commissioned audit. Trying to break it is the most useful thing you can do — [`SECURITY.md`](SECURITY.md) maps the soft spots.
 
 ## More
 
