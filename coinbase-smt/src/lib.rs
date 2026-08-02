@@ -57,6 +57,8 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
+pub mod bip30;
+
 pub type Hash = [u8; 32];
 pub type Key = [u8; 32];
 
