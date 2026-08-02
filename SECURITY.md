@@ -483,7 +483,7 @@ Verdict: consensus-critical core sound. One High, one Medium, three Low.
 | **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
 | **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
 | **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
-| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#64) |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED, not merged** — rides #56; see the line-number note below |
 
 **H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
 into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
@@ -519,6 +519,13 @@ does not use it at all; it has its own `prover/methods/guest/src/utreexo.rs`.
   They now build genuine proofs and perturb one field.
 - **`build-release.sh` bind-mounts the live working tree**, so switching branches mid-build silently
   produces a binary that is a mixture of them, with `METHOD_ID` and the smoke tests all reporting fine.
+- **Any guest-source edit that moves line numbers changes `METHOD_ID` — including comments.** Adding
+  fifteen lines of pure comment to `prover/methods/guest/src/main.rs` moved the id from `be5e0528…` to
+  `2a334ebe…`; the mechanism is Rust embedding file/line into panic metadata. This was measured only
+  because the opposite was assumed and CI was asked to prove it. The consequence is easy to get wrong:
+  a "harmless" comment in the guest is a re-baseline that invalidates every proof on the board, so
+  guest documentation must be batched into a change that is already re-baselining. Recorded in
+  `reproduce/METHOD_ID`. It is also why L-3 above is *fixed but unmerged* rather than closed.
 
 ## Earlier findings (2026-07-15 self-audit) — status
 
