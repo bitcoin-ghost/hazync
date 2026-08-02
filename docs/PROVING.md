@@ -178,6 +178,22 @@ docker build -f reproduce/Dockerfile -t hazync-repro .
 docker run --rm hazync-repro          # prints METHOD_ID — must equal reproduce/METHOD_ID
 ```
 
+**Budget for it honestly**, because both failure modes below have cost a full build:
+
+* **Time and bandwidth.** Provisioning fetches a 488 MB rust toolchain plus Core and secp256k1
+  sources. On a domestic link the toolchain download alone can exceed an hour, and it is the step that
+  fails first (#53). `RZUP_TIMEOUT` defaults to 3600 s; raise it rather than assuming the mirror is
+  down.
+* **Disk.** ~15 GB is enough for this CPU build. A **CUDA** build is not the same: measured at ~18 GB
+  consumed, completing only with 25 GB free. Worse, exhausting disk does not report as a disk error —
+  nvcc dies and cc-rs surfaces `exit status: 139`, a SIGSEGV, which reads as a toolchain bug. If nvcc
+  segfaults, check `df -h` before anything else.
+
+**Do not switch branches while it runs.** `prover/build-release.sh` bind-mounts the working tree, so
+the container compiles whatever is checked out *at the moment each crate builds* — not what you
+started with. The result looks entirely healthy (METHOD_ID prints, smoke tests pass) while being a
+mixture of branches. Use a separate clone if you need to keep working.
+
 The canonical id is checked in at [`reproduce/METHOD_ID`](../reproduce/METHOD_ID) and verified
 reproducible bit-for-bit across machines (local + GitHub CI); the `reproducible-image-id` CI job asserts
 every build still matches it. A from-source host built **outside** the container may differ (absolute
@@ -186,8 +202,8 @@ the canonical guest. The **coordinator** is also an independent check: it re-ver
 proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
-the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id (`3f52baff`,
-the current guest) for **both** the CPU and CUDA release binaries.
+the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id
+(`71790584…`, the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 

@@ -271,8 +271,9 @@ delete/proof handling and `num_leaves`/root recomputation, all primitive math (`
   SEC-2 pinning the reference oracle lacks (the proven guest is the authority).
 
 **Update 2026-07-30 — the domain-tag item below is now FIXED, and "non-exploitable" was wrong.** Leaf
-and interior hashes are domain-separated as of canonical id `85dc0b56…` (now superseded by
-`be5e0528…`, a dependency-only bump for RUSTSEC-2026-0220). A leaf preimage is
+and interior hashes are domain-separated as of canonical id `85dc0b56…` (since superseded by
+`be5e0528…` for RUSTSEC-2026-0220, and by `71790584…` in v0.14.0 — see `reproduce/METHOD_ID` for the
+full chain). A leaf preimage is
 `57 + |scriptPubKey|` bytes, so a 7-byte scriptPubKey gives a 64-byte preimage — the width an interior
 node hashes — and the stated barrier (leaf preimages open with an uncontrollable txid) is a grinding
 cost rather than a separation, since a txid is the hash of a transaction an attacker composes. See

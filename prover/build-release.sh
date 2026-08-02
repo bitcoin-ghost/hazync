@@ -18,7 +18,18 @@
 #   NVCC multi-arch  Without explicit -gencode flags nvcc targets only the build box's GPU, and the
 #                    binary then fails on every other card. We ship sm_80/86/89/90 + compute_90 PTX.
 #
-# Needs ~15 GB free disk and, for cuda, a working `--gpus all`. The CUDA kernel compile is the slow
+# DISK: ~15 GB free is enough for `cpu`. It is NOT enough for `cuda` — measured 2026-08-02, a CUDA
+# build consumed ~18 GB and only completed with 25 GB free. Budget 25 GB for cuda.
+#
+# Running out does NOT report as a disk error. nvcc writes large intermediates, and the first thing
+# you see is cc-rs reporting `exit status: 139` — a SIGSEGV — from a kernel compile, which reads as a
+# toolchain bug. The real message is further up the log and easy to miss:
+#
+#   eval_check_2.cu(6160): catastrophic error: error while writing generated C file: No space left on device
+#
+# That cost a full CUDA build to diagnose. If nvcc segfaults, check `df -h` before anything else.
+#
+# Needs, for cuda, a working `--gpus all`. The CUDA kernel compile is the slow
 # part (tens of minutes); the CPU build is much quicker.
 set -euo pipefail
 
