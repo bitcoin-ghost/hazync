@@ -126,6 +126,42 @@ if [ -n "$REMOTE" ]; then
         ( cd "$SRC" && sha256sum ./coordinator.db > SHA256SUMS 2>/dev/null || true )
         echo "[backup] offsite copy is LEDGER-ONLY ($(du -h "$SRC/coordinator.db" | cut -f1)); proofs stay local"
     fi
+
+    # ── receipts offsite, as an append-only MIRROR (hazync#49) ────────────────────────────────────
+    #
+    # The dated-snapshot scheme above is right for the ledger and wrong for receipts. The ledger is
+    # small and MUTABLE, so history matters; a receipt is ~220 KB and IMMUTABLE — block N's proof never
+    # changes — so 14 dated copies of it is 14x the cost of the one thing you actually need.
+    #
+    # Mirroring instead makes the offsite cost 1x the store rather than KEEP x, which is the difference
+    # between "affordable" and "not". Measured 2026-08-02: 759 MB of receipts against 14 GB free on the
+    # target — as snapshots that is ~10 GB and rising; as a mirror it is 759 MB.
+    #
+    # NAMESPACED BY GUEST ID, and this is not optional. Receipts are only meaningful relative to the
+    # guest that produced them, and filenames REPEAT across re-baselines: proof_10000.bin exists under
+    # every id, with different bytes. A flat mirror would either collide or (with --ignore-existing)
+    # silently skip the new one and keep serving the retired proof back to you on restore.
+    #
+    # No --delete, deliberately. A re-baseline clears the local store; the offsite copy of the retired
+    # baseline is then the only surviving record of work that really happened, and it stays
+    # re-verifiable with the archived host binary.
+    #
+    # CEILING, stated rather than discovered: the store grows toward ~165 GB at full chain and the
+    # current target has 14 GB. This buys a long runway, not a permanent home — when it fills, the
+    # answer is a bigger target, not silently dropping back to ledger-only.
+    if [ "${BACKUP_REMOTE_PROOFS:-0}" = "1" ] && [ -d "$PROOFS" ]; then
+        _mid="$(grep -vE '^[[:space:]]*#' "${HZ_REPO:-$HZ_HOME}/reproduce/METHOD_ID" 2>/dev/null                 | grep -oE '[0-9a-f]{64}' | head -1)"
+        _mid="${_mid:0:8}"
+        if [ -z "$_mid" ]; then
+            echo "[backup] WARNING: could not read METHOD_ID — skipping receipt mirror rather than" >&2
+            echo "[backup]          writing receipts to an unnamespaced path" >&2
+        else
+            case "$REMOTE" in
+                rclone:*) rclone copy "$PROOFS" "${REMOTE#rclone:}/proofs-$_mid" ;;
+                *:*)      rsync -a --ignore-existing "$PROOFS/" "$REMOTE/proofs-$_mid/" ;;
+            esac && echo "[backup] receipts mirrored offsite -> proofs-$_mid ($(du -sh "$PROOFS" | cut -f1), append-only)"                  || echo "[backup] WARNING: receipt mirror failed — ledger snapshot still shipped" >&2
+        fi
+    fi
     case "$REMOTE" in
         rclone:*)
             _rc="${REMOTE#rclone:}"
