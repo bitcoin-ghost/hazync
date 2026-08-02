@@ -16,8 +16,12 @@ publish = false
 # the host uses, so there is no ported copy to drift.
 default = ["std"]
 std = []
+# `Proof` on the wire. Needed on BOTH sides — the bridge serialises proofs into bundles and the guest
+# deserialises them — so it is deliberately not std-gated.
+serde = ["dep:serde"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+serde = { version = "1", optional = true, default-features = false, features = ["alloc", "derive"] }
 
 [workspace]

@@ -113,6 +113,7 @@ fn bit(key: &Key, i: usize) -> bool {
 /// ~1M entries roughly 20 are non-default, so this is ~640 bytes. That compression is not cosmetic —
 /// it is the difference between ~1 GB and ~8 GB of extra bundle data across the chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Proof {
     pub bitmap: [u8; 32],
     pub siblings: Vec<Hash>,

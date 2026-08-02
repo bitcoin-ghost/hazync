@@ -2,7 +2,7 @@ use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash as _;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use hazync_utreexo::{hash_leaf, Forest, Hash};
-use hazync_coinbase_smt::Smt;
+use hazync_coinbase_smt::{Proof as SmtProof, Smt};
 use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use serde::{Deserialize, Serialize};
@@ -1961,6 +1961,70 @@ fn check_bip30() {
 // prove [n..n] with NO bridge_pass replay (kills the quadratic; closes S3). Reuses build_block_carried +
 // push_mtp exactly; a parallel UTXO-metadata map (outpoint -> value,spk,creation-height,coinbase) supplies
 // the prevouts build_block_carried needs.
+/// One coinbase-output spend, with the proof of that coinbase's count under the root as it stands
+/// when the spend is applied. Mirrors `hazync_coinbase_smt::bip30::Spend`.
+#[derive(Serialize, Deserialize, Clone)]
+struct SmtSpend { coinbase_txid: [u8; 32], current_count: u32, proof: SmtProof }
+
+/// Everything the guest needs to run the BIP30 transition for one block.
+///
+/// The guest takes ONLY the proofs from here. `coinbase_txid`, `coinbase_outputs` and the spend list
+/// are all things it derives for itself from data it already validates — anything it read instead of
+/// derived would be something a prover could lie about, and the whole point of the structure is that
+/// the check cannot be talked out of.
+#[derive(Serialize, Deserialize, Clone)]
+struct SmtBlockWitness { absence_proof: SmtProof, spends: Vec<SmtSpend> }
+
+/// Advance the coinbase SMT by one block and emit the proofs the guest will need.
+///
+/// PURE AND SEPARATE FROM THE BRIDGE ON PURPOSE. The order of operations here has to match
+/// `bip30::apply_block` exactly — every proof is against the root as it stands at that step, not
+/// against the incoming root — and a mismatch is refused by the guest rather than mis-folded, so it
+/// shows up as a stalled board with no obvious cause. Extracting it means the agreement between the
+/// two is a native test (`smt_emission_round_trips_through_apply_block`) instead of a comment.
+///
+/// `coinbase_spends` is the coinbase txid of every input in this block that spends a coinbase output,
+/// in the block's own tx-then-input order.
+///
+/// # What the sequencing actually constrains — narrower than it looks
+///
+/// A proof for key `k` is made of the siblings OFF `k`'s path, so it is completely unaffected by any
+/// change to `k`'s own value. Two consequences, both established by running the mistakes as positive
+/// controls rather than by reasoning about them:
+///
+///   * Taking the absence proof after its own insert changes nothing — the two are byte-identical.
+///   * Chained spends of the SAME coinbase do not invalidate each other's proofs either.
+///
+/// What does bite is ordering across DISTINCT keys: the coinbase insert sits on a path that is a
+/// sibling of every other key that branches off it, so a spend proof taken before that insert is
+/// stale and is refused. That is the one real constraint here, and it is the one the round-trip test
+/// is built to catch — the first two controls passed against a deliberately broken implementation,
+/// which is exactly why they are recorded here instead of being trusted as tests.
+fn smt_advance(
+    smt: &mut Smt,
+    coinbase_txid: [u8; 32],
+    coinbase_outputs: u32,
+    coinbase_spends: &[[u8; 32]],
+) -> SmtBlockWitness {
+    // 1. Absence, against the INCOMING root — before any of this block's own updates.
+    let absence_proof = smt.prove(&coinbase_txid);
+    if coinbase_outputs > 0 { smt.insert(coinbase_txid, coinbase_outputs); }
+
+    // 2. Decrement each spend, proving against the root as it stands at that step. This is what lets
+    //    a block spend two outputs of the same coinbase: the second proof sees the first's effect.
+    let mut spends = Vec::with_capacity(coinbase_spends.len());
+    for t in coinbase_spends {
+        let cur = smt.get(t).unwrap_or(0);
+        assert!(cur > 0,
+            "bridge: a block spends coinbase {} which the SMT holds at zero — the tree and the UTXO \
+             set have diverged, which is a bug here and not a property of the chain",
+            t.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        spends.push(SmtSpend { coinbase_txid: *t, current_count: cur, proof: smt.prove(t) });
+        smt.insert(*t, cur - 1);
+    }
+    SmtBlockWitness { absence_proof, spends }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Bundle {
     height: u32, in_tip: [u8; 32],
@@ -1976,6 +2040,9 @@ struct Bundle {
     // output that can be checked against an independent replay, and costs nothing if it is wrong.
     #[serde(default)]
     smt_root: [u8; 32],
+    /// The sequenced proofs for `smt_root -> next`. `None` on bundles built before #54.
+    #[serde(default)]
+    smt_witness: Option<SmtBlockWitness>,
 }
 
 // Regression test for the v0.9.0 bundle-parse bug. `PackedBytes` serialises via `serialize_bytes`, which
@@ -2010,7 +2077,7 @@ fn bundle_roundtrip_test() {
     let b = Bundle {
         height: 170, in_tip: [1u8; 32], in_roots: vec![None, Some([2u8; 32])], in_leaves: 42,
         in_nbits: 0x1d00_ffff, in_time: 1_231_731_025, in_epoch_start: 1_231_006_505, in_recent: vec![1, 2, 3],
-        witness: w, smt_root: [0u8; 32],
+        witness: w, smt_root: [0u8; 32], smt_witness: None,
     };
     let j = serde_json::to_vec(&b).expect("serialise Bundle");
     let back: Bundle = serde_json::from_slice(&j)
@@ -2324,32 +2391,28 @@ fn cmd_bridge() {
                 // reason this block sits immediately after build_block_carried rather than anywhere
                 // more convenient.
                 let smt_root_in: [u8; 32] = smt.root();
-                {
+                let smt_witness = {
                     let cb = block.txdata[0].compute_txid().to_byte_array();
                     // Count only SPENDABLE outputs: an OP_RETURN coinbase output can never be spent,
                     // so counting it would leave the entry permanently nonzero and reject-valid a
                     // legal duplicate for ever. Matches the accumulator's out_spendable rule exactly.
                     let nout = block.txdata[0].output.iter()
                         .filter(|o| out_spendable(o.script_pubkey.as_bytes())).count() as u32;
-                    if nout > 0 { smt.insert(cb, nout); }
-                    // Decrement for every input spending a coinbase output. `utxo` still holds the
-                    // pre-block state here, which is what tells us whether a spent coin was a coinbase.
+                    // `utxo` still holds the PRE-block state here, which is what tells us whether a
+                    // spent coin was a coinbase output.
+                    let mut cb_spends: Vec<[u8; 32]> = Vec::new();
                     for tx in block.txdata.iter().skip(1) {
                         for inp in &tx.input {
                             let key = (inp.previous_output.txid.to_byte_array(), inp.previous_output.vout);
-                            if let Some((_, _, _, is_cb)) = utxo.get(&key) {
-                                if *is_cb {
-                                    let t = key.0;
-                                    let cur = smt.get(&t).unwrap_or(0);
-                                    if cur > 0 { smt.insert(t, cur - 1); }
-                                }
-                            }
+                            if matches!(utxo.get(&key), Some((_, _, _, true))) { cb_spends.push(key.0); }
                         }
                     }
-                }
+                    smt_advance(&mut smt, cb, nout, &cb_spends)
+                };
                 bridge_update_utxo(&mut utxo, &block, h);
                 let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
-                    in_nbits, in_time, in_epoch_start, in_recent, witness: w, smt_root: smt_root_in };
+                    in_nbits, in_time, in_epoch_start, in_recent, witness: w, smt_root: smt_root_in,
+                    smt_witness: Some(smt_witness) };
                 // atomic bundle write too — a prover polling the dir never reads a half-written bundle
                 let bp = format!("{out_dir}/bundle_{h}.json");
                 std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
@@ -2728,4 +2791,93 @@ fn main() {
     let all_valid = results.iter().all(|r| r.script == 1 && r.tx_check == 1);
     println!(">>> multi-tx modern validation {} — segwit witness + P2SH + taproot verified with correct flags + full sigop cost.",
         if all_valid { "ALL VALID ✓" } else { "had rejects ✗" });
+}
+
+#[cfg(test)]
+mod smt_bridge {
+    use super::*;
+    use hazync_coinbase_smt::bip30::{apply_block, BlockUpdate, Spend};
+
+    fn txid(n: u64) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&n.to_le_bytes());
+        Sha256::digest(b).into()
+    }
+
+    fn to_update(cb: [u8; 32], nout: u32, w: &SmtBlockWitness) -> BlockUpdate {
+        BlockUpdate {
+            coinbase_txid: cb,
+            coinbase_outputs: nout,
+            absence_proof: w.absence_proof.clone(),
+            spends: w.spends.iter()
+                .map(|s| Spend { coinbase_txid: s.coinbase_txid, current_count: s.current_count,
+                                 proof: s.proof.clone() })
+                .collect(),
+        }
+    }
+
+    /// THE test this refactor exists for: what the bridge emits is what the guest can consume.
+    ///
+    /// The coupling is invisible in either half alone — the bridge produces well-formed proofs and
+    /// `apply_block` verifies well-formed proofs, but if the two disagree about the ORDER the roots
+    /// are taken in, every proof is against the wrong intermediate state. That fails closed, so it
+    /// would present as a board that silently stops advancing rather than as a wrong answer.
+    #[test]
+    fn smt_emission_round_trips_through_apply_block() {
+        let mut bridge = Smt::new();
+        let mut guest_root = bridge.root();
+
+        // A chain where coinbases accumulate and later blocks spend them, including two outputs of
+        // the SAME coinbase inside one block — the case that only works if proofs are sequenced.
+        for h in 0..40u64 {
+            let cb = txid(h);
+            let nout = if h % 5 == 0 { 2 } else { 1 };
+            let spends: Vec<[u8; 32]> = if h >= 10 {
+                if h % 5 == 0 { vec![txid(h - 10), txid(h - 10)] } else { vec![txid(h - 10)] }
+            } else { Vec::new() };
+            // txid(h-10) has 2 outputs exactly when (h-10) % 5 == 0, i.e. when h % 5 == 0.
+
+            let w = smt_advance(&mut bridge, cb, nout, &spends);
+            guest_root = apply_block(&guest_root, &to_update(cb, nout, &w))
+                .unwrap_or_else(|e| panic!("guest refused the bridge's own block at height {h}: {e:?}"));
+            assert_eq!(guest_root, bridge.root(), "roots diverged at height {h}");
+        }
+    }
+
+    /// A block whose coinbase duplicates one that still has unspent outputs must be refused, using
+    /// exactly the witness the bridge would have produced for it.
+    #[test]
+    fn the_bridge_cannot_produce_a_witness_that_passes_a_real_bip30_violation() {
+        let mut bridge = Smt::new();
+        let cb = txid(1);
+        let w0 = smt_advance(&mut bridge, cb, 1, &[]);
+        let root0 = apply_block(&Smt::new().root(), &to_update(cb, 1, &w0)).unwrap();
+
+        // Now try the same coinbase again while it is still unspent.
+        let mut replay = bridge.clone();
+        let w1 = smt_advance(&mut replay, cb, 1, &[]);
+        assert!(apply_block(&root0, &to_update(cb, 1, &w1)).is_err(),
+                "a duplicate of an UNSPENT coinbase was accepted");
+    }
+
+    /// The two historical duplicates, in shape: once the earlier coinbase is fully spent, the later
+    /// one is an ordinary insert. This is what retires the F3 grandfathered-overwrite special case.
+    #[test]
+    fn a_fully_spent_coinbase_can_be_duplicated_with_no_special_case() {
+        let mut bridge = Smt::new();
+        let dup = txid(91812);
+        let w0 = smt_advance(&mut bridge, dup, 1, &[]);
+        let mut root = apply_block(&Smt::new().root(), &to_update(dup, 1, &w0)).unwrap();
+
+        // Spend it to zero via an ordinary later block.
+        let w1 = smt_advance(&mut bridge, txid(999), 1, &[dup]);
+        root = apply_block(&root, &to_update(txid(999), 1, &w1)).unwrap();
+
+        // Now the duplicate is legal.
+        let w2 = smt_advance(&mut bridge, dup, 1, &[]);
+        root = apply_block(&root, &to_update(dup, 1, &w2))
+            .expect("duplicating a fully-spent coinbase was rejected — this is legal under BIP30");
+        assert_eq!(root, bridge.root());
+    }
 }
