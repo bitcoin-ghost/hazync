@@ -38,7 +38,7 @@ jobs:
         run: rustup update --no-self-update stable && rustc --version
       - name: Utreexo accumulator tests
         run: cargo test --manifest-path accumulator/Cargo.toml --release
-      - name: Guest pure-Rust helper tests (activation heights, add256, median_time_past)
+      - name: Guest pure-Rust tests (activation heights, add256, median_time_past, utreexo SEC-2 pinning)
         run: cargo test --manifest-path guest-pure-fuzz/Cargo.toml --release
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
