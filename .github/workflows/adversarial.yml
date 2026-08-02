@@ -114,16 +114,22 @@ jobs:
             echo "::error::reason (2 means 'valid SNARK, not anchored'; 1 means 'invalid proof')"; exit 1
           fi
           echo "verifier rejects the non-genesis range with the anchoring code ✓"
-      - name: FFI verifier links from C++ and rejects what it must (#31)
-        # ghostd will call THIS, not a C++ reimplementation of risc0 verification. Proves the static
-        # library links from C++ and that every rejection path returns its own code — a caller that
-        # adopted state on a non-zero return would be adopting a fabricated anchor.
+      - name: FFI verifier — adversarial suite from C++ (#31)
+        # ghostd will call THIS, not a C++ reimplementation of risc0 verification, and #31 makes
+        # "adversarial tests first" non-negotiable: adopting a proof is a trust decision, and a bug
+        # here means accepting an invalid chain — strictly worse than slow IBD.
+        #
+        # Every case asserts the output struct is left BYTE-FOR-BYTE untouched on rejection. The
+        # smoke test this replaces printed "state correctly not written" and checked nothing, so a
+        # rejection path that wrote partial state would have passed it while reassuring the reader.
+        #
+        # The baseline acceptance runs FIRST and hard-fails the suite: a verifier that rejects
+        # everything passes an adversarial suite trivially.
         run: |
           cargo build --release --manifest-path verifier-ffi/Cargo.toml
-          g++ -O2 -I verifier-ffi/include prover/testdata/ffi_smoke.cpp \
-              verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_smoke
-          /tmp/ffi_smoke prover/testdata/snark/fold_8.snark 0   # genesis-anchored -> HAZYNC_OK
-          /tmp/ffi_smoke prover/testdata/snark/neg500.snark   -5   # valid but NOT anchored
+          g++ -O2 -I verifier-ffi/include prover/testdata/ffi_adversarial.cpp \
+              verifier-ffi/target/release/libhazync_verify.a -lpthread -ldl -lm -o /tmp/ffi_adv
+          /tmp/ffi_adv prover/testdata/snark/fold_8.snark prover/testdata/snark/neg500.snark
       - name: WASM verifier agrees with the CLI on every fixture (browsers are the copy nobody can audit)
         # The browser build is the copy most people will run and the one least inspectable after the
         # fact. It shares hazync_verify::verify with the CLI, so it cannot disagree "in principle" —
