@@ -177,6 +177,38 @@ done < <(git ls-files '*.md' 2>/dev/null | while read -r f; do
          done)
 [ "$fail" -eq 0 ] && note "ok   no superseded id is presented as evidence inside a code block"
 
+# ── 8. a superseded id described as CURRENT, in prose ─────────────────────────────────────────────
+#
+# Check 7 only inspects fenced blocks, on the reasoning that prose should discuss history freely.
+# That left a real gap: docs/PROVING.md carried "the CPU-only reproduce/Dockerfile attests the
+# canonical id (`3f52baff`, the current guest)" through TWO re-baselines. Every gate passed — the id
+# was outside a fence, and the file did mention the canonical id elsewhere, so checks 4 and 6 were
+# satisfied. Found by an external auditor reading the page, which is the wrong way to find it.
+#
+# So: history is still free, but a retired id sitting next to a word that CLAIMS currency is not
+# history. Narrow on purpose — "current|canonical|latest|now" within the same sentence — because a
+# broader rule would flag the supersession chains that are supposed to name old ids.
+prev_fail=$fail
+while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    f=${hit%%:*}; rest=${hit#*:}; ln=${rest%%:*}; tok=${rest##*:}
+    bad "$f:$ln calls superseded id '$tok' current/canonical in prose — it is history, say so"
+done < <(git ls-files '*.md' 2>/dev/null | while read -r f; do
+             awk -v known="$KNOWN" -v canon="$CANON8" -v file="$f" '
+                 /^[[:space:]]*```/ { infence = !infence; next }
+                 # A line that says "superseded" is self-labelling as history — "as of canonical id
+                 # X (now superseded by Y)" is exactly the phrasing this repo should keep using, and
+                 # flagging it would train people to delete the supersession chain to appease a gate.
+                 !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ {
+                     line = $0
+                     while (match(line, /[0-9a-f]{8}/)) {
+                         tok = substr(line, RSTART, 8); line = substr(line, RSTART + 8)
+                         if (tok != canon && index(known, tok) > 0) print file ":" NR ":" tok
+                     }
+                 }' "$f"
+         done)
+[ "$fail" -eq "$prev_fail" ] && note "ok   no superseded id is described as current in prose"
+
 if [ "$fail" -ne 0 ]; then
     echo
     echo "Version/id drift detected. If this was an intentional re-baseline, update reproduce/METHOD_ID"

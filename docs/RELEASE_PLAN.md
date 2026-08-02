@@ -143,9 +143,12 @@ These are the items where being wrong costs money already spent.
 
 ## Re-baseline: what must move together
 
-The canonical guest is `85dc0b56…` (accumulator domain separation) and is **ahead of the live board**,
-which still serves `3f52baff` proofs. These artifacts are built and tested but deliberately NOT
-deployed, because deploying any of them early makes the public surface reject the public board:
+The canonical guest is `71790584…` (v0.14.0: cshims.c hardening + multi_check docs), and the live
+board serves it — the two were cut over together on 2026-08-02.
+
+This section was written when `85dc0b56…` was staged *ahead of* a board still serving `3f52baff`, and
+it describes that hazard, which is the general one: while the two disagree, deploying either half
+early makes the public surface reject the public board:
 
 | artifact | state | deploy when |
 |---|---|---|
