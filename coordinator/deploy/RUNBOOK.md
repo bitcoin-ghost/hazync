@@ -356,8 +356,20 @@ install -m755 ./host-new /usr/local/bin/hazync-host
 mv /var/lib/hazync/coordinator.db /var/lib/hazync/coordinator.db.<OLD_ID_PREFIX>
 mv /var/lib/hazync/proofs /var/lib/hazync/proofs.<OLD_ID_PREFIX>
 mkdir /var/lib/hazync/proofs && chown hazync:hazync /var/lib/hazync/proofs
+
+# ⚠ THE SPINE TOO — it is a PROOF and it does not live with the others.
+# COORD_SPINE defaults to <server.py dir>/spine, i.e. INSIDE the checkout, and it is untracked — so
+# `git checkout <tag>` does not touch it and it survives every step above. Left in place, the
+# coordinator keeps serving a genesis-anchored proof made by the OLD guest, and /api/spine/proof —
+# the exact command the README's 30-second demo tells strangers to run — fails against the new
+# verifier. Missed on 2026-08-02 and caught only by walking the published path as a stranger.
+mv /opt/hazync/coordinator/spine /opt/hazync/coordinator/spine.<OLD_ID_PREFIX>
+mkdir /opt/hazync/coordinator/spine && chown hazync:hazync /opt/hazync/coordinator/spine
 # ⚠ the services run as USER hazync since #58 — anything you recreate by hand must be chowned, or the
-#   coordinator starts, serves reads, and silently fails every write.
+#   coordinator starts, serves reads, and silently fails every write. That includes the PARENT
+#   directory: /var/lib/hazync itself must be hazync-owned, or sqlite cannot CREATE the new DB and
+#   the service dies at startup with "unable to open database file". Hit on 2026-08-02 despite this
+#   warning already being written — an existing file is writable, a missing one needs a writable dir.
 
 # 4. Start BOTH — init_db() reseeds the open ranges; the frontier restarts at 0.
 systemctl start hazync-coordinator hazync-bridge
