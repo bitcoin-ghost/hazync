@@ -384,6 +384,87 @@ def peer_proven_heights():
         _peer_cache.update(t=now, heights=got)
     return got
 
+def sync_from_peers(limit=200):
+    """Pull proofs peers have that we do not, RE-VERIFY each, and adopt the ones that pass (hazync#69).
+
+    This is what makes multiple coordinators easy rather than hard, and it is worth being explicit
+    about why there is no consensus protocol here:
+
+      * A proof is SELF-AUTHENTICATING. It verifies against METHOD_ID no matter who is holding it, so
+        there is no canonical store to agree on — every coordinator simply keeps its own copy.
+      * The frontier is a PURE FUNCTION of the verified set (`_frontier_chain`). Two coordinators
+        holding the same set compute the same frontier by construction. Convergence is arithmetic,
+        not agreement.
+
+    So federation reduces to: fetch the peer's index, download what we lack, verify it OURSELVES, and
+    store it. The union converges. No leader, no quorum, no clock.
+
+    WE NEVER TRUST THE PEER. Every receipt goes through the same `verify_receipt()` a submission does —
+    real STARK verification against our own METHOD_ID — and a range whose receipt does not prove what
+    the peer claims is dropped. The worst a hostile peer can do is waste our bandwidth serving junk we
+    reject; it cannot put anything on our board.
+
+    Attribution is preserved: the peer reports the handle that earned it, and we record that rather
+    than crediting ourselves. Adopting someone's proof is not the same as having proved it.
+
+    `limit` bounds one pass so a fresh coordinator syncing a large peer makes steady progress instead
+    of one enormous transaction.
+    """
+    if not PEERS:
+        return {"adopted": 0, "rejected": 0, "peers": 0}
+    c = db()
+    have = {r["id"] for r in c.execute("SELECT id FROM vranges")}
+    c.close()
+    adopted = rejected = 0
+    for base in PEERS:
+        try:
+            req = urllib.request.Request(f"{base}/api/vranges", headers={"User-Agent": "hazync-coordinator"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                doc = json.loads(r.read(64 * 1024 * 1024).decode())
+        except Exception:
+            continue                                   # peer down: nothing to do, never fatal
+        for v in doc.get("vranges", []):
+            if adopted + rejected >= limit:
+                break
+            rid = str(v.get("id") or f'{v["lo"]}-{v["hi"]}' if v.get("lo") != v.get("hi") else str(v.get("lo")))
+            if rid in have:
+                continue
+            try:
+                preq = urllib.request.Request(f"{base}/api/proof/{rid}",
+                                              headers={"User-Agent": "hazync-coordinator"})
+                with urllib.request.urlopen(preq, timeout=60) as pr:
+                    receipt = pr.read(MAX_BODY)
+            except Exception:
+                continue
+            # The claimed range is the peer's word; verify_receipt checks the RECEIPT proves it.
+            rng = {"id": rid, "lo": int(v["lo"]), "hi": int(v["hi"])}
+            ok, _note, meta = verify_receipt(receipt, rng)
+            if not ok or not meta:
+                rejected += 1
+                continue
+            handle = clean_handle(v.get("handle") or "peer")
+            with _lock:
+                c = db()
+                c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')",
+                          (rid, rng["lo"], rng["hi"]))
+                c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,"
+                          "out_leaves,range_work,in_bhash,out_bhash)"
+                          " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (rid, int(meta["lo"]), int(meta["hi"]), meta["in_tip"], meta["out_tip"],
+                           "", handle, time.time(), meta.get("out_leaves", 0),
+                           str(meta.get("range_work", "0")), str(meta.get("in_bhash", "")),
+                           str(meta.get("out_bhash", ""))))
+                c.commit(); c.close()
+            try:
+                os.makedirs(PROOFS_DIR, exist_ok=True)
+                with open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb") as pf:
+                    pf.write(receipt)
+            except Exception:
+                pass
+            have.add(rid)
+            adopted += 1
+    return {"adopted": adopted, "rejected": rejected, "peers": len(PEERS)}
+
 def pick(body):
     """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
     per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`

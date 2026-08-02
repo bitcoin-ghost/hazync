@@ -335,6 +335,33 @@ finally:
     server.PEERS = _orig_peers
     server._peer_cache.update(**_orig_cache)
 
+# ── peer proof sync (#69) ────────────────────────────────────────────────────────────────────────
+# The property worth asserting is that adoption goes through the SAME verification a submission does.
+# A coordinator that trusted a peer's index would let a hostile peer put anything on the board; one
+# that re-verifies can only ever waste bandwidth on junk it rejects.
+_orig_peers = server.PEERS
+try:
+    server.PEERS = []
+    check(server.sync_from_peers() == {"adopted": 0, "rejected": 0, "peers": 0},
+          "no peers -> sync is a no-op, no network call")
+
+    server.PEERS = ["http://peer.invalid"]
+    r = server.sync_from_peers()
+    check(r["adopted"] == 0 and r["peers"] == 1,
+          "an unreachable peer adopts nothing and does not raise")
+
+    # Adoption must be gated on OUR verification, not the peer's claim. In mock mode verify_receipt
+    # returns a fixed shape, so assert the call path rather than the crypto: a range the peer offers
+    # is only ever inserted after verify_receipt returns ok.
+    import inspect
+    src = inspect.getsource(server.sync_from_peers)
+    check("verify_receipt(" in src, "sync re-verifies every receipt itself")
+    check("if not ok or not meta:" in src, "sync drops anything that fails ITS OWN verification")
+    check(src.index("verify_receipt(") < src.index("INSERT OR REPLACE INTO vranges"),
+          "verification happens BEFORE the row is written, not after")
+finally:
+    server.PEERS = _orig_peers
+
 print()
 if CONTROL:
     if fails:
