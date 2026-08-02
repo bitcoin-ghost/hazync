@@ -57,6 +57,10 @@ whatever work-distribution scheme is in force (#37).
 blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. The board stands at **26,637 of
 958,301 blocks — 2.78% of blocks, and well under 0.1% of the work** (measured 2026-08-01).
 
+> Re-baselined a THIRD time on 2026-08-02 to `71790584` (v0.14.0), discarding 46,177 blocks — see
+> `reproduce/METHOD_ID` for why, and note the rule it established: any guest edit that moves line
+> numbers changes the id, including comments.
+>
 > The board was at 39,299 (4.1%) before two guest re-baselines — `85dc0b56`, then `be5e0528` for the
 > `ruint` RUSTSEC bump — each of which resets it to genesis. Those receipts were made against a
 > superseded guest and do not verify today. It is re-proving from genesis under `be5e0528`.
