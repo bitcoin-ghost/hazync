@@ -6,18 +6,24 @@ than existing only on one machine.
 
 ## Current state (measured 2026-08-02, after the migration)
 
-| service | user | ProtectHome | ProtectSystem |
-|---|---|---|---|
-| `hazync-coordinator` | **hazync** | **true** | **strict** |
-| `hazync-bridge` | root | read-only | strict |
+| service | user | ProtectHome | ProtectSystem | NoNewPrivileges |
+|---|---|---|---|---|
+| `hazync-coordinator` | **hazync** | **true** | **strict** | true |
+| `hazync-bridge` | **hazync** | **true** | **strict** | true |
 
-The coordinator — the internet-facing service — is now fully unprivileged with `/root` inaccessible.
+**Both services are now fully unprivileged, with `/root` inaccessible to each.**
 
-**The bridge cannot drop privilege yet, and the reason is bitcoind, not the bridge.** bitcoind runs as
-root with `-datadir=/root/.bitcoin` and writes `.cookie` as `0600 root:root`, rewriting it on every
-restart. An unprivileged bridge cannot authenticate. Closing that needs either `rpcauth` credentials
-in `bitcoin.conf` or bitcoind's datadir moving out of `/root` — both are bitcoind changes, so they are
-out of scope here. `ProtectHome=read-only` is the most that can be done meanwhile.
+The bridge was the harder one, and the blocker was never the bridge — it was bitcoind. bitcoind runs
+as root with `-datadir=/root/.bitcoin` and rewrites `.cookie` as `0600 root:root` on every restart, so
+an unprivileged bridge could not authenticate, and `ProtectHome=true` was impossible while it needed
+to read that cookie.
+
+Solved by giving the bridge its **own client-only datadir** — `/var/lib/hazync/bitcoin-client`, mode
+`0600 hazync`, containing nothing but `rpcauth` credentials. `bitcoin-cli` reads those and talks to
+the node over localhost RPC, so the bridge never touches `/root` at all. bitcoind gained one
+`rpcauth=` line and was restarted (RPC ready again in ~30 s; the node is 864 GB with `txindex=1`).
+
+The credentials were generated **on the box** so the password never transited a log.
 
 ## Where things live now
 
@@ -25,8 +31,9 @@ out of scope here. `ProtectHome=read-only` is the most that can be done meanwhil
 |---|---|---|
 | checkout | `/opt/hazync` | root |
 | DB / state / proofs / witnesses / backups | `/var/lib/hazync/…` | hazync |
-| bridge bundles | `/var/lib/hazync/bridge_bundles` | root, `0644` (coordinator reads) |
-| host binary | `/usr/local/bin/hazync-host` | root |
+| bridge bundles | `/var/lib/hazync/bridge_bundles` | hazync (bridge writes, coordinator reads) |
+| host binary | `/usr/local/bin/hazync-host` | root (0755) |
+| bitcoind RPC creds | `/var/lib/hazync/bitcoin-client/bitcoin.conf` | hazync, `0600` |
 
 The migration was a same-filesystem rename of ~85 GB (73 GB of bundles, 12 GB of proofs) and took
 **0 seconds**. The 53,350 proof files were chowned *before* the outage, since chown does not disturb
@@ -56,28 +63,31 @@ same time.
 
 So the hardening was added as drop-ins, leaving every existing directive untouched.
 
-## What is deliberately NOT set
+## What is still NOT possible, and why
 
-- **`User=` / `Group=`** — `ExecStart`, the datadir, the DB, the state dir and the proof store are all
-  under `/root`. Dropping privilege needs a path migration first (#58).
-- **`ProtectHome=`** — `/root` must stay readable *and writable*: `coordinator.db`, `coord_state` and
-  `hazync-proofs` live there, and `/root/bridge_bundles` + `/root/witnesses` must be readable. This is
-  exactly the conflict in #60.
-- **`ProtectSystem=strict`** — same reason; it would make `/root` read-only.
+Nothing is held back on the hazync side any more. The one remaining item is bitcoind's own posture:
 
-`ProtectSystem=full` is used instead: `/usr`, `/boot` and `/etc` become read-only, `/root` is
-untouched. That is a real gain with none of the path risk.
+- **bitcoind still runs as root** with `-datadir=/root/.bitcoin`. That is out of scope here — the
+  bridge no longer depends on it, because it authenticates over RPC instead of reading the cookie.
+  Hardening bitcoind itself is a separate exercise.
 
 ## Applying
 
 ```bash
-install -m 0644 hazync-coordinator-hardening.conf \
-  /etc/systemd/system/hazync-coordinator.service.d/hardening.conf
-install -m 0644 hazync-bridge-hardening.conf \
-  /etc/systemd/system/hazync-bridge.service.d/hardening.conf
+for f in hazync-coordinator-hardening hazync-coordinator-paths-and-user \
+         hazync-bridge-hardening hazync-bridge-paths \
+         hazync-coordinator-backup-paths hazync-retention-check-paths; do
+  svc=$(echo "$f" | sed -E 's/-(hardening|paths-and-user|paths)$//')
+  name=$(echo "$f" | grep -oE '(hardening|paths-and-user|paths)$')
+  install -D -m 0644 "$f.conf" "/etc/systemd/system/$svc.service.d/$name.conf"
+done
 systemctl daemon-reload
 systemctl restart hazync-bridge hazync-coordinator
 ```
+
+The bridge drop-in assumes `rpcauth=` is present in bitcoind's `bitcoin.conf` and that
+`/var/lib/hazync/bitcoin-client/bitcoin.conf` holds the matching credentials. Without those it cannot
+reach the node, because it no longer has any path to the cookie.
 
 ## Verifying — `is-active` is not enough
 
@@ -85,12 +95,16 @@ A hardened service that has lost access to a path it needs usually keeps running
 Check the things that would go quiet:
 
 ```bash
-systemctl show hazync-coordinator -p NoNewPrivileges -p ProtectSystem -p PrivateTmp
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/api/state?slim=1   # 200
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/api/witness/500    # 200 — bundle dir readable
-ls -la /root/coordinator.db                                                       # mtime advancing
+systemctl show hazync-coordinator -p User -p ProtectHome -p ProtectSystem
+systemctl show hazync-bridge      -p User -p ProtectHome -p ProtectSystem
+sudo -u hazync bitcoin-cli -datadir=/var/lib/hazync/bitcoin-client getblockcount   # bridge -> node
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/api/state?slim=1    # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/api/witness/500     # 200 — bundle read
+systemctl start hazync-retention-check && systemctl show hazync-retention-check -p ExecMainStatus
 ```
 
-Measured after applying, 2026-08-02: both services active, `/api/state` 200, `/api/witness/500` 200,
-DB written, bridge resumed from its checkpoint at height 220000 (its configured cap), and the public
-board served 46,124 proven with frontier 46,124.
+Measured after the migration, 2026-08-02: both services active as `hazync` with `ProtectHome=true`
+and `ProtectSystem=strict`; unprivileged `getblockcount` returned 960691; `/api/state`,
+`/api/witness/500` and `/api/spine` all 200; a write lock taken and released on the DB as `hazync`;
+retention gate `exit=0`; backup `exit=0`; and the public board at 46,177 proven with frontier ==
+proven throughout.
