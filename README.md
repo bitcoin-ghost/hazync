@@ -52,7 +52,8 @@ rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md)) and validate
 taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** — CI rebuilds it from
 scratch and checks it matches.
 
-What remains is scale, and we are honest about it: **~40,000 of 958,301 blocks proven so far**, on an
+What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-02**
+when v0.14.0 re-baselined the guest, discarding 46,177 proven blocks. Re-proving is under way, on an
 open board anyone can join. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
 quietly. **Two independent external reviews ran in August 2026 and neither found a soundness break in
