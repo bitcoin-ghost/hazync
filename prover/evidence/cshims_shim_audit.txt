@@ -1,0 +1,33 @@
+cshims.c — evidence for hazync#55
+Collected 2026-08-01 against the linked guest ELF at METHOD_ID be5e0528 (pre-fix).
+
+== 1. call sites of the shims, resolved by objdump ==
+   (this is what establishes that NONE of them is on the consensus path)
+   _sbrk  <-  <_sbrk_r>:
+   getenv  <-  <_GLOBAL__sub_I__ZN9__gnu_cxx9__freeresEv>:
+   strchr  <-  <_GLOBAL__sub_I__ZN9__gnu_cxx9__freeresEv>:
+   strtoul  <-  <_GLOBAL__sub_I__ZN9__gnu_cxx9__freeresEv>:
+   strtoul  <-  <_ZNSt13random_device14_M_init_pretr1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE>:
+   strtoul  <-  <__strftime.isra.0>:
+   strtoul  <-  <_tzset_unlocked_r>:
+
+== 2. _malloc_trim_r passes a NEGATIVE increment (verified, not inferred from the name) ==
+   a1 is the incr argument; note 'neg a1,s0' immediately before the call.
+     2ae914:	00000593          	li	a1,0
+     2ae91c:	7d11d0ef          	jal	2cc8ec <_sbrk_r>
+     2ae958:	408005b3          	neg	a1,s0
+     2ae960:	78d1d0ef          	jal	2cc8ec <_sbrk_r>
+
+   => the pre-fix guard 'if(_hp+incr > _heap+sizeof(_heap))' is trivially false for incr<0,
+      so the break moved unchecked. Latent only because newlib never releases more than it took.
+
+== 3. differential test vs glibc, with positive controls ==
+   == cshims.c vs glibc ==
+   all shim assertions passed
+   ok   cshims.c agrees with glibc and honours both _sbrk bounds
+   
+   == positive control: the same harness against the previous implementation ==
+   ok   control caught: strtoul/differential
+   ok   control caught: sbrk/lower-bound
+   
+   shim semantics verified, and the harness is proven able to fail.

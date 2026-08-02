@@ -85,7 +85,11 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   `68819a54…` (witness byte-packing + per-tx dedup; v0.9.0/v0.9.1) → `3f52baff…` (ecmult window 19; v0.10.0)
   → `85dc0b56…` (accumulator leaf/interior domain separation)
   → `be5e0528…` (ruint 1.19→1.20 for RUSTSEC-2026-0220; no Hazync source change, but ruint is
-  compiled into the circuit so the ELF moves).
+  compiled into the circuit so the ELF moves)
+  → `71790584…` (v0.14.0: `cshims.c` `_sbrk` bounds + C99 `strtoul`, and `multi_check` documented —
+  two external-review findings batched into one re-baseline because neither was worth the cost alone;
+  the second is COMMENTS ONLY, which moves the id regardless, since Rust embeds file/line in panic
+  metadata).
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

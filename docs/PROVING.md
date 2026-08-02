@@ -108,12 +108,17 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release is **v0.13.5**, shipping `METHOD_ID be5e0528` — the same guest as
-v0.12.x, so **every existing proof stays valid**. v0.13.5 is the response to the first two external
-reviews of the project: a release-signing key exposure (a tag spliced into a `run:` block in the job
+either way. **Releases:** the current release is **v0.14.0**, shipping `METHOD_ID 71790584` — a **NEW guest**, so
+**every proof made against `be5e0528` is invalid** and the board restarted from genesis. That was the
+price of two guest fixes from the first external reviews: `cshims.c`'s `_sbrk` bounds and `strtoul`
+base handling (#55), plus documenting `multi_check` (#59). Neither was worth a re-baseline alone —
+they were batched into one deliberately, and taken at 4.8% of the chain rather than later, because a
+re-baseline never gets cheaper.
+
+v0.13.5 (`be5e0528`) was the previous release: the response to those same reviews for everything that
+did NOT touch the guest — a release-signing key exposure (a tag spliced into a `run:` block in the job
 holding `GPG_PRIVATE_KEY`), accumulator panic paths reachable from untrusted proof data, and an API
-that could not distinguish a genesis-anchored range from a mid-chain one. It ships **no CUDA host** —
-that binary needs a GPU to build; v0.13.4's remains correct for proving, since the guest is unchanged. v0.13.0 adds the two things that let volunteered
+that could not distinguish a genesis-anchored range from a mid-chain one. v0.13.0 adds the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
 (`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
 chunks instead of being re-folded from scratch, and **folding as a task in its own right**
@@ -263,7 +268,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`be5e0528…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`71790584…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

@@ -16,7 +16,7 @@ T=$(mktemp -d); trap 'kill %1 2>/dev/null; rm -rf "$T"' EXIT
 
 # A stub prover, so /api/meta's real code path runs. Without HAZYNC_HOST the handler legitimately
 # reports no id, and the test would then be asserting nothing about the path that actually broke.
-printf '#!/bin/sh\necho METHOD_ID be5e05280e108bdeeb6747b231df375f946a8530300525b5d4c523abe5b7c246\n' > "$T/host"
+printf '#!/bin/sh\necho METHOD_ID 717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490\n' > "$T/host"
 chmod +x "$T/host"
 
 COORD_DB="$T/c.db" COORD_PROOFS="$T/p" COORD_STATE="$T/s" WITNESS="$T/w" BRIDGE_DIR="$T/b" \

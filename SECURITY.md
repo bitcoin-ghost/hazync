@@ -441,6 +441,13 @@ defect the pass surfaced.
 
 ## Rounds 10 & 11 (2026-08-01/02) — the first EXTERNAL reviews
 
+> **Outcome: re-baselined to `71790584…` (v0.14.0).** The two guest-side findings below — `cshims.c`
+> and `multi_check` — could not ship without a new `METHOD_ID`, so they were batched into one
+> deliberate re-baseline rather than triggering two. It discarded 46,177 proven blocks and 12 GB of
+> receipts (archived, not deleted), and was taken at 4.8% of the chain precisely because that cost only
+> grows. Everything else from both reviews shipped earlier in v0.13.5 under `be5e0528…`.
+
+
 The first reviews by people outside the project. Two independent passes, both AI-assisted full-source
 reviews rather than a commissioned professional audit — that distinction matters and is kept
 throughout. **Neither found a soundness break in the guest, the verifier or the coordinator frontier.**
@@ -466,9 +473,9 @@ Every proof on the board is an execution of that check.
 ignored its `base` argument entirely. Neither can produce a false proof: all four `strtoul` call sites
 are libstdc++/newlib scaffolding with none on the consensus path, and heap exhaustion is fail-closed
 (1 MiB heap, `-fexceptions`, no `catch` anywhere in the guest validator, so `bad_alloc` reaches
-`std::terminate`). **Fix prepared in #56 but NOT yet merged** — `cshims.c` compiles into the guest, so
-it forces a `METHOD_ID` re-baseline that invalidates every proof on the board, and neither defect is
-live enough to justify that alone. It is staged to ride the next planned guest change.
+`std::terminate`). **FIXED here (#56)**, as part of the re-baseline this change forced. `cshims.c` compiles into the
+guest, so the fix could not land without invalidating every proof on the board; it waited until a
+re-baseline was being done deliberately rather than triggering one on its own.
 
 Also filed from this round: the BIP30 structural argument's hard ceiling at height ~1,983,702 (#54),
 and `std::random_device` being linked into the guest though never called (#55).
@@ -483,7 +490,7 @@ Verdict: consensus-critical core sound. One High, one Medium, three Low.
 | **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
 | **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
 | **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
-| **L-3** | `multi_check` hardcodes coin metadata | **FIXED, not merged** — rides #56; see the line-number note below |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#56) — could only land with a re-baseline; see the line-number note below |
 
 **H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
 into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
