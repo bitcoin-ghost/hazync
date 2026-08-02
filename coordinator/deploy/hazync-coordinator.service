@@ -30,8 +30,20 @@ Restart=always
 RestartSec=3
 # hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
+# ProtectHome=true is NOT set, and must not be while HAZYNC_BRIDGE_OUT points into /root.
+#
+# It makes /home, /root and /run/user "inaccessible and empty", so the coordinator cannot read the
+# bridge's bundle directory — and it fails SILENTLY, because can_serve_witness() probes with
+# os.path.exists(), which simply returns False and falls through to the legacy per-block witness
+# window. No exception, no log line. The co-located bundle read that lets provers request ARBITRARY
+# heights would quietly stop working and look like nobody submitting (hazync#60).
+#
+# Verified 2026-08-02 on the live box: ProtectHome=no there, /api/witness/<n> returns 200, and the
+# bundle dir holds 220,001 files. The bug was never live — it was latent in THIS file, waiting for
+# someone to deploy it.
+#
+# Restore ProtectHome=true only after the bundle dir moves out of /root (hazync#58).
+ProtectSystem=full
 PrivateTmp=true
 ReadWritePaths=/opt/hazync
 
