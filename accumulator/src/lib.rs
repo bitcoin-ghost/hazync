@@ -124,19 +124,37 @@ impl Stump {
         self.root_at(proof.siblings.len()) == Some(proof.compute_root())
     }
 
-    /// The (offset, height) of the tree containing global leaf position `pos`.
-    fn tree_of(&self, pos: u64) -> (u64, usize) {
+    /// The (offset, height) of the tree containing global leaf position `pos`, or `None` when `pos`
+    /// is outside the forest.
+    ///
+    /// This USED TO PANIC, and the panic was reachable from untrusted input: `delete`'s `i` is an
+    /// independent argument that `verify` does not constrain, so a perfectly well-formed inclusion
+    /// proof paired with an out-of-range index aborted the process. Fail-closed in the guest, but a
+    /// remote abort of the host/coordinator verification subprocess otherwise (audit 2026-08-01, L-2).
+    fn tree_of(&self, pos: u64) -> Option<(u64, usize)> {
         let mut offset = 0u64;
         for h in (0..u64::BITS as usize).rev() {
             if (self.num_leaves >> h) & 1 == 1 {
                 let size = 1u64 << h;
                 if pos >= offset && pos < offset + size {
-                    return (offset, h);
+                    return Some((offset, h));
                 }
                 offset += size;
             }
         }
-        panic!("position {pos} out of range for {} leaves", self.num_leaves);
+        None
+    }
+
+    /// Shape precondition for [`Self::remove_rightmost`], checked BEFORE any mutation.
+    ///
+    /// The rightmost leaf is the right child at every level, so its local position is all-ones for
+    /// its height. This was only a `debug_assert!` inside `remove_rightmost` — i.e. absent in release
+    /// builds, which is where it mattered. Hoisted out so a rejected delete leaves the accumulator
+    /// UNTOUCHED: the disjoint-tree branch sets a root before removing the rightmost, and discovering
+    /// a malformed proof at that point would leave a corrupted Stump behind a `false` return.
+    fn rightmost_ok(&self, p: &Proof) -> bool {
+        let h = p.siblings.len();
+        h < u64::BITS as usize && self.num_leaves > 0 && p.position == (1u64 << h) - 1
     }
 
     /// Fold `leaf` (at local `position`) up through `siblings` to the subtree root.
@@ -172,21 +190,45 @@ impl Stump {
     ///
     /// This is exactly the `Forest` operation `leaves.swap(i, last); leaves.pop()`, done with only
     /// the roots + the two paths.
+    /// EVERY rejection path returns before mutating. `delete` returning `false` must leave the
+    /// accumulator exactly as it was — a partially-applied delete would silently corrupt the roots
+    /// while the caller believed nothing happened, which is worse than the panic this replaces.
     pub fn delete(&mut self, i: u64, proof_i: &Proof, proof_last: &Proof) -> bool {
+        // Nothing to delete, and `num_leaves - 1` below would underflow.
+        if self.num_leaves == 0 {
+            return false;
+        }
+        // `i` is an INDEPENDENT argument: verifying proof_i constrains the leaf and its path, not the
+        // index. Without this, an out-of-range `i` reached tree_of and panicked.
+        if i >= self.num_leaves {
+            return false;
+        }
         if !self.verify(proof_i) {
             return false;
         }
         let last = self.num_leaves - 1;
         if i == last {
+            if !self.rightmost_ok(proof_i) {
+                return false;
+            }
             self.remove_rightmost(proof_i); // deleting the rightmost itself
             return true;
         }
         if !self.verify(proof_last) {
             return false;
         }
+        if !self.rightmost_ok(proof_last) {
+            return false;
+        }
+        let (off_i, h_i) = match self.tree_of(i) {
+            Some(t) => t,
+            None => return false,
+        };
+        let (off_last, _) = match self.tree_of(last) {
+            Some(t) => t,
+            None => return false,
+        };
         let l_hash = proof_last.leaf;
-        let (off_i, h_i) = self.tree_of(i);
-        let (off_last, _) = self.tree_of(last);
 
         if off_i != off_last {
             // Disjoint trees. Overwrite i's slot with L (recompute i's whole tree), drop rightmost.
@@ -196,7 +238,6 @@ impl Stump {
         } else {
             // Same (smallest) tree. Shrink first — that exposes the left-subtrees as roots — then
             // place L into whichever exposed subtree slot `i` fell into.
-            self.remove_rightmost(proof_last);
             let px = proof_i.position; // i's local position in the pre-shrink tree of height h_i
             // The surviving subtree holding i has height j = index of the highest 0-bit of px
             // (px < 2^{h_i}-1, so a 0-bit exists). i's path within it is the low j siblings.
@@ -207,6 +248,14 @@ impl Stump {
                     break;
                 }
             }
+            // `j` is derived from h_i — i.e. from `i` — while the siblings come from the proof. A
+            // proof that verified at a DIFFERENT height than i's tree can drive j past the end of the
+            // slice, which was an out-of-range panic. Computed and checked BEFORE the shrink so this
+            // rejection still mutates nothing.
+            if j > proof_i.siblings.len() {
+                return false;
+            }
+            self.remove_rightmost(proof_last);
             let local = px & ((1u64 << j) - 1);
             let new_root = Self::fold(local, l_hash, &proof_i.siblings[..j]);
             self.set_root(j, Some(new_root));
@@ -461,6 +510,140 @@ mod tests {
 
     fn leaf(i: u64) -> Hash {
         hash_leaf(&i.to_le_bytes())
+    }
+
+    // ── L-2: adversarial proof input must not abort the process (audit 2026-08-01) ───────────────
+    //
+    // `Stump::delete` takes proofs from untrusted input. It had three reachable panics: `num_leaves
+    // - 1` underflowing on an empty stump, `tree_of` panicking on an out-of-range `i` (which
+    // `verify` does not constrain, being an independent argument), and a `siblings[..j]` slice whose
+    // bound is derived from `i` while the slice comes from the proof.
+    //
+    // Fail-closed in the guest, but in the host/coordinator it aborts the verification subprocess.
+    //
+    // Asserted as a PROPERTY rather than three hand-built cases, because hand-building the
+    // height-mismatch case requires constructing a proof that verifies at the wrong height — easy to
+    // get subtly wrong, and a test that silently stops reaching the path proves nothing.
+    //
+    // TO RE-RUN THE POSITIVE CONTROL (do this if you change delete/tree_of, because these four tests
+    // are worthless the moment they stop reaching the paths):
+    //   1. delete the `if i >= self.num_leaves { return false; }` guard in `delete`;
+    //   2. replace `None` at the end of `tree_of` with the original
+    //      `panic!("position {pos} out of range for {} leaves", self.num_leaves);`.
+    // All FOUR tests below must fail. Verified 2026-08-02 — and the first draft of them passed this
+    // control, because fully random proofs never got past `verify()`. That is why they build genuine
+    // proofs and perturb one field instead.
+
+    /// Adversarial (i, proof_i, proof_last) triples that still get PAST `verify`.
+    ///
+    /// Fully random proofs are rejected by `verify` immediately, so a test built from them never
+    /// reaches tree_of or the sibling slice and passes against the unfixed code — an earlier version
+    /// of these tests did exactly that, and the positive control is what exposed it. So: start from
+    /// GENUINE proofs and perturb one field, which keeps them plausible while making the index or the
+    /// sibling count disagree with what they attest.
+    fn adversarial_case(f: &Forest, n: u64, st: &mut u64) -> (u64, Proof, Proof) {
+        let a = (splitmix(st) % n) as usize;
+        let b = (splitmix(st) % n) as usize;
+        let mut pi = f.prove(a);
+        let mut pl = f.prove(b);
+        match splitmix(st) % 5 {
+            0 => {}                                            // genuine, wrong index only
+            1 => pi.position = splitmix(st) % 64,
+            2 => {
+                let k = (splitmix(st) as usize) % (pi.siblings.len() + 1);
+                pi.siblings.truncate(k);                        // drives j past the slice end
+            }
+            3 => pl.position = splitmix(st) % 64,
+            _ => pl.siblings.truncate((splitmix(st) as usize) % (pl.siblings.len() + 1)),
+        }
+        (splitmix(st) % (n * 2 + 4), pi, pl)                    // frequently out of range
+    }
+
+    #[test]
+    fn delete_never_panics_on_arbitrary_proof_input() {
+        let mut st = 0x243F6A8885A308D3u64;
+        for n in 1..40u64 {
+            let (mut f, mut base) = (Forest::new(), Stump::new());
+            for k in 0..n {
+                f.add(leaf(k));
+                base.add(leaf(k));
+            }
+            for _ in 0..300 {
+                let mut s = base.clone();
+                let (i, pi, pl) = adversarial_case(&f, n, &mut st);
+                let _ = s.delete(i, &pi, &pl); // the assertion is that this line returns at all
+            }
+        }
+    }
+
+    #[test]
+    fn a_rejected_delete_mutates_nothing() {
+        // Worse than the panic would be a delete that half-applies and then reports false: the
+        // caller believes nothing happened while the roots have already moved.
+        let mut st = 0x9E3779B97F4A7C15u64;
+        for n in 1..40u64 {
+            let (mut f, mut base) = (Forest::new(), Stump::new());
+            for k in 0..n {
+                f.add(leaf(k));
+                base.add(leaf(k));
+            }
+            for _ in 0..300 {
+                let mut s = base.clone();
+                let (i, pi, pl) = adversarial_case(&f, n, &mut st);
+                if !s.delete(i, &pi, &pl) {
+                    assert_eq!(s, base, "a rejected delete left the accumulator modified");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_out_of_range_deletes_are_refused_not_fatal() {
+        let empty_proof = Proof { leaf: leaf(0), position: 0, siblings: vec![] };
+        let mut s = Stump::new();
+        assert!(!s.delete(0, &empty_proof, &empty_proof), "delete on an empty stump must be refused");
+        assert_eq!(s.num_leaves, 0, "a refused delete must not touch num_leaves");
+
+        // A GENUINE proof paired with an out-of-range index: this is the case `verify` cannot catch,
+        // because the index is not part of what the proof attests.
+        let mut f = Forest::new();
+        for k in 0..5u64 {
+            f.add(leaf(k));
+        }
+        let mut s = Stump::new();
+        for k in 0..5u64 {
+            s.add(leaf(k));
+        }
+        // BOTH proofs must be genuine, and proof_last must be the REAL rightmost, or the guards
+        // ahead of tree_of reject first and the test never reaches the path it exists to cover.
+        // Using f.prove(0) for both passed against the unfixed code — it was rejected by
+        // rightmost_ok long before the panic. The positive control caught that; it is the reason
+        // this reads as it does.
+        let good = f.prove(0);
+        let rightmost = f.prove(4);
+        assert!(s.verify(&good), "the proof itself is valid — the index is what is wrong");
+        assert!(s.verify(&rightmost), "and so is the rightmost proof");
+        let before = s.clone();
+        assert!(!s.delete(999, &good, &rightmost), "an out-of-range index must be refused");
+        assert_eq!(s, before, "the refusal must not have mutated anything");
+
+        // Guard against the test going vacuous: the same machinery must still accept a real delete.
+        let last = f.prove(4);
+        assert!(s.delete(4, &last, &last), "a legitimate delete must still succeed");
+        assert_eq!(s.num_leaves, 4);
+    }
+
+    #[test]
+    fn tree_of_reports_out_of_range_instead_of_panicking() {
+        let mut s = Stump::new();
+        for k in 0..5u64 {
+            s.add(leaf(k));
+        }
+        assert!(s.tree_of(0).is_some());
+        assert!(s.tree_of(4).is_some());
+        assert!(s.tree_of(5).is_none(), "one past the end is out of range");
+        assert!(s.tree_of(u64::MAX).is_none());
+        assert!(Stump::new().tree_of(0).is_none(), "nothing is in range in an empty forest");
     }
 
     // Deterministic pseudo-random walk so failures reproduce without an RNG crate.
