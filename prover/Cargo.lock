@@ -1952,6 +1952,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hazync-coinbase-smt"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "hazync-utreexo"
 version = "0.1.0"
 dependencies = [
@@ -2035,6 +2042,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bitcoin",
+ "hazync-coinbase-smt",
  "hazync-utreexo",
  "methods",
  "risc0-zkvm",

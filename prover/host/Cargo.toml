@@ -17,6 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 bitcoin = "0.32"
 bincode = "1"
 hazync-utreexo = { path = "../../accumulator" }
+hazync-coinbase-smt = { path = "../../coinbase-smt", features = ["std"] }
 
 [features]
 cuda = ["risc0-zkvm/cuda"]

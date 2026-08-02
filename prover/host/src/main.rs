@@ -2,6 +2,7 @@ use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash as _;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use hazync_utreexo::{hash_leaf, Forest, Hash};
+use hazync_coinbase_smt::Smt;
 use methods::{METHOD_ELF, METHOD_ID};
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,10 @@ struct BlockWitness {
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
     inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
+    // #54 — the coinbase-SMT root this block starts from. Serialised LAST so the field order matches
+    // the guest's, which must stay in step for every wire struct here.
+    #[serde(default)]
+    in_smt_root: [u8; 32],
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct ChainState {
@@ -302,7 +307,7 @@ fn build_block(
     }
     let root_next = wire_stump(forest);
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root: [0u8; 32] }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -617,7 +622,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); }
     for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root: [0u8; 32] };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -998,7 +1003,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         add_out(&p.tx, &p.txid, false, forest, &mut new_outputs);
     }
     let root_next = wire_stump(forest);
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30 }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30, in_smt_root: [0u8; 32] }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1740,7 +1745,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     }
     let root_next = wire_stump(&forest); // approximate — root_matches is not part of all_ok
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None, in_smt_root: [0u8; 32] }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -1823,7 +1828,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
         wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
-        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None }
+        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None, in_smt_root: [0u8; 32] }
 }
 
 // #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
@@ -1936,7 +1941,7 @@ fn check_bip30() {
 
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
         header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
-        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30, in_smt_root: [0u8; 32],
     };
     let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
     let skip = block_out(&mk(None));
@@ -1962,6 +1967,15 @@ struct Bundle {
     in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
     witness: BlockWitness,
+    // #54 — the coinbase-SMT root this block starts from, as the bridge computed it.
+    //
+    // DELIBERATELY ON THE BUNDLE, NOT ON THE WITNESS. Putting it in `witness.in_smt_root` would feed
+    // it into the guest's journal, where the fold seam asserts out == in — and the guest does not yet
+    // ADVANCE the root, so the first block whose root actually changed would break every fold. The
+    // bridge and guest halves have to be switched on together; until then this field is observable
+    // output that can be checked against an independent replay, and costs nothing if it is wrong.
+    #[serde(default)]
+    smt_root: [u8; 32],
 }
 
 // Regression test for the v0.9.0 bundle-parse bug. `PackedBytes` serialises via `serialize_bytes`, which
@@ -1991,12 +2005,12 @@ fn bundle_roundtrip_test() {
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
         inputs: vec![], new_outputs: vec![[5u8; 32]],
-        root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None,
+        root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None, in_smt_root: [0u8; 32],
     };
     let b = Bundle {
         height: 170, in_tip: [1u8; 32], in_roots: vec![None, Some([2u8; 32])], in_leaves: 42,
         in_nbits: 0x1d00_ffff, in_time: 1_231_731_025, in_epoch_start: 1_231_006_505, in_recent: vec![1, 2, 3],
-        witness: w,
+        witness: w, smt_root: [0u8; 32],
     };
     let j = serde_json::to_vec(&b).expect("serialise Bundle");
     let back: Bundle = serde_json::from_slice(&j)
@@ -2219,15 +2233,29 @@ fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) {
 // mid-chain instead of rebuilding from genesis. `leaves` is the live UTXO set (swap-and-pop), so at the
 // tip it is ~the UTXO count, not the full history. Borrowed on save (no clone of the multi-GB state),
 // owned on load; field order MUST match between the two (bincode is positional).
+//
+// #54 adds `smt`: the coinbase-SMT entries (txid -> unspent output count) backing BIP30
+// non-membership. Stored as a sorted Vec rather than the live `Smt` because bincode is positional and
+// a HashMap's iteration order is not — a checkpoint that round-tripped differently each save would be
+// a state that disagrees with itself.
+//
+// APPENDING THIS FIELD INVALIDATES EXISTING CHECKPOINTS, deliberately. bincode is positional, so an
+// old state.bin fails to deserialise and the bridge rebuilds from genesis. That is the correct
+// outcome and not merely tolerable: the SMT has to be built by replaying the chain anyway — there is
+// no way to derive "which coinbases still have unspent outputs" from a checkpoint that never tracked
+// it — so a resume that silently kept the old state would produce a tree missing all history before
+// the upgrade.
 #[derive(Serialize)]
 struct BridgeStateRef<'a> {
     height: u32, leaves: &'a Vec<[u8; 32]>, utxo: &'a Utxo,
     win: &'a Vec<u32>, block_mtp: &'a Vec<u32>, nbits: u32, time: u32, epoch_start: u32,
+    smt: Vec<([u8; 32], u32)>,
 }
 #[derive(Deserialize)]
 struct BridgeState {
     height: u32, leaves: Vec<[u8; 32]>, utxo: Utxo,
     win: Vec<u32>, block_mtp: Vec<u32>, nbits: u32, time: u32, epoch_start: u32,
+    smt: Vec<([u8; 32], u32)>,
 }
 
 fn bridge_load_state(dir: &str) -> Option<BridgeState> {
@@ -2251,15 +2279,24 @@ fn cmd_bridge() {
     let cap = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse::<u32>().ok()); // optional hard height cap
 
     // Resume from the last checkpoint, or start fresh at genesis.
-    let (mut forest, mut utxo, mut win, mut block_mtp, mut nbits, mut time, mut epoch_start, mut done) =
+    // A checkpoint written before #54 has no `smt` field, so bincode refuses it and this falls through
+    // to genesis. That is intended — see the note on BridgeState. The log line below says so out loud,
+    // because "starting from genesis" after an upgrade otherwise looks like data loss.
+    let (mut forest, mut utxo, mut win, mut block_mtp, mut nbits, mut time, mut epoch_start, mut done, mut smt) =
         if let Some(st) = bridge_load_state(&out_dir) {
-            println!("bridge: resuming from checkpoint @ height {} ({} utxos, {} leaves)",
-                st.height, st.utxo.len(), st.leaves.len());
-            (Forest::from_leaves(st.leaves), st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start, st.height)
+            println!("bridge: resuming from checkpoint @ height {} ({} utxos, {} leaves, {} coinbase-SMT entries)",
+                st.height, st.utxo.len(), st.leaves.len(), st.smt.len());
+            (Forest::from_leaves(st.leaves), st.utxo, st.win, st.block_mtp, st.nbits, st.time, st.epoch_start,
+             st.height, Smt::from_entries(st.smt))
         } else {
+            if std::path::Path::new(&format!("{out_dir}/state.bin")).exists() {
+                println!("bridge: checkpoint present but not readable under this build — \
+                          rebuilding from genesis (expected on the #54 upgrade: the coinbase SMT \
+                          cannot be derived from a checkpoint that never tracked it)");
+            }
             println!("bridge: no checkpoint — starting from genesis");
             (Forest::new(), Utxo::new(), vec![GENESIS_TIME], vec![GENESIS_TIME],
-             GENESIS_BITS, GENESIS_TIME, GENESIS_TIME, 0u32)
+             GENESIS_BITS, GENESIS_TIME, GENESIS_TIME, 0u32, Smt::new())
         };
     let mut last_ckpt = done;
     loop {
@@ -2279,9 +2316,40 @@ fn cmd_bridge() {
                 let in_tip = block.header.prev_blockhash.to_byte_array(); // internal order = tip of h-1
                 push_mtp(&j, &mut win, &mut block_mtp);
                 let w = build_block_carried(&mut forest, &j, &block_mtp);
+
+                // #54 — advance the coinbase SMT, in the SAME order the guest's apply_block does:
+                // check-then-insert the new coinbase, then decrement each spent coinbase output. The
+                // guest's proofs are sequenced against intermediate roots, so a different order here
+                // produces proofs it will refuse. That coupling is documented in bip30.rs and is the
+                // reason this block sits immediately after build_block_carried rather than anywhere
+                // more convenient.
+                let smt_root_in: [u8; 32] = smt.root();
+                {
+                    let cb = block.txdata[0].compute_txid().to_byte_array();
+                    // Count only SPENDABLE outputs: an OP_RETURN coinbase output can never be spent,
+                    // so counting it would leave the entry permanently nonzero and reject-valid a
+                    // legal duplicate for ever. Matches the accumulator's out_spendable rule exactly.
+                    let nout = block.txdata[0].output.iter()
+                        .filter(|o| out_spendable(o.script_pubkey.as_bytes())).count() as u32;
+                    if nout > 0 { smt.insert(cb, nout); }
+                    // Decrement for every input spending a coinbase output. `utxo` still holds the
+                    // pre-block state here, which is what tells us whether a spent coin was a coinbase.
+                    for tx in block.txdata.iter().skip(1) {
+                        for inp in &tx.input {
+                            let key = (inp.previous_output.txid.to_byte_array(), inp.previous_output.vout);
+                            if let Some((_, _, _, is_cb)) = utxo.get(&key) {
+                                if *is_cb {
+                                    let t = key.0;
+                                    let cur = smt.get(&t).unwrap_or(0);
+                                    if cur > 0 { smt.insert(t, cur - 1); }
+                                }
+                            }
+                        }
+                    }
+                }
                 bridge_update_utxo(&mut utxo, &block, h);
                 let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
-                    in_nbits, in_time, in_epoch_start, in_recent, witness: w };
+                    in_nbits, in_time, in_epoch_start, in_recent, witness: w, smt_root: smt_root_in };
                 // atomic bundle write too — a prover polling the dir never reads a half-written bundle
                 let bp = format!("{out_dir}/bundle_{h}.json");
                 std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
@@ -2291,7 +2359,8 @@ fn cmd_bridge() {
                 done = h;
                 if done - last_ckpt >= ckpt_every {
                     bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
-                        utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start });
+                        utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start,
+                        smt: smt.entries() });
                     last_ckpt = done;
                     println!("bridge: checkpoint @ {done} ({} utxos, {} leaves)", utxo.len(), forest.leaves.len());
                 }
@@ -2300,7 +2369,8 @@ fn cmd_bridge() {
             // checkpoint on catch-up so a one-shot run and each tip-follow cycle persist their progress
             if done > last_ckpt {
                 bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
-                    utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start });
+                    utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start,
+                        smt: smt.entries() });
                 last_ckpt = done;
             }
             println!("bridge: caught up to {done} (node tip {tip})");
