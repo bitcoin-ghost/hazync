@@ -9,3 +9,10 @@ publish = false
 build = "build.rs"
 
 [workspace]
+
+# For the guest utreexo tests (hazync#76). The guest module is INCLUDED BY PATH, never copied — the
+# same zero-drift rule build.rs follows for main.rs — so these tests cannot pass against a stale copy.
+# sha2 matches the guest's hasher; hazync-utreexo is the reference the guest is checked against.
+[dev-dependencies]
+sha2 = "0.10"
+hazync-utreexo = { path = "../accumulator" }
