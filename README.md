@@ -146,6 +146,7 @@ Two external reviews ran in August 2026 — findings, fixes and what each could 
 
 - New to zero-knowledge proofs? [`EXPLAINER.md`](docs/EXPLAINER.md) — plain English.
 - Prove blocks, join the party: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Run your own coordinator (archive node + bridge + board): [`docs/RUN_YOUR_OWN_COORDINATOR.md`](docs/RUN_YOUR_OWN_COORDINATOR.md)
 - **Specification** (formats, invariants, how to verify independently): [`docs/SPEC.md`](docs/SPEC.md)
 - Soundness statement (a reviewer's best first read): [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
 - Audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)

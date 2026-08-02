@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 CONTROL = "--control" in sys.argv
 
@@ -300,6 +301,66 @@ os.makedirs(server.SPINE_DIR, exist_ok=True)
 with open(os.path.join(server.SPINE_DIR, "spine.json"), "w") as f:
     json.dump({"lo": 1, "hi": 137, "out_tip": "deadbeef"}, f)
 check(server.state()["progress"]["spine_hi"] == 137, "a present spine reports its hi")
+
+# ── peer-aware claim allocation (#69) ────────────────────────────────────────────────────────────
+# The property that matters is not "it excludes peer heights" — it is that it FAILS OPEN. A peer being
+# unreachable, slow or lying must never stall local proving, because the cost of a duplicate proof is
+# wasted GPU time while the cost of blocking is an idle fleet.
+c = server.db()
+c.execute("DELETE FROM vranges"); c.execute("DELETE FROM ranges"); c.commit(); c.close()
+
+_orig_peers, _orig_cache = server.PEERS, dict(server._peer_cache)
+try:
+    server.PEERS = []
+    server._peer_cache.update(t=0, heights=set())
+    check(server.peer_proven_heights() == set(), "no peers configured -> no exclusions, no network call")
+    code, obj = server.pick(None)
+    check(code == 200 and obj["lo"] == 1, "with no peers, pick() offers block 1 as before")
+
+    # A peer claiming heights 1-3 should push us past them.
+    server.PEERS = ["http://peer.invalid"]
+    server._peer_cache.update(t=time.time(), heights={1, 2, 3})
+    code, obj = server.pick(None)
+    check(code == 200 and obj["lo"] == 4, f"peer-proven heights are skipped (got lo={obj.get('lo')})")
+
+    # THE ONE THAT MATTERS: an unreachable peer must not stall us. Force a real fetch against a
+    # non-resolving host and assert it returns empty rather than raising or hanging the allocator.
+    server._peer_cache.update(t=0, heights=set())
+    t0 = time.time()
+    check(server.peer_proven_heights() == set(), "an unreachable peer contributes nothing (fails OPEN)")
+    check(time.time() - t0 < 30, "an unreachable peer does not hang the allocator")
+    code, obj = server.pick(None)
+    check(code == 200 and obj["lo"] == 1, "with the peer down, local work continues from block 1")
+finally:
+    server.PEERS = _orig_peers
+    server._peer_cache.update(**_orig_cache)
+
+# ── peer proof sync (#69) ────────────────────────────────────────────────────────────────────────
+# The property worth asserting is that adoption goes through the SAME verification a submission does.
+# A coordinator that trusted a peer's index would let a hostile peer put anything on the board; one
+# that re-verifies can only ever waste bandwidth on junk it rejects.
+_orig_peers = server.PEERS
+try:
+    server.PEERS = []
+    check(server.sync_from_peers() == {"adopted": 0, "rejected": 0, "peers": 0},
+          "no peers -> sync is a no-op, no network call")
+
+    server.PEERS = ["http://peer.invalid"]
+    r = server.sync_from_peers()
+    check(r["adopted"] == 0 and r["peers"] == 1,
+          "an unreachable peer adopts nothing and does not raise")
+
+    # Adoption must be gated on OUR verification, not the peer's claim. In mock mode verify_receipt
+    # returns a fixed shape, so assert the call path rather than the crypto: a range the peer offers
+    # is only ever inserted after verify_receipt returns ok.
+    import inspect
+    src = inspect.getsource(server.sync_from_peers)
+    check("verify_receipt(" in src, "sync re-verifies every receipt itself")
+    check("if not ok or not meta:" in src, "sync drops anything that fails ITS OWN verification")
+    check(src.index("verify_receipt(") < src.index("INSERT OR REPLACE INTO vranges"),
+          "verification happens BEFORE the row is written, not after")
+finally:
+    server.PEERS = _orig_peers
 
 print()
 if CONTROL:
