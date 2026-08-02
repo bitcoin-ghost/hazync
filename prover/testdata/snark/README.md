@@ -1,7 +1,8 @@
 # Groth16 SNARK fixtures
 
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
-push (#23). Regenerated 2026-07-30 under canonical guest `85dc0b56…` (accumulator domain separation),
+push (#23). Regenerated 2026-08-02 under canonical guest `71790584…` (cshims.c hardening + multi_check
+docs — see `reproduce/METHOD_ID`),
 which changes every leaf hash and therefore invalidated the previous pair.
 
 **They were [1..1000] and are now [1..8].** The originals were folded from 1000 GPU block-proofs; on
