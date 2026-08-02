@@ -627,6 +627,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hazync-coinbase-smt"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -746,6 +754,7 @@ name = "method"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "hazync-coinbase-smt",
  "risc0-zkvm",
  "serde",
  "sha2",

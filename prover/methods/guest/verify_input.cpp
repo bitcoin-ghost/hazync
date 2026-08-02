@@ -350,6 +350,28 @@ extern "C" uint32_t tx_vin_count(const uint8_t* tx_bytes, unsigned tx_len) {
     return (uint32_t)mtx.vin.size();
 }
 
+// The txid an input spends (prevout.hash), in internal byte order — hazync#54.
+//
+// The guest needs this to run the BIP30 transition itself rather than being told which coinbases a
+// block spends. `coin_is_coinbase` is already leaf-committed and so cannot be lied about; this
+// supplies the other half, the identity of the coinbase being spent, read out of the SAME
+// Core-deserialised transaction the script verification runs against. Taking it from the witness
+// instead would let a prover name a coinbase the block never touched and decrement it to zero,
+// manufacturing a free slot for a later duplicate — which is the whole attack the SMT exists to stop.
+//
+// Returns 0 and writes nothing if `input_idx` is out of range; the caller treats that as invalid.
+extern "C" int tx_input_prevout_txid(const uint8_t* tx_bytes, unsigned tx_len,
+                                     uint32_t input_idx, uint8_t* out_txid) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    if (input_idx >= mtx.vin.size()) return 0;
+    const uint256 h = mtx.vin[input_idx].prevout.hash;
+    std::memcpy(out_txid, h.begin(), 32);
+    return 1;
+}
+
 // Per-tx weight + legacy sigop cost (real Core: GetSerializeSize + CScript::GetSigOpCount).
 // weight = base_size*(WITNESS_SCALE_FACTOR-1) + total_size; sigop cost = legacy count * WITNESS_SCALE_FACTOR.
 extern "C" void tx_wu_sigops(const uint8_t* tx_bytes, unsigned tx_len, int64_t* out_weight, int64_t* out_sigops) {

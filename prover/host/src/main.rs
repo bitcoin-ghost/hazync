@@ -70,10 +70,12 @@ struct BlockWitness {
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
     inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
-    // #54 — the coinbase-SMT root this block starts from. Serialised LAST so the field order matches
-    // the guest's, which must stay in step for every wire struct here.
+    // #54 — the coinbase-SMT root this block starts from, and the sequenced proofs that advance it.
+    // Serialised LAST so the field order matches the guest's, which must stay in step for every wire
+    // struct here.
     #[serde(default)]
     in_smt_root: [u8; 32],
+    smt: SmtBlockWitness,
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct ChainState {
@@ -307,7 +309,9 @@ fn build_block(
     }
     let root_next = wire_stump(forest);
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root: [0u8; 32] }
+    let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
+        &cb_spends_from(&inputs, &txs));
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -622,7 +626,9 @@ fn build_full() -> (ChainState, BlockWitness) {
     for v in 0..coinbase.output.len() { if !out_spendable(coinbase.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&coinbase, &cb_txid, v, height, true, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); }
     for p in &ptxs { for v in 0..p.tx.output.len() { if !out_spendable(p.tx.output[v].script_pubkey.as_bytes()) { continue; } let l = out_leaf_of(&p.tx, &p.txid, v, height, false, cmtp); if spent_in_block.contains(&l) { continue; } forest.add(l); new_outputs.push(l); } }
     let root_next = wire_stump(&forest);
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root: [0u8; 32] };
+    let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
+        &cb_spends_from(&inputs, &txs));
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -1003,7 +1009,9 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
         add_out(&p.tx, &p.txid, false, forest, &mut new_outputs);
     }
     let root_next = wire_stump(forest);
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30, in_smt_root: [0u8; 32] }
+    let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
+        &cb_spends_from(&inputs, &txs));
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30, in_smt_root, smt }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1745,7 +1753,9 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     }
     let root_next = wire_stump(&forest); // approximate — root_matches is not part of all_ok
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None, in_smt_root: [0u8; 32] }
+    let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
+        &cb_spends_from(&inputs, &wtxs));
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -1824,11 +1834,15 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let shared_blob = if phantom { phantom_blob } else { real_blob.clone() };
 
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
+    // Both inputs here are non-coinbase, so the transition is just the coinbase insert.
+    let unbound_smt = smt_witness_standalone(cb.compute_txid().to_byte_array(),
+        cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
         wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
-        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None, in_smt_root: [0u8; 32] }
+        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None,
+        in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
 }
 
 // #1: on the real block-170 chain step, downgrade the host-supplied height. The guest must reject
@@ -1939,9 +1953,15 @@ fn check_bip30() {
     }
     let root_next = wire_stump(&forest);
 
+    // F3 is about the ACCUMULATOR overwrite, not the BIP30 check — under the SMT these two blocks are
+    // ordinary inserts once the earlier coinbase is spent, which `a_fully_spent_coinbase_can_be_
+    // duplicated_with_no_special_case` covers directly. A standalone transition keeps this test on its
+    // own subject.
+    let f3_smt = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase), &[]);
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
         header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
-        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30, in_smt_root: [0u8; 32],
+        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+        in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
     let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
     let skip = block_out(&mk(None));
@@ -1972,8 +1992,67 @@ struct SmtSpend { coinbase_txid: [u8; 32], current_count: u32, proof: SmtProof }
 /// are all things it derives for itself from data it already validates — anything it read instead of
 /// derived would be something a prover could lie about, and the whole point of the structure is that
 /// the check cannot be talked out of.
+/// `coinbase_txid`/`coinbase_outputs` are CROSS-CHECKS, not inputs: the guest derives both for itself
+/// and refuses the block if they disagree. They exist because a disagreement otherwise surfaces as an
+/// unexplained `BadProof` three steps later — which is exactly what happened the first time the guest
+/// counted the coinbase's outputs at the wrong point in the function.
 #[derive(Serialize, Deserialize, Clone)]
-struct SmtBlockWitness { absence_proof: SmtProof, spends: Vec<SmtSpend> }
+struct SmtBlockWitness {
+    coinbase_txid: [u8; 32],
+    coinbase_outputs: u32,
+    absence_proof: SmtProof,
+    spends: Vec<SmtSpend>,
+}
+
+/// The coinbase txid of every input that spends a coinbase output, in the block's tx-then-input
+/// order — derived the same way the guest derives it, from the same raw transaction bytes.
+///
+/// The guest does NOT take this list from the witness; it reads each prevout out of the transaction
+/// itself. This exists so the host can build a witness whose proofs line up with what the guest will
+/// independently compute, and any disagreement shows up as a refused proof rather than a bad one.
+fn cb_spends_from(inputs: &[BlockInput], txs: &[PackedBytes]) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    for inp in inputs {
+        if inp.coin_is_coinbase != 1 { continue; }
+        let raw = txs.get(inp.tx_idx as usize)
+            .unwrap_or_else(|| panic!("cb_spends_from: tx_idx {} out of range ({} txs)", inp.tx_idx, txs.len()));
+        let tx: Transaction = deserialize(&raw.0)
+            .unwrap_or_else(|e| panic!("cb_spends_from: tx_idx {} did not parse: {e}", inp.tx_idx));
+        let i = tx.input.get(inp.input_idx as usize)
+            .unwrap_or_else(|| panic!("cb_spends_from: input_idx {} out of range ({} inputs)",
+                                      inp.input_idx, tx.input.len()));
+        out.push(i.previous_output.txid.to_byte_array());
+    }
+    out
+}
+
+/// Count of a coinbase's SPENDABLE outputs — the value the guest derives from its own leaf gather.
+fn cb_spendable_outputs(coinbase: &Transaction) -> u32 {
+    coinbase.output.iter().filter(|o| out_spendable(o.script_pubkey.as_bytes())).count() as u32
+}
+
+/// A self-consistent SMT transition for a block considered in ISOLATION, for the fixture and
+/// synthetic-block paths that have no chain history behind them.
+///
+/// The tree is seeded with exactly the coinbases this block spends, so the transition is valid on its
+/// own terms. It is NOT the chain's real SMT state and must never be used for proving — only the
+/// bridge, which replays from genesis, knows that. Its purpose is to keep the negative tests testing
+/// what they are about (script flags, merkle mutation, unbound prevouts) rather than failing on an
+/// unrelated BIP30 input they were never written to exercise.
+fn smt_witness_standalone(
+    coinbase_txid: [u8; 32],
+    coinbase_outputs: u32,
+    coinbase_spends: &[[u8; 32]],
+) -> ([u8; 32], SmtBlockWitness) {
+    let mut t = Smt::new();
+    for s in coinbase_spends {
+        let c = t.get(s).unwrap_or(0);
+        t.insert(*s, c + 1);
+    }
+    let root_in = t.root();
+    let w = smt_advance(&mut t, coinbase_txid, coinbase_outputs, coinbase_spends);
+    (root_in, w)
+}
 
 /// Advance the coinbase SMT by one block and emit the proofs the guest will need.
 ///
@@ -2022,7 +2101,7 @@ fn smt_advance(
         spends.push(SmtSpend { coinbase_txid: *t, current_count: cur, proof: smt.prove(t) });
         smt.insert(*t, cur - 1);
     }
-    SmtBlockWitness { absence_proof, spends }
+    SmtBlockWitness { coinbase_txid, coinbase_outputs, absence_proof, spends }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2031,18 +2110,6 @@ struct Bundle {
     in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
     witness: BlockWitness,
-    // #54 — the coinbase-SMT root this block starts from, as the bridge computed it.
-    //
-    // DELIBERATELY ON THE BUNDLE, NOT ON THE WITNESS. Putting it in `witness.in_smt_root` would feed
-    // it into the guest's journal, where the fold seam asserts out == in — and the guest does not yet
-    // ADVANCE the root, so the first block whose root actually changed would break every fold. The
-    // bridge and guest halves have to be switched on together; until then this field is observable
-    // output that can be checked against an independent replay, and costs nothing if it is wrong.
-    #[serde(default)]
-    smt_root: [u8; 32],
-    /// The sequenced proofs for `smt_root -> next`. `None` on bundles built before #54.
-    #[serde(default)]
-    smt_witness: Option<SmtBlockWitness>,
 }
 
 // Regression test for the v0.9.0 bundle-parse bug. `PackedBytes` serialises via `serialize_bytes`, which
@@ -2072,12 +2139,14 @@ fn bundle_roundtrip_test() {
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
         inputs: vec![], new_outputs: vec![[5u8; 32]],
-        root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None, in_smt_root: [0u8; 32],
+        root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None,
+        // Round-trip test only — never executed, so a bare standalone transition is enough.
+        in_smt_root: [0u8; 32], smt: smt_witness_standalone([1u8; 32], 1, &[]).1,
     };
     let b = Bundle {
         height: 170, in_tip: [1u8; 32], in_roots: vec![None, Some([2u8; 32])], in_leaves: 42,
         in_nbits: 0x1d00_ffff, in_time: 1_231_731_025, in_epoch_start: 1_231_006_505, in_recent: vec![1, 2, 3],
-        witness: w, smt_root: [0u8; 32], smt_witness: None,
+        witness: w,
     };
     let j = serde_json::to_vec(&b).expect("serialise Bundle");
     let back: Bundle = serde_json::from_slice(&j)
@@ -2409,10 +2478,12 @@ fn cmd_bridge() {
                     }
                     smt_advance(&mut smt, cb, nout, &cb_spends)
                 };
+                let mut w = w;
+                w.in_smt_root = smt_root_in;
+                w.smt = smt_witness;
                 bridge_update_utxo(&mut utxo, &block, h);
                 let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
-                    in_nbits, in_time, in_epoch_start, in_recent, witness: w, smt_root: smt_root_in,
-                    smt_witness: Some(smt_witness) };
+                    in_nbits, in_time, in_epoch_start, in_recent, witness: w };
                 // atomic bundle write too — a prover polling the dir never reads a half-written bundle
                 let bp = format!("{out_dir}/bundle_{h}.json");
                 std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
