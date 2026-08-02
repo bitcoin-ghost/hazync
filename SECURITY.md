@@ -441,6 +441,13 @@ defect the pass surfaced.
 
 ## Rounds 10 & 11 (2026-08-01/02) — the first EXTERNAL reviews
 
+> **Outcome: re-baselined to `71790584…` (v0.14.0).** The two guest-side findings below — `cshims.c`
+> and `multi_check` — could not ship without a new `METHOD_ID`, so they were batched into one
+> deliberate re-baseline rather than triggering two. It discarded 46,177 proven blocks and 12 GB of
+> receipts (archived, not deleted), and was taken at 4.8% of the chain precisely because that cost only
+> grows. Everything else from both reviews shipped earlier in v0.13.5 under `be5e0528…`.
+
+
 The first reviews by people outside the project. Two independent passes, both AI-assisted full-source
 reviews rather than a commissioned professional audit — that distinction matters and is kept
 throughout. **Neither found a soundness break in the guest, the verifier or the coordinator frontier.**

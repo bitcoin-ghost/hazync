@@ -23,7 +23,7 @@ a live artifact, fetched from the board and checked with the released binaries (
 $ hazync-verify proof_20000.bin
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest be5e0528.
+  The SNARK is VALID and was produced by guest 71790584.
 $ host verify-any proof_20000.bin
 RANGE-OK lo=20000 hi=20000 out_leaves=19023 range_work=4295032833
 ```

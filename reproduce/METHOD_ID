@@ -131,4 +131,54 @@
 # ⚠️ DO NOT run `cargo fmt` on the guest before a release. The guest ELF embeds core::panic::Location
 # (file + LINE) from every assert!/panic!, so reformatting shifts line numbers and CHANGES this id with
 # zero logic change. The repo's compact hand-formatting is load-bearing for the canonical id; keep it.
-be5e05280e108bdeeb6747b231df375f946a8530300525b5d4c523abe5b7c246
+#
+# 2026-08-02 (re-baseline): cshims.c hardening + multi_check documentation.
+#
+# TWO guest changes, batched deliberately into one re-baseline because the board reset costs the same
+# whether one thing changes or five — and because NEITHER was worth this cost alone.
+#
+# 1. prover/methods/guest/cshims.c — the freestanding libc shims (hazync#55, external review).
+#    `_sbrk` checked only its UPPER bound. `_malloc_trim_r` calls it with NEGATIVE increments to
+#    release top-of-heap memory — confirmed by resolving the call sites in the linked guest ELF
+#    (`neg a1,s0` immediately before `jal <_sbrk_r>`), not inferred from the function name — and for
+#    incr < 0 the guard was trivially false, so the break moved unchecked and could in principle walk
+#    below `_heap`. Latent only because newlib never released more than it took, which is a property
+#    of the caller and not of the function.
+#    `strtoul` ignored its `base` argument entirely: always decimal, no whitespace/sign/0x handling,
+#    no overflow detection. All four call sites are libstdc++/newlib scaffolding (`__strftime`,
+#    `_tzset_unlocked_r`, `std::random_device::_M_init_pretr1`, static init) — none on the consensus
+#    path, and `_tzset` parses TZ, which `getenv` returns NULL for. Now standard C99.
+#    Neither could produce a false proof. Heap exhaustion remains fail-closed: 1 MiB heap,
+#    -fexceptions, and no `catch` anywhere in the guest validator, so `bad_alloc` reaches
+#    std::terminate and no receipt is produced.
+#
+# 2. prover/methods/guest/src/main.rs — `multi_check` documented as the debug exerciser it is
+#    (hazync#59, L-3). COMMENTS ONLY, no code.
+#
+# THE SECOND ONE IS WHY THIS NOTE EXISTS. It was assumed a comment-only guest edit was free, and CI
+# was asked to prove it rather than argued with. It disproved the assumption: fifteen lines of pure
+# comment moved the id from be5e0528… to 2a334ebe…. Rust embeds file and line into panic metadata, so
+# inserting a line shifts every subsequent line number and the ELF changes with it.
+#
+# The rule is therefore stronger and more surprising than "do not change guest logic":
+#
+#     ANY edit to guest source that moves line numbers changes this id — INCLUDING COMMENTS.
+#
+# A "harmless" comment or a reformat under prover/methods/guest/ is a re-baseline. It invalidates
+# every proof on the board as surely as a consensus change would. Batch guest documentation into a
+# change that is already re-baselining; never land it on its own.
+#
+# COST, recorded honestly: this reset discarded 46,177 proven blocks and 12 GB of receipts (53,372
+# files), archived rather than deleted. Taken now rather than later because a re-baseline never gets
+# cheaper — the board was at 4.8%, and the same decision at 20% would have cost four times as much.
+# The previous re-baseline (85dc0b56 -> be5e0528) was taken when the board held 0 blocks; this one is
+# the first with real work on it, which is exactly why the batching rule above matters.
+#
+# NOT taken along, though the RUNBOOK's ride-along list offers it: journal byte-packing (#22, ~20-25%
+# smaller wraps). It is new guest code, and this re-baseline lands immediately before an external
+# audit — widening the diff to save a few KB that the runbook itself says "buys no product
+# capability" is the wrong trade. It stays free for the next one.
+#
+# Superseded the earlier id be5e0528…
+
+717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490
