@@ -31,7 +31,13 @@ try:
 except ImportError:
     print("::error::PyYAML not available", file=sys.stderr); sys.exit(2)
 bad = 0
-for f in sorted(pathlib.Path(sys.argv[1]).glob("*.yml")):
+# BOTH extensions. GitHub honours .yaml as well as .yml, so globbing one lets a future workflow
+# escape this gate silently — the failure mode being that the gate reports "ok" over a file it
+# never opened. Flagged by external audit #2 (N-3).
+files = sorted(set(pathlib.Path(sys.argv[1]).glob("*.yml")) | set(pathlib.Path(sys.argv[1]).glob("*.yaml")))
+if not files:
+    print("no workflow files found — the gate would pass vacuously"); sys.exit(2)
+for f in files:
     try:
         doc = yaml.safe_load(f.read_text())
     except Exception as e:
