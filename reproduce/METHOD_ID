@@ -10,6 +10,17 @@
 #
 # ⚠ ANY EDIT TO GUEST SOURCE THAT MOVES LINE NUMBERS CHANGES THIS ID — INCLUDING COMMENTS.
 #
+# ⚠ AND "GUEST SOURCE" IS WIDER THAN prover/methods/guest/. The guest has PATH DEPENDENCIES, and they
+# are compiled into the ELF like any other guest code:
+#
+#     coinbase-smt/   — the BIP30 coinbase SMT (roots-only half; hazync#54)
+#
+# A crate in that list can sit anywhere in the tree and have its own host-side test suite, and editing
+# it is still a re-baseline. This is not hypothetical: adding a five-line `empty_root()` helper to
+# coinbase-smt/src/lib.rs, for a host-side genesis pin, moved the id from 4ea6567b… to 35cfbbed…, with
+# nothing under prover/methods/guest/ changed. scripts/check-guest-inputs.sh keeps this list honest and
+# keeps a matching notice at the top of each such crate, where whoever is editing it will see it.
+#
 # Measured 2026-08-02, because the opposite was assumed: adding FIFTEEN LINES OF PURE COMMENT to
 # prover/methods/guest/src/main.rs (no code, only `///` and `//`) moved the id from be5e0528… to
 # 2a334ebe…. CI's reproducible-image-id job is what caught it.

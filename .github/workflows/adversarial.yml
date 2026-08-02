@@ -204,6 +204,11 @@ jobs:
         run: ./prover/methods/guest/test-cshims.sh
       - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
         run: ./scripts/check-rangestate.sh
+      - name: Every crate the GUEST compiles is flagged as a METHOD_ID input
+        # "guest source" is wider than prover/methods/guest/ — the guest has path dependencies, and
+        # editing one re-baselines the board with nothing in the guest directory changed. That has
+        # already happened once (coinbase-smt's empty_root: 4ea6567b -> 35cfbbed).
+        run: ./scripts/check-guest-inputs.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
       - name: No workflow splices an expression into a shell block (arbitrary code where the signing key lives)

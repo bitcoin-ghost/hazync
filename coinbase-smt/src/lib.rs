@@ -1,3 +1,16 @@
+//! ⚠ GUEST-COMPILED CRATE — editing this file changes METHOD_ID and re-baselines the board.
+//!
+//! This crate is a path dependency of `prover/methods/guest`, so it is compiled into the guest ELF.
+//! Rust embeds file and line into panic metadata, which means ANY edit here that moves line numbers
+//! changes the image id — including pure comments, and including changes to code the guest never
+//! calls. Every proof on the board becomes invalid.
+//!
+//! That is easy to miss precisely because this directory is nowhere near the guest and has its own
+//! host-side test suite. It has already happened once: adding `empty_root()` below — five lines, for a
+//! host-side genesis pin — moved the id from 4ea6567b… to 35cfbbed…, and adding this very notice moved it again.
+//! `scripts/check-guest-inputs.sh`
+//! exists to keep this notice attached to every crate in that position.
+//!
 //! Coinbase-only sparse Merkle tree — the structure that closes BIP30 permanently (hazync#54).
 //!
 //! # What this is for
