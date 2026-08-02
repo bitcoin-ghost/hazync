@@ -48,6 +48,16 @@ jobs:
         # of cleverness that yields a self-consistent WRONG answer. The first bug here was precisely
         # that: reversed sibling order folding to a well-formed but incorrect root.
         run: cargo test --manifest-path coinbase-smt/Cargo.toml --release
+      - name: Coinbase SMT still builds no_std for the GUEST target
+        # The whole point of the crate being shared rather than ported is that the guest compiles the
+        # SAME code the host does. That only holds while the roots-only half stays std-free, and
+        # nothing stops someone reaching for a HashMap in a helper — it would build fine here and fail
+        # only inside the zkVM build, far from the cause. So it is checked directly, against the real
+        # bare-metal target.
+        run: |
+          rustup target add riscv32im-unknown-none-elf
+          cargo build --release --manifest-path coinbase-smt/Cargo.toml \
+                --no-default-features --target riscv32im-unknown-none-elf
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Coordinator seam fuzz (soundness — must find NOTHING)

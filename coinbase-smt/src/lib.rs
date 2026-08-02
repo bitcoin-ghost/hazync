@@ -36,7 +36,25 @@
 //!   * [`verify`]/[`apply`] — roots-only. What the guest runs: check a proof against a root, and compute
 //!     the new root after an update, without ever holding the tree.
 
+//! # One crate, not two copies
+//!
+//! The guest depends on THIS crate rather than carrying a ported copy, which is the main structural
+//! improvement over how utreexo is arranged. There, `prover/methods/guest/src/utreexo.rs` is a
+//! verbatim port of `accumulator/`, and keeping them identical costs a CI gate plus a hand-written
+//! test — because "ported verbatim" is an assertion, not a property. Here the guest and the host run
+//! the same compiled code, so drift is not something to detect; it cannot occur.
+//!
+//! That works because the roots-only half needs no `std`: no allocation beyond `alloc::vec::Vec`, no
+//! collections. Only [`Smt`] — the full tree, host-side, never in the zkVM — needs `HashMap`, so it
+//! sits behind the default-on `std` feature and the guest builds with `default-features = false`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
+
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 
 pub type Hash = [u8; 32];
@@ -156,12 +174,14 @@ pub fn apply(root: &Hash, key: &Key, old: Option<u32>, new: Option<u32>, proof: 
     compute_root(key, new, proof)
 }
 
-/// The full tree. Host/bridge side only.
+/// The full tree. Host/bridge side only — never compiled into the guest.
+#[cfg(feature = "std")]
 #[derive(Clone, Debug, Default)]
 pub struct Smt {
     leaves: HashMap<Key, u32>,
 }
 
+#[cfg(feature = "std")]
 impl Smt {
     pub fn new() -> Self {
         Smt { leaves: HashMap::new() }
