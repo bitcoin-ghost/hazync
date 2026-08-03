@@ -67,13 +67,6 @@ jobs:
         # and a range that anchors at genesis while starting from a FABRICATED coinbase-SMT would
         # otherwise verify happily against a history that never happened.
         run: cargo test --manifest-path rangestate/Cargo.toml --release
-      - name: Bridge <-> guest BIP30 agreement (host unit tests)
-        # The bridge emits the SMT proofs and the guest consumes them, and the two must agree about
-        # which intermediate root each proof is taken against. Both halves are individually
-        # well-formed, so a disagreement fails CLOSED — it looks like a board that stopped advancing,
-        # not like a wrong answer. These are the only #[test]s in prover/host; without this step the
-        # test-surfaces gate is right to call them a rotting surface.
-        run: cargo test --manifest-path prover/host/Cargo.toml --release
       - name: Coinbase SMT no_std build for the GUEST target, WITH serde
         # `Proof` crosses the wire, so its serde impls have to build for bare metal too — the guest
         # deserialises the same type the bridge serialises. The default no_std check above does not
@@ -299,6 +292,16 @@ jobs:
         # tag shape check-utreexo.sh does.
         run: |
           HAZYNC_BASE="$HOME/hazync-build" cargo test --manifest-path leaf-differential/Cargo.toml --release
+      - name: Bridge <-> guest BIP30 agreement (host unit tests)
+        # MOVED HERE FROM accumulator-tests, for the same reason leaf-differential moved: prover/host
+        # depends on the `methods` crate, whose build script builds the GUEST — so it needs the RISC0
+        # toolchain, which the fast job deliberately does not install. It failed with
+        # "Risc Zero Rust toolchain not found".
+        #
+        # The bridge emits the SMT proofs and the guest consumes them; the two must agree about which
+        # intermediate root each proof is taken against. Both halves are individually well-formed, so a
+        # disagreement fails CLOSED — it looks like a board that stopped advancing, not a wrong answer.
+        run: cargo test --manifest-path prover/host/Cargo.toml --release
       - name: BIP30 grandfathered overwrite (real block 91842)
         run: |
           . "$HOME/.cargo/env"
