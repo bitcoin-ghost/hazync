@@ -85,20 +85,25 @@ echo "   HEAD: $(git -C "$REPO" describe --tags --always 2>/dev/null || echo unk
 # which silently overrode provision-vps.sh's own default and pinned every release build to 600s — less
 # than the 488 MB rust toolchain needs on a domestic link, so raising the default there would have had
 # no effect here at all. A wrapper that hardcodes a default defeats the default it wraps.
-# MOUNTED AT /hazync-zkvm, NOT /repo, AND THE PATH IS LOAD-BEARING (hazync#88).
+# MOUNTED AT /hazync-zkvm, matching reproduce/Dockerfile. As of v0.16.0 this is belt-and-braces rather
+# than load-bearing — but it was load-bearing, and the history is worth keeping.
 #
-# The guest id embeds the ABSOLUTE path of any external path dependency. Since #54 the guest depends on
-# coinbase-smt, so the ELF carries e.g. "/repo/coinbase-smt/src/lib.rs" and the id changes with the
-# mount point. Building here at /repo while reproduce/Dockerfile builds at /hazync-zkvm produced a host
-# reporting 7649f929… against a canonical dfc9eeda… — a shipped host that rejects every proof from the
-# guest it is supposed to verify.
+# Before #88 the guest id embedded the ABSOLUTE path of any external Cargo path dependency. Since #54
+# the guest depended on coinbase-smt, so the ELF carried e.g. "/repo/coinbase-smt/src/lib.rs" and the id
+# moved with the mount point. Building here at /repo while reproduce/Dockerfile built at /hazync-zkvm
+# produced a host reporting 7649f929… against a canonical dfc9eeda… — a shipped host that rejects every
+# proof from the guest it is supposed to verify. Confirmed by building the same tree at three paths and
+# getting three ids, and by finding "/repo/coinbase-smt/src/lib.rs" in the guest ELF while the guest's
+# OWN sources appeared relative and Core's were already normalised by -ffile-prefix-map.
 #
-# Confirmed by building the same tree at three paths and getting three ids, and by finding
-# "/repo/coinbase-smt/src/lib.rs" in the guest ELF while the guest's OWN sources appear relative and
-# Core's are already normalised by -ffile-prefix-map.
+# #88 fixed it at the source: the shared SMT is #[path]-INCLUDED rather than depended on, so the ELF
+# records a relative path and two checkouts agree. Verified on the same pair — /hazync-zkvm and /repo
+# now produce one id, as does the container.
 #
-# Matching the Dockerfile is the fix that unblocks a release. The deeper fix — remapping external path
-# dependencies so the id stops depending on the checkout location at all — is hazync#88.
+# So the mount path is free again, and the line near the top of this file ("the repo path does NOT
+# matter — only $HOME") is true once more. Keep the fixed mount anyway: it costs nothing, it keeps this
+# script and the Dockerfile visibly in agreement, and if an external path dependency is ever
+# re-introduced it is the difference between a shipped-and-broken host and a working one.
 docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
     -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
     "${docker_args[@]}" "$IMAGE" bash -lc '
