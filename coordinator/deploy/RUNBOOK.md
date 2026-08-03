@@ -261,6 +261,42 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### Never read an id off a binary you did not just watch get built
+
+This is the single most repeated mistake in this process — three times in one night on two boxes during
+the v0.16.0 re-baseline, twice reporting a **stale id as a live result** and once nearly stopping the
+release over a disagreement that was not real.
+
+The shape is always the same: a build fails, the previous binary is still sitting there, and
+`host method-id` answers cheerfully. Nothing is missing and nothing errors — the answer is simply about
+different source than you think.
+
+So, every time, all three:
+
+```bash
+BEFORE=$(stat -c %Y "$D/prover/target/release/host" 2>/dev/null || echo 0)
+REPO_DIR="$D" HAZYNC_PROVISION=build ./provision-vps.sh; RC=$?
+AFTER=$(stat -c %Y "$D/prover/target/release/host" 2>/dev/null || echo 0)
+[ "$RC" -eq 0 ] && [ "$AFTER" -gt "$BEFORE" ] || { echo "build did not produce a new binary"; exit 1; }
+```
+
+1. **Check the exit code** — and check the right one. `ssh … | tail` gives you `tail`'s status, not the
+   build's; `$?` after a pipeline is the last element. Use `PIPESTATUS[0]` or don't pipe.
+2. **Check the mtime advanced.** This is what catches the case where the build failed *early* and left
+   yesterday's binary in place.
+3. **Only then read the id.**
+
+Two corollaries worth internalising:
+
+- **Empty is not "different".** A probe that returns nothing because it used a wrong path prints a
+  mismatch that looks like a re-baseline emergency. Distinguish "no answer" from "wrong answer" before
+  reacting to either.
+- **A disagreement between two builds is a question, not a verdict.** Check what each one actually
+  compiled — commit, dirty files, and whether the binary is even from that tree — before concluding the
+  id moved. A binary can be built in one place and *copied* to another; the path it sits at tells you
+  nothing about the path it was built at. `strings host | grep -oE '[^ ]*coinbase-smt/src/[a-z_]+\.rs'`
+  shows the paths actually recorded in it, and settles this in seconds rather than a 25-minute rebuild.
+
 ### Publishing does NOT make a release `latest` — check it, twice
 
 Two independent failures on the v0.15.0 publish, either of which leaves `/releases/latest/` serving the
