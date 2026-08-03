@@ -261,6 +261,38 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### Anything that PRODUCES a proof must be built at the CANONICAL paths
+
+A guest's image id embeds absolute build paths, so a host built anywhere else produces proofs that
+verify against **nothing published**. This is easy to walk into: the build succeeds, the binary works,
+the proofs look fine, and they are worthless.
+
+Measured on 2026-08-03 while regenerating the SNARK fixtures — the same tree produced **three
+different ids**:
+
+| built at | id |
+|---|---|
+| `/home/…/dev/projects/hazync` (dev box) | `1bed31ef…` |
+| `/root/hazync-rebuild` (coordinator, scratch) | `1112670d…` |
+| `/hazync-zkvm` (container / canonical) | `dfc9eeda…` |
+
+Only the third can produce a publishable proof. To prove or wrap on a box that is not the container,
+reproduce the container's environment exactly:
+
+```
+HOME=/root                       # so CARGO_HOME=/root/.cargo
+HAZYNC_BASE=/root/hazync-build   # Core + secp sources
+REPO_DIR=/hazync-zkvm            # the checkout itself
+```
+
+Then `REPO_DIR=/hazync-zkvm HAZYNC_PROVISION=build ./provision-vps.sh`. Verify before proving anything:
+
+```bash
+/hazync-zkvm/prover/target/release/host method-id   # MUST equal reproduce/METHOD_ID
+```
+
+If it does not match, stop — everything proved with that binary is scrap.
+
 ### The mechanical half is SCRIPTED — do not hand-edit it
 
 **`./scripts/rebaseline-id.sh <new-64-hex-id>`**, then let `check-versions.sh` verify.
