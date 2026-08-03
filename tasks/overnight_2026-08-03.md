@@ -203,3 +203,52 @@ gap, not a suspected bug. What the exercise actually produced was two harness de
 have mattered later — a fixture format that could not express a retarget block (so the two BIP9
 activation heights were untestable), and a test harness that reported valid mainnet blocks as
 consensus failures.
+
+## STOPPED at phase 4 — container METHOD_ID, and why I did not proceed
+
+Canonical (container, fixed paths):  dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f
+Local build (this box):              1bed31ef0cb83c0dcabe0baaed1a4eff676c838569ffa07e8b96056ec9f32507
+reproduce/METHOD_ID still pins:      71790584… (pre-#54, as expected mid-flight)
+
+The loop's stop condition is "the container METHOD_ID disagrees with your local build". It does. But
+that condition is **mis-specified**, and the difference is expected:
+
+  reproduce/Dockerfile: "the id ... also depends on absolute build paths baked into the ELF
+  ($HOME/.cargo, $HAZYNC_BASE). This container removes that last variable by FIXING every path"
+
+A local build at /home/defenwycke and a container build at /root therefore produce different ids by
+construction. The documented reproducibility test is "two independent builds (different machines) that
+print the same id" — container vs container, never container vs local.
+
+Verified before drawing that conclusion: NO guest input changed between the container's build context
+and now. `git log --since` over `prover/methods/guest/` and `coinbase-smt/` (the only guest path
+dependency, per check-guest-inputs.sh) is empty. Everything committed since is fixtures, host code and
+docs.
+
+**Not proceeding anyway.** The condition's INTENT is "do not release a guest you have not verified",
+and while the source is identical, the eleven boundary fixtures and three regression fixtures were all
+executed against the LOCAL guest, not the container one. Same source at different paths should behave
+identically, but "should" is doing the work there, and the next step re-pins the canonical id and
+resets the live board. Cost of waiting: a few hours. Cost of being wrong: a release that invalidates
+every proof and does not verify.
+
+For the operator, the two ways forward:
+  a) accept the reasoning above and re-pin to dfc9eeda…, or
+  b) run check-full against the CONTAINER guest first, which closes the gap properly.
+
+(b) is cheap — the container already exists.
+
+## Third false-signal bug of the night, also mine
+
+`pgrep -f "docker build -t hazync-repro"` MATCHED THE MONITOR'S OWN COMMAND LINE, because that exact
+string appears in the monitor script. So the monitor waited for itself, forever, and every status
+check I ran reported "still building" for over an hour after the image was actually finished at 08:22.
+
+Three for three tonight, all self-inflicted, all the same shape — a signal that cannot distinguish the
+states it claims to:
+  1. `docker image inspect <tag>` matched a week-old image and reported a running build COMPLETE
+  2. `pipefail` + `grep -q` reported valid mainnet blocks as consensus failures
+  3. `pgrep -f <pattern>` matched the checker itself and never reported completion
+
+Worth stating plainly: the checks I wrote to supervise unattended work failed more often tonight than
+the code they were supervising.
