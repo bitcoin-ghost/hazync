@@ -261,6 +261,51 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### The mechanical half is SCRIPTED — do not hand-edit it
+
+**`./scripts/rebaseline-id.sh <new-64-hex-id>`**, then let `check-versions.sh` verify.
+
+This script already existed and nothing referenced it, so the 2026-08-03 re-baseline was done by hand:
+nine sites across eleven locations, each discovered by a gate failure, in five rounds. Someone then
+started writing a *second* script before noticing the first. If you take one thing from this section,
+take the command above.
+
+The id comes from the container and **only** from the container — a local build produces a different
+id BY DESIGN, because the ELF embeds absolute build paths and normalising them is what
+`reproduce/Dockerfile` is for:
+
+```bash
+docker build -t hazync-repro -f reproduce/Dockerfile .
+docker run --rm hazync-repro                 # prints the canonical METHOD_ID
+./scripts/rebaseline-id.sh <that id>         # rewrites every known site
+./scripts/check-versions.sh                  # the backstop, not the discovery mechanism
+```
+
+If `check-versions` names a site the script missed, **add it to the script** rather than hand-editing.
+That is the whole point: the gate finding something should be rare and should teach the script.
+
+**What the script deliberately will not do**, and you must:
+
+1. **Write the supersession note** into `reproduce/METHOD_ID` — why the id moved and what it cost. A
+   script cannot write that, and it is the part future readers actually need.
+2. **Regenerate `prover/testdata/snark/*.snark`.** They are PROOFS made by the old guest; a proof
+   carries its guest id inside it, so they cannot be re-pointed, only re-made. Until then `snark-verify`
+   fails, and it *should*. Needs Groth16 on a **CPU** host — it crashes on every CUDA build we ship
+   (#20).
+3. **Check the WASM and the published verifiers by EMBEDDED ID, never by size.** Swapping one 64-hex
+   literal for another is length-preserving, so a stale artifact is byte-identical in size to a correct
+   one, and sha256 + PGP both pass over it — they attest the bytes are the bytes, not that they are
+   right.
+
+```bash
+strings <artifact> | grep -c <new-id>   # want 1
+strings <artifact> | grep -c <old-id>   # want 0
+```
+
+The aarch64 verifier is no longer committed (#85) — `release-sign.yml` builds it, asserts its embedded
+id, and attaches it. Nothing guest-dependent should be committed under `verifier/dist/` again; a gate
+now fails if it is.
+
 ### Ride-alongs — guest changes worth batching into ANY re-baseline
 
 The board reset is the expensive part, and it costs the same whether one thing changes or five. So a
