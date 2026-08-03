@@ -54,8 +54,22 @@ pub struct Spend {
 pub struct BlockUpdate {
     pub coinbase_txid: Key,
     pub coinbase_outputs: u32,
-    /// Proof that `coinbase_txid` is absent-or-zero under the INCOMING root.
+    /// Normally a proof that `coinbase_txid` is absent-or-zero under the INCOMING root.
+    ///
+    /// At a grandfathered block (`overwrite` is `Some`) it is instead a MEMBERSHIP proof of the prior
+    /// count, because absence is *unprovable* there — see `overwrite`.
     pub absence_proof: Proof,
+    /// `Some(prior_count)` ONLY at the two blocks BIP30 grandfathers (91842, 91880).
+    ///
+    /// Those two coinbases duplicated earlier ones that were **still unspent** — that is the whole
+    /// reason BIP30 exists, and the reason Core exempts exactly these two heights. So entering them
+    /// the tree holds the txid with a nonzero count and no absence proof can exist. Without this the
+    /// check is reject-valid on real history and a from-genesis prover stalls at 91841.
+    ///
+    /// It is NOT a general escape hatch. The caller gates it on the block hash (the guest does this
+    /// from the hash it derives, exactly as the utreexo F3 overwrite is gated), and `apply` still
+    /// binds the prover to the real prior count — a wrong one folds to a different root and fails.
+    pub overwrite: Option<u32>,
     /// Coinbase-output spends in this block, in application order.
     pub spends: Vec<Spend>,
 }
@@ -68,6 +82,8 @@ pub enum Bip30Error {
     BadProof,
     /// A spend claimed a count of zero, which cannot be spent from.
     SpendFromEmpty,
+    /// A grandfathered overwrite claimed a prior count of zero — that is an insert, not an overwrite.
+    OverwriteFromEmpty,
 }
 
 /// Apply one block's BIP30 transition, returning the new SMT root.
@@ -77,21 +93,42 @@ pub enum Bip30Error {
 /// than mutated in place regardless, so a rejected block cannot leave a half-updated state behind for
 /// a caller that ignores the error.
 pub fn apply_block(root: &Hash, u: &BlockUpdate) -> Result<Hash, Bip30Error> {
-    // 1. THE CHECK — against the incoming root, before this block's own updates. See the ordering note
-    //    above: doing it later would let a block spend the duplicate to zero and then claim the slot.
-    //    "Absent" and "zero" are the same state (the tree stores no zero-valued leaves), so proving
-    //    absence is exactly proving BIP30 is satisfied.
-    if !verify(root, &u.coinbase_txid, None, &u.absence_proof) {
-        // Either the key is present with a nonzero count — a real BIP30 violation — or the proof is
-        // junk. Both reject; distinguishing them would require a second proof and buys nothing, since
-        // the block is invalid either way.
-        return Err(Bip30Error::DuplicateUnspentCoinbase);
-    }
+    // A coinbase with no SPENDABLE outputs is stored as absent, not as zero — the tree holds no
+    // zero-valued leaves, and writing one would be a second encoding of the same state.
+    let new_val = if u.coinbase_outputs == 0 { None } else { Some(u.coinbase_outputs) };
 
-    // 2. Insert the new coinbase. The same proof supports this: it proved the slot's state, so it can
-    //    carry the update to it — which is why the insert costs no extra witness bytes.
-    let mut cur = apply(root, &u.coinbase_txid, None, Some(u.coinbase_outputs), &u.absence_proof)
-        .ok_or(Bip30Error::BadProof)?;
+    let mut cur = match u.overwrite {
+        // 1. THE CHECK — against the incoming root, before this block's own updates. See the ordering
+        //    note above: doing it later would let a block spend the duplicate to zero and then claim
+        //    the slot. "Absent" and "zero" are the same state, so proving absence is exactly proving
+        //    BIP30 is satisfied.
+        //
+        // 2. Then insert. The SAME proof carries the update — it proved the slot's state — which is
+        //    why the insert costs no extra witness bytes.
+        None => {
+            if !verify(root, &u.coinbase_txid, None, &u.absence_proof) {
+                // Either the key is present with a nonzero count — a real BIP30 violation — or the
+                // proof is junk. Both reject; distinguishing them needs a second proof and buys
+                // nothing, since the block is invalid either way.
+                return Err(Bip30Error::DuplicateUnspentCoinbase);
+            }
+            apply(root, &u.coinbase_txid, None, new_val, &u.absence_proof)
+                .ok_or(Bip30Error::BadProof)?
+        }
+        // THE GRANDFATHERED OVERWRITE (91842 / 91880). Absence is unprovable here by construction, so
+        // the witness proves the PRIOR COUNT instead and `apply` replaces it. That still binds the
+        // prover to the real prior state: a wrong count folds to a different root and fails. For the
+        // real blocks the duplicate coinbase is byte-identical, so prior == new and the root does not
+        // move — the overwrite is a no-op on the tree, which is exactly right, because the earlier
+        // outputs are destroyed and replaced by identical ones.
+        Some(prior) => {
+            if prior == 0 {
+                return Err(Bip30Error::OverwriteFromEmpty);
+            }
+            apply(root, &u.coinbase_txid, Some(prior), new_val, &u.absence_proof)
+                .ok_or(Bip30Error::BadProof)?
+        }
+    };
 
     // 3. Decrement each spent coinbase, deleting at zero. Sequential: every proof is against the root
     //    as it stands after the previous update, which is what lets a block spend two outputs of the
@@ -125,6 +162,7 @@ mod tests {
             coinbase_txid: cb,
             coinbase_outputs: nout,
             absence_proof: t.prove(&cb),
+            overwrite: None,
             spends: Vec::new(),
         }
     }
@@ -182,7 +220,7 @@ mod tests {
         ];
         let u = BlockUpdate {
             coinbase_txid: k(50), coinbase_outputs: 1,
-            absence_proof: absence, spends,
+            absence_proof: absence, overwrite: None, spends,
         };
         let new_root = apply_block(&root, &u).expect("honest block rejected");
         t.insert(k(50), 1);
@@ -207,6 +245,7 @@ mod tests {
         let u = BlockUpdate {
             coinbase_txid: k(60), coinbase_outputs: 1,
             absence_proof: t.prove(&k(60)),
+            overwrite: None,
             spends: vec![
                 Spend { coinbase_txid: k(2), current_count: 2, proof: p1 },
                 Spend { coinbase_txid: k(2), current_count: 1, proof: p2 },
@@ -230,6 +269,7 @@ mod tests {
         let u = BlockUpdate {
             coinbase_txid: k(9), coinbase_outputs: 1,
             absence_proof: t.prove(&k(9)),
+            overwrite: None,
             spends: vec![Spend { coinbase_txid: k(9), current_count: 1, proof: t.prove(&k(9)) }],
         };
         assert_eq!(apply_block(&root, &u).unwrap_err(), Bip30Error::DuplicateUnspentCoinbase,
@@ -245,6 +285,7 @@ mod tests {
         let u = BlockUpdate {
             coinbase_txid: k(3), coinbase_outputs: 1,
             absence_proof: t.prove(&k(4242)),
+            overwrite: None,
             spends: Vec::new(),
         };
         assert!(apply_block(&root, &u).is_err(), "a proof for another key was accepted");
@@ -257,27 +298,95 @@ mod tests {
         let u = BlockUpdate {
             coinbase_txid: k(70), coinbase_outputs: 1,
             absence_proof: t.prove(&k(70)),
+            overwrite: None,
             spends: vec![Spend { coinbase_txid: k(71), current_count: 0, proof: t.prove(&k(71)) }],
         };
         assert_eq!(apply_block(&root, &u).unwrap_err(), Bip30Error::SpendFromEmpty);
     }
 
+    /// AUDIT #3 F-1 REPRODUCTION — the real shape of blocks 91842 / 91880.
+    ///
+    /// The duplicated coinbases were overwritten while STILL UNSPENT. That is the entire reason BIP30
+    /// exists and the entire reason Core grandfathers exactly these two blocks: the later coinbase
+    /// destroyed the earlier, still-spendable outputs. This codebase proves the precondition itself —
+    /// the guest MANDATES an overwrite witness at those two block hashes and DELETES the superseded
+    /// leaves from the utreexo accumulator, which can only succeed if those leaves are present.
+    ///
+    /// So entering 91842 the SMT holds the txid with a nonzero count, and an absence proof cannot
+    /// exist. Without a grandfather on the SMT path the block is rejected and a from-genesis prover
+    /// stalls at 91841 — about 10% of the chain.
     #[test]
-    fn the_two_historical_duplicates_stop_needing_a_special_case() {
-        // F3 currently grandfathers 91842/91812 and 91880/91722 with an explicit overwrite witness.
-        // Under the SMT they are ordinary: the earlier coinbase is spent to zero, so the later one is
-        // an ordinary absent-slot insert. Modelled here with the real shape rather than the real txids,
-        // which the bridge will supply.
+    fn the_real_91842_shape_is_accepted() {
+        let dup = k(91812);
         let mut t = Smt::new();
-        let earlier = k(91812);
+        t.insert(dup, 1);              // present and UNSPENT — the real precondition
+        let root = t.root();
+
+        let u = BlockUpdate {
+            coinbase_txid: dup,
+            coinbase_outputs: 1,
+            // At a grandfathered block the witness proves the PRIOR COUNT, not absence — absence is
+            // unprovable here, which is the check working correctly on a block history exempts.
+            absence_proof: t.prove(&dup),
+            overwrite: Some(1),
+            spends: Vec::new(),
+        };
+        let out = apply_block(&root, &u)
+            .expect("block 91842 was rejected — a from-genesis prover stalls at 91841");
+
+        // The duplicate coinbase is byte-identical, so the count is unchanged and so is the root.
+        assert_eq!(out, root, "a byte-identical overwrite must leave the SMT root unchanged");
+    }
+
+    /// The grandfather must not become a general escape hatch: the guest gates `overwrite` on the two
+    /// block hashes, and the transition still binds the prover to the REAL prior count.
+    #[test]
+    fn an_overwrite_with_the_wrong_prior_count_is_refused() {
+        let dup = k(91812);
+        let mut t = Smt::new();
+        t.insert(dup, 1);
+        let root = t.root();
+        for lie in [0u32, 2, 7] {
+            let u = BlockUpdate {
+                coinbase_txid: dup, coinbase_outputs: 1,
+                absence_proof: t.prove(&dup), overwrite: Some(lie), spends: Vec::new(),
+            };
+            assert!(apply_block(&root, &u).is_err(),
+                    "an overwrite claiming a prior count of {lie} was accepted");
+        }
+    }
+
+    /// An overwrite of a key that is ABSENT is refused — otherwise the exception would let a prover
+    /// insert an arbitrary coinbase at the two grandfathered heights without proving anything.
+    #[test]
+    fn an_overwrite_of_an_absent_coinbase_is_refused() {
+        let t = Smt::new();
+        let u = BlockUpdate {
+            coinbase_txid: k(5), coinbase_outputs: 1,
+            absence_proof: t.prove(&k(5)), overwrite: Some(1), spends: Vec::new(),
+        };
+        assert!(apply_block(&t.root(), &u).is_err(),
+                "an overwrite of an absent coinbase was accepted");
+    }
+
+    #[test]
+    fn duplicating_a_coinbase_that_was_SPENT_TO_ZERO_needs_no_exception() {
+        // RENAMED AND REFRAMED (audit #3 N-3). This used to be called
+        // `the_two_historical_duplicates_stop_needing_a_special_case` and was read as covering blocks
+        // 91842/91880. It does not, and the name asserting otherwise is what let F-1 through: those
+        // two coinbases duplicated earlier ones that were still UNSPENT, which is the one case this
+        // models away. `the_real_91842_shape_is_accepted` covers them; this covers the *different*,
+        // genuinely exception-free case of a coinbase spent to zero first.
+        let mut t = Smt::new();
+        let earlier = k(4242);
         t.insert(earlier, 1);
         let root_before = t.root();
         assert!(apply_block(&root_before, &update(&t, earlier, 1)).is_err(),
-                "while unspent, the duplicate must be rejected");
+                "while unspent, a non-grandfathered duplicate must be rejected");
 
-        t.insert(earlier, 0);                        // the earlier coinbase gets spent
+        t.insert(earlier, 0);                        // spent to zero -> absent
         let root_after = t.root();
         assert!(apply_block(&root_after, &update(&t, earlier, 1)).is_ok(),
-                "once spent, the duplicate is an ordinary insert — no special case needed");
+                "once spent, the duplicate is an ordinary insert — no exception needed");
     }
 }

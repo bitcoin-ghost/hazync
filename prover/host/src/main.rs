@@ -195,7 +195,7 @@ fn header_hash(header: &[u8]) -> [u8; 32] { bitcoin::hashes::sha256d::Hash::hash
 // difficulty, and the MTP window). Chaining ranges on `out_bhash(k) == in_bhash(k+1)` reproduces the
 // guest fold's seam check that tip-hash equality alone does NOT (a mid-chain range could otherwise
 // fabricate its in-boundary UTXO set / in_time / MTP window). Roots are normalized so padding can't vary.
-fn boundary_digest(height: u32, tip: &[u8; 32], roots: &[Option<[u8; 32]>], leaves: u64, nbits: u32, time: u32, epoch: u32, recent: &[u32]) -> [u8; 32] {
+fn boundary_digest(height: u32, tip: &[u8; 32], roots: &[Option<[u8; 32]>], leaves: u64, nbits: u32, time: u32, epoch: u32, recent: &[u32], smt_root: &[u8; 32]) -> [u8; 32] {
     let mut m: Vec<u8> = Vec::new();
     // H9: bind the boundary's HEIGHT (out-boundary = hi, in-boundary = lo-1). RangeState.lo/hi are
     // committed in-circuit (prove_range sets lo=hi=w.height, the same value that selects the script
@@ -211,6 +211,12 @@ fn boundary_digest(height: u32, tip: &[u8; 32], roots: &[Option<[u8; 32]>], leav
         match r { Some(h) => { m.push(1); m.extend_from_slice(h); } None => m.push(0) }
     }
     m.extend_from_slice(&leaves.to_le_bytes());
+    // AUDIT #3 F-3: the coinbase-SMT root is part of the boundary and MUST be in the seam digest.
+    // Without it two ranges that disagree about BIP30 state but agree on everything else digest
+    // IDENTICALLY, so the coordinator's out_bhash(k) == in_bhash(k+1) chaining cannot see the
+    // disagreement. The guest's fold_range does assert SMT continuity, so folded proofs were always
+    // safe — the hole was the verify-any chaining track the coordinator actually uses.
+    m.extend_from_slice(smt_root);
     m.extend_from_slice(&nbits.to_le_bytes());
     m.extend_from_slice(&time.to_le_bytes());
     m.extend_from_slice(&epoch.to_le_bytes());
@@ -1314,6 +1320,19 @@ fn assert_genesis_in_boundary(rs: &RangeState) {
     assert_eq!(normalize_host(rs.in_roots.clone()), normalize_host(Forest::new().roots()), "in-boundary UTXO roots != empty");
     assert_eq!(rs.in_recent, vec![GENESIS_TIME], "in-boundary recent-times != [genesis time]");
     assert_eq!(rs.in_time, GENESIS_TIME, "in-boundary prev-time != genesis time");
+    // AUDIT #3 F-3. #54 added the coinbase-SMT root to the boundary and pinned it in `rangestate`;
+    // this gate — behind verify-range, verify-snark, verify-any's conditional pin, and therefore the
+    // coordinator's spine — did not get it. A spine folded from a FABRICATED genesis SMT root passed
+    // verify-range. Same drift class as F-2, and the reason the shared predicate is called here rather
+    // than the assertion being copied a third time.
+    //
+    // Compared against `empty_root()` directly rather than via `rangestate::is_genesis_anchored`,
+    // because the host deliberately keeps its own `RangeState` mirror — `check-rangestate.sh` gates
+    // that mirror field-for-field against the shared crate, which is what stops THIS copy drifting.
+    // A tree of empty hashes does not fold to zero, so a zeroed field is not accidentally correct.
+    assert_eq!(rs.in_smt_root, hazync_coinbase_smt::empty_root(),
+        "in-boundary coinbase-SMT (BIP30) root is not the empty tree — the range claims genesis but \
+         starts from a fabricated BIP30 history");
 }
 
 // `verify-range <bin>`: verify a range proof and PIN its leftmost boundary to the genesis anchor.
@@ -1422,8 +1441,8 @@ fn verify_any_cmd(bin: &str) {
     // complete seam check the guest fold does (tip + UTXO roots + leaves + difficulty + MTP window), not
     // just tip-hash. Without this a mid-chain range can fabricate its in-boundary UTXO set / difficulty.
     // in-boundary = the chain state after block lo-1; out-boundary = after block hi (H9 height binding).
-    let in_bh = boundary_digest(rs.lo.saturating_sub(1), &rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent);
-    let out_bh = boundary_digest(rs.hi, &rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent);
+    let in_bh = boundary_digest(rs.lo.saturating_sub(1), &rs.in_tip_hash, &rs.in_roots, rs.in_leaves, rs.in_nbits, rs.in_time, rs.in_epoch_start, &rs.in_recent, &rs.in_smt_root);
+    let out_bh = boundary_digest(rs.hi, &rs.out_tip_hash, &rs.out_roots, rs.out_leaves, rs.out_nbits, rs.out_time, rs.out_epoch_start, &rs.out_recent, &rs.out_smt_root);
     // `anchored` is APPENDED, never inserted: the coordinator parses this line as
     // `dict(t.split("=",1) for t in line[len("RANGE-OK"):].split() if "=" in t)`, so a new key=value
     // token is picked up by older coordinators as an extra key and by newer ones as the flag. Moving
@@ -1940,11 +1959,19 @@ fn check_bip30() {
     }
     let root_next = wire_stump(&forest);
 
-    // F3 is about the ACCUMULATOR overwrite, not the BIP30 check — under the SMT these two blocks are
-    // ordinary inserts once the earlier coinbase is spent, which `a_fully_spent_coinbase_can_be_
-    // duplicated_with_no_special_case` covers directly. A standalone transition keeps this test on its
-    // own subject.
-    let f3_smt = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase), &[]);
+    // AUDIT #3 F-1. This used to build a transition against a FRESH, EMPTY tree — where absence proves
+    // trivially, which is the one state these blocks are never in. Their duplicated coinbase is
+    // present and UNSPENT (that is why the utreexo overwrite below has leaves to delete at all), so
+    // the fixture now models exactly that: seed the tree with the duplicate, then take the
+    // grandfathered overwrite path. Driving the real block from an empty tree is what let the SMT's
+    // reject-valid behaviour on 91842/91880 sit green through a whole test suite.
+    let f3_smt = {
+        let cb_out = cb_spendable_outputs(&coinbase);
+        let mut t = Smt::new();
+        t.insert(cb_txid, cb_out.max(1));
+        let root_in = t.root();
+        (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
+    };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
         header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
         root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
@@ -1989,6 +2016,10 @@ struct SmtBlockWitness {
     coinbase_outputs: u32,
     absence_proof: SmtProof,
     spends: Vec<SmtSpend>,
+    /// `Some(prior_count)` ONLY at the two blocks BIP30 grandfathers (91842, 91880), where the
+    /// duplicated coinbase was still UNSPENT so no absence proof can exist. LAST, because risc0's
+    /// serde is positional and appending is the only change that does not renumber every field.
+    smt_overwrite: Option<u32>,
 }
 
 /// The coinbase txid of every input that spends a coinbase output, in the block's tx-then-input
@@ -2037,7 +2068,7 @@ fn smt_witness_standalone(
         t.insert(*s, c + 1);
     }
     let root_in = t.root();
-    let w = smt_advance(&mut t, coinbase_txid, coinbase_outputs, coinbase_spends);
+    let w = smt_advance(&mut t, coinbase_txid, coinbase_outputs, coinbase_spends, false);
     (root_in, w)
 }
 
@@ -2071,10 +2102,26 @@ fn smt_advance(
     coinbase_txid: [u8; 32],
     coinbase_outputs: u32,
     coinbase_spends: &[[u8; 32]],
+    grandfathered: bool,
 ) -> SmtBlockWitness {
-    // 1. Absence, against the INCOMING root — before any of this block's own updates.
+    // 1. Normally: absence, against the INCOMING root, before any of this block's own updates.
+    //
+    //    At 91842/91880 (audit#3 F-1) the duplicated coinbase is still UNSPENT — that is why BIP30
+    //    exists and why Core exempts these two heights — so absence is unprovable and the witness
+    //    carries a MEMBERSHIP proof of the prior count instead. The guest gates this on the block
+    //    HASH it derives, so a spurious height match here is still rejected there.
     let absence_proof = smt.prove(&coinbase_txid);
+    let smt_overwrite = if grandfathered {
+        let prior = smt.get(&coinbase_txid).unwrap_or_else(|| panic!(
+            "bridge: grandfathered BIP30 block duplicates coinbase {} which the SMT does not hold — \
+             the tree and the chain have diverged",
+            coinbase_txid.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        Some(prior)
+    } else {
+        None
+    };
     if coinbase_outputs > 0 { smt.insert(coinbase_txid, coinbase_outputs); }
+    else if grandfathered { smt.remove(&coinbase_txid); }
 
     // 2. Decrement each spend, proving against the root as it stands at that step. This is what lets
     //    a block spend two outputs of the same coinbase: the second proof sees the first's effect.
@@ -2088,7 +2135,7 @@ fn smt_advance(
         spends.push(SmtSpend { coinbase_txid: *t, current_count: cur, proof: smt.prove(t) });
         smt.insert(*t, cur - 1);
     }
-    SmtBlockWitness { coinbase_txid, coinbase_outputs, absence_proof, spends }
+    SmtBlockWitness { coinbase_txid, coinbase_outputs, absence_proof, spends, smt_overwrite }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2463,7 +2510,7 @@ fn cmd_bridge() {
                             if matches!(utxo.get(&key), Some((_, _, _, true))) { cb_spends.push(key.0); }
                         }
                     }
-                    smt_advance(&mut smt, cb, nout, &cb_spends)
+                    smt_advance(&mut smt, cb, nout, &cb_spends, h == 91842 || h == 91880)
                 };
                 let mut w = w;
                 w.in_smt_root = smt_root_in;
@@ -2868,6 +2915,7 @@ mod smt_bridge {
             coinbase_txid: cb,
             coinbase_outputs: nout,
             absence_proof: w.absence_proof.clone(),
+            overwrite: w.smt_overwrite,
             spends: w.spends.iter()
                 .map(|s| Spend { coinbase_txid: s.coinbase_txid, current_count: s.current_count,
                                  proof: s.proof.clone() })
@@ -2896,7 +2944,7 @@ mod smt_bridge {
             } else { Vec::new() };
             // txid(h-10) has 2 outputs exactly when (h-10) % 5 == 0, i.e. when h % 5 == 0.
 
-            let w = smt_advance(&mut bridge, cb, nout, &spends);
+            let w = smt_advance(&mut bridge, cb, nout, &spends, false);
             guest_root = apply_block(&guest_root, &to_update(cb, nout, &w))
                 .unwrap_or_else(|e| panic!("guest refused the bridge's own block at height {h}: {e:?}"));
             assert_eq!(guest_root, bridge.root(), "roots diverged at height {h}");
@@ -2909,14 +2957,50 @@ mod smt_bridge {
     fn the_bridge_cannot_produce_a_witness_that_passes_a_real_bip30_violation() {
         let mut bridge = Smt::new();
         let cb = txid(1);
-        let w0 = smt_advance(&mut bridge, cb, 1, &[]);
+        let w0 = smt_advance(&mut bridge, cb, 1, &[], false);
         let root0 = apply_block(&Smt::new().root(), &to_update(cb, 1, &w0)).unwrap();
 
         // Now try the same coinbase again while it is still unspent.
         let mut replay = bridge.clone();
-        let w1 = smt_advance(&mut replay, cb, 1, &[]);
+        let w1 = smt_advance(&mut replay, cb, 1, &[], false);
         assert!(apply_block(&root0, &to_update(cb, 1, &w1)).is_err(),
                 "a duplicate of an UNSPENT coinbase was accepted");
+    }
+
+    /// AUDIT #3 F-1 — the REAL shape of 91842/91880, against a RESIDENT tree.
+    ///
+    /// The fixture that stood here drove the guest from a fresh, empty `Smt`, where absence proves
+    /// trivially. That is the one state the real blocks are not in: their duplicated coinbases were
+    /// overwritten while still UNSPENT, which is the entire reason BIP30 exists. Because the fixture
+    /// never reproduced the precondition, the whole suite stayed green while a from-genesis prover
+    /// would have stalled at 91841.
+    #[test]
+    fn the_grandfathered_overwrite_round_trips_against_a_resident_tree() {
+        let dup = txid(91812);
+        let mut bridge = Smt::new();
+        bridge.insert(dup, 1);                       // present and UNSPENT — the real precondition
+        let root = bridge.root();
+
+        let w = smt_advance(&mut bridge, dup, 1, &[], true);
+        assert_eq!(w.smt_overwrite, Some(1), "the bridge did not emit an overwrite claim");
+
+        let out = apply_block(&root, &to_update(dup, 1, &w))
+            .expect("the guest rejected real block 91842 — a from-genesis prover stalls at 91841");
+        assert_eq!(out, root, "a byte-identical overwrite must leave the root unchanged");
+        assert_eq!(out, bridge.root(), "bridge and guest diverged across the overwrite");
+    }
+
+    /// The exception must not be reachable on an ordinary block: without the grandfather flag the same
+    /// state is a plain BIP30 violation and must be refused.
+    #[test]
+    fn the_same_state_without_the_grandfather_is_still_refused() {
+        let dup = txid(91812);
+        let mut bridge = Smt::new();
+        bridge.insert(dup, 1);
+        let root = bridge.root();
+        let w = smt_advance(&mut bridge.clone(), dup, 1, &[], false);
+        assert!(apply_block(&root, &to_update(dup, 1, &w)).is_err(),
+                "a duplicate of an UNSPENT coinbase was accepted outside the two grandfathered blocks");
     }
 
     /// The two historical duplicates, in shape: once the earlier coinbase is fully spent, the later
@@ -2925,15 +3009,15 @@ mod smt_bridge {
     fn a_fully_spent_coinbase_can_be_duplicated_with_no_special_case() {
         let mut bridge = Smt::new();
         let dup = txid(91812);
-        let w0 = smt_advance(&mut bridge, dup, 1, &[]);
+        let w0 = smt_advance(&mut bridge, dup, 1, &[], false);
         let mut root = apply_block(&Smt::new().root(), &to_update(dup, 1, &w0)).unwrap();
 
         // Spend it to zero via an ordinary later block.
-        let w1 = smt_advance(&mut bridge, txid(999), 1, &[dup]);
+        let w1 = smt_advance(&mut bridge, txid(999), 1, &[dup], false);
         root = apply_block(&root, &to_update(txid(999), 1, &w1)).unwrap();
 
         // Now the duplicate is legal.
-        let w2 = smt_advance(&mut bridge, dup, 1, &[]);
+        let w2 = smt_advance(&mut bridge, dup, 1, &[], false);
         root = apply_block(&root, &to_update(dup, 1, &w2))
             .expect("duplicating a fully-spent coinbase was rejected — this is legal under BIP30");
         assert_eq!(root, bridge.root());

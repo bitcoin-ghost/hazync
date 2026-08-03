@@ -267,6 +267,11 @@ struct SmtWitnessW {
     coinbase_outputs: u32,
     absence_proof: SmtProof,
     spends: Vec<SmtSpendW>,
+    // #54 / audit#3 F-1 — `Some(prior_count)` ONLY at the two blocks BIP30 grandfathers. Gated below
+    // on the block hash the guest DERIVES, exactly as the utreexo F3 overwrite is: required at those
+    // two hashes, forbidden everywhere else. A prover cannot opt into it. LAST, because risc0's serde
+    // is positional and appending is the only change that does not renumber every field on both sides.
+    smt_overwrite: Option<u32>,
 }
 #[derive(Deserialize)]
 struct BlockWitness {
@@ -728,13 +733,29 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                 cb_spends.len(), w.smt.spends.len()));
         }
     }
-    let (bip30_ok, out_smt_root) = if !ids_distinct || !spends_ok {
+    // AUDIT #3 F-1. At 91842 and 91880 the duplicated coinbase was still UNSPENT — that is why BIP30
+    // exists and why Core grandfathers exactly these two heights. Entering them the tree holds the
+    // txid with a nonzero count, so NO absence proof can exist and the ordinary check is reject-valid
+    // on real history: a from-genesis prover would stall at 91841, ~10% of the chain.
+    //
+    // So the same two block hashes that mandate the utreexo overwrite above also switch the SMT to an
+    // overwrite. Gated identically and in both directions — required there, forbidden elsewhere — so
+    // it is an exception history forces, not an escape hatch a prover can reach for. The transition
+    // still binds the prover to the real prior count.
+    let overwrite_ok = w.smt.smt_overwrite.is_some() == is_bip30_block;
+    if !overwrite_ok {
+        env::log(&format!(
+            "BIP30 SMT overwrite claim does not match the block: is_grandfathered={} claimed={}",
+            is_bip30_block, w.smt.smt_overwrite.is_some()));
+    }
+    let (bip30_ok, out_smt_root) = if !ids_distinct || !spends_ok || !overwrite_ok {
         (false, w.in_smt_root)
     } else {
         let u = bip30::BlockUpdate {
             coinbase_txid: cb_txid,
             coinbase_outputs: cb_outputs,
             absence_proof: w.smt.absence_proof.clone(),
+            overwrite: w.smt.smt_overwrite,
             spends: w.smt.spends.iter()
                 .map(|s| bip30::Spend { coinbase_txid: s.coinbase_txid,
                                         current_count: s.current_count, proof: s.proof.clone() })
