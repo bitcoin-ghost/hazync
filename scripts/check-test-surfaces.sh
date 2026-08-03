@@ -29,7 +29,6 @@ declare -A EXCLUDED=(
   [cluster.sh]="multi-GPU prove fan-out, not a test"
   [rangecluster.sh]="multi-GPU prove fan-out, not a test"
   [build-release.sh]="release build tool, not a test"
-  [ffi_smoke.cpp]="not a shell harness — a C++ smoke test invoked directly by the FFI CI step, which asserts an exact return code per proof."
   [hazed-chain-verify.py]="needs a live mainnet bitcoind, or a hazed archive via --txid-source gsb (#31 Phase 1). Demonstrates that merkle-root identity composes with Hazync validity for hazed blocks. Run by hand; it refuses --txid-source gsb with exit 1 rather than silently falling back, so it cannot report a pass for an untested path."
   [node-sync-demo.sh]="needs a live mainnet bitcoind to cross-check the proof against the real chain (#19). Runs by hand or before a release; it exits NON-ZERO if no node is reachable rather than passing quietly, so it cannot report a partial run as success."
   [bench-fold-concurrency.sh]="benchmark, not a test — measures fold concurrency/VRAM to size a whole-board fold (#24). It has no pass/fail semantics beyond its own dependency checks, needs a GPU and a receipt set, and is run by hand before a fold. NOTE it does fail loudly if it measures nothing."
@@ -49,13 +48,28 @@ while read -r manifest; do
 done < <(git ls-files '*/Cargo.toml' | grep -v '/fuzz/Cargo.toml$')
 
 echo "== 2. every test harness is either in CI or explicitly excluded with a reason =="
+# A harness counts as "in CI" if a workflow names it, OR if a shell harness that a workflow names
+# invokes it. The second case is real: chainparams_check.cpp is compiled and run by
+# chainparams_check.sh, which CI calls — the .cpp itself appears in no workflow.
+in_ci() {
+  grep -rqs "$1" "$WF" && return 0
+  while read -r sh; do
+    grep -qs "$1" "$sh" || continue
+    grep -rqs "$(basename "$sh")" "$WF" && return 0
+  done < <(git ls-files '*.sh')
+  return 1
+}
 while read -r h; do
   b=$(basename "$h")
   case "$b" in make_negative_tests.py|fetch_block*.py) continue ;; esac   # generators, not tests
-  if grep -rqs "$b" "$WF"; then ok "$b runs in CI"
+  if in_ci "$b"; then ok "$b runs in CI"
   elif [ -n "${EXCLUDED[$b]:-}" ]; then ok "$b excluded — ${EXCLUDED[$b]}"
   else bad "$b is neither run by CI nor listed as excluded — nothing would notice if it broke"; fi
-done < <(git ls-files 'prover/*.sh' 'coordinator/*fuzz*.py')
+# C++ harnesses are enumerated too. They were not, which made this section blind to them: the
+# EXCLUDED entry for the FFI suite claimed it was "invoked directly by the FFI CI step" and NOTHING
+# checked that claim — the basename never reached this loop, so the entry was never even consulted.
+# Deleting the CI step would have gone unnoticed while the exclusion list went on asserting it ran.
+done < <(git ls-files 'prover/*.sh' 'coordinator/*fuzz*.py' 'prover/testdata/*.cpp')
 
 echo "== 3. every CI-run harness can actually FAIL =="
 # A script with no failure path is decoration. test_bip68_real.sh printed a contradiction and exited 0.
