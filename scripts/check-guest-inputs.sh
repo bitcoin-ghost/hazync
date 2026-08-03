@@ -30,23 +30,40 @@ fail(){ echo "FAIL $*"; bad=1; }
 [ -f "$GUEST_TOML" ] || { echo "FAIL $GUEST_TOML not found"; exit 1; }
 
 # Path dependencies of the guest, resolved relative to the guest's own directory.
-deps=$(grep -oE 'path = "[^"]+"' "$GUEST_TOML" | sed 's/path = "//; s/"$//')
-[ -n "$deps" ] || fail "no path dependencies found in $GUEST_TOML — the parser is broken, not the tree"
+# A PATH DEPENDENCY PUTS AN ABSOLUTE PATH IN THE IMAGE ID (hazync#88).
+#
+# Cargo resolves path deps to absolute paths, and Rust embeds them in panic metadata, so the guest ELF
+# carries e.g. "/repo/coinbase-smt/src/lib.rs" and the id changes with the checkout location. The same
+# tree gave dfc9eeda at /hazync-zkvm and 7649f929 at /repo — which is how a release host was built that
+# would have rejected every proof from its own guest.
+#
+# The guest's OWN sources are recorded relative, so shared code must be #[path]-included rather than
+# depended on. That keeps one copy (no drift) AND keeps the path relative.
+#
+# This check fails on ANY path dependency. If one is genuinely needed, the fix is to include the file
+# by path instead — not to relax this.
+if [ -n "$(grep -oE 'path = "[^"]+"' "$GUEST_TOML")" ]; then
+    fail "$GUEST_TOML declares a PATH DEPENDENCY. Cargo makes those absolute and the image id then
+       depends on where the repo is checked out (#88). #[path]-include the source instead:
+       $(grep -oE 'path = \"[^\"]+\"' "$GUEST_TOML" | tr '\n' ' ')"
+fi
+
+# Guest inputs are now #[path] INCLUDES, not Cargo path dependencies — see the note above. Resolve
+# them relative to the file that declares them, which is how rustc resolves them too.
+deps=$(grep -rhoE '#\[path = "[^"]+"\]' prover/methods/guest/src/*.rs 2>/dev/null \
+       | sed 's/#\[path = "//; s/"\]//' | sed 's|^|src/|' | sort -u)
+[ -n "$deps" ] || fail "no #[path] includes found in the guest — either the parser is broken or the
+       shared SMT source is no longer compiled in, which would be a silent consensus change"
 
 count=0
 for d in $deps; do
-    dir=$(cd "prover/methods/guest/$d" 2>/dev/null && pwd) || { fail "guest dep path does not resolve: $d"; continue; }
+    f=$(cd prover/methods/guest 2>/dev/null && readlink -f "$d" 2>/dev/null)
+    [ -n "$f" ] && [ -f "$f" ] || { fail "guest #[path] include does not resolve: $d"; continue; }
+    dir=$(cd "$(dirname "$f")/.." && pwd)
     rel=${dir#"$(pwd)/"}
     count=$((count + 1))
 
-    src=""
-    for cand in "$dir/src/lib.rs" "$dir/src/main.rs"; do
-        [ -f "$cand" ] && src="$cand" && break
-    done
-    if [ -z "$src" ]; then
-        fail "$rel has no src/lib.rs or src/main.rs to carry the marker"
-        continue
-    fi
+    src="$f"
     if grep -q "$MARKER" "$src"; then
         note "ok   $rel carries the $MARKER marker"
     else
@@ -64,6 +81,6 @@ for d in $deps; do
     fi
 done
 
-note "checked $count guest path dependenc$([ "$count" = 1 ] && echo y || echo ies)"
+note "checked $count guest #[path] include(s)"
 [ "$bad" = 0 ] || { echo; echo "A crate the guest compiles is not flagged as a METHOD_ID input."; exit 1; }
 echo "every guest-compiled crate is flagged as a METHOD_ID input."

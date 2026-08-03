@@ -1,3 +1,10 @@
+//! ⚠ GUEST-COMPILED CRATE — editing this file changes METHOD_ID and re-baselines the board.
+//!
+//! This file is #[path]-included into `prover/methods/guest`, so it compiles into the guest ELF. Rust
+//! embeds file and line into panic metadata, which means ANY edit that moves line numbers changes the
+//! image id — including pure comments, and including code the guest never calls. Every proof on the
+//! board becomes invalid.
+//!
 //! The per-block BIP30 state transition (hazync#54).
 //!
 //! This is the logic that replaces the structural argument. It lives here, `no_std`, so the guest and

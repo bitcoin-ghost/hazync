@@ -1,6 +1,8 @@
-//! ⚠ GUEST-COMPILED CRATE — editing this file changes METHOD_ID and re-baselines the board.
+//! ⚠ THIS FILE IS NOT GUEST-COMPILED — but `roots.rs` and `bip30.rs` ARE (#88).
 //!
-//! This crate is a path dependency of `prover/methods/guest`, so it is compiled into the guest ELF.
+//! The guest #[path]-includes those two files directly rather than depending on this crate, because a
+//! Cargo path dependency bakes its ABSOLUTE path into the ELF and made the image id depend on the
+//! checkout location. Editing THEM re-baselines the board; editing the std-only `Smt` below does not.
 //! Rust embeds file and line into panic metadata, which means ANY edit here that moves line numbers
 //! changes the image id — including pure comments, and including changes to code the guest never
 //! calls. Every proof on the board becomes invalid.
