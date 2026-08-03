@@ -77,8 +77,11 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `3f52baff…` (v0.10.0: libsecp `ECMULT_WINDOW_SIZE` 15→19 — a compile-time speed trade, no consensus
-  change — see `reproduce/METHOD_ID`, authoritative). Superseded history:
+  `dfc9eeda…` (BIP30 closed by a coinbase-only SMT, #54; the 91842/91880 grandfather from audit #3;
+  BIP34Height read from Core — see `reproduce/METHOD_ID`, authoritative). This sentence went stale
+  through two earlier re-baselines before `check-versions.sh` began requiring the canonical short id
+  to appear here — the same stale-current-guest failure #53 gated against.
+  Superseded history:
   `d1fc4065…` (with k256) → `c029cee4…` (v0.5.0, k256 stripped) → `601d7ca2…` (round-8 leaf/anchor
   hardening; v0.6.0/v0.6.1) → `36a0415d…` (P2SH sigop guard; v0.7.x) → `cb114426…` (round-9 R-1 hardening) →
   `ffdc6095…` (real-Core `pow.cpp` retarget carve) → `7a8b29e0…` (chainparams-sourced constants; v0.8.0) →

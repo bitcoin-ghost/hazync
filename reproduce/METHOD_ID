@@ -191,5 +191,40 @@
 # capability" is the wrong trade. It stays free for the next one.
 #
 # Superseded the earlier id be5e0528…
+#
+# 2026-08-03 (re-baseline): BIP30 closed by a coinbase-only SMT (#54), plus audit #3 and the
+# activation-boundary work (#83).
+#
+# WHAT CHANGED IN THE GUEST
+#
+# 1. BIP30 is now PROVEN, not argued (#54). The old check leaned on BIP34 making coinbase txids unique
+#    per height, which is sound and EXPIRES at ~1,983,702 — the height where a BIP34 height-push can
+#    reproduce a pre-BIP34 coinbase scriptSig. A second accumulator replaces it: a coinbase-only sparse
+#    Merkle tree (txid -> unspent output count) whose root is journalled beside the utreexo roots and
+#    enforced at the fold seam. Absence and a zero count are the same state, so "prove it is absent" is
+#    exactly "prove BIP30 is satisfied", and a fully-spent duplicate stays legal — which it must, since
+#    Core accepted one in 2010. The ceiling is gone: nothing in the check depends on scriptSig encoding.
+#
+# 2. Blocks 91842/91880 are grandfathered ON THE SMT PATH (audit #3 F-1). Their coinbases duplicated
+#    earlier ones that were STILL UNSPENT — the entire reason BIP30 exists — so entering them the tree
+#    holds the txid with a nonzero count and NO absence proof can exist. Without the exception the
+#    check is reject-valid on real history and a from-genesis prover stalls at 91841, ~10% in. Gated on
+#    the block hash in BOTH directions, exactly as the utreexo F3 overwrite is.
+#
+# 3. BIP34Height is read from Core instead of typed (#83 sweep). Its four siblings — BIP66, BIP65, CSV,
+#    Segwit — were already read from Core's compiled Consensus::Params and asserted on every proving
+#    path. 227931 was a literal in two places with nothing checking it, while this very file claimed
+#    "nothing consensus-relevant is a hand-typed magic number now". Now true.
+#
+# WHAT DID NOT CHANGE: behaviour on every block tested. Blocks 130000/140000/741000 execute to
+# BIT-IDENTICAL cycle counts under this guest and the previous one (24,401,107 / 412,503,574 /
+# 1,797,624,838), and all eleven new activation-boundary fixtures validate.
+#
+# THE CONTAINER IS THE AUTHORITY. A local build at $HOME produces a DIFFERENT id than this one, and
+# that is by design — the id embeds absolute build paths, which is the variable this container exists
+# to fix. Container and local guests were confirmed behaviourally identical by cycle count on all three
+# fixtures before this id was pinned. Never pin from a local build.
+#
+# Superseded the earlier id 71790584…
 
-717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490
+dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f

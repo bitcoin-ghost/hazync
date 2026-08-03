@@ -11,7 +11,7 @@ cargo build --release --manifest-path verifier/Cargo.toml
 ```
 >>> SNARK RANGE PROOF [1..1000] VERIFIED — genesis-anchored, 3441 bytes.
   out_tip_hash 09edf646…  range_work 4295032833000  total_cum_work 4299327865833  UTXO leaves 998
-  guest image id 717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490
+  guest image id dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f
 ```
 
 ## Why it exists
@@ -54,7 +54,7 @@ $ hazync-verify neg500.snark          # valid proof, but [500..500]
 VERIFICATION FAILED: range starts at block 500, not 1 — NOT genesis-anchored
 
 $ hazync-verify bitflipped.snark      # one byte changed
-VERIFICATION FAILED: the proof is not valid for guest 71790584 — forged, tampered, corrupt, …
+VERIFICATION FAILED: the proof is not valid for guest dfc9eeda — forged, tampered, corrupt, …
 ```
 
 ## The embedded image id
