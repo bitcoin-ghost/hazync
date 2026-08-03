@@ -182,3 +182,24 @@ Capture first, then match.
 
 A test that reports valid mainnet blocks as consensus failures is worse than no test — it is the
 inverse of the F-1 problem and would have blocked a release on nothing.
+
+### Boundary results — 10 of 11 confirmed
+
+| height | gate | result |
+|---|---|---|
+| 227930 / 227931 | BIP34 + block-version v2 | VALID / VALID |
+| 363724 / 363725 | BIP66 / v3 | VALID / VALID |
+| 388380 / 388381 | BIP65 / v4 | VALID / VALID |
+| 419327 | BIP113 (pre) | VALID |
+| 419328 | BIP113 (activation, retarget) | re-running on the fixed fixture |
+| 434499 | pre-segwit block with an early commitment output | **VALID** |
+| 481823 / 481824 | segwit / witness_ok | VALID / **VALID** |
+
+419328's earlier FAILED was against the pre-fix fixture — the background job started before
+`epoch_start` was added. Same cause as 481824, which now passes.
+
+No consensus defect found in any boundary, which is the expected result: #83 was filed as a coverage
+gap, not a suspected bug. What the exercise actually produced was two harness defects that would each
+have mattered later — a fixture format that could not express a retarget block (so the two BIP9
+activation heights were untestable), and a test harness that reported valid mainnet blocks as
+consensus failures.
