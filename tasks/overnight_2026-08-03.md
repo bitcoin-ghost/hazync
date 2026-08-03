@@ -17,3 +17,36 @@ That file's first bug was a spurious `sibs.reverse()` folding to a well-formed b
 doc comment pointing the wrong way is not cosmetic here.
 
 27/27 crate tests still pass.
+
+## Phase 2 — the F-1 class hunt
+
+Method: for every height-gated branch and every exception, ask *does a test drive it from the REAL
+precondition, or a convenient one?*
+
+**FIXED — `BIP34Height` was the one buried height still hand-typed** (`29a4a46`). BIP66/BIP65/CSV/
+Segwit are all read from Core's compiled `Consensus::Params` and asserted by `assert_core_constants`.
+BIP34's 227931 was a literal in two places with nothing checking it, while `reproduce/METHOD_ID`
+claimed "nothing consensus-relevant is a hand-typed magic number now". Not a live bug — the value is
+right — but an unenforced claim, which is the F-1 shape. Now read from Core in the C++ and
+runtime-pinned in the Rust. Cycles 24,400,773 -> 24,401,107 on block 130000 (measured): the real cost
+of a call replacing a constant. All three fixtures still VALID. METHOD_ID now `1bed31ef…`.
+
+**FILED #83 — no fixture drives any activation boundary.** Fixtures are at 130000/140000 (before
+everything) and 741000 (after everything), so every gate in `validate_block` has one side exercised
+and no boundary. Sharpest case: `witness_ok`, whose own comment records a reject-valid liveness bug in
+433k–481823 that was fixed with **no test in that window** — asserted by comment, with the fixture set
+unable to reproduce the precondition.
+
+**Checked and found adequate:** script-flag activations (guest-pure-fuzz asserts OFF at h-1, ON at h
+against independent constants); script-flag exception blocks (driven from the real hashes/heights —
+what BIP30's test failed to do, though no end-to-end fixture); coinbase maturity (real data in 140000
+plus dedicated harnesses); `assumevalid` (does not exist in the guest — nothing to get wrong).
+
+Recorded the passes as well as the failures: a sweep that reports only problems gives no signal about
+what was actually examined.
+
+## Near-miss worth recording
+
+The BIP34 build failed (`mainnet_params` not declared at that point in the file) and the fixtures then
+ran **off a stale binary**, printing three VALIDs. Caught only because the build log said exit 101
+while the run said pass. Always read the build result before trusting the run that follows it.
