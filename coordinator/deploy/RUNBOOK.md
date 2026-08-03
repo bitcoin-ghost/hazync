@@ -261,6 +261,35 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### Publishing does NOT make a release `latest` — check it, twice
+
+Two independent failures on the v0.15.0 publish, either of which leaves `/releases/latest/` serving the
+previous release for ever:
+
+**1. `make_latest` silently did not apply.** A single `PATCH` setting `draft=false` and
+`make_latest=true` together published the release but left GitHub pointing `latest` at the PREVIOUS tag.
+A second PATCH with only `make_latest=true` fixed it. `gh release edit --draft=false` also did nothing
+at all on a draft — a draft has no resolvable tag, so it could not find the release, and reported no
+error either time.
+
+```bash
+gh api repos/<owner>/<repo>/releases/latest --jq .tag_name    # must be the tag you just cut
+```
+
+**2. The `/latest/download/` CDN caches.** For several minutes after the fix it still served the OLD
+binary — at 1,723,592 bytes where the real one is 1,726,504. Both pass sha256 against their own
+manifest; only the embedded id distinguishes them.
+
+```bash
+curl -sL -H 'Cache-Control: no-cache' -o v \
+  https://github.com/<owner>/<repo>/releases/latest/download/hazync-verify-x86_64-linux-gnu
+grep -ac <new-id> v    # want 1
+grep -ac <old-id> v    # want 0
+```
+
+Check via the **`latest`** URL, not the versioned one. The versioned URL was correct throughout while
+`latest` was wrong, so verifying the versioned asset proves nothing about what a downloader receives.
+
 ### The CUDA release build needs 25 GB free, and failing costs more than a failed build
 
 `build-release.sh cuda` consumed 21 GB -> 4.4 GB on the GPU box, burning **3.7 GB/minute** while
