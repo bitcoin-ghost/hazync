@@ -36,6 +36,11 @@ SECP_TAG="v0.5.1";  SECP_COMMIT="642c885b6102725e25623738529895a95addc4f4"   # b
 #
 # Phases 1-7 depend only on provision-vps.sh, patches/ and coreshim/, all of which change rarely.
 # Splitting there lets the expensive half cache.
+# Initialised BEFORE the phase gate: phase 7 sets it, and HAZYNC_PROVISION=build skips phase 7, so
+# under `set -u` the build path aborted with "GPU_FEATURES: unbound variable". Caught by actually
+# running the split container build rather than by reading the script.
+GPU_FEATURES=""
+
 PHASE="${HAZYNC_PROVISION:-all}"
 case "$PHASE" in
   all|deps|build) ;;
@@ -160,7 +165,7 @@ export HAZYNC_BASE="$WORK"
 EOF
 
 # 7. (optional) CUDA for GPU proving — installed BEFORE the build so we can compile the CUDA backend.
-GPU_FEATURES=""
+# (GPU_FEATURES is initialised above the phase gate — see the note there.)
 if [ "${GPU:-0}" = "1" ]; then
   echo "== 7. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x"
   echo "   that some L40S boxes ship — cccl header errors; 12.6 works). =="
