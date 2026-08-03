@@ -12,7 +12,23 @@ set -euo pipefail
 # reproducible-build container), where sudo may be absent.
 SUDO="sudo"; { [ "$(id -u)" = "0" ] || ! command -v sudo >/dev/null; } && SUDO=""
 
-REPO_DIR="${REPO_DIR:-$HOME/hazync-zkvm}"      # where this repo is checked out on the box
+# Where this repo is checked out on the box. This script LIVES IN the repo, so its own directory is
+# the answer — asking $HOME was a guess, and it was wrong on every box where the checkout is not at
+# $HOME/hazync-zkvm. The failure mode is nasty rather than loud: phase 8 does `cd "$REPO_DIR/prover"`,
+# so a wrong value either dies with a confusing "No such file or directory" halfway through, or — far
+# worse — silently builds a DIFFERENT checkout than the one you are standing in, and you then read an
+# id off a binary that has nothing to do with your working tree.
+#
+# Falls back to the old guess only when the source path is not a real file (curl | bash), where
+# BASH_SOURCE is "main" or a pipe and there is no directory to derive.
+if [ -z "${REPO_DIR:-}" ]; then
+    _src="${BASH_SOURCE[0]:-$0}"
+    if [ -f "$_src" ]; then
+        REPO_DIR="$(cd "$(dirname "$_src")" && pwd)"
+    else
+        REPO_DIR="$HOME/hazync-zkvm"
+    fi
+fi
 WORK="${WORK:-$HOME/hazync-build}"             # scratch for Core clones + the assembled project
 # The guest compiles this exact C/C++ source, so it is pinned by IMMUTABLE COMMIT HASH, not just the
 # (mutable) tag: if an upstream tag were ever re-pointed, the METHOD_ID would change while the repo still
