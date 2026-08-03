@@ -81,17 +81,6 @@ jobs:
         run: |
           cargo build --release --manifest-path coinbase-smt/Cargo.toml \
                 --no-default-features --features serde --target riscv32im-unknown-none-elf
-      - name: Leaf preimage — all THREE implementations agree byte for byte (#50)
-        # The accumulator's leaf exists in three places: the host's Rust `coin_leaf`, and the guest's
-        # C++ spend-side `coin_leaf` and create-side `tx_out_leaves`. A drift between any two is the
-        # one failure that reaches BACKWARDS — every proof made against a broken commitment is
-        # worthless and the only repair is re-proving from genesis.
-        #
-        # check-utreexo.sh gates the construction textually (tags declared equal, tag written first).
-        # This gates the BYTES, by compiling the guest's real C++ natively and calling it. Real blocks
-        # already cover the shapes they happen to contain; this covers the edges on purpose — empty
-        # scripts, MAX_SCRIPT_SIZE, zero and MAX_MONEY, the coinbase flag, boundary heights.
-        run: cargo test --manifest-path leaf-differential/Cargo.toml --release
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Coordinator seam fuzz (soundness — must find NOTHING)
@@ -299,6 +288,17 @@ jobs:
         # suite gets switched off six months later.
         run: |
           cd prover && HAZYNC_HOST=./target/release/host ./ci_boundary_tests.sh cheap
+      - name: Leaf preimage — all THREE implementations agree byte for byte (#50)
+        # MOVED HERE FROM accumulator-tests. That job is deliberately "fast, always-green: the pure-Rust
+        # accumulator" and provisions NO Core sources — but leaf-differential's build.rs compiles Bitcoin
+        # Core natively to call the guest's real C++ leaf builders. Putting it there broke the job's
+        # premise and failed with exit 101; this job already provisions Core, which is what it needs.
+        #
+        # It gates the accumulator's leaf preimage BYTES (field order, widths, endianness,
+        # length-prefixing) across the C++ spend-side, C++ create-side and Rust builders — not just the
+        # tag shape check-utreexo.sh does.
+        run: |
+          HAZYNC_BASE="$HOME/hazync-build" cargo test --manifest-path leaf-differential/Cargo.toml --release
       - name: BIP30 grandfathered overwrite (real block 91842)
         run: |
           . "$HOME/.cargo/env"
