@@ -252,3 +252,44 @@ states it claims to:
 
 Worth stating plainly: the checks I wrote to supervise unattended work failed more often tonight than
 the code they were supervising.
+
+## #87 VERIFIED — split Dockerfile, measured
+
+The id from the split build is `dfc9eeda…`, identical to the single-stage build. Confirmed twice, by
+two independent monitors, because the whole artifact is worthless if the split moved a path.
+
+Measured, not claimed:
+
+| | single-stage | split, ordinary repo change |
+|---|---|---|
+| dependency layer | 3506s (~58 min) | **CACHED** |
+| guest build | (included) | 772s (~13 min) |
+
+`#10 CACHED` against a touched README — an ordinary change no longer re-runs the RISC0 toolchain
+install or the Core clone. Verifying the canonical id after a code change costs ~13 minutes instead of
+~an hour.
+
+**The caveat, stated because it will surprise someone:** editing `provision-vps.sh`, `patches/` or
+`coreshim/` invalidates the base layer and costs the full hour again. That is correct — they are
+inputs to it — but it means the split speeds up code changes, not provisioning changes. It bit twice
+during this very session while fixing the `GPU_FEATURES` bug.
+
+**And #87's own bug was caught by building, not reading.** The first split failed with
+`GPU_FEATURES: unbound variable`: it is initialised in phase 7, which `HAZYNC_PROVISION=build` skips,
+and `set -u` aborts. That was in a commit already pushed, and it failed twice more the same way on the
+coordinator before the fix propagated.
+
+## The canonical-paths discovery
+
+Regenerating the SNARK fixtures nearly produced worthless files. The same tree gives THREE ids:
+
+| built at | id |
+|---|---|
+| dev box `/home/…` | `1bed31ef…` |
+| coordinator scratch `/root/hazync-rebuild` | `1112670d…` |
+| container `/hazync-zkvm` | `dfc9eeda…` |
+
+Only the third can produce a publishable proof, and nothing about the wrong ones looks wrong — the
+build succeeds, the binary runs, the proofs verify against themselves. Fixed by staging the
+coordinator checkout at `/hazync-zkvm`, where `HOME=/root` and `HAZYNC_BASE=/root/hazync-build`
+already match. Written into the RUNBOOK with the check to run BEFORE proving anything.
