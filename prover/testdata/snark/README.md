@@ -13,8 +13,8 @@ of eight blocks would be a fixture lying about itself.
 
 | File | Range | Size | Must |
 |---|---|---|---|
-| `fold_8.snark` | `[1..8]`, genesis-anchored | 1,841 B | **VERIFY** |
-| `neg500.snark` | `[500..500]`, valid but **not** genesis-anchored | 5,633 B | **be REJECTED, on the genesis pin** |
+| `fold_8.snark` | `[1..8]`, genesis-anchored | 2,353 B | **VERIFY** |
+| `neg500.snark` | `[500..500]`, valid but **not** genesis-anchored | 6,145 B | **be REJECTED, on the genesis pin** |
 
 The negative fixture is the important one. A verifier that accepts everything passes a positive-only
 test, so the gate asserts not merely that the non-genesis range is rejected but that it is rejected
