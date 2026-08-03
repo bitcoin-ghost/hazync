@@ -1,7 +1,7 @@
 # Groth16 SNARK fixtures
 
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
-push (#23). Regenerated 2026-08-02 under canonical guest `71790584…` (cshims.c hardening + multi_check
+push (#23). Regenerated 2026-08-02 under canonical guest `dfc9eeda…` (cshims.c hardening + multi_check
 docs — see `reproduce/METHOD_ID`),
 which changes every leaf hash and therefore invalidated the previous pair.
 
@@ -13,8 +13,8 @@ of eight blocks would be a fixture lying about itself.
 
 | File | Range | Size | Must |
 |---|---|---|---|
-| `fold_8.snark` | `[1..8]`, genesis-anchored | 1,841 B | **VERIFY** |
-| `neg500.snark` | `[500..500]`, valid but **not** genesis-anchored | 5,633 B | **be REJECTED, on the genesis pin** |
+| `fold_8.snark` | `[1..8]`, genesis-anchored | 2,353 B | **VERIFY** |
+| `neg500.snark` | `[500..500]`, valid but **not** genesis-anchored | 6,145 B | **be REJECTED, on the genesis pin** |
 
 The negative fixture is the important one. A verifier that accepts everything passes a positive-only
 test, so the gate asserts not merely that the non-genesis range is rejected but that it is rejected
@@ -46,7 +46,7 @@ a stale or foreign id in documentation is exactly the drift it exists to catch. 
 
 ## These are tied to a METHOD_ID
 
-Both were wrapped under guest image id `717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490`
+Both were wrapped under guest image id `dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f`
 (v0.10.0). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
 re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.

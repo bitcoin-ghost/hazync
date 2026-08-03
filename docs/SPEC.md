@@ -176,6 +176,7 @@ in_nbits      u32
 in_time       u32
 in_epoch_start u32
 in_recent     Vec<u32>             timestamps for median-time-past
+in_smt_root   [u8;32]              coinbase-SMT root (BIP30 non-membership state)
 out_tip_hash  [u8;32]              internal order
 out_roots     Vec<Option<[u8;32]>>
 out_leaves    u64
@@ -183,6 +184,7 @@ out_nbits     u32
 out_time      u32
 out_epoch_start u32
 out_recent    Vec<u32>
+out_smt_root  [u8;32]              coinbase-SMT root after block hi
 range_work    [u8;32]              cumulative work across the range, big-endian
 self_id       [u32;8]              the guest image id, committed by the guest itself
 ```

@@ -6,6 +6,9 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+# The SAME crate the bridge uses, roots-only (no_std, no `Smt`). Not a port: a ported copy would drift,
+# and a drift between the two halves of a non-membership check is a silent soundness hole.
+hazync-coinbase-smt = { path = "../../../coinbase-smt", default-features = false, features = ["serde"] }
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ['std', 'unstable'] }
 sha2 = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

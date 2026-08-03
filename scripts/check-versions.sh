@@ -118,35 +118,45 @@ if [ -f "$V" ]; then
 fi
 done
 
-# ── 6. committed verifier BINARIES must embed the canonical id ────────────────────────────────────
-# Check 5 guards the source literal; this guards the compiled artifact in the tree, which is a
-# separate thing that can drift on its own. It did: the be5e0528 re-baseline rebuilt the published
-# release asset but not verifier/dist/hazync-verify-aarch64, so the tree carried an 85dc0b56 verifier
-# that was self-consistent with its own .sha256 and would have rejected every current proof. The
-# binary is unreproducible here without a cross-toolchain, so nothing else was going to notice.
+# ── 6. guest-dependent BINARIES must not be committed, and CI must verify the one it builds ───────
 #
-# grep on the raw bytes: the id is a &str literal, so it survives as ASCII in the compiled binary.
-# That is a weaker check than rebuilding — it proves the current id is present, not that the build is
-# otherwise fresh — but it is the check that catches the failure that actually happened.
-# An array, not a bare word: shellcheck SC2043 correctly objects to a for-loop over a single literal,
-# and the loop is here because more prebuilt verifiers may be committed later (an x86_64 copy, say).
-DIST_BINS=(verifier/dist/hazync-verify-aarch64)
-for B in "${DIST_BINS[@]}"; do
-if [ -f "$B" ]; then
-    if grep -aq "$CANON8" "$B"; then
-        note "ok   $B embeds the canonical id"
-    else
-        stale=$(for k in $KNOWN; do grep -aq "$k" "$B" && echo "$k"; done | head -1)
-        bad "$B does not embed the canonical id $CANON8…${stale:+ (it embeds $stale… — stale, rebuild it)}"
-    fi
-    if [ -f "$B.sha256" ]; then
-        want=$(grep -oE '^[0-9a-f]{64}' "$B.sha256")
-        got=$(sha256sum "$B" | grep -oE '^[0-9a-f]{64}')
-        [ "$want" = "$got" ] && note "ok   $B matches its .sha256" \
-            || bad "$B sha256 is ${got:0:12}… but $B.sha256 says ${want:0:12}…"
-    fi
+# This check used to grep a committed verifier/dist/hazync-verify-aarch64 for the canonical id, because
+# that binary went stale at the be5e0528 re-baseline and shipped a verifier that rejected every current
+# proof. The grep was right; keeping the binary in git was not (hazync#85). Refreshing it needs a cross
+# toolchain no dev box has, so EVERY re-baseline stranded it — it went stale again at dfc9eeda.
+#
+# It is now built by the release workflow and attached as an asset. Which moves the risk rather than
+# removing it, so this check moved too, and deliberately does NOT become "if the file exists": a check
+# whose subject can vanish is a check that stops checking, and the file just vanished.
+#
+# Two assertions instead, neither of which can go quiet:
+#   a) nothing executable is committed under verifier/dist/ — catches it being re-added
+#   b) the release workflow still contains the embedded-id assertion — catches it being deleted
+#
+# Note the staleness is INVISIBLE to size: swapping one 64-hex literal for another is
+# length-preserving, so a stale binary is byte-identical in size to a correct one.
+found_bin=0
+if [ -d verifier/dist ]; then
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        bad "$b is a committed guest-dependent binary — build it in CI and attach it to the release (#85).
+       Every re-baseline strands a committed binary, and its staleness is invisible to size."
+        found_bin=1
+    done < <(find verifier/dist -type f -exec sh -c 'file -b "$1" | grep -qi "ELF\|executable" && echo "$1"' _ {} \; 2>/dev/null)
 fi
-done
+[ "$found_bin" = 0 ] && note "ok   no guest-dependent binary is committed under verifier/dist"
+
+RELEASE_WF=.github/workflows/release-sign.yml
+if [ -f "$RELEASE_WF" ]; then
+    if grep -q "does not embed the canonical id" "$RELEASE_WF"; then
+        note "ok   the release workflow asserts the built verifier embeds the canonical id"
+    else
+        bad "$RELEASE_WF no longer asserts the built verifier embeds the canonical id — that assertion is
+       the ONLY thing standing between a re-baseline and publishing a verifier for a retired guest."
+    fi
+else
+    bad "$RELEASE_WF is missing — nothing builds or checks the published verifier"
+fi
 
 # ── 7. a superseded id must not appear inside a fenced CODE BLOCK ─────────────────────────────────
 # Check 2 asks "is this token a real id?" and a documented predecessor passes — correctly, because

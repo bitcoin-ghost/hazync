@@ -14,4 +14,5 @@ license = "Apache-2.0"
 # scripts/check-rangestate.sh fails the build if the two ever drift apart.
 
 [dependencies]
+hazync-coinbase-smt = { path = "../coinbase-smt", default-features = false }
 serde = { version = "1", features = ["derive"] }

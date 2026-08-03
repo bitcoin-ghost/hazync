@@ -28,7 +28,7 @@ use hazync_rangestate::{
 /// Canonical guest image id. Embedded rather than imported from the `methods` crate, which would drag
 /// in the guest build. `scripts/check-versions.sh` fails the build if this drifts from
 /// `reproduce/METHOD_ID`, which is the source of truth.
-pub const METHOD_ID_HEX: &str = "717905842bb012db8c2e62804e68c30b05cb1f08091dd903b85c27bc894af490";
+pub const METHOD_ID_HEX: &str = "dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f";
 
 /// Everything the proof commits to — i.e. the state a node may ADOPT once verification passes.
 ///
@@ -132,25 +132,22 @@ pub fn verify(bytes: &[u8]) -> Result<Verified, VerifyError> {
             detail: "Its in-boundary tip is not the genesis block hash.".into(),
         });
     }
-    if rs.in_leaves != 0 {
-        return Err(VerifyError::Invalid(
-            "in-boundary UTXO set is not empty — the range does not start from nothing".into(),
-        ));
-    }
-    if !normalize_roots(rs.in_roots.clone()).is_empty() {
-        return Err(VerifyError::Invalid("in-boundary UTXO roots are not empty".into()));
-    }
-    if rs.in_nbits != GENESIS_BITS {
-        return Err(VerifyError::Invalid("in-boundary nBits != genesis".into()));
-    }
-    if rs.in_epoch_start != GENESIS_TIME {
-        return Err(VerifyError::Invalid("in-boundary epoch start != genesis time".into()));
-    }
-    if rs.in_time != GENESIS_TIME {
-        return Err(VerifyError::Invalid("in-boundary prev-time != genesis time".into()));
-    }
-    if rs.in_recent != vec![GENESIS_TIME] {
-        return Err(VerifyError::Invalid("in-boundary recent-times != [genesis time]".into()));
+    // EVERY REMAINING IN-BOUNDARY FIELD COMES FROM THE SHARED PREDICATE. It used to be a second,
+    // inline copy of the same assertions — and audit #3 (F-2) found what that costs: when #54 added
+    // `in_smt_root` to the boundary and pinned it in `rangestate`, this copy did not get it, so a
+    // journal with genesis's tip, an empty utreexo set and a FABRICATED coinbase-SMT root verified
+    // here as genesis-anchored. That is the exact attack the pin exists to stop, passing through the
+    // most widely distributed artifact — this CLI and the browser WASM build.
+    //
+    // This is audit #1's L-1 lesson landing on our own new code: one predicate, or it drifts.
+    //
+    // The two cases above stay explicit because their bucket is NOT arbitrary — a range that starts
+    // elsewhere is a legitimate segment proof (NotAnchored), while a range claiming lo == 1 with a
+    // non-genesis boundary is asserting something false about itself (Invalid).
+    if let Err(detail) = rs.is_genesis_anchored() {
+        return Err(VerifyError::Invalid(format!(
+            "in-boundary is not genesis: {detail}"
+        )));
     }
 
     let range_work = work_u128(&rs.range_work);

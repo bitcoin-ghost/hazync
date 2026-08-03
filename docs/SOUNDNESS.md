@@ -116,8 +116,9 @@ verifier-hole and five completeness deviations were found; all fixed except the 
   any witness data (now including the coinbase — G2).
 - **G5 — block-level `MoneyRange(nFees)`** now asserted explicitly (+ i128-safe `subsidy+fees`), not left
   to anchor-integrity induction.
-- **G1 — BIP30** is a utreexo non-membership limitation; the structural argument is now an explicit,
-  gated, bounded invariant (sound to ~1,983,702; see the matrix below).
+- **G1 — BIP30** was a utreexo non-membership limitation carried by a bounded structural argument
+  (sound to ~1,983,702). **CLOSED in #54** by a second accumulator — a coinbase-only sparse Merkle tree
+  that proves non-membership directly. See the matrix below.
 - **N1/N2/N3 — hardening:** removed the dead host-flags field, length-prefixed the leaf `scriptPubKey`,
   and made `tx_full_sigops` fail closed on a short blob.
 - **G4 — 2h future-time** stays deliberately unenforced (verifier-local wall-clock, unprovable).
@@ -168,13 +169,20 @@ ENFORCED (real Core unless noted):
   (`prover/test_bip68_real.sh`). Height-based BIP68 + maturity + absolute locktime are live too.
 - **BIP34** (coinbase scriptSig encodes height) — CLOSED (S4a). `check_bip34` parses coinbase vin[0]
   scriptSig and compares the pushed height to the block height. Validated on 741000 (`bip34_ok=true`).
-- **BIP30** (no duplicate txid overwriting an unspent output) — in-block distinctness is an explicit
-  sorted-txid check (validated on 741000, `bip30_ok=true`); the general cross-block `HaveCoin` rule is a
-  **bounded gated invariant**, not a lookup, because a utreexo `Stump` has no non-membership proof.
-  Coverage (now explicit in-code, round 8 / G1): BIP34 (asserted ≥227931) forces coinbase-txid
-  uniqueness; the two pre-BIP34 duplicates (91842/91880) are handled by the F3 overwrite; a non-coinbase
-  duplicate outpoint is a double-spend the accumulator rejects. Sound for every mainnet block to
-  ~1,983,702 (≈2046), where a real membership/overwrite mechanism would be needed.
+- **BIP30** (no duplicate txid overwriting an unspent output) — **CLOSED (#54)**. In-block distinctness
+  is still an explicit sorted-txid check. The cross-block rule is no longer a bounded invariant but a
+  **proof**: a coinbase-only sparse Merkle tree (key = coinbase txid, value = unspent output count),
+  journalled as `in_smt_root`/`out_smt_root` and continuity-checked at the fold seam. Per block the guest
+  proves the new coinbase absent-or-zero against the INCOMING root, inserts it, then decrements each
+  spent coinbase — checking before the updates, so a block cannot spend its own duplicate to zero and
+  then claim the slot was free.
+  What the guest DERIVES rather than reads is the security argument: the coinbase txid and its
+  spendable-output count from the coinbase transaction, and each spent coinbase's txid from the same
+  Core-deserialised transaction the scripts ran against. Only the proofs come from the witness.
+  `is_genesis_anchored` pins the tree to empty at the anchor, so a prover cannot start from a fabricated
+  history. The ~1,983,702 ceiling is gone: nothing in the check depends on scriptSig encoding.
+  The F3 grandfathered overwrite REMAINS — it deletes a superseded coin from the accumulator, which is
+  still real work. Only the BIP30 check moved; under the tree those two blocks are ordinary inserts.
 
 - **BIP68 time-based** — CLOSED. The IBD/chain proving path commits real `MTP(coinHeight−1)` (host
   derives it from the chain, mirroring an archive node; see the §5-ENFORCED note). The one residual is

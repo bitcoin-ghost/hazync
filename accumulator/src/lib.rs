@@ -49,6 +49,37 @@ pub fn parent(left: &Hash, right: &Hash) -> Hash {
 /// Leaf commitment for a UTXO: SHA256(TAG_LEAF || data). `data` is the caller's canonical
 /// serialization of the coin (outpoint + height/coinbase flag + CTxOut). Opaque here; the accumulator
 /// only hashes it.
+/// The UTXO-set leaf preimage: the bytes a coin is committed as.
+///
+/// THIS EXISTS IN THREE IMPLEMENTATIONS and they must agree byte for byte — this one, the guest's
+/// C++ `coin_leaf` (spend side) and its `tx_out_leaves` (create side), both in
+/// `prover/methods/guest/verify_input.cpp`. A drift is unrecoverable: every proof made against a
+/// broken commitment is worthless and the only repair is re-proving from genesis.
+///
+/// It lives HERE, in the library, rather than in the host binary, so `leaf-differential` can call the
+/// real function instead of a re-typed copy. A differential test against a duplicate proves only that
+/// the duplicate is self-consistent.
+///
+/// `scripts/check-utreexo.sh` gates the construction textually; `leaf-differential` gates the BYTES.
+///
+/// The `scriptPubKey` length prefix (N2) is what keeps the preimage injective: without it the
+/// concatenation of a variable-length script and the fixed fields after it is ambiguous, and two
+/// different coins can produce one preimage — a collision in a UTXO commitment being a coin that can
+/// be spent twice.
+pub fn coin_leaf(txid_internal: &[u8; 32], vout: u32, value_sat: u64, spk: &[u8],
+                 height: u32, is_coinbase: bool, coin_mtp: u32) -> Hash {
+    let mut b = Vec::with_capacity(57 + spk.len());
+    b.extend_from_slice(txid_internal);
+    b.extend_from_slice(&vout.to_le_bytes());
+    b.extend_from_slice(&value_sat.to_le_bytes());
+    b.extend_from_slice(&(spk.len() as u32).to_le_bytes());
+    b.extend_from_slice(spk);
+    b.extend_from_slice(&height.to_le_bytes());
+    b.push(is_coinbase as u8);
+    b.extend_from_slice(&coin_mtp.to_le_bytes());
+    hash_leaf(&b)
+}
+
 pub fn hash_leaf(data: &[u8]) -> Hash {
     let mut h = Sha256::new();
     h.update([TAG_LEAF]);

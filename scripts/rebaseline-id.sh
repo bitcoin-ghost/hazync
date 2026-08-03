@@ -60,13 +60,51 @@ for f in "${FILES[@]}"; do
     printf '  %-44s %d occurrence(s)\n' "$f" "$n"
 done
 
+# SHORT-FORM IDS ON CLAIM LINES (hazync#86).
+#
+# This script used to skip short ids entirely, reasoning that "3f52baff…" may be history rather than a
+# current claim — sound, and it left a hole the size of the problem. The docs state the CURRENT id in
+# short form ("the current canonical id is `3f52baff…`"), and check-versions REQUIRES the canonical
+# short id to appear in them. So the script and the gate disagreed, and every re-baseline became a
+# round of hand-editing driven by gate failures. The #54 re-baseline took five rounds across eleven
+# sites, and docs/ROADMAP.md still named a retired id as canonical through TWO of them.
+#
+# The fix is not to replace short ids blindly — that would corrupt the supersession chains, which is
+# what the old reasoning was protecting. It is to replace them on exactly the lines the GATE would
+# flag: a line that claims currency (current|canonical|latest) and does not label itself as history
+# (superseded). Same rule, same place, so the two agree by construction rather than by discipline.
+OLD8=${OLD:0:8}; NEW8=${NEW:0:8}
+#
+# SCANNED SEPARATELY FROM $FILES, and that is the whole point. $FILES is discovered by grepping for the
+# FULL 64-hex id — so a doc that only ever writes the SHORT form is not in it, and iterating $FILES
+# here reaches nothing. That is exactly how docs/PROVING.md, SECURITY.md and docs/ROADMAP.md were
+# missed: check-versions requires the canonical SHORT id in each of them, and none of the three
+# contains the long form at all.
+echo
+echo "short-form ids on lines that CLAIM currency (same rule check-versions applies):"
+while read -r f; do
+    [ -f "$f" ] || continue
+    n=$(awk -v old="$OLD8" '
+            /^[[:space:]]*```/ { infence = !infence; next }
+            !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ && index($0, old) { c++ }
+            END { print c + 0 }' "$f")
+    [ "$n" = "0" ] && continue
+    tmp=$(mktemp)
+    awk -v old="$OLD8" -v new="$NEW8" '
+        /^[[:space:]]*```/ { infence = !infence; print; next }
+        !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ { gsub(old, new) }
+        { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+    printf '  %-44s %d claim line(s)\n' "$f" "$n"
+done < <(git ls-files '*.md' | grep -v '^prover/evidence/' | grep -v '^tasks/')
+echo "  (history, fenced evidence and tasks/ left alone — those legitimately name retired ids)"
+echo
+
 # reproduce/METHOD_ID is the source of truth and its trailing line must be the bare id.
 tail -1 reproduce/METHOD_ID | grep -qE "^$NEW$" \
     || { echo "::error::reproduce/METHOD_ID does not end with the new bare id"; exit 1; }
 
 echo
 echo "NOT touched, deliberately:"
-echo "  SHORT-form ids (3f52baff…)          they appear in HISTORY as well as in current claims"
 echo "  prover/evidence/**                  records of runs made under the OLD guest — history, not references"
 echo "  verifier/dist/hazync-verify-aarch64 a binary; it must be REBUILT, not edited"
 echo

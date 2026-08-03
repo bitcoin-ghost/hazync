@@ -1,0 +1,23 @@
+# The accumulator's leaf preimage exists in THREE implementations and a drift between any two is
+# unrecoverable — every proof made against a broken commitment is worthless, and the only repair is
+# re-proving from genesis (hazync#50).
+#
+# `scripts/check-utreexo.sh` gates the SHAPE of that construction textually: the tag constants agree,
+# and each builder writes its tag first. What it cannot check is that the builders produce the same
+# BYTES for the same coin. This crate does, by compiling the guest's real C++ natively and calling it
+# next to the host's Rust.
+[package]
+name = "hazync-leaf-differential"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+hazync-utreexo = { path = "../accumulator" }
+bitcoin = "0.32"
+sha2 = "0.10"
+
+[build-dependencies]
+cc = "1"
+
+[workspace]

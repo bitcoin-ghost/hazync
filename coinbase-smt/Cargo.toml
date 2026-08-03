@@ -1,0 +1,27 @@
+# Coinbase-only sparse Merkle tree — the structure that closes BIP30 permanently (hazync#54).
+#
+# Separate crate rather than part of `hazync-utreexo` on purpose: they answer opposite questions.
+# Utreexo proves MEMBERSHIP (this coin exists and is unspent). This proves NON-MEMBERSHIP (no unspent
+# coinbase has that txid), which a utreexo Stump structurally cannot do — and that gap is the entire
+# reason BIP30 is currently an argument with an expiry date rather than a check.
+[package]
+name = "hazync-coinbase-smt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# `std` brings the full tree (`Smt`), which the host and bridge need and the guest must never have.
+# The guest builds with default-features = false and gets only verify/apply — the same compiled code
+# the host uses, so there is no ported copy to drift.
+default = ["std"]
+std = []
+# `Proof` on the wire. Needed on BOTH sides — the bridge serialises proofs into bundles and the guest
+# deserialises them — so it is deliberately not std-gated.
+serde = ["dep:serde"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+serde = { version = "1", optional = true, default-features = false, features = ["alloc", "derive"] }
+
+[workspace]

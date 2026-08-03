@@ -620,9 +620,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hazync-coinbase-smt"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "hazync-rangestate"
 version = "0.1.0"
 dependencies = [
+ "hazync-coinbase-smt",
  "serde",
 ]
 

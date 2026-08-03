@@ -87,7 +87,7 @@ wire-format change (`68819a54`, v0.9.0), the round-9 post-audit hardening (`cb11
 | G3 | BIP141 witness-commitment check ran at all heights (Core gates on segwit ≥481824) → reject-valid stall in 433k–481823 | med (reject-valid) | **fixed** (gate at 481824; below, `witness_ok=!has_witness` = Core `unexpected-witness`) |
 | G2 | `unexpected-witness` excluded the coinbase from `has_witness` | low | **fixed** (coinbase now counted) |
 | G5 | Block-level `MoneyRange(nFees)` implicit; `subsidy+fee` unguarded i64 add | low | **fixed** (explicit MoneyRange + i128-safe bound, folded into `subsidy_ok`) |
-| G1 | General BIP30 `HaveCoin` replaced by a structural argument (utreexo has no non-membership proof) | low (bounded) | **documented + gated invariant** (BIP34≥227931 + 2 grandfathered; sound to height ~1,983,702; full HaveCoin needs utreexo non-membership) |
+| G1 | General BIP30 `HaveCoin` replaced by a structural argument (utreexo has no non-membership proof) | low (bounded) | **CLOSED (#54)** — replaced by a coinbase-only sparse Merkle tree that proves non-membership directly; root journalled + seam-enforced, pinned empty at the genesis anchor. The ~1,983,702 ceiling no longer applies |
 | G4 | 2-hour future-time limit | (not a bug) | **intentionally not enforced** (verifier-local wall-clock, unprovable in a zkVM) |
 | N1 | Dead `BlockInput.flags` wire field (flags are guest-derived) | hygiene | **removed** (guest+host+all sites, incl. host `Spend.flags`) |
 | N2 | `scriptPubKey` not length-prefixed in the UTXO leaf | fragility | **fixed** (length-prefixed in all 3 byte-identical leaf sites — changes every leaf hash/root) |
@@ -272,7 +272,8 @@ delete/proof handling and `num_leaves`/root recomputation, all primitive math (`
 
 **Update 2026-07-30 — the domain-tag item below is now FIXED, and "non-exploitable" was wrong.** Leaf
 and interior hashes are domain-separated as of canonical id `85dc0b56…` (since superseded by
-`be5e0528…` for RUSTSEC-2026-0220, and by `71790584…` in v0.14.0 — see `reproduce/METHOD_ID` for the
+`be5e0528…` for RUSTSEC-2026-0220, by `71790584…` in v0.14.0, and by `dfc9eeda…` for the #54 BIP30
+SMT plus audit #3 — see `reproduce/METHOD_ID` for the
 full chain). A leaf preimage is
 `57 + |scriptPubKey|` bytes, so a 7-byte scriptPubKey gives a 64-byte preimage — the width an interior
 node hashes — and the stated barrier (leaf preimages open with an uncontrollable txid) is a grinding
@@ -388,12 +389,19 @@ the finding-by-finding detail + verification in **`docs/AUDIT_2026-07.md`**.
 - **G5 (low) — FIXED.** Added the explicit block-level `MoneyRange(total_fee)` + an i128-safe
   `subsidy + fees ≤ MAX_MONEY` bound (Core's `bad-txns-accumulated-fee-outofrange`), folded into the
   already-gated `subsidy_ok`, rather than relying on anchor-integrity induction.
-- **G1 (low, bounded) — DOCUMENTED as a gated invariant.** A utreexo `Stump` cannot prove non-membership,
-  so Core's general BIP30 `HaveCoin` lookup is replaced by a structural argument, now written in-code as an
-  explicit, gated, bounded invariant: BIP34 (asserted, ≥227931) forces coinbase-txid uniqueness, the two
-  pre-BIP34 duplicates are handled by F3, and a non-coinbase duplicate is a double-spend the accumulator
-  rejects — sound for every mainnet block up to ~1,983,702 (≈2046), where a real membership mechanism
-  would be needed.
+- **G1 (low, bounded) — CLOSED (#54), was a gated invariant.** A utreexo `Stump` cannot prove
+  non-membership, so Core's general BIP30 `HaveCoin` lookup used to be replaced by a structural
+  argument: BIP34 (asserted, ≥227931) forces coinbase-txid uniqueness, the two pre-BIP34 duplicates are
+  handled by F3, and a non-coinbase duplicate is a double-spend the accumulator rejects. Sound, and it
+  EXPIRED — at ~1,983,702 (≈2046) a BIP34 height-push can reproduce a pre-BIP34 coinbase scriptSig and
+  the reasoning stops holding.
+  A **second accumulator** now proves the property instead: a coinbase-only sparse Merkle tree (txid ->
+  unspent output count) whose root is journalled beside the utreexo roots and enforced at the fold seam.
+  Absence and a zero count are the same state, so "prove it is absent" is exactly "prove BIP30 is
+  satisfied" — and a fully-spent duplicate stays legal, which it must. The ceiling is gone because the
+  check no longer depends on any property of scriptSig encoding. The guest DERIVES the coinbase txid,
+  its spendable-output count and the spent-coinbase list itself and takes only the proofs from the
+  witness; `is_genesis_anchored` pins the tree to empty at the anchor.
 - **N1/N2/N3 (hardening).** Removed the dead `BlockInput.flags` (guest+host; flags are guest-derived — a
   refactor trap); length-prefixed `scriptPubKey` in all three byte-identical UTXO-leaf sites (future-proofs
   the preimage — **changes every leaf hash/root**); and `tx_full_sigops` now fails closed on a short

@@ -16,6 +16,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The heavy boundary set (#83) is ~34 minutes of execution over blocks that never change, so it runs
+  # nightly rather than per push. It still runs: a boundary nobody executes is the gap #83 was filed for.
+  schedule:
+    - cron: '0 3 * * *'
 
 # Superseding a branch makes its in-flight run pointless; let it be cancelled rather than sit in the
 # queue ahead of the run that matters. NOT applied to main: those runs are the record of what the
@@ -40,6 +44,36 @@ jobs:
         run: cargo test --manifest-path accumulator/Cargo.toml --release
       - name: Guest pure-Rust tests (activation heights, add256, median_time_past, utreexo SEC-2 pinning)
         run: cargo test --manifest-path guest-pure-fuzz/Cargo.toml --release
+      - name: Coinbase SMT (BIP30 non-membership) — incl. differential oracle
+        # A SECOND accumulator, so it gets the same discipline as the first from day one rather than
+        # after an audit asks: the optimised tree is checked against a deliberately naive one that
+        # shares no code, over a random walk of inserts/deletes/decrements. The optimised version
+        # prunes empty subtrees to constants and proves by descending sorted slices — exactly the kind
+        # of cleverness that yields a self-consistent WRONG answer. The first bug here was precisely
+        # that: reversed sibling order folding to a well-formed but incorrect root.
+        run: cargo test --manifest-path coinbase-smt/Cargo.toml --release
+      - name: Coinbase SMT still builds no_std for the GUEST target
+        # The whole point of the crate being shared rather than ported is that the guest compiles the
+        # SAME code the host does. That only holds while the roots-only half stays std-free, and
+        # nothing stops someone reaching for a HashMap in a helper — it would build fine here and fail
+        # only inside the zkVM build, far from the cause. So it is checked directly, against the real
+        # bare-metal target.
+        run: |
+          rustup target add riscv32im-unknown-none-elf
+          cargo build --release --manifest-path coinbase-smt/Cargo.toml \
+                --no-default-features --target riscv32im-unknown-none-elf
+      - name: Genesis-anchor pin, including the empty coinbase-SMT root
+        # `is_genesis_anchored` is the assertion the whole artifact rests on. #54 added a field to it,
+        # and a range that anchors at genesis while starting from a FABRICATED coinbase-SMT would
+        # otherwise verify happily against a history that never happened.
+        run: cargo test --manifest-path rangestate/Cargo.toml --release
+      - name: Coinbase SMT no_std build for the GUEST target, WITH serde
+        # `Proof` crosses the wire, so its serde impls have to build for bare metal too — the guest
+        # deserialises the same type the bridge serialises. The default no_std check above does not
+        # cover it, since serde is off by default.
+        run: |
+          cargo build --release --manifest-path coinbase-smt/Cargo.toml \
+                --no-default-features --features serde --target riscv32im-unknown-none-elf
       - name: Accumulator fuzz-harness unit tests
         run: cargo test --manifest-path audit-fuzz/Cargo.toml --release
       - name: Coordinator seam fuzz (soundness — must find NOTHING)
@@ -162,6 +196,11 @@ jobs:
         run: ./prover/methods/guest/test-cshims.sh
       - name: RangeState mirrors agree (a reordered field MISREADS a valid proof, it does not reject it)
         run: ./scripts/check-rangestate.sh
+      - name: Every crate the GUEST compiles is flagged as a METHOD_ID input
+        # "guest source" is wider than prover/methods/guest/ — the guest has path dependencies, and
+        # editing one re-baselines the board with nothing in the guest directory changed. That has
+        # already happened once (coinbase-smt's empty_root: 4ea6567b -> 35cfbbed).
+        run: ./scripts/check-guest-inputs.sh
       - name: Workflow YAML valid (a bad step name can silently break the whole run)
         run: ./scripts/check-workflows.sh
       - name: No workflow splices an expression into a shell block (arbitrary code where the signing key lives)
@@ -181,6 +220,29 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S warning $(git ls-files '*.sh')
+
+  boundary-heavy:
+    # The six expensive activation-boundary blocks (#83): 388380, 419327/8, 434499, 481823/4.
+    # ~30,700 prevouts, ~34 minutes. Nightly and on demand, never per push.
+    #
+    # 434499 is the one that matters most: the first pre-segwit block whose coinbase carries a BIP141
+    # commitment with no witness data anywhere. witness_ok's own comment records that checking the
+    # commitment at every height "rejected the canonical pre-activation blocks ... a reject-valid
+    # liveness bug in the 433k-481823 range". That was fixed and nothing drove the window it broke.
+    #
+    # 419328 and 481824 are both exactly 2016k, because BIP9 forks activate ON retarget boundaries —
+    # which is why their fixtures carry a real epoch_start rather than a synthesised one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision (RISC0 toolchain, Bitcoin Core v28 source, patches, build)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./provision-vps.sh
+      - name: Activation boundaries — heavy set
+        run: |
+          cd prover && HAZYNC_HOST=./target/release/host ./ci_boundary_tests.sh heavy
 
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
@@ -214,6 +276,38 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && HAZYNC_HOST=./target/release/host ./ci_negative_tests.sh
+      - name: Consensus activation boundaries — real blocks, cheap set (#83)
+        # Before #83 the fixtures were 130000/140000 (before every activation) and 741000 (after all of
+        # them), so every height gate in validate_block had one side exercised and no boundary. These
+        # are the real blocks either side of BIP34, BIP66 and BIP65.
+        #
+        # CHEAP SET ONLY here. Cost tracks prevout count: block 741000 has 670 and runs in ~45s; this
+        # set totals ~2,760 (~3 min). The heavy six total ~30,700 (~34 min) and run on a schedule
+        # instead — adding half an hour to every push to re-execute blocks that never change is how a
+        # suite gets switched off six months later.
+        run: |
+          cd prover && HAZYNC_HOST=./target/release/host ./ci_boundary_tests.sh cheap
+      - name: Leaf preimage — all THREE implementations agree byte for byte (#50)
+        # MOVED HERE FROM accumulator-tests. That job is deliberately "fast, always-green: the pure-Rust
+        # accumulator" and provisions NO Core sources — but leaf-differential's build.rs compiles Bitcoin
+        # Core natively to call the guest's real C++ leaf builders. Putting it there broke the job's
+        # premise and failed with exit 101; this job already provisions Core, which is what it needs.
+        #
+        # It gates the accumulator's leaf preimage BYTES (field order, widths, endianness,
+        # length-prefixing) across the C++ spend-side, C++ create-side and Rust builders — not just the
+        # tag shape check-utreexo.sh does.
+        run: |
+          HAZYNC_BASE="$HOME/hazync-build" cargo test --manifest-path leaf-differential/Cargo.toml --release
+      - name: Bridge <-> guest BIP30 agreement (host unit tests)
+        # MOVED HERE FROM accumulator-tests, for the same reason leaf-differential moved: prover/host
+        # depends on the `methods` crate, whose build script builds the GUEST — so it needs the RISC0
+        # toolchain, which the fast job deliberately does not install. It failed with
+        # "Risc Zero Rust toolchain not found".
+        #
+        # The bridge emits the SMT proofs and the guest consumes them; the two must agree about which
+        # intermediate root each proof is taken against. Both halves are individually well-formed, so a
+        # disagreement fails CLOSED — it looks like a board that stopped advancing, not a wrong answer.
+        run: cargo test --manifest-path prover/host/Cargo.toml --release
       - name: BIP30 grandfathered overwrite (real block 91842)
         run: |
           . "$HOME/.cargo/env"

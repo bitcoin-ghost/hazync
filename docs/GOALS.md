@@ -23,7 +23,7 @@ a live artifact, fetched from the board and checked with the released binaries (
 $ hazync-verify proof_20000.bin
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest 71790584.
+  The SNARK is VALID and was produced by guest dfc9eeda.
 $ host verify-any proof_20000.bin
 RANGE-OK lo=20000 hi=20000 out_leaves=19023 range_work=4295032833
 ```
@@ -57,7 +57,9 @@ whatever work-distribution scheme is in force (#37).
 blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. The board stands at **26,637 of
 958,301 blocks — 2.78% of blocks, and well under 0.1% of the work** (measured 2026-08-01).
 
-> Re-baselined a THIRD time on 2026-08-02 to `71790584` (v0.14.0), discarding 46,177 blocks — see
+> Re-baselined again on 2026-08-03 to `dfc9eeda` (BIP30 closed by a coinbase-only SMT, #54; audit #3's
+> 91842/91880 grandfather). Before that, a THIRD time on 2026-08-02 to `71790584` (v0.14.0), discarding
+> 46,177 blocks — see
 > `reproduce/METHOD_ID` for why, and note the rule it established: any guest edit that moves line
 > numbers changes the id, including comments.
 >

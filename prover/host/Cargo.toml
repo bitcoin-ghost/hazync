@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+sha2 = "0.10"
 serde_json = "1"
 methods = { path = "../methods" }
 # `prove` is NOT a default feature (default = ["client", "bonsai"]), and without it risc0's
@@ -17,6 +18,7 @@ serde = { version = "1.0", features = ["derive"] }
 bitcoin = "0.32"
 bincode = "1"
 hazync-utreexo = { path = "../../accumulator" }
+hazync-coinbase-smt = { path = "../../coinbase-smt", features = ["std", "serde"] }
 
 [features]
 cuda = ["risc0-zkvm/cuda"]

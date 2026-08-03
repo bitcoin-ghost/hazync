@@ -1,6 +1,7 @@
 // Guest: verify ONE transaction input using Bitcoin Core's REAL VerifyScript + interpreter + sighash
 // + libsecp256k1 — all compiled into the guest via build.rs.
 use risc0_zkvm::guest::env;
+use hazync_coinbase_smt::{bip30, Proof as SmtProof};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -79,6 +80,10 @@ extern "C" {
     fn is_coinbase_tx(tx: *const u8, tx_len: u32) -> i32;
     // Number of inputs of a tx from its raw bytes (#5 — tie the flat BlockInput list to each tx's vin).
     fn tx_vin_count(tx: *const u8, tx_len: u32) -> u32;
+    // The txid an input spends (prevout.hash, internal order) — #54. Read out of the same
+    // Core-deserialised tx the scripts run against, so the guest names the coinbase a block spends
+    // rather than being told. 0 = input_idx out of range.
+    fn tx_input_prevout_txid(tx: *const u8, tx_len: u32, input_idx: u32, out_txid: *mut u8) -> i32;
     // Sum of a coinbase tx's outputs, and the height's block subsidy (exact halving formula).
     fn coinbase_value(tx: *const u8, tx_len: u32) -> i64;
     fn block_subsidy(height: u32) -> i64;
@@ -98,6 +103,7 @@ extern "C" {
     fn core_bip65_height() -> u32;
     fn core_csv_height() -> u32;
     fn core_segwit_height() -> u32;
+    fn core_bip34_height() -> u32;
     fn core_retarget_interval() -> u32;
     fn core_max_block_weight() -> i64;
     fn core_max_block_sigops_cost() -> i64;
@@ -139,6 +145,7 @@ fn assert_core_constants() {
         assert_eq!(RETARGET_INTERVAL, core_retarget_interval(), "RETARGET_INTERVAL != Core");
         assert_eq!(MAX_BLOCK_WEIGHT, core_max_block_weight(), "MAX_BLOCK_WEIGHT != Core");
         assert_eq!(MAX_BLOCK_SIGOPS_COST, core_max_block_sigops_cost(), "MAX_BLOCK_SIGOPS_COST != Core");
+        assert_eq!(BIP34_HEIGHT, core_bip34_height(), "BIP34Height != Core");
         assert_eq!(sf::BIP66_HEIGHT, core_bip66_height(), "BIP66Height != Core");
         assert_eq!(sf::BIP65_HEIGHT, core_bip65_height(), "BIP65Height != Core");
         assert_eq!(sf::CSV_HEIGHT, core_csv_height(), "CSVHeight != Core");
@@ -163,6 +170,11 @@ fn assert_core_constants() {
 // becomes unspendable). At exactly these two blocks the guest deletes the superseded coinbase leaf so
 // it can't linger spendable (F3). 91842 duplicates 91812's coinbase; 91880 duplicates 91722's.
 // (BIP34, enforced from 227931, makes coinbases unique thereafter, so no later duplicate can occur.)
+/// Core mainnet `consensus.BIP34Height`. Runtime-pinned to Core's compiled value by
+/// `assert_core_constants`, like BIP66/BIP65/CSV/Segwit — audit #3's phase-2 sweep found this was the
+/// one buried height still hand-typed, in two places, with nothing checking it.
+const BIP34_HEIGHT: u32 = 227_931;
+
 const BIP30_OVERWRITE_A: [u8; 32] = [0xec, 0xca, 0xe0, 0x00, 0xe3, 0xc8, 0xe4, 0xe0, 0x93, 0x93, 0x63, 0x60, 0x43, 0x1f, 0x3b, 0x76, 0x03, 0xc5, 0x63, 0xc1, 0xff, 0x61, 0x81, 0x39, 0x0a, 0x4d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91842
 const BIP30_OVERWRITE_B: [u8; 32] = [0x21, 0xd7, 0x7c, 0xcb, 0x4c, 0x08, 0x38, 0x6a, 0x04, 0xac, 0x01, 0x96, 0xae, 0x10, 0xf6, 0xa1, 0xd2, 0xc2, 0xa3, 0x77, 0x55, 0x8c, 0xa1, 0x90, 0xf1, 0x43, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91880
 
@@ -248,6 +260,26 @@ struct WireStump {
 struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
 #[derive(Deserialize)]
 struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> }
+// #54 — one coinbase-output spend. `coinbase_txid` is present but is NOT trusted: the guest derives
+// the same value from the transaction and asserts they agree, so the field is a cross-check that
+// cannot rot rather than an input a prover controls. `current_count` and `proof` are the only things
+// genuinely supplied, and both are pinned by the root: a wrong count folds to a different root.
+#[derive(Deserialize)]
+struct SmtSpendW { coinbase_txid: [u8; 32], current_count: u32, proof: SmtProof }
+#[derive(Deserialize)]
+struct SmtWitnessW {
+    // Cross-checks, not inputs — the guest derives both and refuses the block if they disagree. See
+    // the note on SmtSpendW: a value the guest derives must never be a value it is told.
+    coinbase_txid: [u8; 32],
+    coinbase_outputs: u32,
+    absence_proof: SmtProof,
+    spends: Vec<SmtSpendW>,
+    // #54 / audit#3 F-1 — `Some(prior_count)` ONLY at the two blocks BIP30 grandfathers. Gated below
+    // on the block hash the guest DERIVES, exactly as the utreexo F3 overwrite is: required at those
+    // two hashes, forbidden everywhere else. A prover cannot opt into it. LAST, because risc0's serde
+    // is positional and appending is the only change that does not renumber every field on both sides.
+    smt_overwrite: Option<u32>,
+}
 #[derive(Deserialize)]
 struct BlockWitness {
     header: Vec<u8>,            // 80-byte block header
@@ -262,6 +294,11 @@ struct BlockWitness {
     new_outputs: Vec<[u8; 32]>, // leaves of the coins the block creates
     root_next: WireStump,
     bip30: Option<Bip30Overwrite>, // Some ONLY at the two grandfathered BIP30 blocks (F3)
+    // #54: coinbase-SMT root entering this block, and the sequenced proofs that advance it. REQUIRED,
+    // not Option — an optional consensus input is not an input, and a bundle that predates the fields
+    // should fail to parse loudly rather than prove against a default.
+    in_smt_root: [u8; 32],
+    smt: SmtWitnessW,
 }
 #[derive(Serialize)]
 struct BlockOutput {
@@ -308,6 +345,7 @@ struct BlockResult {
     witness_ok: bool,
     bip34_ok: bool,
     bip30_ok: bool,
+    out_smt_root: [u8; 32],   // #54: the coinbase-SMT root AFTER this block's transition
     tip_hash: [u8; 32],
     nbits: u32,
     block_time: u32,
@@ -374,7 +412,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // 227931), BIP66 (v>=3 @363725), BIP65/CLTV (v>=4 @388381). The height-derived script flags already
     // enforce the RULES; this rejects the stale header itself as Core does, closing an accept-invalid gap.
     let version = i32::from_le_bytes(w.header[0..4].try_into().unwrap());
-    if (version < 2 && w.height >= 227_931)
+    if (version < 2 && w.height >= BIP34_HEIGHT)
         || (version < 3 && w.height >= 363_725)
         || (version < 4 && w.height >= 388_381) {
         all_ok = false;
@@ -407,6 +445,10 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     };
     let cb_start = output_leaves.len();
     let cb_txid = gather(&w.coinbase_tx, 1, &mut output_leaves);
+    // #54 — the coinbase's SPENDABLE output count, captured HERE and not later: `output_leaves` goes
+    // on to accumulate every other tx's leaves, so the same subtraction further down the function
+    // silently yields the whole block's output count. It did, and the fixture blocks caught it.
+    let cb_outputs = (output_leaves.len() - cb_start) as u32;
     for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
     if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
     // The de-duplicated per-tx blobs: one raw_tx + one prevouts blob per non-coinbase tx. Bind their
@@ -641,26 +683,97 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // BIP34: coinbase encodes the block height (from 227931).
     let bip34_ok = unsafe { check_bip34(w.coinbase_tx.as_ptr(), w.coinbase_tx.len() as u32, w.height) } == 1;
     // BIP30 (no tx may create an outpoint duplicating an existing UNSPENT coin). A utreexo Stump cannot
-    // prove NON-membership, so the general HaveCoin lookup Core does is replaced by a complete structural
-    // argument, enforced here as a gated invariant:
-    //   • in-block: all txids must be distinct (the O(n log n) check below) — else two txs in this block
-    //     share an outpoint.
-    //   • cross-block, height ≥ 227931: BIP34 (asserted via `bip34_ok`, which is in every proving mode's
-    //     conjunction) forces the coinbase scriptSig to encode the height, so a coinbase's txid is unique
-    //     across heights; a non-coinbase txid can never equal a coinbase's (null vs non-null prevout), and
-    //     a non-coinbase duplicate outpoint would require re-creating an existing txid = identical inputs =
-    //     a double-spend the accumulator already rejects. So no created outpoint can collide with an
-    //     existing unspent coin.
-    //   • cross-block, height < 227931: the ONLY real duplicates in mainnet history are blocks 91842/91880
-    //     (handled above by the F3 overwrite/delete). This is exhaustive for the pre-BIP34 range.
-    // BOUND: this argument holds for every mainnet block up to the first height where a BIP34 height-push
-    // could reproduce a pre-BIP34 coinbase scriptSig (~1,983,702, ≈2046). A validator run at/after that
-    // height needs a real membership/overwrite mechanism (utreexo non-membership) — tracked, out of scope
-    // for the current chain. Cheap distinctness over the merkle-committed txids:
-    let bip30_ok = {
+    // prove NON-membership, so this is carried by a SECOND accumulator: a coinbase-only sparse Merkle
+    // tree mapping coinbase txid -> unspent output count, whose root is journalled and folded like the
+    // utreexo one. Absence and a zero count are the SAME state in that tree, so "prove it is absent" is
+    // exactly "prove BIP30 is satisfied" — and a fully-spent duplicate stays legal, which it must
+    // (Core accepted one in 2010).
+    //
+    // THIS REPLACES THE OLD STRUCTURAL ARGUMENT, which leaned on BIP34 making coinbase txids unique per
+    // height and therefore expired at ~1,983,702 — the height where a BIP34 height-push could reproduce
+    // a pre-BIP34 coinbase scriptSig. That ceiling is gone: the check no longer depends on any property
+    // of scriptSig encoding.
+    //
+    // WHAT THE GUEST DERIVES vs WHAT IT IS TOLD. Everything that identifies the transition is derived
+    // here: the coinbase txid and its spendable-output count from the coinbase transaction, and the
+    // spent coinbase's txid from the same Core-deserialised transaction the scripts ran against. Only
+    // the PROOFS come from the witness, and a wrong proof folds to a different root and fails. If a
+    // prover could name which coinbases a block spends, it could decrement one the block never touched
+    // down to zero and manufacture a free slot for a later duplicate — the exact attack this exists to
+    // stop.
+    //
+    // In-block duplicate txids are still rejected: two txs in one block sharing an outpoint is a
+    // separate failure from the cross-block one, and cheap to check over the merkle-committed set.
+    let ids_distinct = {
         let mut ids = w.txids.clone();
         ids.sort_unstable();
         ids.windows(2).all(|w| w[0] != w[1])
+    };
+    // `cb_outputs` was captured immediately after the coinbase gather — see the note there.
+    // The coinbase txid of every input spending a coinbase output, in the block's own tx-then-input
+    // order — the same order the bridge emits proofs in. `w.inputs` is already pinned to that order by
+    // the vin-grouping check above (`input_idx == j`, one entry per real input, no padding).
+    let mut cb_spends: Vec<[u8; 32]> = Vec::new();
+    let mut spends_ok = true;
+    for inp in w.inputs.iter() {
+        if inp.coin_is_coinbase != 1 { continue; }   // leaf-committed, so it cannot be lied about
+        let raw = match w.txs.get(inp.tx_idx as usize) { Some(t) => &t.0, None => { spends_ok = false; break; } };
+        let mut t = [0u8; 32];
+        let rc = unsafe { tx_input_prevout_txid(raw.as_ptr(), raw.len() as u32, inp.input_idx, t.as_mut_ptr()) };
+        if rc != 1 { spends_ok = false; break; }
+        cb_spends.push(t);
+    }
+    // The witness's spend list must line up with the derived one. This is a cross-check, not a source
+    // of truth — it exists so a bridge that reorders its emission fails HERE with a clear cause rather
+    // than as an unexplained proof rejection three lines later.
+    if spends_ok {
+        spends_ok = w.smt.coinbase_txid == cb_txid
+            && w.smt.coinbase_outputs == cb_outputs
+            && w.smt.spends.len() == cb_spends.len()
+            && w.smt.spends.iter().zip(cb_spends.iter()).all(|(s, d)| &s.coinbase_txid == d);
+        if !spends_ok {
+            // Named, because the alternative is a bare BadProof from three steps later that says
+            // nothing about which of the two sides is wrong.
+            env::log(&format!(
+                "BIP30 witness disagrees with the derived transition: cb_txid_match={} outputs derived={} witness={} spends derived={} witness={}",
+                w.smt.coinbase_txid == cb_txid, cb_outputs, w.smt.coinbase_outputs,
+                cb_spends.len(), w.smt.spends.len()));
+        }
+    }
+    // AUDIT #3 F-1. At 91842 and 91880 the duplicated coinbase was still UNSPENT — that is why BIP30
+    // exists and why Core grandfathers exactly these two heights. Entering them the tree holds the
+    // txid with a nonzero count, so NO absence proof can exist and the ordinary check is reject-valid
+    // on real history: a from-genesis prover would stall at 91841, ~10% of the chain.
+    //
+    // So the same two block hashes that mandate the utreexo overwrite above also switch the SMT to an
+    // overwrite. Gated identically and in both directions — required there, forbidden elsewhere — so
+    // it is an exception history forces, not an escape hatch a prover can reach for. The transition
+    // still binds the prover to the real prior count.
+    let overwrite_ok = w.smt.smt_overwrite.is_some() == is_bip30_block;
+    if !overwrite_ok {
+        env::log(&format!(
+            "BIP30 SMT overwrite claim does not match the block: is_grandfathered={} claimed={}",
+            is_bip30_block, w.smt.smt_overwrite.is_some()));
+    }
+    let (bip30_ok, out_smt_root) = if !ids_distinct || !spends_ok || !overwrite_ok {
+        (false, w.in_smt_root)
+    } else {
+        let u = bip30::BlockUpdate {
+            coinbase_txid: cb_txid,
+            coinbase_outputs: cb_outputs,
+            absence_proof: w.smt.absence_proof.clone(),
+            overwrite: w.smt.smt_overwrite,
+            spends: w.smt.spends.iter()
+                .map(|s| bip30::Spend { coinbase_txid: s.coinbase_txid,
+                                        current_count: s.current_count, proof: s.proof.clone() })
+                .collect(),
+        };
+        match bip30::apply_block(&w.in_smt_root, &u) {
+            Ok(r) => (true, r),
+            // Fails closed: a duplicate of an unspent coinbase, a bad proof, or a spend from an empty
+            // count all land here, and `block_valid` gates the commit, so no receipt is produced.
+            Err(e) => { env::log(&format!("BIP30 transition rejected the block: {e:?}")); (false, w.in_smt_root) }
+        }
     };
 
     // #4: run the coinbase through real Core CheckTransaction (bad-cb-length, per-output MoneyRange,
@@ -732,7 +845,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
 
     BlockResult {
         script_results, tx_checks, coin_leaves, total_fee, pow_ok, merkle_ok,
-        coinbase_val, subsidy, subsidy_ok, all_ok, root_matches, weight_ok, sigops_ok, witness_ok, bip34_ok, bip30_ok,
+        coinbase_val, subsidy, subsidy_ok, all_ok, root_matches, weight_ok, sigops_ok, witness_ok, bip34_ok, bip30_ok, out_smt_root,
         tip_hash: block_hash,
         nbits: u32::from_le_bytes(w.header[72..76].try_into().unwrap()),
         block_time: u32::from_le_bytes(w.header[68..72].try_into().unwrap()),
@@ -799,10 +912,16 @@ struct RangeState {
     in_tip_hash: [u8; 32],
     in_roots: Vec<Option<[u8; 32]>>, in_leaves: u64,
     in_nbits: u32, in_time: u32, in_epoch_start: u32, in_recent: Vec<u32>,
+    // Coinbase-SMT root at the in boundary (#54) — the BIP30 non-membership state a utreexo Stump
+    // cannot express. Carried in the journal for the same reason the UTXO roots are: the next range
+    // must inherit it unchanged, and a fold that did not check it could join two ranges whose BIP30
+    // state disagrees.
+    in_smt_root: [u8; 32],
     // "out" boundary — the chain state just after block hi.
     out_tip_hash: [u8; 32],
     out_roots: Vec<Option<[u8; 32]>>, out_leaves: u64,
     out_nbits: u32, out_time: u32, out_epoch_start: u32, out_recent: Vec<u32>,
+    out_smt_root: [u8; 32],
     range_work: [u8; 32], // total chainwork of blocks lo..=hi (256-bit LE)
     self_id: [u32; 8],
 }
@@ -972,12 +1091,19 @@ fn prove_range() {
     out_recent.push(r.block_time);
     if out_recent.len() > 11 { let e = out_recent.len() - 11; out_recent.drain(0..e); }
 
+    // #54 — the coinbase-SMT root actually ADVANCES now: `validate_block` ran the BIP30 transition
+    // against `in_smt_root` and `block_valid` (asserted above) already required it to succeed, so
+    // reaching here means the block satisfied BIP30 by proof rather than by argument.
+    let in_smt_root = w.in_smt_root;
+    let out_smt_root = r.out_smt_root;
     env::commit(&RangeState {
         kind: KIND_RANGE,
         lo: height, hi: height,
         in_tip_hash, in_roots, in_leaves, in_nbits, in_time, in_epoch_start, in_recent,
+        in_smt_root,
         out_tip_hash: r.tip_hash, out_roots: r.root_next_roots, out_leaves: r.root_next_leaves,
         out_nbits: r.nbits, out_time: r.block_time, out_epoch_start, out_recent,
+        out_smt_root,
         range_work, self_id,
     });
 }
@@ -1004,6 +1130,12 @@ fn fold_range() {
     assert!(l.out_nbits == rr.in_nbits && l.out_time == rr.in_time
         && l.out_epoch_start == rr.in_epoch_start && l.out_recent == rr.in_recent,
         "fold: difficulty/MTP context discontinuous at seam");
+    // #54: the BIP30 state must carry across the seam exactly as the UTXO set does. Without this a
+    // fold could join a left range that spent a coinbase to zero with a right range that still
+    // believes it unspent — or the reverse — and the joined proof would attest a BIP30 history that
+    // neither half proved. No normalisation: the SMT root is a single hash with no padding ambiguity,
+    // unlike the utreexo root vector above.
+    assert!(l.out_smt_root == rr.in_smt_root, "fold: coinbase-SMT (BIP30) state broken at seam");
 
     let mut range_work = l.range_work;
     add256(&mut range_work, &rr.range_work);
@@ -1012,8 +1144,10 @@ fn fold_range() {
         lo: l.lo, hi: rr.hi,
         in_tip_hash: l.in_tip_hash, in_roots: l.in_roots, in_leaves: l.in_leaves,
         in_nbits: l.in_nbits, in_time: l.in_time, in_epoch_start: l.in_epoch_start, in_recent: l.in_recent,
+        in_smt_root: l.in_smt_root,
         out_tip_hash: rr.out_tip_hash, out_roots: rr.out_roots, out_leaves: rr.out_leaves,
         out_nbits: rr.out_nbits, out_time: rr.out_time, out_epoch_start: rr.out_epoch_start, out_recent: rr.out_recent,
+        out_smt_root: rr.out_smt_root,
         range_work, self_id,
     });
 }

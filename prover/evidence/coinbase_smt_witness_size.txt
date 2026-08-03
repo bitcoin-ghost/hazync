@@ -1,0 +1,32 @@
+Coinbase-SMT witness cost — measured 2026-08-02 (hazync#54)
+
+This was the gate on the design: if uncompressed 256-deep paths pushed bundles past ~5 KB/block, the
+bridge disk story needed revisiting BEFORE building, not after. Measured against the real
+implementation rather than estimated.
+
+Proof size vs tree size (64 non-membership probes each, bitmap + non-default siblings only):
+
+  n=   1000  avg siblings  10.4  avg wire   364 B
+  n=  10000  avg siblings  13.6  avg wire   467 B
+  n=  41000  avg siblings  15.8  avg wire   536 B     <- the measured danger set
+  n= 100000  avg siblings  17.0  avg wire   574 B
+
+Growth is logarithmic, as it should be: 2.4x the entries between 41k and 100k costs 1.2 extra
+siblings. An uncompressed path would be 256 * 32 = 8,192 B, so the bitmap compression is buying ~15x.
+
+PER BLOCK the honest figure is higher than one proof, because a block needs:
+
+  1 non-membership proof for the new coinbase txid   (the BIP30 check itself)
+  1 insert                                            (reuses that same proof — free)
+  ~1-3 decrements for coinbase outputs spent          (one proof each)
+
+So ~2-4 proofs per block at ~536 B = ~1.1-2.1 KB/block, i.e. ~1.0-2.0 GB over 958,301 blocks.
+
+VERDICT: the gate passes. ~1-2 GB of additional bundle data against the ~73 GB the bridge already
+emits to height 220,000 — a few percent, not a doubling. The 8 KB/block worst case that would have
+forced a redesign does not occur, because the compression works.
+
+CAVEAT: the decrement count is an estimate. The real rate depends on how often coinbase outputs are
+spent, which varies by era — early blocks rarely, modern blocks routinely, since pool payouts spend
+coinbases promptly. Worth re-measuring against real bridge data before the bridge work lands; if it
+turns out to be 5-10 decrements per block in the modern era, the figure doubles and is still fine.

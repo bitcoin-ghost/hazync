@@ -23,6 +23,31 @@ WORK="${WORK:-$HOME/hazync-build}"             # scratch for Core clones + the a
 CORE_TAG="v28.0";   CORE_COMMIT="110183746150428e6385880c79f8c5733b1361ba"   # bitcoin/bitcoin v28.0
 SECP_TAG="v0.5.1";  SECP_COMMIT="642c885b6102725e25623738529895a95addc4f4"   # bitcoin-core/secp256k1 v0.5.1
 
+# PHASE SELECTION (hazync#87). Default is unchanged: run everything, exactly as before.
+#
+#   HAZYNC_PROVISION=deps    phases 1-7 only (toolchain, Core, shims, env) — NO prover build
+#   HAZYNC_PROVISION=build   phase 8 only (build the prover against an already-provisioned box)
+#
+# Why: reproduce/Dockerfile copied the whole repo and then ran this script, so ANY repo edit
+# invalidated the layer and re-ran the toolchain install and Core clone. A container build took 1h45m,
+# of which the guest compile was minutes. That made verifying the canonical METHOD_ID — the value every
+# published proof is checked against, and obtainable ONLY from this container — a two-hour job, which
+# is a good way to ensure nobody verifies it.
+#
+# Phases 1-7 depend only on provision-vps.sh, patches/ and coreshim/, all of which change rarely.
+# Splitting there lets the expensive half cache.
+# Initialised BEFORE the phase gate: phase 7 sets it, and HAZYNC_PROVISION=build skips phase 7, so
+# under `set -u` the build path aborted with "GPU_FEATURES: unbound variable". Caught by actually
+# running the split container build rather than by reading the script.
+GPU_FEATURES=""
+
+PHASE="${HAZYNC_PROVISION:-all}"
+case "$PHASE" in
+  all|deps|build) ;;
+  *) echo "HAZYNC_PROVISION must be all, deps or build (got '$PHASE')" >&2; exit 2 ;;
+esac
+
+if [ "$PHASE" != "build" ]; then
 echo "== 1. system packages =="
 $SUDO apt-get update
 $SUDO apt-get install -y build-essential cmake git curl ca-certificates pkg-config libssl-dev clang lld python3 protobuf-compiler
@@ -140,7 +165,7 @@ export HAZYNC_BASE="$WORK"
 EOF
 
 # 7. (optional) CUDA for GPU proving — installed BEFORE the build so we can compile the CUDA backend.
-GPU_FEATURES=""
+# (GPU_FEATURES is initialised above the phase gate — see the note there.)
 if [ "${GPU:-0}" = "1" ]; then
   echo "== 7. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x"
   echo "   that some L40S boxes ship — cccl header errors; 12.6 works). =="
@@ -171,6 +196,21 @@ export PATH="/usr/local/cuda-12.6/bin:$PATH"
 export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
 EOF
 fi
+
+fi   # end phases 1-7
+
+if [ "$PHASE" = "deps" ]; then
+  echo
+  echo "provisioned dependencies only (HAZYNC_PROVISION=deps) — prover NOT built."
+  echo "run with HAZYNC_PROVISION=build in the same environment to build it."
+  exit 0
+fi
+
+# `build` skips 1-7, so the env those phases exported is not set in this shell. Re-derive it — these
+# are the same values phase 6 writes, and the guest's build.rs reads HAZYNC_BASE to find Core.
+export HAZYNC_BASE="$WORK"
+export RISC0_HOME="$HOME/.risc0"
+export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:$PATH"
 
 echo "== 8. build the prover (release${GPU_FEATURES:+ + CUDA}) — HAZYNC_BASE is exported above =="
 cd "$REPO_DIR/prover"
