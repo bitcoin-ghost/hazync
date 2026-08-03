@@ -48,9 +48,32 @@ for f in "$DIST"/*; do
         fi ;;
       *host*)
         # Ask it. A host stores the id as [u32; 8]; grep would find nothing and report a false failure.
+        #
+        # THREE OUTCOMES, NOT TWO, and conflating the last two is a false alarm. A CUDA host cannot run
+        # on a box without libcuda.so.1 — it exits before printing anything, which is NOT the same as
+        # reporting a wrong id. The first version of this check said "reports <nothing>, not the
+        # canonical id — do not ship it" about a perfectly good binary, which is the same defect class
+        # this script exists to catch, one level up.
+        err=$(timeout 120 "$f" method-id 2>&1 >/dev/null | head -1)
         got=$(timeout 120 "$f" method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)
         if [ "$got" = "$CANON" ]; then
             echo "  ok   $b reports the canonical id"
+        elif [ -z "$got" ] && printf '%s' "$err" | grep -q "error while loading shared libraries"; then
+            # Unverifiable HERE. Still a failure — an artifact nobody has checked must not ship — but
+            # the operator needs the real reason, which is "check it on a capable host", not "rebuild".
+            # Keep the LIBRARY name. "${err##*: }" trimmed it to "No such file or directory",
+            # which names the symptom and hides the cause.
+            lib=$(printf '%s' "$err" | grep -oE '[a-z0-9_.]+[.]so[0-9.]*' | head -1)
+            echo "FAIL $b cannot be verified on this machine (missing ${lib:-a shared library})"
+            echo "       This is NOT evidence the artifact is wrong — it cannot run here at all."
+            echo "       Verify on a capable host:  $b method-id   (want $CANON8...)"
+            echo "       Then record it:            HAZYNC_ATTEST_${b//[^A-Za-z0-9]/_}=<id> $0"
+            att="HAZYNC_ATTEST_${b//[^A-Za-z0-9]/_}"
+            if [ "${!att:-}" = "$CANON" ]; then
+                echo "  ok   $b attested canonical from a capable host (via $att)"
+            else
+                fail=1
+            fi
         else
             echo "FAIL $b reports '${got:-<nothing>}', not the canonical id — do not ship it"
             fail=1
