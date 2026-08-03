@@ -1,7 +1,33 @@
 // Guest: verify ONE transaction input using Bitcoin Core's REAL VerifyScript + interpreter + sighash
 // + libsecp256k1 — all compiled into the guest via build.rs.
 use risc0_zkvm::guest::env;
-use hazync_coinbase_smt::{bip30, Proof as SmtProof};
+// COINBASE SMT — INCLUDED BY PATH, NOT DEPENDED ON AS A CRATE (hazync#88).
+//
+// As a Cargo path dependency this baked the dependency's ABSOLUTE path into the guest ELF
+// ("/repo/coinbase-smt/src/lib.rs"), so the image id changed with the checkout location: the same tree
+// produced four different ids, and a release host was built that would have rejected every proof from
+// its own guest. Core's sources were already normalised by -ffile-prefix-map and the guest's own
+// sources are relative; this was the only variable path left.
+//
+// Included, the file is guest source: the path is recorded relative to this crate and the id no longer
+// depends on where the repo lives. THERE IS STILL ONE COPY — the same file is compiled into the host's
+// crate for the bridge — so this buys path-independence without the drift a vendored copy invites.
+//
+// bip30.rs refers to `crate::{apply, verify, ...}`, which resolves here because of the re-export below
+// and in the crate because of its own `pub use roots::*`. Both must keep working.
+extern crate alloc;
+
+#[path = "../../../../coinbase-smt/src/roots.rs"]
+mod smt_roots;
+// Re-exported under their ORIGINAL names because bip30.rs says `use crate::{apply, verify, Hash, Key,
+// Proof}` and must compile unchanged in both contexts. Safe at this crate root: utreexo's Hash/Proof
+// live inside that module, not here, so nothing collides. SmtProof is the alias main.rs uses, kept so
+// the witness structs read clearly next to utreexo's own Proof.
+pub use smt_roots::{apply, verify, Hash, Key, Proof};
+use smt_roots::Proof as SmtProof;
+
+#[path = "../../../../coinbase-smt/src/bip30.rs"]
+mod bip30;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
