@@ -15,11 +15,33 @@
 import json, sys, http.client, base64, pathlib
 from decimal import Decimal
 
-COOKIE = pathlib.Path.home() / ".bitcoin" / ".cookie"
-HOST, PORT = "127.0.0.1", 8332
+# Defaults target a node on this machine. Overridable so the same script can pull fixtures from a
+# node reachable over the network (an SSH tunnel, or an RPC port bound to a private interface) without
+# a second copy of this logic drifting from the first:
+#
+#   HAZYNC_RPC_HOST / HAZYNC_RPC_PORT   where bitcoind's RPC listens
+#   HAZYNC_RPC_COOKIE                   path to .cookie, or
+#   HAZYNC_RPC_AUTH                     literal "user:password" when cookie auth is not available
+#
+# Read-only either way: this issues getblockhash and getblock and nothing else.
+import os
+HOST = os.environ.get("HAZYNC_RPC_HOST", "127.0.0.1")
+PORT = int(os.environ.get("HAZYNC_RPC_PORT", "8332"))
+COOKIE = pathlib.Path(os.environ.get("HAZYNC_RPC_COOKIE",
+                                     str(pathlib.Path.home() / ".bitcoin" / ".cookie")))
+
+def _auth():
+    literal = os.environ.get("HAZYNC_RPC_AUTH")
+    if literal:
+        return base64.b64encode(literal.strip().encode()).decode()
+    if not COOKIE.exists():
+        raise SystemExit(
+            f"no RPC credentials: {COOKIE} does not exist and HAZYNC_RPC_AUTH is unset.\n"
+            f"Set HAZYNC_RPC_COOKIE to the node's cookie path, or HAZYNC_RPC_AUTH to 'user:pass'.")
+    return base64.b64encode(COOKIE.read_text().strip().encode()).decode()
 
 def rpc(method, params=None):
-    auth = base64.b64encode(COOKIE.read_text().strip().encode()).decode()
+    auth = _auth()
     body = json.dumps({"jsonrpc": "2.0", "id": "h", "method": method, "params": params or []})
     c = http.client.HTTPConnection(HOST, PORT, timeout=600)
     c.request("POST", "/", body, {"Authorization": "Basic " + auth, "Content-Type": "application/json"})
