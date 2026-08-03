@@ -291,8 +291,13 @@ extern "C" int check_witness_commitment(const uint8_t* cb, unsigned cb_len,
 
 // BIP34: from height 227931 the coinbase scriptSig must begin with a push of the block height.
 // Compared against Core's own `CScript() << height` serialization (minimal push). 1 valid.
+// Defined further down (it builds CChainParams once); declared here so the BIP34 gate can read the
+// buried height out of Core rather than repeating it as a literal.
+static const Consensus::Params& mainnet_params();
+
 extern "C" int check_bip34(const uint8_t* cb, unsigned cb_len, uint32_t height) {
-    if (height < 227931) return 1; // pre-activation (Core mainnet consensus.BIP34Height = 227931)
+    // Read from Core's own compiled Consensus::Params rather than typed here — see core_bip34_height.
+    if (height < (uint32_t)mainnet_params().BIP34Height) return 1;
     MiniReader r{reinterpret_cast<const std::byte*>(cb), reinterpret_cast<const std::byte*>(cb) + cb_len};
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);
@@ -495,6 +500,10 @@ extern "C" uint32_t core_bip66_height()            { return (uint32_t)mainnet_pa
 extern "C" uint32_t core_bip65_height()            { return (uint32_t)mainnet_params().BIP65Height; }
 extern "C" uint32_t core_csv_height()              { return (uint32_t)mainnet_params().CSVHeight; }
 extern "C" uint32_t core_segwit_height()           { return (uint32_t)mainnet_params().SegwitHeight; }
+// BIP34Height was the ONE buried height still hand-typed (audit #3 phase-2 sweep). Its four siblings
+// were already read from Core; this one was a literal in two places, so the claim that nothing
+// consensus-relevant is a hand-typed magic number did not hold for it.
+extern "C" uint32_t core_bip34_height()            { return (uint32_t)mainnet_params().BIP34Height; }
 extern "C" uint32_t core_retarget_interval()       { return (uint32_t)mainnet_params().DifficultyAdjustmentInterval(); }
 extern "C" uint32_t core_subsidy_halving_interval(){ return (uint32_t)mainnet_params().nSubsidyHalvingInterval; }
 extern "C" int64_t  core_max_block_weight()        { return (int64_t)MAX_BLOCK_WEIGHT; }

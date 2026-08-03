@@ -103,6 +103,7 @@ extern "C" {
     fn core_bip65_height() -> u32;
     fn core_csv_height() -> u32;
     fn core_segwit_height() -> u32;
+    fn core_bip34_height() -> u32;
     fn core_retarget_interval() -> u32;
     fn core_max_block_weight() -> i64;
     fn core_max_block_sigops_cost() -> i64;
@@ -144,6 +145,7 @@ fn assert_core_constants() {
         assert_eq!(RETARGET_INTERVAL, core_retarget_interval(), "RETARGET_INTERVAL != Core");
         assert_eq!(MAX_BLOCK_WEIGHT, core_max_block_weight(), "MAX_BLOCK_WEIGHT != Core");
         assert_eq!(MAX_BLOCK_SIGOPS_COST, core_max_block_sigops_cost(), "MAX_BLOCK_SIGOPS_COST != Core");
+        assert_eq!(BIP34_HEIGHT, core_bip34_height(), "BIP34Height != Core");
         assert_eq!(sf::BIP66_HEIGHT, core_bip66_height(), "BIP66Height != Core");
         assert_eq!(sf::BIP65_HEIGHT, core_bip65_height(), "BIP65Height != Core");
         assert_eq!(sf::CSV_HEIGHT, core_csv_height(), "CSVHeight != Core");
@@ -168,6 +170,11 @@ fn assert_core_constants() {
 // becomes unspendable). At exactly these two blocks the guest deletes the superseded coinbase leaf so
 // it can't linger spendable (F3). 91842 duplicates 91812's coinbase; 91880 duplicates 91722's.
 // (BIP34, enforced from 227931, makes coinbases unique thereafter, so no later duplicate can occur.)
+/// Core mainnet `consensus.BIP34Height`. Runtime-pinned to Core's compiled value by
+/// `assert_core_constants`, like BIP66/BIP65/CSV/Segwit — audit #3's phase-2 sweep found this was the
+/// one buried height still hand-typed, in two places, with nothing checking it.
+const BIP34_HEIGHT: u32 = 227_931;
+
 const BIP30_OVERWRITE_A: [u8; 32] = [0xec, 0xca, 0xe0, 0x00, 0xe3, 0xc8, 0xe4, 0xe0, 0x93, 0x93, 0x63, 0x60, 0x43, 0x1f, 0x3b, 0x76, 0x03, 0xc5, 0x63, 0xc1, 0xff, 0x61, 0x81, 0x39, 0x0a, 0x4d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91842
 const BIP30_OVERWRITE_B: [u8; 32] = [0x21, 0xd7, 0x7c, 0xcb, 0x4c, 0x08, 0x38, 0x6a, 0x04, 0xac, 0x01, 0x96, 0xae, 0x10, 0xf6, 0xa1, 0xd2, 0xc2, 0xa3, 0x77, 0x55, 0x8c, 0xa1, 0x90, 0xf1, 0x43, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00]; // block 91880
 
@@ -405,7 +412,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // 227931), BIP66 (v>=3 @363725), BIP65/CLTV (v>=4 @388381). The height-derived script flags already
     // enforce the RULES; this rejects the stale header itself as Core does, closing an accept-invalid gap.
     let version = i32::from_le_bytes(w.header[0..4].try_into().unwrap());
-    if (version < 2 && w.height >= 227_931)
+    if (version < 2 && w.height >= BIP34_HEIGHT)
         || (version < 3 && w.height >= 363_725)
         || (version < 4 && w.height >= 388_381) {
         all_ok = false;
