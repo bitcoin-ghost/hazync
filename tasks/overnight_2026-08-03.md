@@ -123,3 +123,29 @@ The later blocks are 2.7 MB with large input counts and take well over ten minut
 so the remaining five run in the background. No boundary has failed so far — which is the expected
 outcome, since #83 was filed as a COVERAGE gap and not a known bug. The value is that "expected" is
 now measured rather than assumed.
+
+### 434499 VALID — the finding this was all for
+
+The pre-segwit block carrying a BIP141 witness commitment with no witness data validates against the
+current guest. That is the shape `witness_ok`'s own comment says the pre-fix code REJECTED, and until
+now the fix was asserted by that comment with nothing driving it. It is now measured.
+
+Seven of eleven boundaries confirmed VALID: 227930/227931, 363724/363725, 388380/388381, 434499.
+
+### CI cost, measured rather than estimated
+
+Block 741000 (670 prevouts) takes ~45s. Prevout count is the cost driver:
+
+| set | fixtures | prevouts | est. CI |
+|---|---|---|---|
+| cheap | 227930, 227931, 363724, 363725, 388381 | ~2,760 | ~3 min |
+| heavy | 388380, 419327/8, 434499, 481823/4 | ~30,700 | ~34 min |
+
+So the fixtures go in per-push only for the cheap set; the heavy six belong on a schedule or manual
+dispatch. Adding 34 minutes to every push to re-prove blocks that do not change is the kind of cost
+that gets a suite disabled six months later.
+
+Storage measured too, not assumed: 18 MB raw compresses to **6.9 MB** in git against a 23 MB repo.
+Worth it to close a consensus coverage gap permanently.
+
+Note `block_363725.json` is 678 bytes — a coinbase-only block. A boundary fixture that costs nothing.
