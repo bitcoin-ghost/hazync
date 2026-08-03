@@ -130,8 +130,15 @@ fn bit(key: &Key, i: usize) -> bool {
 
 /// An inclusion **or** non-inclusion proof.
 ///
-/// `siblings` carries ONLY the non-default ones, ordered leaf-to-root, with `bitmap` marking which
-/// depths they belong to. A 256-deep path is otherwise 8 KB of mostly-constant hashes; in a tree of
+/// `siblings` carries ONLY the non-default ones, in ASCENDING DEPTH — root-to-leaf — with `bitmap`
+/// marking which depths they belong to. `compute_root` folds leaf-to-root (depth descending) and so
+/// consumes this vector from the END.
+///
+/// This comment said "leaf-to-root" until audit #3 (N-1). That is the wrong direction, and it is the
+/// wrong direction in the one place a reader checks before touching `prove` — where the FIRST bug in
+/// this file was a spurious `sibs.reverse()` that folded to a well-formed but incorrect root. See the
+/// "NOT reversed" note at the end of `prove`, which was correct all along; this is now consistent
+/// with it rather than contradicting it. A 256-deep path is otherwise 8 KB of mostly-constant hashes; in a tree of
 /// ~1M entries roughly 20 are non-default, so this is ~640 bytes. That compression is not cosmetic —
 /// it is the difference between ~1 GB and ~8 GB of extra bundle data across the chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
