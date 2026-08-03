@@ -29,7 +29,13 @@ BIP34's 227931 was a literal in two places with nothing checking it, while `repr
 claimed "nothing consensus-relevant is a hand-typed magic number now". Not a live bug — the value is
 right — but an unenforced claim, which is the F-1 shape. Now read from Core in the C++ and
 runtime-pinned in the Rust. Cycles 24,400,773 -> 24,401,107 on block 130000 (measured): the real cost
-of a call replacing a constant. All three fixtures still VALID. METHOD_ID now `1bed31ef…`.
+of a call replacing a constant. All three fixtures still VALID.
+
+The guest image id moved, as any guest edit does. It is deliberately NOT written here: `check-versions.sh`
+scans docs for tokens claimed as a guest id and fails anything that is not canonical or a documented
+predecessor — and it caught this file doing exactly that. The gate is right. A pre-release local build
+id in a doc is the stale-id trap the gate exists for, so the measured value lives in the commit message
+(`29a4a46`) and the authoritative one comes from the release container.
 
 **FILED #83 — no fixture drives any activation boundary.** Fixtures are at 130000/140000 (before
 everything) and 741000 (after everything), so every gate in `validate_block` has one side exercised
@@ -50,3 +56,35 @@ what was actually examined.
 The BIP34 build failed (`mainnet_params` not declared at that point in the file) and the fixtures then
 ran **off a stale binary**, printing three VALIDs. Caught only because the build log said exit 101
 while the run said pass. Always read the build result before trusting the run that follows it.
+
+## Phase 3/4 prep — two self-inflicted findings worth more than the work
+
+**A gate caught me, correctly.** `check-versions.sh` went red on *this file*: I had written a local
+pre-release guest id into it, and the gate fails any token claimed as a guest id that is not canonical
+or a documented predecessor. That is precisely the stale-id-in-docs trap it exists for, and the fact
+that the id was mine and fresh rather than someone else's and stale makes no difference to a reader.
+The measured value now lives only in the commit message; the authoritative one comes from the release
+container.
+
+**My own monitor gave a false completion.** I armed a watcher that reported "REPRO BUILD COMPLETE"
+because `docker image inspect hazync-repro` succeeded — against an image built **2026-07-26**, a week
+old, while the build was still in `apt-get`. A completion check that cannot distinguish "this build
+finished" from "a tag with this name exists" is the same defect class as the `ffi_smoke` printf and the
+hardcoded benchmark constant: a signal that cannot fail. Re-armed to wait on the build PROCESS and
+require an image-write line in the log.
+
+Recording it because an overnight run leans on these signals unattended, and a false green here would
+have had me re-pin `reproduce/METHOD_ID` from a week-old image.
+
+## SMT branch verification (pre-merge)
+
+All 9 gates PASS. Crate tests: accumulator 24, rangestate 3, coinbase-smt 27, guest-pure-fuzz 6,
+leaf-differential 6, audit-fuzz 2 — all green. Fixtures 130000 / 140000 / 741000 all VALID on the
+current guest.
+
+## Blocked
+
+#83 needs archive-node access to pull the 11 boundary fixtures (`getblockhash` + `getblock`,
+read-only). `fetch_block_rpc.py` now takes `HAZYNC_RPC_{HOST,PORT,COOKIE,AUTH}` so it is one command
+once reachable. Synthetic substitutes were assessed and rejected — mode 1 does not journal the
+individual gate flags, so a synthetic boundary test could not say WHICH gate fired.
