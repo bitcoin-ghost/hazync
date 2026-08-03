@@ -4,7 +4,7 @@
 |---|---|---|---|
 | `hazync-verify-aarch64` | `aarch64-unknown-linux-gnu` | 1,708,632 B | `d25ab8949eff…` (see `.sha256`) |
 
-Rebuilt for canonical guest `71790584…`, cross-compiled with
+Rebuilt for canonical guest `dfc9eeda…`, cross-compiled with
 `aarch64-linux-gnu-gcc` in a container. This is the same binary published as the
 v0.14.0 release asset.
 Verified as ARM64 code under `qemu-aarch64-static` — accepts the
