@@ -510,8 +510,17 @@ mkdir /var/lib/hazync/proofs && chown hazync:hazync /var/lib/hazync/proofs
 # coordinator keeps serving a genesis-anchored proof made by the OLD guest, and /api/spine/proof —
 # the exact command the README's 30-second demo tells strangers to run — fails against the new
 # verifier. Missed on 2026-08-02 and caught only by walking the published path as a stranger.
-mv /opt/hazync/coordinator/spine /opt/hazync/coordinator/spine.<OLD_ID_PREFIX>
-mkdir /opt/hazync/coordinator/spine && chown hazync:hazync /opt/hazync/coordinator/spine
+# ⚠⚠ READ COORD_SPINE FROM THE UNIT — DO NOT ASSUME THE DEFAULT. Production overrides it to
+#    /var/lib/hazync/spine, so archiving <server.py dir>/spine (the default) moves an EMPTY leftover
+#    directory and leaves the real, old-guest spine live and being served. That happened on
+#    2026-08-03: the board reported proven 0 / frontier 0 and spine_hi 8156, and /api/spine/proof kept
+#    returning a proof made by the retired guest. The 8156 was the only visible symptom.
+SPINE=$(systemctl show hazync-coordinator -p Environment --value | tr ' ' '\n' \
+        | grep -oP 'COORD_SPINE=\K.*')
+SPINE=${SPINE:-/opt/hazync/coordinator/spine}
+echo "spine is at: $SPINE"          # CHECK THIS before moving anything
+mv "$SPINE" "$SPINE.<OLD_ID_PREFIX>"
+mkdir "$SPINE" && chown hazync:hazync "$SPINE"
 # ⚠ the services run as USER hazync since #58 — anything you recreate by hand must be chowned, or the
 #   coordinator starts, serves reads, and silently fails every write. That includes the PARENT
 #   directory: /var/lib/hazync itself must be hazync-owned, or sqlite cannot CREATE the new DB and
