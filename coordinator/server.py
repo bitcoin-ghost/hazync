@@ -443,6 +443,12 @@ def sync_from_peers(limit=200):
     the peer claims is dropped. The worst a hostile peer can do is waste our bandwidth serving junk we
     reject; it cannot put anything on our board.
 
+    That contract covers the RECEIPT. It does not cover the peer's other strings, and audit #3 (F-4)
+    found the gap: the range id is peer-controlled and reaches a filesystem path. Every peer-supplied
+    id is now shape-validated through `parse_any_range` before it is used for anything at all. If you
+    add a new peer-supplied field here, validate it at the point of entry — this docstring's promise
+    is about proofs, and it is not self-executing for everything else that arrives in the same JSON.
+
     Attribution is preserved: the peer reports the handle that earned it, and we record that rather
     than crediting ourselves. Adopting someone's proof is not the same as having proved it.
 
@@ -466,6 +472,22 @@ def sync_from_peers(limit=200):
             if adopted + rejected >= limit:
                 break
             rid = str(v.get("id") or f'{v["lo"]}-{v["hi"]}' if v.get("lo") != v.get("hi") else str(v.get("lo")))
+            # AUDIT #3 F-4 — VALIDATE THE PEER'S id BEFORE IT IS USED FOR ANYTHING.
+            #
+            # `rid` is peer-controlled and reaches a URL, a SQL parameter and — the one that matters —
+            # open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb"). A `/` or `..` in it is an
+            # arbitrary file write. Today that is incidentally unreachable on Linux, because the
+            # "proof_" prefix becomes the first path component and traversal past it needs a directory
+            # literally named proof_* to exist, so resolution fails with ENOENT and the surrounding
+            # `except` swallows it. That is luck, not a control: one stray mkdir away, on an input this
+            # feature's own contract calls untrusted, in code that is not wired up yet and will be.
+            #
+            # parse_any_range requires every part to parse as an int, which is exactly the shape gate
+            # the submit path already relies on to sanitise /api/proof/<id>. Same function, so the two
+            # paths cannot diverge on what an id is allowed to be.
+            if parse_any_range(rid) is None:
+                rejected += 1
+                continue
             if rid in have:
                 continue
             try:

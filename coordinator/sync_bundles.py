@@ -26,7 +26,11 @@ Usage:
   python3 sync_bundles.py https://peer.example/hazync ./bundles --from 1 --to 220000
   python3 sync_bundles.py https://peer.example/hazync ./bundles --from 1 --to 220000 --dry-run
 """
-import argparse, io, json, os, sys, tarfile, time, urllib.request, urllib.error
+import argparse, io, json, os, shutil, sys, tarfile, time, urllib.request, urllib.error
+
+# Largest single bundle we will write. Real bundles average ~340 KB; the biggest mainnet block
+# (741000, 670 inputs) is under 1 MB. 64 MB is orders of magnitude of headroom and still bounded.
+MAX_MEMBER_BYTES = 64 * 1024 * 1024
 
 
 def fetch_chunk(peer, frm, count, timeout):
@@ -46,6 +50,7 @@ def extract(blob, out_dir):
     members = tf.getmembers()
     manifest = None
     written = 0
+    skipped = 0
     for m in members:
         if m.name == "MANIFEST.json":
             manifest = json.loads(tf.extractfile(m).read())
@@ -57,14 +62,34 @@ def extract(blob, out_dir):
         if not name.startswith("bundle_") or not name.endswith(".json"):
             print(f"  skipping unexpected member {m.name!r}", file=sys.stderr)
             continue
+        # AUDIT #3 N-2 — bounded, and STREAMED rather than read whole.
+        #
+        # `.read()` on a tar member is unbounded: a peer declaring a 40 GB bundle would have had the
+        # client buffer it in memory. The peer is operator-chosen, not anonymous, so this is a
+        # robustness bound rather than a security boundary — but a client that OOMs on a malformed or
+        # malicious archive is a bad way to find that out, and the size is declared in the header, so
+        # refusing early costs nothing.
+        #
+        # The cap is generous against real bundles (~340 KB average, block 741000 is ~0.9 MB) and
+        # still far below anything that threatens the process.
+        if m.size > MAX_MEMBER_BYTES:
+            print(f"  refusing {name}: {m.size} bytes exceeds the {MAX_MEMBER_BYTES}-byte cap",
+                  file=sys.stderr)
+            skipped += 1
+            continue
         dst = os.path.join(out_dir, name)
         tmp = dst + ".tmp"
+        src = tf.extractfile(m)
         with open(tmp, "wb") as fh:
-            fh.write(tf.extractfile(m).read())
+            shutil.copyfileobj(src, fh, 1024 * 1024)   # streamed: peak memory is the chunk, not the file
         os.replace(tmp, dst)      # atomic: a killed run never leaves a half-written bundle behind
         written += 1
     if manifest is None:
         raise SystemExit("chunk had no MANIFEST.json — that peer is not serving #69's format")
+    if skipped:
+        # Reported, not swallowed: a bundle refused for size is a bundle you do not have, and the
+        # resume pass will try it again rather than the gap being silently permanent.
+        print(f"  {skipped} member(s) refused for exceeding the size cap", file=sys.stderr)
     return written, manifest
 
 

@@ -460,6 +460,44 @@ finally:
     _srv.shutdown()
     server.BRIDGE_DIR, server.BULK_MAX = _orig_bridge, _orig_bulk
 
+# ---------------------------------------------------------------------------------------------
+# Audit #3 F-4 / N-2 — peer-supplied strings and peer-supplied sizes.
+# ---------------------------------------------------------------------------------------------
+import sync_bundles as _sb
+
+# F-4: the peer's range id reaches a filesystem path. Validate it as a SHAPE before any use.
+for _bad in ["../../etc/passwd", "1/../../x", "0-1/../../y", "a", "", "-5", "1-"]:
+    check(server.parse_any_range(_bad) is None,
+          f"peer id {_bad!r} is refused by parse_any_range")
+check(server.parse_any_range("100-199") == (100, 199),
+      "a legitimate range id still parses — the validator is not refusing everything")
+
+# Order matters as much as presence: validating AFTER the open() would be no defence at all.
+# CODE ONLY — comments are stripped first. The first version of this check compared raw source
+# positions and failed, because the comment explaining the fix QUOTES the open() call it protects, so
+# `index()` found the comment rather than the code. A source-order assertion that a comment can move
+# is not measuring order.
+_src = "\n".join(l for l in inspect.getsource(server.sync_from_peers).splitlines()
+                 if not l.lstrip().startswith("#"))
+check("parse_any_range(rid) is None" in _src, "sync validates the peer's id")
+check(_src.index("parse_any_range(rid)") < _src.index("proof_{rid}.bin"),
+      "the id is validated BEFORE it is used to build a filesystem path")
+
+# N-2: a tar member declaring an enormous size must be refused, not buffered into memory.
+_out = tempfile.mkdtemp()
+_buf = _io.BytesIO()
+with tarfile.open(fileobj=_buf, mode="w") as _tf:
+    _man = json.dumps({"served": [], "missing": []}).encode()
+    _ti = tarfile.TarInfo("MANIFEST.json"); _ti.size = len(_man); _tf.addfile(_ti, _io.BytesIO(_man))
+    _ti = tarfile.TarInfo("bundle_1.json"); _ti.size = 10; _tf.addfile(_ti, _io.BytesIO(b"0123456789"))
+    _big = tarfile.TarInfo("bundle_2.json"); _big.size = _sb.MAX_MEMBER_BYTES + 1
+    _tf.addfile(_big, _io.BytesIO(b"\0" * _big.size))
+_w, _m = _sb.extract(_buf.getvalue(), _out)
+_files = sorted(os.listdir(_out))
+check("bundle_2.json" not in _files, "an oversized tar member is refused rather than written")
+check("bundle_1.json" in _files,
+      "a normal member in the same archive is still written — the cap is not refusing everything")
+
 print()
 if CONTROL:
     if fails:
