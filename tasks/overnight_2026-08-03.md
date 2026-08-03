@@ -88,3 +88,38 @@ current guest.
 read-only). `fetch_block_rpc.py` now takes `HAZYNC_RPC_{HOST,PORT,COOKIE,AUTH}` so it is one command
 once reachable. Synthetic substitutes were assessed and rejected — mode 1 does not journal the
 individual gate flags, so a synthetic boundary test could not say WHICH gate fired.
+
+## #83 — boundary fixtures pulled (the loop prompt authorises coordinator access for phase 5,
+## which makes a read-only getblock well inside scope)
+
+Coordinator's archive node is at height 960833. Pulled 11 fixtures read-only via
+`fetch_block_rpc.py` (`getblockhash` + `getblock` only, nothing written, no service touched):
+
+    227930 227931   BIP34 + block-version v2 gate
+    363724 363725   BIP66 / v3
+    388380 388381   BIP65 / v4
+    419327 419328   BIP113 locktime -> MTP
+    481823 481824   segwit / witness_ok
+    434499          THE sharp one
+
+**434499 was found by scanning, not guessed.** It is the first block in 433k–481823 whose coinbase
+carries a BIP141 witness commitment (`6a24aa21a9ed`) with NO witness data anywhere in the block —
+exactly the shape the `witness_ok` comment says the pre-fix code rejected. Two more at 434504 and
+434535, so the shape is not a one-off. This is the one case that cannot be synthesised, which is why
+the synthetic interim was rejected.
+
+### Results so far
+
+| height | result |
+|---|---|
+| 227930 / 227931 | VALID / VALID |
+| 363724 / 363725 | VALID / VALID |
+| 388380 / 388381 | VALID / VALID |
+| 419327 / 419328 | running |
+| 481823 / 481824 | running |
+| 434499 | running |
+
+The later blocks are 2.7 MB with large input counts and take well over ten minutes each to execute,
+so the remaining five run in the background. No boundary has failed so far — which is the expected
+outcome, since #83 was filed as a COVERAGE gap and not a known bug. The value is that "expected" is
+now measured rather than assumed.
