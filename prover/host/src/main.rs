@@ -555,7 +555,18 @@ fn build_full() -> (ChainState, BlockWitness) {
         kind: KIND_CHAIN,
         tip_hash: arr(rev(hx(prev))), utxo_roots: forest.roots(), utxo_leaves: forest.leaves.len() as u64,
         cum_work: [0u8; 32], height: height - 1,
-        prev_nbits: bits, prev_time: time.saturating_sub(600), epoch_start: time.saturating_sub(600 * 1000),
+        // #83: use the REAL in-boundary retarget inputs when the fixture carries them. The old values
+        // were fabricated — prev_time as "this block minus 600s", epoch_start as "minus 1000 blocks".
+        // Harmless at a non-retarget height, where the guest carries nbits through unchanged; fatal at
+        // a retarget height, where calc_next_bits consumes epoch_start and the expected target is then
+        // derived from a timestamp that never existed. Block 481824 came back `block_valid=true
+        // retarget_ok=false` for exactly that reason: the block was fine, the fixture could not
+        // express it. Pre-#83 fixtures (130000/140000/741000) carry none of these and keep the old
+        // behaviour, which is correct for them because none is a retarget height.
+        prev_nbits: j["prev_bits"].as_u64().map(|v| v as u32).unwrap_or(bits),
+        prev_time: j["prev_time"].as_u64().map(|v| v as u32).unwrap_or_else(|| time.saturating_sub(600)),
+        epoch_start: j["epoch_start"].as_u64().map(|v| v as u32)
+            .unwrap_or_else(|| time.saturating_sub(600 * 1000)),
         // Real prev-11 block timestamps (median = MTP(height-1), the spend block's BIP68-time/BIP113
         // window) when the fetcher/bridge supplies them; else the benign placeholder for pre-S2 vectors
         // (130000/140000) that carry no `recent_times` — computed above (with the COV-1 hook applied).

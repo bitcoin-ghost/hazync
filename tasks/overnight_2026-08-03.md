@@ -149,3 +149,36 @@ Storage measured too, not assumed: 18 MB raw compresses to **6.9 MB** in git aga
 Worth it to close a consensus coverage gap permanently.
 
 Note `block_363725.json` is 678 bytes — a coinbase-only block. A boundary fixture that costs nothing.
+
+## The retarget-boundary finding — #83's real discovery
+
+481824 first came back **`block_valid=true retarget_ok=false`**. Reading that carefully mattered: the
+block passed every consensus flag. What failed was the *harness*.
+
+`build_full` fabricated two in-boundary values — `prev_time` as "this block's time minus 600s" and
+`epoch_start` as "minus 1000 blocks". Harmless at a non-retarget height, where the guest carries nbits
+through unchanged and never reads them. **Fatal at a retarget height**, where `calc_next_bits` consumes
+`epoch_start` and the expected target is derived from a timestamp that never existed.
+
+And this is not a corner: **BIP9 soft forks activate ON retarget boundaries by design.** 419328 (CSV)
+and 481824 (segwit) are both exactly 2016·k. So the two activation heights that most needed a fixture
+were precisely the two the fixture format could not express — the coverage gap had a second floor under
+it.
+
+Fixed: `fetch_block_rpc.py` now emits real `epoch_start` (first block of the PREVIOUS epoch, what
+Core's `CalculateNextWorkRequired` takes as `nFirstBlockTime`), `prev_time` and `prev_bits`. The host
+uses them when present and keeps the synthetic fallback for pre-#83 fixtures, which is correct for them
+because none is a retarget height.
+
+**481824 now VALID** — 5,192 inputs, 15.7B cycles, 446s.
+
+## A harness bug of my own, worth recording
+
+The first `ci_boundary_tests.sh` reported 227931 and 363725 as consensus failures. They were fine. The
+cause: `set -o pipefail` with `| grep -q`. grep exits on first match, closes the pipe, host takes
+SIGPIPE, pipefail turns that into a failed pipeline — so a block that printed VALID was reported as
+REJECTED. It was a RACE: fast blocks finish writing before grep leaves and "pass", slow ones do not.
+Capture first, then match.
+
+A test that reports valid mainnet blocks as consensus failures is worse than no test — it is the
+inverse of the F-1 problem and would have blocked a release on nothing.

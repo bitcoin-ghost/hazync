@@ -60,6 +60,20 @@ def main():
     height, out_path = int(sys.argv[1]), sys.argv[2]
     h = rpc("getblockhash", [height])
     b = rpc("getblock", [h, 3])
+
+    # RETARGET SUPPORT (hazync#83). The guest computes the expected nBits at every height where
+    # height % 2016 == 0, using the timestamp of the first block of the PREVIOUS epoch. A fixture that
+    # does not carry it forces the host to fabricate one, and the retarget check then compares against
+    # a target derived from a made-up timestamp — which is exactly how block 481824 came back
+    # `block_valid=true retarget_ok=false`: the block was fine, the fixture could not express it.
+    #
+    # This is not an edge case to skip. BIP9 soft forks activate ON retarget boundaries by design, so
+    # the activation heights that most need a fixture (CSV 419328, segwit 481824) are all retarget
+    # blocks. Emitted for every height, since it costs one extra call and a non-retarget block simply
+    # carries it unused.
+    epoch_first = ((height - 1) // 2016) * 2016 if height > 0 else 0
+    eb = rpc("getblock", [rpc("getblockhash", [epoch_first]), 1])
+    prev = rpc("getblock", [b["previousblockhash"], 1]) if height > 0 else None
     txs = b["tx"]
     print(f"block {height} ({h[:16]}..): {len(txs)} txs", flush=True)
 
@@ -90,7 +104,15 @@ def main():
            # the integer. Convert, or the guest sees a wrong difficulty target.
            "bits": int(b["bits"], 16), "nonce": b["nonce"], "prev": b["previousblockhash"],
            "merkle": b["merkleroot"], "coinbase_hex": txs[0]["hex"],
-           "recent_times": recent_times, "txs": []}
+           "recent_times": recent_times,
+           # #83: the in-boundary retarget inputs, so a block at a retarget height can be validated
+           # standalone. `epoch_start` is the timestamp of the first block of the PREVIOUS epoch —
+           # what Core's CalculateNextWorkRequired takes as nFirstBlockTime. `prev_time`/`prev_bits`
+           # are the previous block's, not this one's minus a guess.
+           "epoch_start": eb["time"],
+           "prev_time": prev["time"] if prev else b["time"],
+           "prev_bits": int(prev["bits"], 16) if prev else int(b["bits"], 16),
+           "txs": []}
 
     n_meta = 0
     for idx in range(1, len(txs)):
