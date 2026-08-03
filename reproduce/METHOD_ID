@@ -10,10 +10,16 @@
 #
 # ⚠ ANY EDIT TO GUEST SOURCE THAT MOVES LINE NUMBERS CHANGES THIS ID — INCLUDING COMMENTS.
 #
-# ⚠ AND "GUEST SOURCE" IS WIDER THAN prover/methods/guest/. The guest has PATH DEPENDENCIES, and they
-# are compiled into the ELF like any other guest code:
+# ⚠ AND "GUEST SOURCE" IS WIDER THAN prover/methods/guest/. The guest #[path]-INCLUDES source from
+# elsewhere in the tree, and it compiles into the ELF like any other guest code:
 #
-#     coinbase-smt/   — the BIP30 coinbase SMT (roots-only half; hazync#54)
+#     coinbase-smt/src/roots.rs   — the roots-only half of the BIP30 coinbase SMT (hazync#54)
+#     coinbase-smt/src/bip30.rs   — the per-block BIP30 state transition
+#
+# These are #[path] INCLUDES, not Cargo path dependencies, and the distinction is the whole of hazync#88:
+# Cargo makes a path dependency ABSOLUTE, Rust embeds it in panic metadata, and the id then depends on
+# where the repo happens to be checked out. Including the file keeps ONE copy (no drift between the
+# guest's check and the host's) while keeping the recorded path relative. Do not convert these back.
 #
 # A crate in that list can sit anywhere in the tree and have its own host-side test suite, and editing
 # it is still a re-baseline. This is not hypothetical: adding a five-line `empty_root()` helper to
@@ -226,5 +232,40 @@
 # fixtures before this id was pinned. Never pin from a local build.
 #
 # Superseded the earlier id 71790584…
+#
+# 2026-08-04 (v0.16.0): the id no longer depends on WHERE THE REPO IS CHECKED OUT (hazync#88).
+#
+# coinbase-smt was a Cargo PATH DEPENDENCY of the guest. Cargo resolves those to absolute paths and
+# Rust embeds them in panic metadata, so the same tree built at two locations produced two different
+# ids — measured: /hazync-zkvm gave dfc9eeda… and /repo gave 7649f929…. That made the container the
+# only way to get a usable id, when it should be the way to CONFIRM one.
+#
+# Fixed by #[path]-including the source instead. The ELF now records
+# src/../../../../coinbase-smt/src/roots.rs — relative. Same tree at both paths now yields this id, and
+# so does the container: three builds, two locations, one id.
+#
+# SCOPE, because the obvious over-claim is wrong: this removes the REPO path. The id still depends on
+# CARGO_HOME — the ELF carries /home/<user>/.cargo/registry/… for the risc0 crates — which is why the
+# container fixes HOME=/root and why the paragraph above still stands. This restores exactly the
+# property that held before #54, no more. Full path-independence would need an upstream risc0-build
+# change: it composes CARGO_ENCODED_RUSTFLAGS from static Cargo.toml metadata and ignores the
+# environment, so --remap-path-prefix cannot be injected per-machine.
+#
+# The split into roots.rs exists to make inclusion LEGAL, not for tidiness: #![no_std], extern crate
+# alloc and feature gates are all illegal in a non-root module, so the roots-only half carries none of
+# them and lib.rs keeps them. lib.rs is NOT guest-compiled; roots.rs and bip30.rs are. Editing the
+# std-only Smt in lib.rs does not re-baseline. Editing either of the other two does.
+#
+# Also landed: prover/methods/build.rs now watches those includes. Cargo only re-runs a build script
+# for changes inside its own package, and coinbase-smt is outside it, so editing the SMT had begun
+# leaving the previously-built guest ELF in place — a build that reported success while the embedded id
+# described source that was no longer there. Host-side only; it does not itself move the id.
+#
+# WHAT DID NOT CHANGE: guest LOGIC — nothing about consensus, the SMT algorithm, or the journal moved.
+# The id changed because file paths and line numbers did (the 7-line GUEST-COMPILED banner now at the
+# top of roots.rs and bip30.rs shifted every line below it), which is precisely the mechanism this file
+# warns about at the top.
+#
+# Superseded the earlier id dfc9eeda…
 
-dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f
+b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d

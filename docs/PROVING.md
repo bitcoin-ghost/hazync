@@ -108,7 +108,7 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release ships `METHOD_ID dfc9eeda` — a **NEW guest**, so
+either way. **Releases:** the current release ships `METHOD_ID b161735a` — a **NEW guest**, so
 **every proof made against `be5e0528` is invalid** and the board restarted from genesis. That was the
 price of two guest fixes from the first external reviews: `cshims.c`'s `_sbrk` bounds and `strtoul`
 base handling (#55), plus documenting `multi_check` (#59). Neither was worth a re-baseline alone —
@@ -203,7 +203,7 @@ proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
 the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id
-(`dfc9eeda…`, the current guest) for **both** the CPU and CUDA release binaries.
+(`b161735a…`, the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 
@@ -284,7 +284,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`dfc9eeda…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`b161735a…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

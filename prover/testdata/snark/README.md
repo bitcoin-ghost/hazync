@@ -1,7 +1,7 @@
 # Groth16 SNARK fixtures
 
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
-push (#23). Regenerated 2026-08-02 under canonical guest `dfc9eeda…` (cshims.c hardening + multi_check
+push (#23). Regenerated 2026-08-02 under canonical guest `b161735a…` (cshims.c hardening + multi_check
 docs — see `reproduce/METHOD_ID`),
 which changes every leaf hash and therefore invalidated the previous pair.
 
@@ -46,7 +46,7 @@ a stale or foreign id in documentation is exactly the drift it exists to catch. 
 
 ## These are tied to a METHOD_ID
 
-Both were wrapped under guest image id `dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f`
+Both were wrapped under guest image id `b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d`
 (v0.10.0). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
 re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.

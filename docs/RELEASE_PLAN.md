@@ -143,7 +143,7 @@ These are the items where being wrong costs money already spent.
 
 ## Re-baseline: what must move together
 
-The canonical guest is `dfc9eeda…` (BIP30 closed by a coinbase-only SMT #54, audit #3's 91842/91880
+The canonical guest is `b161735a…` (BIP30 closed by a coinbase-only SMT #54, audit #3's 91842/91880
 grandfather, BIP34Height read from Core), and the live board must serve it — the two cut over together.
 
 This section was written when `85dc0b56…` was staged *ahead of* a board still serving `3f52baff`, and

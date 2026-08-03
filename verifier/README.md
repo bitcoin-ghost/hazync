@@ -11,7 +11,7 @@ cargo build --release --manifest-path verifier/Cargo.toml
 ```
 >>> SNARK RANGE PROOF [1..1000] VERIFIED — genesis-anchored, 3441 bytes.
   out_tip_hash 09edf646…  range_work 4295032833000  total_cum_work 4299327865833  UTXO leaves 998
-  guest image id dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f
+  guest image id b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
 ```
 
 ## Why it exists

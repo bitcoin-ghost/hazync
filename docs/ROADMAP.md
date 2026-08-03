@@ -77,8 +77,10 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `dfc9eeda…` (BIP30 closed by a coinbase-only SMT, #54; the 91842/91880 grandfather from audit #3;
-  BIP34Height read from Core — see `reproduce/METHOD_ID`, authoritative). This sentence went stale
+  `b161735a…` (#88: the id no longer varies with where the repo is checked out — the shared SMT source
+  is `#[path]`-included rather than a Cargo path dependency, so the ELF records a relative path. It
+  still depends on `CARGO_HOME`, which is what the container fixes — see `reproduce/METHOD_ID`,
+  authoritative). This sentence went stale
   through two earlier re-baselines before `check-versions.sh` began requiring the canonical short id
   to appear here — the same stale-current-guest failure #53 gated against.
   Superseded history:
