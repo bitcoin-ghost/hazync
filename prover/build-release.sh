@@ -85,13 +85,27 @@ echo "   HEAD: $(git -C "$REPO" describe --tags --always 2>/dev/null || echo unk
 # which silently overrode provision-vps.sh's own default and pinned every release build to 600s — less
 # than the 488 MB rust toolchain needs on a domestic link, so raising the default there would have had
 # no effect here at all. A wrapper that hardcodes a default defeats the default it wraps.
-docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
+# MOUNTED AT /hazync-zkvm, NOT /repo, AND THE PATH IS LOAD-BEARING (hazync#88).
+#
+# The guest id embeds the ABSOLUTE path of any external path dependency. Since #54 the guest depends on
+# coinbase-smt, so the ELF carries e.g. "/repo/coinbase-smt/src/lib.rs" and the id changes with the
+# mount point. Building here at /repo while reproduce/Dockerfile builds at /hazync-zkvm produced a host
+# reporting 7649f929… against a canonical dfc9eeda… — a shipped host that rejects every proof from the
+# guest it is supposed to verify.
+#
+# Confirmed by building the same tree at three paths and getting three ids, and by finding
+# "/repo/coinbase-smt/src/lib.rs" in the guest ELF while the guest's OWN sources appear relative and
+# Core's are already normalised by -ffile-prefix-map.
+#
+# Matching the Dockerfile is the fix that unblocks a release. The deeper fix — remapping external path
+# dependencies so the id stops depending on the checkout location at all — is hazync#88.
+docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
     -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
-    cd /repo && REPO_DIR=/repo ./provision-vps.sh
-    H=/repo/prover/target/release/host
+    cd /hazync-zkvm && REPO_DIR=/hazync-zkvm ./provision-vps.sh
+    H=/hazync-zkvm/prover/target/release/host
     echo "=== METHOD_ID ==="; $H method-id
     echo "=== seg-po2 ==="; $H seg-po2
     echo "=== GLIBC ==="; objdump -T $H | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1
@@ -106,7 +120,7 @@ docker run --rm -v "$REPO:/repo" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive
     # ~/.risc0/bin) came back empty on 2026-07-31 even though the log said r0vm was installed. Search.
     R=$(command -v r0vm 2>/dev/null || find /root/.risc0 -name r0vm -type f 2>/dev/null | head -1)
     if [ -n "$R" ]; then
-        mkdir -p /repo/dist && cp "$R" /repo/dist/r0vm && echo "=== staged r0vm from $R ($(stat -c%s "$R") bytes) ==="
+        mkdir -p /hazync-zkvm/dist && cp "$R" /hazync-zkvm/dist/r0vm && echo "=== staged r0vm from $R ($(stat -c%s "$R") bytes) ==="
     else
         echo "=== WARNING: no r0vm found in the container; snark-wrap will not work on this host ===" >&2
         find /root/.risc0 -maxdepth 3 -type d 2>/dev/null | head -10 >&2
