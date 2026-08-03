@@ -52,12 +52,17 @@ rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md)) and validate
 taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** — CI rebuilds it from
 scratch and checks it matches.
 
-What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-02**
-when v0.14.0 re-baselined the guest, discarding 46,177 proven blocks. Re-proving is under way, on an
+What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-03**
+when v0.15.0 re-baselined the guest to close BIP30 permanently, discarding 16,949 proven blocks — the
+second reset in two days, and the price of changing the guest at all. Re-proving is under way, on an
 open board anyone can join. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
-quietly. **Two independent external reviews ran in August 2026 and neither found a soundness break in
-the guest, the verifier or the coordinator; both flagged the same two places as the residual risk, and
+quietly. **Three independent external reviews ran in August 2026. None found a way to make the guest ACCEPT an
+invalid chain — but the third found a canonical-chain break that would have made it REJECT a valid
+one**, stalling any from-genesis prover at block 91841, roughly 10% in. Blocks 91842 and 91880
+duplicate coinbases that were still unspent, which is the reason BIP30 exists, and the new
+non-membership check had no exception for them. Fixed in v0.15.0, with the real blocks now in the
+fixture set. The first two reviews flagged the same two places as the residual risk, and
 everything they raised is fixed or tracked ([`SECURITY.md`](SECURITY.md)). Those were code reviews,
 not a commissioned professional audit — that has still not happened.**
 
