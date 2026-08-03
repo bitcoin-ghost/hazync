@@ -26,6 +26,48 @@ permissions:
   contents: write
 
 jobs:
+  build-aarch64-verifier:
+    # BUILT HERE, NOT COMMITTED (hazync#85). This binary used to live in verifier/dist/ and be
+    # cross-compiled by hand. Every re-baseline stranded it: refreshing it needs a cross-toolchain no
+    # dev box has, so the tree carried a verifier for a retired guest that rejected every current
+    # proof. It happened once already at the be5e0528 re-baseline, and again at dfc9eeda.
+    #
+    # Its staleness is also invisible to the obvious check: swapping one 64-hex literal for another is
+    # LENGTH-PRESERVING, so a stale binary is byte-identical in size to a correct one. The assertion
+    # below greps the embedded id out of the raw bytes, which is the only thing that actually catches it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the aarch64 cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Build the aarch64 verifier
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --manifest-path verifier/Cargo.toml \
+                --target aarch64-unknown-linux-gnu
+          cp verifier/target/aarch64-unknown-linux-gnu/release/hazync-verify hazync-verify-aarch64
+      - name: Assert it embeds the CANONICAL guest id
+        # The whole reason this job exists. A verifier pinned to the wrong guest rejects every real
+        # proof, and nothing downstream would notice — sha256 and PGP both pass over a stale binary.
+        run: |
+          CANON=$(grep -vE '^[[:space:]]*#' reproduce/METHOD_ID | grep -oE '[0-9a-f]{64}' | head -1)
+          CANON8=${CANON:0:8}
+          n=$(strings hazync-verify-aarch64 | grep -c "$CANON8" || true)
+          echo "embedded occurrences of $CANON8: $n"
+          if [ "$n" -lt 1 ]; then
+            echo "::error::aarch64 verifier does not embed the canonical id $CANON8 — it would reject every current proof"
+            exit 1
+          fi
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" hazync-verify-aarch64 --clobber
+
   sign:
     runs-on: ubuntu-latest
     steps:
