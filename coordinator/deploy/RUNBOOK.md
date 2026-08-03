@@ -261,6 +261,21 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### Set RZUP_TIMEOUT when running build-release.sh
+
+`build-release.sh` forwards `RZUP_TIMEOUT` **only when the caller sets it** — deliberately, since a
+hardcoded default in a wrapper defeats the default it wraps. The consequence is easy to walk into: the
+groth16 component is a 488 MB download, and on anything short of a datacentre link it times out at the
+default and burns 3 x 300 s of retries before warning and carrying on.
+
+```bash
+RZUP_TIMEOUT=7200 ./prover/build-release.sh cpu
+```
+
+It is not fatal — groth16 is a RUNTIME rzup component, not something the host links against, so the
+build completes and the binary is fine without it. It just costs fifteen minutes of a release for
+nothing. Cost it once on 2026-08-03.
+
 ### Anything that PRODUCES a proof must be built at the CANONICAL paths
 
 A guest's image id embeds absolute build paths, so a host built anywhere else produces proofs that
