@@ -261,6 +261,32 @@ When the guest changes, `METHOD_ID` changes, and **every proof on the board was 
 id** — the coordinator will (correctly) reject them all on re-verification. The board must restart from
 genesis. This is not a failure; it is the price of a guest change, so batch guest changes deliberately.
 
+### The CUDA release build needs 25 GB free, and failing costs more than a failed build
+
+`build-release.sh cuda` consumed 21 GB -> 4.4 GB on the GPU box, burning **3.7 GB/minute** while
+unpacking the CUDA toolkit. It was killed a minute short of filling the root filesystem — which on a
+box running services is how things die silently, not merely how a build fails.
+
+**Check before starting, not after:**
+
+```bash
+df -h /            # want 25 GB+ free; 21 GB is NOT enough despite looking close
+```
+
+21 GB looked adequate right up until it did not. The consumption is not linear: most of it lands in a
+few minutes during the toolkit unpack, so a comfortable-looking figure five minutes in means nothing.
+
+**Where to reclaim it on a box that is short:**
+
+- `docker system prune -af` — 5.3 GB of unused images, always safe
+- `/usr/local/cuda-13.x` — RISC0 3.0.5 kernels do NOT build against 13.x, so a host-side 13.x install
+  is dead weight for this purpose (~4.8 GB). `provision-vps.sh` installs 12.6 inside the container.
+- `~/.hazync/receipts` — the prover's LOCAL copies. The coordinator holds the board's own store, so
+  clearing these loses nothing, and a re-baseline invalidates them regardless (~3.7 GB for 17k).
+
+**Pass `SKIP_GROTH16=1`.** groth16 is a runtime rzup component the host does not link against, so the
+release build does not need it — it only costs a 488 MB download and, on a slow link, three timeouts.
+
 ### Set RZUP_TIMEOUT when running build-release.sh
 
 `build-release.sh` forwards `RZUP_TIMEOUT` **only when the caller sets it** — deliberately, since a
