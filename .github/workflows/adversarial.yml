@@ -16,6 +16,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The heavy boundary set (#83) is ~34 minutes of execution over blocks that never change, so it runs
+  # nightly rather than per push. It still runs: a boundary nobody executes is the gap #83 was filed for.
+  schedule:
+    - cron: '0 3 * * *'
 
 # Superseding a branch makes its in-flight run pointless; let it be cancelled rather than sit in the
 # queue ahead of the run that matters. NOT applied to main: those runs are the record of what the
@@ -229,6 +233,29 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S warning $(git ls-files '*.sh')
 
+  boundary-heavy:
+    # The six expensive activation-boundary blocks (#83): 388380, 419327/8, 434499, 481823/4.
+    # ~30,700 prevouts, ~34 minutes. Nightly and on demand, never per push.
+    #
+    # 434499 is the one that matters most: the first pre-segwit block whose coinbase carries a BIP141
+    # commitment with no witness data anywhere. witness_ok's own comment records that checking the
+    # commitment at every height "rejected the canonical pre-activation blocks ... a reject-valid
+    # liveness bug in the 433k-481823 range". That was fixed and nothing drove the window it broke.
+    #
+    # 419328 and 481824 are both exactly 2016k, because BIP9 forks activate ON retarget boundaries —
+    # which is why their fixtures carry a real epoch_start rather than a synthesised one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision (RISC0 toolchain, Bitcoin Core v28 source, patches, build)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./provision-vps.sh
+      - name: Activation boundaries — heavy set
+        run: |
+          cd prover && HAZYNC_HOST=./target/release/host ./ci_boundary_tests.sh heavy
+
   soundness-suite:
     # Full build (RISC0 toolchain + Core source + patches) then run regress + adversarial.
     runs-on: ubuntu-latest
@@ -261,6 +288,17 @@ jobs:
           . "$HOME/.cargo/env"
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && HAZYNC_HOST=./target/release/host ./ci_negative_tests.sh
+      - name: Consensus activation boundaries — real blocks, cheap set (#83)
+        # Before #83 the fixtures were 130000/140000 (before every activation) and 741000 (after all of
+        # them), so every height gate in validate_block had one side exercised and no boundary. These
+        # are the real blocks either side of BIP34, BIP66 and BIP65.
+        #
+        # CHEAP SET ONLY here. Cost tracks prevout count: block 741000 has 670 and runs in ~45s; this
+        # set totals ~2,760 (~3 min). The heavy six total ~30,700 (~34 min) and run on a schedule
+        # instead — adding half an hour to every push to re-execute blocks that never change is how a
+        # suite gets switched off six months later.
+        run: |
+          cd prover && HAZYNC_HOST=./target/release/host ./ci_boundary_tests.sh cheap
       - name: BIP30 grandfathered overwrite (real block 91842)
         run: |
           . "$HOME/.cargo/env"
