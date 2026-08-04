@@ -179,8 +179,63 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     for tu in core_tus { println!("cargo:rerun-if-changed={core}/{tu}"); }
     println!("cargo:rerun-if-changed={shim}");
+    // secp256k1's sources are compiled by the FIRST cc::Build above, and they live outside this
+    // package exactly like Core's do — so cargo cannot infer them either. They were missing from this
+    // list, which is the same staleness class the list exists to prevent (audit #5, N-1): a manual edit
+    // under {secp}/src on a dev box would leave a stale object linked into a guest that reports a fresh
+    // id. Release builds are container-fresh so the shipped path was never affected; a dev machine is
+    // precisely where you would be editing these.
+    for tu in ["secp256k1.c", "precomputed_ecmult.c", "precomputed_ecmult_gen.c"] {
+        println!("cargo:rerun-if-changed={secp}/src/{tu}");
+    }
 
     b.compile("bitcoinconsensus");
+
+    // A DISCARDED re-compile of OUR OWN two translation units with the warnings turned back on.
+    //
+    // Both cc::Builds above set warnings(false), which passes `-w`. That is not laziness — Core and
+    // libsecp are third-party trees that warn copiously, and their noise is not ours to fix. But `-w`
+    // is global to the compile, so it silences our files too, and it silenced a real defect: coin_leaf
+    // was declared `bool` and fell off the end of its success path with no `return true`. Control
+    // reaching the end of a non-void function is UB, and coin_leaf_only branches on that return value
+    // to decide whether to zero the leaf — so a VALID coin could be zeroed on a compiler's whim, which
+    // in a zkVM means an honest block failing its accumulator delete non-deterministically.
+    //
+    // It survived a container build, CI, and an audit round, because nothing anywhere was looking.
+    //
+    // Doing this by adding `-Werror=return-type` to the builds above does NOT work, and that was
+    // measured rather than assumed: `-w` beats it in EVERY flag order (`-w -Werror=return-type`,
+    // `-Werror=return-type -w`, and with an explicit `-Wreturn-type` in between — all three compile the
+    // broken file silently). GCC's `-w` inhibits the diagnostic outright, so promoting a warning that
+    // is never issued promotes nothing. A separate compile is the only thing that actually fires.
+    //
+    // It lives in build.rs rather than a scripts/check-*.sh so it cannot be skipped: it runs on every
+    // guest build — container, CI, and dev box alike — and needs no toolchain discovery of its own. The
+    // objects go to a scratch path and are thrown away, so the guest ELF and METHOD_ID are untouched.
+    // Only OUR files are checked; Core and libsecp keep their `-w`.
+    let out = std::env::var("OUT_DIR").expect("OUT_DIR");
+    for (compiler, src, lang) in [
+        (&gpp, "verify_input.cpp", &["-std=c++20", "-fexceptions", "-fno-rtti"][..]),
+        (&gcc, "cshims.c", &[][..]),
+    ] {
+        let mut c = std::process::Command::new(compiler);
+        c.args(["-march=rv32im", "-mabi=ilp32", "-O2"]).args(lang)
+            // Only the classes that are UB or a silent miscompile, not a style sweep — a warning set
+            // this code has never been held to would fail on noise and get switched off within a week.
+            .args(["-Werror=return-type", "-Wreturn-type"])
+            .arg("-I").arg(&shim).arg("-I").arg(&core)
+            .arg("-I").arg(format!("{secp}/include"))
+            .arg("-I").arg(&secp).arg("-I").arg(format!("{secp}/src"))
+            .args(["-DECMULT_WINDOW_SIZE=19", "-DECMULT_GEN_KB=22",
+                   "-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1",
+                   "-DUSE_EXTERNAL_DEFAULT_CALLBACKS=1"])
+            .args(["-c", src, "-o", &format!("{out}/warncheck.o")]);
+        let st = c.status().expect("run the guest warning check");
+        assert!(st.success(), "guest warning check FAILED on {src} (see the diagnostic above). This \
+            compile exists because the real build passes -w, which hides UB in our own sources — it \
+            already hid a non-void function with no return on its success path. Fix the source; do \
+            not remove this check.");
+    }
 
     // 3) C++ runtime: libstdc++ + libgcc (unwinder, dormant) + newlib libc/nosys.
     //    Lib dirs derived from gcc so they track whatever toolchain version rzup installed.
