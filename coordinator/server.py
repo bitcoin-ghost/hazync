@@ -1193,27 +1193,6 @@ def beat(body):
         return 400, {"error": "range and pubkey required"}
     if not parse_any_range(rid):
         return 400, {"error": "invalid range id"}
-
-    # A beat is authenticated by ASSIGNEE MATCH below, and pubkeys are public on the board — so anyone
-    # could renew anyone else's claim and hold a block out of the reopen pool (audit #5, L-2). Bounded:
-    # CLAIM_MAX kills the claim at claimed_at + CLAIM_MAX no matter how many beats it receives, so the
-    # ceiling is short-lived duplicate work rather than a stuck board.
-    #
-    # PHASED, because this is a live protocol. Requiring a signature outright would break every worker
-    # already in flight — a running prove beats to hold its claim, so an old worker would lose the claim
-    # mid-prove and the work with it. So: a signature that is PRESENT must be valid, and an absent one
-    # is still accepted. That closes it for updated workers immediately and breaks nobody.
-    #
-    # ⚠ This does NOT yet close the hole — an attacker simply omits the field. It becomes a real control
-    # only when the `if sig` below turns into `if not sig: return 401`, which is safe once the signing
-    # worker has been the released one for a full cycle. Do not read the presence of this block as the
-    # issue being fixed.
-    sig = body.get("sig", "")
-    if sig:
-        if not is_hex(pk, 32) or not is_hex(sig, 64):
-            return 400, {"error": "pubkey must be 32-byte hex and sig 64-byte hex (ed25519)"}
-        if not verify_sig(pk, sig, str(rid).encode()):
-            return 403, {"error": "beat signature does not verify for that pubkey"}
     now = time.time()
     with _lock:
         c = db()
