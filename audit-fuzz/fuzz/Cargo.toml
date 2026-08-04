@@ -26,3 +26,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "forest_cache_equivalence"
+path = "fuzz_targets/forest_cache_equivalence.rs"
+test = false
+doc = false
+bench = false
