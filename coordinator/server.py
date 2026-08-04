@@ -65,6 +65,11 @@ def is_genesis_anchored(in_tip, lo):
 # heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "3600"))    # 1 hour, then anyone may take it
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
+# How far a signed beat's timestamp may sit from ours. It bounds REPLAY of a captured beat, so it
+# wants to be small; it also has to absorb ordinary clock drift on a contributor's box plus request
+# latency, so it cannot be tiny. Two minutes is comfortably above NTP-corrected drift and well under
+# CLAIM_TTL, so a replayed beat can extend an abandoned claim by at most this much.
+BEAT_SKEW  = int(os.environ.get("BEAT_SKEW", "120"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # park a range as 'failed' after this many BLOCK-implicating failures
 MAX_ENV_FAILURES = int(os.environ.get("MAX_ENV_FAILURES", "12"))  # separate, looser cap for environmental (capacity) failures
 
@@ -1193,6 +1198,52 @@ def beat(body):
         return 400, {"error": "range and pubkey required"}
     if not parse_any_range(rid):
         return 400, {"error": "invalid range id"}
+
+    # A beat used to be authenticated by ASSIGNEE MATCH alone, and pubkeys are public on the board — so
+    # anyone could renew anyone else's claim and hold a block out of the reopen pool (audit #5, L-2).
+    # A SIGNATURE IS NOW REQUIRED.
+    #
+    # Landed as a hard requirement rather than phased in, because this ships with a guest re-baseline:
+    # every proof made against the old id is invalid, so every worker must take the new release anyway.
+    # A protocol break costs nothing at exactly this moment, and phasing would have left the hole open
+    # for a full release cycle for no benefit — an attacker just omits the field.
+    #
+    # The signed message is "<rid>:<ts>", not "<rid>". Signing the id alone leaves a captured beat
+    # replayable forever: an attacker who saw one legitimate beat could keep the claim alive after the
+    # holder ABANDONED it, which is the griefing case this is meant to stop. Binding a timestamp
+    # collapses that to BEAT_SKEW seconds. CLAIM_MAX remains the outer bound in every case.
+    sig, ts = body.get("sig", ""), body.get("ts")
+    if not sig:
+        return 401, {"error": "beat must be signed: sig over '<range>:<ts>' (ed25519)"}
+    if not is_hex(pk, 32) or not is_hex(sig, 64):
+        return 400, {"error": "pubkey must be 32-byte hex and sig 64-byte hex (ed25519)"}
+    # ts is INTEGER unix seconds, and that is part of the protocol rather than a preference.
+    #
+    # The signed message is built by formatting ts, so client and server must render the SAME
+    # characters or the signature cannot verify. An earlier revision accepted any number and used
+    # float(), which silently coupled the wire format to Python's float repr: the reference worker
+    # signs f"{time.time()}" and it agreed with itself, so it passed. Any other client sending the
+    # obvious thing — a whole-number JSON timestamp, as JWT iat/exp do — signs "<rid>:1754305000",
+    # the server rebuilds "<rid>:1754305000.0", and the beat is rejected 403 "signature does not
+    # verify for that pubkey": an error blaming the KEY for what is a number-formatting mismatch,
+    # on a public multi-operator board where third-party workers are the point. Found by testing a
+    # non-Python client's encoding against a live coordinator, not by reading this back.
+    #
+    # Integer seconds removes the ambiguity outright, and BEAT_SKEW is 120s so sub-second precision
+    # buys nothing. A non-integer is now a CLEAR 400 naming the canonical form, instead of a 403
+    # pointing at the wrong thing.
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return 400, {"error": "ts required (unix seconds), and must be a number"}
+    if float(ts) != int(ts):
+        return 400, {"error": "ts must be INTEGER unix seconds — the signed message is '<range>:<ts>' "
+                              "with ts rendered as a whole number"}
+    ts = int(ts)
+    # Reject a beat from outside the window in BOTH directions. A far-future ts would otherwise be a
+    # signature that stays valid indefinitely — the replay hole reintroduced by the caller's clock.
+    if abs(time.time() - ts) > BEAT_SKEW:
+        return 400, {"error": f"beat timestamp outside +/-{BEAT_SKEW}s — check your clock"}
+    if not verify_sig(pk, sig, f"{rid}:{ts}".encode()):
+        return 403, {"error": "beat signature does not verify for that pubkey"}
     now = time.time()
     with _lock:
         c = db()

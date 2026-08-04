@@ -77,9 +77,9 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
   `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
-  `b161735a…` (#88: the id no longer varies with where the repo is checked out — the shared SMT source
-  is `#[path]`-included rather than a Cargo path dependency, so the ELF records a relative path. It
-  still depends on `CARGO_HOME`, which is what the container fixes — see `reproduce/METHOD_ID`,
+  `4722cec8…` (audit #5: `coin_leaf` bounds guards, a 32-bit-safe overflow check in `coinbase_value`
+  — `__int128` does not exist on `rv32im` — and a `bool` whose success path had no `return true`, which
+  `-w` had hidden from the container, CI and an audit round alike. See `reproduce/METHOD_ID`,
   authoritative). This sentence went stale
   through two earlier re-baselines before `check-versions.sh` began requiring the canonical short id
   to appear here — the same stale-current-guest failure #53 gated against.
@@ -95,6 +95,11 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   two external-review findings batched into one re-baseline because neither was worth the cost alone;
   the second is COMMENTS ONLY, which moves the id regardless, since Rust embeds file/line in panic
   metadata).
+  → `dfc9eeda…` (#54: BIP30 closed by a coinbase-only SMT, plus audit #3's 91842/91880 grandfathering)
+  → `b161735a…` (v0.16.0, #88: the id no longer varies with where the repo is checked out — the shared
+  SMT source is `#[path]`-included rather than a Cargo path dependency, so the ELF records a relative
+  path. It still depends on `CARGO_HOME`, which is what the container fixes)
+  → `4722cec8…` (audit #5 guest guards; see the current-id note above)
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

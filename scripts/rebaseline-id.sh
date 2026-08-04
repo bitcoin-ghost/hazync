@@ -41,6 +41,17 @@ echo
 #   prover/evidence/**  are RECORDS OF PAST RUNS. Those runs really did happen under the old guest;
 #                       rewriting the id in them does not update a reference, it falsifies the
 #                       measurement. The first version of this script rewrote five evidence files.
+#   tasks/**            same category, and it was missed here for exactly one re-baseline. The
+#                       SHORT-form pass below already excludes tasks/, but this full-hex pass did not,
+#                       so the 4722cec8 re-baseline rewrote a dated line in
+#                       tasks/overnight_2026-08-03.md that recorded what the container id WAS that
+#                       night — turning a measurement into a false one. A dated log is history by
+#                       construction; the two passes now agree about that instead of disagreeing.
+#   prover/testdata/**  describes which guest PRODUCED the committed fixtures, and a proof carries its
+#                       guest id inside it. Re-pointing the prose does not re-point the .snark files —
+#                       it just makes the README claim they were made by a guest that never touched
+#                       them, hiding the very fact that they now need regenerating. Same re-baseline,
+#                       same falsification, undone by hand alongside tasks/.
 #   short forms         `3f52baff…` appears in the supersession CHAIN in ROADMAP.md and in past-tense
 #                       statements ("v0.10.0's 3f52baff changes the guest ELF again"). Those are
 #                       history and must survive. Only full 64-hex occurrences are rewritten; the
@@ -50,7 +61,8 @@ echo
 #                       does not visibly corrupt the file — it produces a binary that CLAIMS the new
 #                       id while containing the old build, which is worse than a corrupt one. The
 #                       aarch64 verifier in verifier/dist/ has to be REBUILT, not edited.
-mapfile -t FILES < <(git ls-files | grep -v '^prover/evidence/' | while read -r f; do
+mapfile -t FILES < <(git ls-files | grep -v '^prover/evidence/' | grep -v '^tasks/' \
+                                  | grep -v '^prover/testdata/' | while read -r f; do
     grep -Iq . "$f" 2>/dev/null || continue          # -I: skip binary files
     grep -lq "$OLD" "$f" 2>/dev/null && echo "$f"
 done)

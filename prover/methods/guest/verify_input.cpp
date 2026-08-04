@@ -60,8 +60,20 @@ static const unsigned char TAG_LEAF = 0x00;
 //   SHA256( TAG_LEAF || txid || vout || value || scriptPubKey || coin_height || is_coinbase || coin_mtp ).
 // Height, coinbase flag, and creation median-time-past are committed so maturity + BIP68 (height AND
 // time) checks can't lie about the coin's age.
-static void coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, unsigned input_idx,
+// Returns false without writing `out_leaf` when the witness cannot address the input; see the guard.
+static bool coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, unsigned input_idx,
                       uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp, uint8_t* out_leaf) {
+    // The one unguarded index in this file until audit #5 (L-1). Every sibling entry point validates
+    // the prevouts vector before indexing it — verify_input (-60), check_input_locks (-43),
+    // tx_full_sigops (poison cost), tx_input_prevout_txid (0) — and this did not, so a witness whose
+    // prevouts are shorter than vin produced a wild read. In a zkVM there is no memory protection to
+    // turn that into a fault; it silently reads whatever is adjacent.
+    //
+    // No exposure was ever demonstrated: check_tx's -24 rejects the same tx in the same loop, and a
+    // leaf built from garbage fails the accumulator delete regardless — every path already ended in a
+    // reject. Fixed anyway, because "unreachable" here rests on the ORDER of two checks in a different
+    // function, and that is a property of today's call sites rather than of this code.
+    if (input_idx >= spent.size() || input_idx >= tx.vin.size()) return false;
     const COutPoint& op = tx.vin[input_idx].prevout;
     const CTxOut& coin = spent[input_idx];
     CSHA256 h;
@@ -78,6 +90,7 @@ static void coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, 
     unsigned char cb = (unsigned char)(coin_is_coinbase ? 1 : 0); h.Write(&cb, 1);
     le(b8, coin_mtp, 4); h.Write(b8, 4);
     h.Finalize(out_leaf);
+    return true;
 }
 
 // Compute ONLY the coin leaf for an input (no VerifyScript) — cheap, used by the aggregation proof
@@ -92,7 +105,13 @@ extern "C" void coin_leaf_only(const uint8_t* tx_bytes, unsigned tx_len, unsigne
     MiniReader pr{reinterpret_cast<const std::byte*>(prevouts),
                   reinterpret_cast<const std::byte*>(prevouts) + prevouts_len};
     std::vector<CTxOut> spent; pr >> spent;
-    coin_leaf(tx, spent, input_idx, coin_height, coin_is_coinbase, coin_mtp, out_leaf);
+    // On an unaddressable input, ZERO the leaf rather than leaving the caller's buffer untouched.
+    // Returning without writing would hand back whatever happened to be in that memory — a
+    // non-deterministic result from a deterministic function, and the guest's whole contract is
+    // determinism. Zero is a value no real coin hashes to, so it fails the accumulator delete.
+    if (!coin_leaf(tx, spent, input_idx, coin_height, coin_is_coinbase, coin_mtp, out_leaf)) {
+        for (int i = 0; i < 32; ++i) out_leaf[i] = 0;
+    }
 }
 
 // Recompute the UTXO leaves a transaction CREATES — one per SPENDABLE output — so the guest can derive
@@ -327,8 +346,28 @@ extern "C" int64_t coinbase_value(const uint8_t* tx_bytes, unsigned tx_len) {
                  reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
     CMutableTransaction mtx;
     r >> TX_WITH_WITNESS(mtx);
+    // Detect the overflow instead of risking it (audit #5, N-2). Signed overflow is UB in C++, and
+    // while Core's CheckTransaction independently rejects any tx whose output total leaves MoneyRange —
+    // so no overflowed value has ever reached a decision — "unreachable" there is a property of another
+    // function running first, not of this one.
+    //
+    // NOT __int128: the guest is a 32-BIT riscv target (rv32im) and GCC does not provide __int128
+    // there. The first attempt at this fix used it and died with "expected primary-expression before
+    // '__int128'" — inside the container, after the whole dependency tree had built, which is a slow
+    // way to learn that host intuitions about integer widths do not survive the target change.
+    //
+    // __builtin_add_overflow is exact on any width, has no UB, and says what it means.
     int64_t s = 0;
-    for (const auto& o : mtx.vout) s += o.nValue;
+    for (const auto& o : mtx.vout) {
+        const int64_t v = static_cast<int64_t>(o.nValue);
+        // Saturate on overflow, in the direction it overflowed: |s| <= INT64_MAX going in, so the sign
+        // of the addend is the direction. A total outside int64 is nonsense the caller must reject, and
+        // both saturations are how it reads it — validate_block requires coinbase_val >= 0 AND
+        // coinbase_val <= subsidy + total_fee, so INT64_MIN fails the first and INT64_MAX the second.
+        if (__builtin_add_overflow(s, v, &s)) {
+            return v < 0 ? INT64_MIN : INT64_MAX;
+        }
+    }
     return s;
 }
 

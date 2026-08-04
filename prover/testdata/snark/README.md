@@ -1,9 +1,16 @@
 # Groth16 SNARK fixtures
 
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
-push (#23). Regenerated 2026-08-02 under canonical guest `b161735a…` (cshims.c hardening + multi_check
-docs — see `reproduce/METHOD_ID`),
-which changes every leaf hash and therefore invalidated the previous pair.
+push (#23).
+
+Regenerated 2026-08-04 under canonical guest `4722cec8…` (audit #5 guest guards — see
+`reproduce/METHOD_ID`), which superseded `b161735a…`. A proof carries its guest id inside it, so a
+re-baseline cannot be absorbed by editing anything: the pair has to be re-proved and re-wrapped, and
+until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and `verifier-wasm/test-parity.sh` fail — as
+they should, since a verifier pinned to the new id genuinely cannot accept a proof made by the old one.
+
+The 2026-08-02 regeneration before it was forced the same way, by the `b161735a…` lineage changing
+every leaf hash.
 
 **They were [1..1000] and are now [1..8].** The originals were folded from 1000 GPU block-proofs; on
 CPU that is ~9.6 days. Range length is irrelevant to what these fixtures test — `[1..8]` is exactly as
@@ -46,26 +53,54 @@ a stale or foreign id in documentation is exactly the drift it exists to catch. 
 
 ## These are tied to a METHOD_ID
 
-Both were wrapped under guest image id `b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d`
-(v0.16.0). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
+Both were wrapped under guest image id `4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae`
+(audit #5). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
 re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.
 
 ## Regenerating
 
 Needs a host binary with `snark-wrap` **and** a working Groth16 backend. Today that means a **CPU**
-build — Groth16 crashes in sppark on every CUDA build we ship (#20):
+build — Groth16 crashes in sppark on every CUDA build we ship (#20).
+
+**Use a CANONICAL host binary, but do NOT run the wrap inside the container.** Both halves of that
+sentence cost a run on 2026-08-04:
+
+* The binary must be the container-built one, or the fixtures are wrapped against a non-canonical id
+  (the id absorbs `$HOME/.cargo` paths) and CI rejects them. The id is baked in at BUILD time, so
+  copying the binary out of the image and running it on the host keeps it canonical — verify with
+  `host method-id` before trusting it.
+* `snark-wrap` **shells out to Docker** for the Groth16 compression. Run it inside the reproduce
+  container and it dies with `groth16 compress: Please install docker first` — there is no Docker
+  inside that container. Extract the binary and wrap on the host, where the daemon is reachable.
 
 ```sh
-# positive: fold a genesis-anchored range, then wrap it
-host fold-range r1.bin r2.bin f.bin        # ... log-depth tree up to [1..1000]
-host snark-wrap fold_1000.bin fold_8.snark
-host verify-snark fold_8.snark          # must PASS
+# get a canonical host binary OUT of the image, then confirm it is canonical
+cid=$(docker create hazync-repro) && docker cp "$cid:/hazync-zkvm/prover/target/release/host" ./host
+docker rm "$cid" && chmod +x ./host && ./host method-id      # must equal reproduce/METHOD_ID
+
+# block proofs. Use the BRIDGE path: bundles make each block O(1) instead of replaying the
+# accumulator from genesis, which is what makes a mid-chain block like 500 tractable at all.
+for h in 1 2 3 4 5 6 7 8 500; do curl -s "$COORD/api/witness/$h" > bundles/bundle_$h.json; done
+HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h   # ~8 min each, CPU
+
+# positive: fold [1..8] as an ALIGNED tree (1+2, 3+4, 5+6, 7+8 -> ... -> [1..8])
+./host fold-range range_1.bin range_2.bin f12.bin             # ... 7 folds, ~3 min each
+./host snark-wrap fold8.bin fold_8.snark                      # ~74 s
+./host verify-snark fold_8.snark                              # must PASS
 
 # negative: wrap any single mid-chain range
-host snark-wrap ~/.hazync/receipts/500.bin neg500.snark
-host verify-snark neg500.snark             # must FAIL, naming the genesis pin
+./host snark-wrap range_500.bin neg500.snark                  # ~75 s
+./host verify-snark neg500.snark                              # must FAIL, naming the genesis pin
 ```
+
+⚠ **One prove at a time.** A CPU prove holds ~4.7 GB. Three concurrent on a 12 GB box drove available
+memory to 276 MB and the kernel killed two of them — and a Docker OOM kill takes the container's
+stdout with it, so they failed with ZERO-BYTE logs that look like a mystery rather than exhaustion.
+
+⚠ Sanity-check the mid-chain receipt with `verify-any`, **not** `verify-range`. `verify-range` asserts
+the range starts at block 1, so it panics `range must start at block 1` on the negative fixture —
+which says the checker was pointed at the wrong thing, not that the receipt is bad.
 
 ## What this does NOT cover
 

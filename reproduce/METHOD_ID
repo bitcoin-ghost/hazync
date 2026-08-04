@@ -267,5 +267,68 @@
 # warns about at the top.
 #
 # Superseded the earlier id dfc9eeda…
+#
+# 2026-08-04 (audit #5): guest index guards, a 32-bit-safe overflow check, and a returnless bool.
+#
+# THREE GUEST CHANGES, batched into one re-baseline because the board reset costs the same whether
+# one thing changes or three.
+#
+# 1. coin_leaf guards its indices (L-1). Every sibling entry point validated the prevouts vector
+#    before indexing it and this one did not, so a witness whose prevouts are shorter than vin
+#    produced a wild read — and the zkVM has no memory protection to turn that into a fault. No
+#    exposure was ever demonstrated: check_tx's -24 rejects the same tx in the same loop, and a leaf
+#    built from garbage fails the accumulator delete regardless. Fixed anyway, because "unreachable"
+#    here rested on the ORDER of two checks in a DIFFERENT function — a property of today's call
+#    sites, not of this code. coin_leaf_only now ZEROES the leaf on an unaddressable input instead of
+#    leaving the caller's buffer untouched, which would return whatever was in that memory: a
+#    non-deterministic result from a function whose whole contract is determinism.
+#
+# 2. coinbase_value DETECTS its overflow (N-2) rather than resting on Core's CheckTransaction having
+#    already rejected the tx — again a property of another function running first.
+#
+#    NOT __int128, which was the first attempt and is the note worth keeping: the guest is a 32-BIT
+#    riscv target (rv32im) and GCC provides no __int128 there. It failed with "expected
+#    primary-expression before '__int128'" INSIDE THE CONTAINER, after the whole dependency tree had
+#    built — a 35-minute way to learn that host intuitions about integer widths do not survive the
+#    target change. __builtin_add_overflow is exact at any width and has no UB. Saturation is
+#    directional; both directions are fail-closed at the caller, which requires coinbase_val >= 0 AND
+#    coinbase_val <= subsidy + total_fee.
+#
+# 3. coin_leaf had NO `return true` on its success path. Introduced by (1) as a `bool` and never
+#    completed. Control reaching the end of a non-void function is UB, and coin_leaf_only branches on
+#    that value to decide whether to zero the leaf — so a VALID coin could be zeroed on whatever the
+#    compiler left in the return register: an honest block failing its accumulator delete,
+#    non-deterministically.
+#
+# WHY (3) REACHED A CONTAINER BUILD, CI AND AN AUDIT ROUND UNSEEN, because the mechanism generalises:
+# both cc::Builds in prover/methods/guest/build.rs pass warnings(false), i.e. `-w`. That is correct
+# for Core and libsecp — third-party trees whose noise is not ours — but `-w` is GLOBAL to the
+# compile, so it covered our own sources too. Nothing anywhere was looking.
+#
+# build.rs now re-compiles our own two TUs (verify_input.cpp, cshims.c) a second time with
+# -Werror=return-type and no `-w`, discarding the objects. Adding -Werror to the existing builds does
+# NOT work, and this was MEASURED rather than argued: `-w` beats it in every flag order tried, because
+# it inhibits the diagnostic outright and promoting a warning that is never issued promotes nothing.
+# The check lives in build.rs rather than a scripts/check-*.sh so it cannot be skipped or left unwired
+# — it runs on every guest build, container, CI and dev box alike. The objects go to OUT_DIR and are
+# thrown away, so the check itself does not affect this id.
+#
+# ALSO USEFUL, and the reason (2) should have been cheap: the pinned cpp toolchain (2024.1.5) is
+# installed LOCALLY under ~/.risc0/toolchains, and $HOME/hazync-build carries the Core + secp + shim
+# tree. The real verify_input.cpp therefore compiles for rv32im in about a second with build.rs's own
+# flags — a control reproduced the container's exact __int128 error locally, confirming the local
+# toolchain is a faithful proxy for that failure and not merely a laxer compiler. Use it before
+# spending a container build. The CONTAINER REMAINS THE AUTHORITY for the id itself; a local build
+# gives a different one by design (the id still embeds CARGO_HOME).
+#
+# WHAT DID NOT CHANGE: the build MECHANISM, and every consensus rule. These are guest-source edits to
+# bounds checks and an integer accumulator; nothing about Core's compiled code, the SMT, the
+# accumulator commitment or the journal moved.
+#
+# COST: the board resets again, one day after the #88 reset. Taken now because the alternative is
+# shipping a guest with known UB on a leaf-commitment path, and because a re-baseline never gets
+# cheaper — the same decision at 20% of the board would cost several times as much.
+#
+# Superseded the earlier id b161735a…
 
-b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
+4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae
