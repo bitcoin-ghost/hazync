@@ -6,6 +6,17 @@ project's box, and it is not depending on yours.
 
 This page states the real cost up front, because the software is the easy part.
 
+**You need a checkout**, not just the release:
+
+```bash
+git clone https://github.com/bitcoin-ghost/hazync
+```
+
+The signed release gives you the prover and the verifiers. The coordinator, the bridge tooling,
+`sync_bundles.py` and the systemd units live in the repo, and every command below is written relative
+to it. Said explicitly because most readers arrive here from the release page — where there is no
+`coordinator/` directory to run any of this from.
+
 ## What it actually costs
 
 | | |
