@@ -37,7 +37,21 @@ jobs:
     # below greps the embedded id out of the raw bytes, which is the only thing that actually catches it.
     runs-on: ubuntu-latest
     steps:
+      # PIN TO THE TAG BEING SIGNED, not the default branch (hazync#90).
+      #
+      # A bare checkout takes the default branch. On the normal `release: published` trigger those are
+      # the same commit, so nothing shows. But this workflow is also runnable by hand against ANY tag —
+      # the runbook tells you to do exactly that to sign or re-sign a past release — and there the two
+      # diverge. Re-signing v0.15.0 from a v0.16.0 main would build a verifier embedding the NEW guest,
+      # --clobber it onto the OLD release, and then attest it in that release's SHA256SUMS.
+      #
+      # That is worse than shipping something unsigned. An unsigned artifact is detectable; this would
+      # be a WRONG artifact carrying a good signature and a matching checksum, on a release whose every
+      # proof it rejects. The id assertion below reads the checked-out tree, so pinning the ref is also
+      # what makes that assertion mean "matches THIS tag" rather than "matches main".
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - name: Install the aarch64 cross toolchain
         run: |
           sudo apt-get update -qq
@@ -53,6 +67,11 @@ jobs:
       - name: Assert it embeds the CANONICAL guest id
         # The whole reason this job exists. A verifier pinned to the wrong guest rejects every real
         # proof, and nothing downstream would notice — sha256 and PGP both pass over a stale binary.
+        #
+        # "Canonical" means canonical FOR THE TAG BEING SIGNED. That is only true because the checkout
+        # above is pinned to that tag: reproduce/METHOD_ID is read from the checked-out tree, so an
+        # unpinned checkout would silently compare against main's id and pass while building a verifier
+        # that is wrong for this release (hazync#90).
         run: |
           CANON=$(grep -vE '^[[:space:]]*#' reproduce/METHOD_ID | grep -oE '[0-9a-f]{64}' | head -1)
           CANON8=${CANON:0:8}
