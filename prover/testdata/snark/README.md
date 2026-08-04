@@ -47,7 +47,7 @@ a stale or foreign id in documentation is exactly the drift it exists to catch. 
 ## These are tied to a METHOD_ID
 
 Both were wrapped under guest image id `b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d`
-(v0.10.0). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
+(v0.16.0). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
 re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.
 

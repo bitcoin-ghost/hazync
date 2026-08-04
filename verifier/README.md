@@ -51,11 +51,20 @@ checked less would be worse than the receipt it replaces — it would make a fab
 
 ```
 $ hazync-verify neg500.snark          # valid proof, but [500..500]
-VERIFICATION FAILED: range starts at block 500, not 1 — NOT genesis-anchored
+NOT A GENESIS-ANCHORED CHAIN PROOF
+
+  The SNARK is VALID and was produced by guest b161735a.
 
 $ hazync-verify bitflipped.snark      # one byte changed
-VERIFICATION FAILED: the proof is not valid for guest dfc9eeda — forged, tampered, corrupt, …
+VERIFICATION FAILED: the proof is not valid for guest b161735a — forged, tampered, corrupt, or produced by a different guest build.
+  underlying: verification indicates proof is invalid
 ```
+
+Note how differently the two read, because they are different claims. The bitflipped proof is *invalid*:
+nothing can be concluded from it. `neg500` is a perfectly **valid** proof that simply does not say what
+a chain proof must say — so the verifier confirms its validity and its guest, then refuses the anchor.
+Collapsing both into "VERIFICATION FAILED" would hide exactly the distinction that matters when someone
+shows you a proof of something real and hopes you read it as a proof of something else.
 
 ## The embedded image id
 

@@ -16,16 +16,18 @@ marked otherwise.
 Not an intermediate to be folded and deleted. A sceptic must be able to be handed one block and check
 it alone, rather than being told "we proved a range".
 
-**Status: achieved, and at risk.** A receipt exists and is served for each proven height. Verified on
-a live artifact, fetched from the board and checked with the released binaries (2026-08-01):
+**Status: achieved, and at risk.** A receipt exists and is served for each proven height. Verified on a
+real artifact — a single-block receipt proved from a coordinator witness bundle, then Groth16-wrapped,
+and checked with the released v0.16.0 binaries (2026-08-04):
 
 ```
-$ hazync-verify proof_20000.bin
+$ hazync-verify neg500.snark
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest dfc9eeda.
-$ host verify-any proof_20000.bin
-RANGE-OK lo=20000 hi=20000 out_leaves=19023 range_work=4295032833
+  The SNARK is VALID and was produced by guest b161735a.
+  It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
+$ host verify-any range_500.bin
+RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
 ```
 
 (`hazync-verify` exits 2 here: the SNARK is valid but this is a mid-chain **segment**, not a
