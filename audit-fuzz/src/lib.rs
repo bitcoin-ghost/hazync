@@ -20,6 +20,7 @@
 //!
 //! No panic is allowed on any input (libFuzzer treats a panic as a crash).
 
+pub mod forest_cache;
 use arbitrary::Arbitrary;
 use hazync_utreexo::{hash_leaf, Forest, Proof as RefProof};
 

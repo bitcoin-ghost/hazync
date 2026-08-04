@@ -295,6 +295,75 @@ impl Stump {
     }
 }
 
+
+/// The PRE-CACHE accumulator, kept verbatim as a reference oracle.
+///
+/// #40 rewrote `Forest` to cache internal nodes (a 185x speedup). That rewrite is the one change that
+/// could invalidate the exhaustive small-n assurance the accumulator rests on, so the implementation it
+/// replaced is retained here and diffed against — rather than trusting that the new one "looks right".
+///
+/// It is `pub` so there is exactly ONE reference: the unit tests in this crate and the differential
+/// fuzz target in `audit-fuzz/` compare against the same code. A second copy in the fuzz crate would
+/// only prove that copy self-consistent, which is the failure this oracle exists to avoid.
+///
+/// NOT a production path. Nothing outside tests and fuzzing should call it: it is O(n) per root and
+/// O(n) per proof, which is precisely what #40 removed.
+pub mod reference {
+    use super::*;
+
+/// The pre-cache implementations, verbatim. Reference only.
+pub fn naive_subtree_root(leaves: &[Hash], offset: usize, height: usize) -> Hash {
+    let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
+    while level.len() > 1 {
+        level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
+    }
+    level[0]
+}
+
+pub fn naive_trees(n: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for h in (0..usize::BITS as usize).rev() {
+        if (n >> h) & 1 == 1 {
+            out.push((offset, h));
+            offset += 1 << h;
+        }
+    }
+    out
+}
+
+pub fn naive_roots(leaves: &[Hash]) -> Vec<Option<Hash>> {
+    let mut roots =
+        vec![None; (leaves.len().max(1)).next_power_of_two().trailing_zeros() as usize + 1];
+    for (offset, height) in naive_trees(leaves.len()) {
+        if height >= roots.len() {
+            roots.resize(height + 1, None);
+        }
+        roots[height] = Some(naive_subtree_root(leaves, offset, height));
+    }
+    roots
+}
+
+pub fn naive_prove(leaves: &[Hash], index: usize) -> Proof {
+    let (offset, height) = naive_trees(leaves.len())
+        .into_iter()
+        .find(|&(off, h)| index >= off && index < off + (1 << h))
+        .expect("index out of range");
+    let local = index - offset;
+    let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
+    let mut pos = local;
+    let mut siblings = Vec::with_capacity(height);
+    while level.len() > 1 {
+        let sib = if pos & 1 == 0 { level[pos + 1] } else { level[pos - 1] };
+        siblings.push(sib);
+        level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
+        pos >>= 1;
+    }
+    Proof { leaf: leaves[index], position: local as u64, siblings }
+}
+
+}
+
 // ------------------------------------------------------------------ Forest (bridge oracle) ----
 
 /// The full accumulator: every leaf, in insertion order. Regenerates the exact same roots as a
@@ -902,57 +971,7 @@ mod cached_internals_equivalence {
     //! implementation is kept here verbatim as a reference oracle and diffed against, rather than
     //! trusting that the rewrite "looks right".
     use super::*;
-
-    /// The pre-cache implementations, verbatim. Reference only.
-    fn naive_subtree_root(leaves: &[Hash], offset: usize, height: usize) -> Hash {
-        let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
-        while level.len() > 1 {
-            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
-        }
-        level[0]
-    }
-
-    fn naive_trees(n: usize) -> Vec<(usize, usize)> {
-        let mut out = Vec::new();
-        let mut offset = 0usize;
-        for h in (0..usize::BITS as usize).rev() {
-            if (n >> h) & 1 == 1 {
-                out.push((offset, h));
-                offset += 1 << h;
-            }
-        }
-        out
-    }
-
-    fn naive_roots(leaves: &[Hash]) -> Vec<Option<Hash>> {
-        let mut roots =
-            vec![None; (leaves.len().max(1)).next_power_of_two().trailing_zeros() as usize + 1];
-        for (offset, height) in naive_trees(leaves.len()) {
-            if height >= roots.len() {
-                roots.resize(height + 1, None);
-            }
-            roots[height] = Some(naive_subtree_root(leaves, offset, height));
-        }
-        roots
-    }
-
-    fn naive_prove(leaves: &[Hash], index: usize) -> Proof {
-        let (offset, height) = naive_trees(leaves.len())
-            .into_iter()
-            .find(|&(off, h)| index >= off && index < off + (1 << h))
-            .expect("index out of range");
-        let local = index - offset;
-        let mut level: Vec<Hash> = leaves[offset..offset + (1 << height)].to_vec();
-        let mut pos = local;
-        let mut siblings = Vec::with_capacity(height);
-        while level.len() > 1 {
-            let sib = if pos & 1 == 0 { level[pos + 1] } else { level[pos - 1] };
-            siblings.push(sib);
-            level = level.chunks(2).map(|c| parent(&c[0], &c[1])).collect();
-            pos >>= 1;
-        }
-        Proof { leaf: leaves[index], position: local as u64, siblings }
-    }
+    use super::reference::{naive_prove, naive_roots};
 
     fn lf(i: u64) -> Hash {
         hash_leaf(&i.to_le_bytes())
