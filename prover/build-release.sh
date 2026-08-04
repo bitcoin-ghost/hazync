@@ -123,7 +123,34 @@ docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninte
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
-    cd /hazync-zkvm && REPO_DIR=/hazync-zkvm ./provision-vps.sh
+    cd /hazync-zkvm
+    # PREFLIGHT: prover/target is reused between runs (see above) — but that is only valid if it was
+    # produced by an image with the SAME glibc. Build once in this tree on the HOST (24.04, glibc 2.39)
+    # and the proc-macro .so files left behind cannot be loaded by this container (22.04, glibc 2.34).
+    # Cargo then dies with:
+    #
+    #   error: .../libborsh_derive-*.so: libc.so.6: version `GLIBC_2.39` not found
+    #     --> methods/build.rs:59:5   risc0_build::embed_methods();
+    #
+    # which names a proc-macro and a glibc version and says NOTHING about the cause. Cost a release
+    # build on 2026-08-04. The GLIBC report further down inspects the OUTPUT, so it cannot catch this:
+    # the build dies long before it. Nothing was looking at the INPUT.
+    #
+    # Discard rather than refuse. The target is a regenerable cache, and refusing would only make the
+    # operator discover the remedy after the wait. Losing it costs a full guest + CUDA-kernel rebuild;
+    # shipping is not at risk either way. This also catches a target left by a DIFFERENT container.
+    HAVE_GLIBC=$(objdump -T /lib/x86_64-linux-gnu/libc.so.6 2>/dev/null | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1)
+    NEED_GLIBC=$(find prover/target -name "*.so" -type f 2>/dev/null | head -200 | xargs -r objdump -T 2>/dev/null | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1)
+    if [ -n "$HAVE_GLIBC" ] && [ -n "$NEED_GLIBC" ] && [ "$HAVE_GLIBC" != "$NEED_GLIBC" ] &&
+       [ "$(printf "%s\n%s\n" "$HAVE_GLIBC" "$NEED_GLIBC" | sort -V | tail -1)" = "$NEED_GLIBC" ]; then
+      echo "== DISCARDING prover/target: its artifacts need $NEED_GLIBC, this image has $HAVE_GLIBC =="
+      echo "   Something built in this tree outside the container. Reusing those objects would fail"
+      echo "   inside risc0_build::embed_methods() with a misleading GLIBC error naming a proc-macro."
+      echo "   The target is a regenerable cache; rebuilding it from scratch is the correct state for"
+      echo "   a release build anyway. To keep the reuse optimisation, build only via this script."
+      rm -rf prover/target
+    fi
+    REPO_DIR=/hazync-zkvm ./provision-vps.sh
     H=/hazync-zkvm/prover/target/release/host
     # Checks that never need to RUN the binary come first, and always run.
     echo "=== GLIBC ==="; objdump -T $H | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1
