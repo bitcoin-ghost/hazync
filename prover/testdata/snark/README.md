@@ -1,9 +1,20 @@
 # Groth16 SNARK fixtures
 
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
-push (#23). Regenerated 2026-08-02 under canonical guest `b161735a…` (cshims.c hardening + multi_check
-docs — see `reproduce/METHOD_ID`),
-which changes every leaf hash and therefore invalidated the previous pair.
+push (#23).
+
+> ⚠ **THESE FIXTURES ARE STALE AND MUST BE REGENERATED.** They were produced 2026-08-02 under guest
+> `b161735a…`, which was superseded on 2026-08-04 by `4722cec8…` (audit #5 guest guards — see
+> `reproduce/METHOD_ID`). A proof carries its guest id inside it, so these cannot be re-pointed by
+> editing anything: they have to be re-proved and re-wrapped with the new guest.
+>
+> Until that happens the verifier fixtures fail, and they SHOULD — a verifier pinned to `4722cec8…`
+> genuinely cannot accept a proof made by `b161735a…`. That is the check working, not a broken test.
+> The affected steps are `prover/ci_snark_verify.sh`, `prover/ci_verify_any.sh` and
+> `verifier-wasm/test-parity.sh`.
+
+The 2026-08-02 regeneration was itself forced by the `b161735a…` lineage changing every leaf hash,
+which invalidated the pair before it.
 
 **They were [1..1000] and are now [1..8].** The originals were folded from 1000 GPU block-proofs; on
 CPU that is ~9.6 days. Range length is irrelevant to what these fixtures test — `[1..8]` is exactly as

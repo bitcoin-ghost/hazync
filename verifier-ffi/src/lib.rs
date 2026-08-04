@@ -18,7 +18,7 @@ use hazync_rangestate::{normalize_roots, RangeState, KIND_RANGE};
 /// Guest image id this build trusts. Pinned, and checked against `reproduce/METHOD_ID` by
 /// `scripts/check-versions.sh` — a re-baseline that forgets it ships a verifier that rejects
 /// every current proof.
-const METHOD_ID_HEX: &str = "b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d";
+const METHOD_ID_HEX: &str = "4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae";
 
 pub const HAZYNC_OK: i32 = 0;
 pub const HAZYNC_ERR_NULL: i32 = -1;
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn hazync_verify_proof(
 #[no_mangle]
 pub extern "C" fn hazync_method_id() -> *const std::os::raw::c_char {
     concat!(
-        "b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d",
+        "4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae",
         "\0"
     )
     .as_ptr() as *const std::os::raw::c_char

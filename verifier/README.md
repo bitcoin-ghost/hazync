@@ -11,7 +11,7 @@ cargo build --release --manifest-path verifier/Cargo.toml
 ```
 >>> SNARK RANGE PROOF [1..1000] VERIFIED — genesis-anchored, 3441 bytes.
   out_tip_hash 09edf646…  range_work 4295032833000  total_cum_work 4299327865833  UTXO leaves 998
-  guest image id b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
+  guest image id 4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae
 ```
 
 ## Why it exists
@@ -53,10 +53,10 @@ checked less would be worse than the receipt it replaces — it would make a fab
 $ hazync-verify neg500.snark          # valid proof, but [500..500]
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest b161735a.
+  The SNARK is VALID and was produced by guest 4722cec8.
 
 $ hazync-verify bitflipped.snark      # one byte changed
-VERIFICATION FAILED: the proof is not valid for guest b161735a — forged, tampered, corrupt, or produced by a different guest build.
+VERIFICATION FAILED: the proof is not valid for guest 4722cec8 — forged, tampered, corrupt, or produced by a different guest build.
   underlying: verification indicates proof is invalid
 ```
 

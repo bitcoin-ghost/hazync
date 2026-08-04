@@ -206,7 +206,7 @@ consensus failures.
 
 ## STOPPED at phase 4 — container METHOD_ID, and why I did not proceed
 
-Canonical (container, fixed paths):  b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
+Canonical at the time, since superseded (container, fixed paths):  b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
 Local build (this box):              1bed31ef0cb83c0dcabe0baaed1a4eff676c838569ffa07e8b96056ec9f32507
 reproduce/METHOD_ID still pins:      71790584… (pre-#54, as expected mid-flight)
 

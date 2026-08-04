@@ -24,7 +24,7 @@ and checked with the released v0.16.0 binaries (2026-08-04):
 $ hazync-verify neg500.snark
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest b161735a.
+  The SNARK is VALID and was produced by guest 4722cec8.
   It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
 $ host verify-any range_500.bin
 RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
