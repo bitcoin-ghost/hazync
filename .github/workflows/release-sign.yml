@@ -69,6 +69,21 @@ jobs:
         run: gh release upload "$TAG" hazync-verify-aarch64 --clobber
 
   sign:
+    # MUST wait for the aarch64 verifier, or it silently does not get signed.
+    #
+    # This job writes SHA256SUMS over whatever assets the release carries AT THE MOMENT IT RUNS. Without
+    # this dependency the two jobs race, and sign almost always wins — it only downloads, while the other
+    # installs a cross-toolchain and compiles. The result is a release where hazync-verify-aarch64 is
+    # present and correct but absent from the signed manifest, so an ARM user has a binary they cannot
+    # check. Nothing fails; the manifest is simply short an entry.
+    #
+    # Shipped that way in v0.15.0 and v0.16.0. It regressed in #85, which moved this binary from a
+    # committed file (already present at publish time, so always caught by the glob) to one built here —
+    # trading a staleness bug for a race, and the race is quieter than what it replaced.
+    #
+    # The step that writes the manifest now also asserts the count, so a future reordering fails loudly
+    # rather than shipping an unsigned artifact again.
+    needs: build-aarch64-verifier
     runs-on: ubuntu-latest
     steps:
       - name: Resolve and validate tag
@@ -111,6 +126,12 @@ jobs:
           ls -la
 
       - name: Write SHA256SUMS over the binaries
+        env:
+          # Needed by the completeness assertion below, which asks the release what it actually carries
+          # rather than trusting the local glob.
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
           cd dist
           # every shipped artifact, deterministic order; fail if there are none to sign.
@@ -124,6 +145,22 @@ jobs:
           # the delivery path where a substituted artifact is least likely to be noticed.
           bins=$(ls hazync-host-* hazync-verify-* hazync-worker hazync-verify.wasm 2>/dev/null | sort)
           if [ -z "$bins" ]; then echo "::error::no hazync-* artifacts on the release to sign"; exit 1; fi
+
+          # "Some artifacts" is not the bar — the bar is EVERY artifact the release carries. A glob that
+          # silently matches four of five reads exactly like success, which is how v0.15.0 and v0.16.0
+          # both shipped an unsigned aarch64 verifier. Compare against what is actually on the release.
+          missing=""
+          for a in $(gh release view "$RELEASE_TAG" -R "$REPO" --json assets --jq '.assets[].name' \
+                     | grep -E '^hazync-'); do
+            echo "$bins" | grep -qx "$a" || missing="$missing $a"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::these hazync-* assets are on the release but would NOT be signed:$missing"
+            echo "::error::a manifest that covers only some artifacts is worse than none — it looks complete."
+            exit 1
+          fi
+          echo "signing $(echo "$bins" | wc -l) artifact(s); none left unattested"
+
           sha256sum $bins > ../SHA256SUMS.txt
           cat ../SHA256SUMS.txt
 
