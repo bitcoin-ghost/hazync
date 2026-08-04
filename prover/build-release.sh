@@ -125,14 +125,33 @@ docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninte
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
     cd /hazync-zkvm && REPO_DIR=/hazync-zkvm ./provision-vps.sh
     H=/hazync-zkvm/prover/target/release/host
-    echo "=== METHOD_ID ==="; $H method-id
-    echo "=== seg-po2 ==="; $H seg-po2
+    # Checks that never need to RUN the binary come first, and always run.
     echo "=== GLIBC ==="; objdump -T $H | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1
     if [ "${GPU:-0}" = 1 ]; then
       CB=$(ls /usr/local/cuda*/bin/cuobjdump 2>/dev/null | head -1)
       [ -n "$CB" ] && echo "=== SASS ===" && $CB --list-elf $H 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " " && echo
     fi
-    echo "=== smoke ==="; $H bundle-roundtrip-test; $H regress
+    # Everything below EXECUTES the binary, and a CUDA build cannot execute without a driver
+    # (libcuda.so.1 comes from --gpus all, not from the toolkit). Building the CUDA backend without a
+    # card is supported on purpose, so "cannot run here" must not read as "build failed": these checks
+    # are skipped with a loud note, not treated as an error.
+    #
+    # This is deliberately AFTER the artifact is safe. A 59-minute build once died here because
+    # `$H method-id` could not load libcuda.so.1, and `set -e` took the whole run down before the
+    # copy-out — an hour of correct work discarded by a CHECK that could not run. Verification must
+    # never be able to destroy the thing it is verifying.
+    if $H method-id >/dev/null 2>&1; then
+      echo "=== METHOD_ID ==="; $H method-id
+      echo "=== seg-po2 ==="; $H seg-po2
+      echo "=== smoke ==="; $H bundle-roundtrip-test; $H regress
+    else
+      echo "=== NOT VERIFIED HERE: the binary cannot execute in this container ===" >&2
+      echo "    Almost certainly no NVIDIA driver (libcuda.so.1) because --gpus all was unavailable." >&2
+      echo "    The artifact is still produced and staged. Verify it where it can run:" >&2
+      echo "      hazync-host-x86_64-linux-gnu-cuda method-id      # want the canonical id" >&2
+      echo "      hazync-host-x86_64-linux-gnu-cuda regress" >&2
+      echo "    scripts/check-dist.sh accepts that result via HAZYNC_ATTEST_<artifact>=<id>." >&2
+    fi
     # Stage r0vm into the MOUNTED repo so it survives this --rm container. `host snark-wrap` shells
     # out to it, and provision installs it in here where nothing on the host can reach it.
     # Do not guess rzup'"'"'s layout — it has moved between versions and both guesses (PATH, and
