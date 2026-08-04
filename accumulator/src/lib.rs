@@ -1073,6 +1073,81 @@ mod cached_internals_equivalence {
             );
         }
     }
+
+    /// Delete, exhaustively, against the naive reference — every size and EVERY index (hazync#50).
+    ///
+    /// This is the gap the other tests leave. `exhaustive_sizes_add_only` is exhaustive but never
+    /// deletes; `random_add_delete_walk_matches_reference` deletes but *samples* — for a given
+    /// (size, index) pair it is chance whether that combination was ever tried. And the exhaustive
+    /// `exhaustive_single_delete_matches_forest` above compares Stump against Forest, i.e. two
+    /// post-#40 structures, so it cannot see an error they share.
+    ///
+    /// Delete is the operation the caching rewrite most endangered: swap-and-shrink moves the last
+    /// leaf into the hole, truncates each level bottom-up, and re-shapes the decomposition (n=4, one
+    /// height-2 tree, becomes n=3, a height-1 plus a height-0). Every one of those steps has to leave
+    /// the cache exactly as a from-scratch rebuild would.
+    ///
+    /// Three independent assertions, in order of what they can catch:
+    ///   1. the LEAF VECTOR against a plain `swap_remove` model — this is deliberately not derived
+    ///      from the forest, because assertions 2 and 3 compare the cache against a recomputation
+    ///      over `f.leaves` and would agree with each other if the leaf bookkeeping itself were wrong;
+    ///   2. the cached roots against `naive_roots`;
+    ///   3. every survivor's proof against `naive_prove`.
+    #[test]
+    fn exhaustive_single_delete_matches_naive() {
+        // Sizes 1..=40 exhaustively, then the powers-of-two neighbourhoods, where the tree
+        // decomposition changes shape and a boundary-only bug hides. Exhaustive-to-512 with every
+        // index would be ~130k deletes each re-proving every survivor; these are the sizes that carry
+        // the information.
+        let sizes: Vec<usize> = (1..=40).chain([63, 64, 65, 127, 128, 129, 255, 256, 257]).collect();
+        for n in sizes {
+            for i in 0..n {
+                let mut f = Forest::new();
+                let mut model: Vec<Hash> = Vec::new();
+                for k in 0..n {
+                    // Vary with n so distinct sizes use distinct leaves: identical leaves across
+                    // sizes would let an index mix-up still compare equal.
+                    let l = lf((k * 1000 + n) as u64);
+                    f.add(l);
+                    model.push(l);
+                }
+
+                f.delete(i);
+                model.swap_remove(i); // exactly what Forest::delete does: pop last, write into i
+
+                let check = |f: &Forest, model: &Vec<Hash>, stage: &str| {
+                    assert_eq!(f.leaves, *model, "leaf vector differs {stage} n={n} i={i}");
+                    assert_eq!(f.roots(), naive_roots(model), "roots differ {stage} n={n} i={i}");
+                    for idx in 0..model.len() {
+                        assert_eq!(
+                            f.prove(idx),
+                            naive_prove(model, idx),
+                            "proof differs {stage} n={n} i={i} idx={idx}"
+                        );
+                    }
+                };
+                check(&f, &model, "after delete");
+
+                // Then KEEP GOING. A single delete from a fresh forest cannot see cache damage that
+                // only surfaces once something reads the affected level again — an off-by-one that
+                // leaves one stale entry beyond the live region is invisible until a later add walks
+                // back over it. Measured: truncating to `want + 1` instead of `want` passes the
+                // single-delete check above and fails here.
+                for extra in 0..2u64 {
+                    let l = lf(900_000 + extra + (n * 97) as u64);
+                    f.add(l);
+                    model.push(l);
+                    check(&f, &model, "after follow-up add");
+                }
+                if !model.is_empty() {
+                    let j = model.len() / 2;
+                    f.delete(j);
+                    model.swap_remove(j);
+                    check(&f, &model, "after follow-up delete");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
