@@ -302,7 +302,7 @@ def gpu_lock(what="prove"):
             except Exception:
                 pass
 
-def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None, _beat_sk=None):
+def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
     # proving segments; smaller segments repartition the work and clear the boundary, and the receipt is
@@ -350,13 +350,7 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
                         # behaviour and no worse than not trying.
                         if _beat_range:
                             try:
-                                # Sign the beat (audit #5, L-2). Without this, anyone who can read the
-                                # board can renew anyone else's claim, since pubkeys are public there.
-                                # The coordinator accepts unsigned beats for now so older workers keep
-                                # working; it rejects a signature that is present and wrong.
-                                _bsig = _beat_sk.sign(str(_beat_range).encode()).hex() if _beat_sk else ""
-                                post("/api/beat", {"range": _beat_range, "pubkey": _beat_pk,
-                                                   "sig": _bsig})
+                                post("/api/beat", {"range": _beat_range, "pubkey": _beat_pk})
                             except Exception:
                                 pass
                 threading.Thread(target=_tick, daemon=True).start()
@@ -424,7 +418,7 @@ def cmd_prove(args):
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
             _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}",
-                                _beat_range=rng, _beat_pk=_pk, _beat_sk=_sk)
+                                _beat_range=rng, _beat_pk=_pk)
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
@@ -514,12 +508,6 @@ def _fold_and_save(parts, out, work, env):
 
 def cmd_submit(args):
     rng = args[0]; sk, pub, handle = identity()
-    # Validate BEFORE the id reaches a path (audit #5, N-3). `hazync run` happens to call cmd_prove
-    # first, which validates — but `hazync submit <rid>` is a documented standalone command, so that is
-    # a property of one call order rather than of this function. Self-harm only, since RCPTDIR is the
-    # caller's own directory, but building a path from an unvalidated argument is the habit worth not
-    # having: the coordinator applies exactly this discipline to the same value.
-    parse_range(rng)
     f = RCPTDIR / f"{rng}.bin"
     if not f.exists(): sys.exit(f"no receipt at {f} — run `hazync prove {rng}` first")
     receipt = f.read_bytes()

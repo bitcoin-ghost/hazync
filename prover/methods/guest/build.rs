@@ -179,15 +179,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     for tu in core_tus { println!("cargo:rerun-if-changed={core}/{tu}"); }
     println!("cargo:rerun-if-changed={shim}");
-    // secp256k1's sources are compiled by the FIRST cc::Build above, and they live outside this
-    // package exactly like Core's do — so cargo cannot infer them either. They were missing from this
-    // list, which is the same staleness class the list exists to prevent (audit #5, N-1): a manual edit
-    // under {secp}/src on a dev box would leave a stale object linked into a guest that reports a fresh
-    // id. Release builds are container-fresh so the shipped path was never affected; a dev machine is
-    // precisely where you would be editing these.
-    for tu in ["secp256k1.c", "precomputed_ecmult.c", "precomputed_ecmult_gen.c"] {
-        println!("cargo:rerun-if-changed={secp}/src/{tu}");
-    }
 
     b.compile("bitcoinconsensus");
 
