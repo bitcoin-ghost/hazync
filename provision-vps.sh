@@ -228,6 +228,26 @@ export HAZYNC_BASE="$WORK"
 export RISC0_HOME="$HOME/.risc0"
 export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:$PATH"
 
+# ...including the CUDA env, and GPU_FEATURES itself. Phase 7 is the ONLY place that sets
+# GPU_FEATURES=--features cuda, and `build` skips phase 7 — so before this, `GPU=1 HAZYNC_PROVISION=build`
+# accepted the flag and silently produced a CPU binary. Nothing failed and nothing warned; you only
+# found out by checking `ldd host | grep cuda` on something you believed was a GPU build, or by
+# watching a "GPU" prover run at CPU speed.
+#
+# A flag that is accepted and ignored is worse than one that is rejected, so this mirrors phase 7
+# exactly rather than erroring: the same paths, the same feature string.
+if [ "${GPU:-0}" = "1" ]; then
+  export CUDA_PATH=/usr/local/cuda-12.6
+  export PATH="/usr/local/cuda-12.6/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+  GPU_FEATURES="--features cuda"
+  command -v nvcc >/dev/null || {
+    echo "GPU=1 but nvcc is not on PATH (looked for /usr/local/cuda-12.6/bin/nvcc)." >&2
+    echo "Run the deps phase first: GPU=1 HAZYNC_PROVISION=deps $0" >&2
+    exit 1
+  }
+fi
+
 echo "== 8. build the prover (release${GPU_FEATURES:+ + CUDA}) — HAZYNC_BASE is exported above =="
 cd "$REPO_DIR/prover"
 cargo build --release $GPU_FEATURES
