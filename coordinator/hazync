@@ -21,15 +21,31 @@ Config (env):
   COORD_URL   coordinator base URL   (default https://bitcoinghost.org/hazync — the public party)
   HAZYNC_HOST path to the prover `host` binary. Optional: if unset, the binary is looked for beside
               this script, in ~/.hazync/bin, in the current directory, then on PATH (CUDA preferred).
-  BUNDLE_DIR  where fetched archive bundles live (default ~/.hazync/bundles)
-  WITNESS_DIR legacy per-block witnesses, replay fallback (default ~/.hazync/witnesses)
-Identity + receipts live under ~/.hazync/.
+  BUNDLE_DIR  where fetched archive bundles live (default $HAZYNC_HOME/bundles)
+  WITNESS_DIR legacy per-block witnesses, replay fallback (default $HAZYNC_HOME/witnesses)
+  HAZYNC_HOME identity + receipts (default ~/.hazync). Point it elsewhere and you are a DIFFERENT
+              contributor — a separate key and handle, credited separately on the board. Use it to
+              hold more than one identity on a box, or to try the party without touching your real key.
+Identity + receipts live under $HAZYNC_HOME (default ~/.hazync/).
 """
 import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil, random
 import signal
 import concurrent.futures
 
-HOME    = pathlib.Path(os.path.expanduser("~/.hazync"))
+# Where this contributor's IDENTITY lives — the signing key and handle, i.e. who gets credit.
+#
+# Overridable, because everything else here already is: COORD_URL, HAZYNC_HOST, WITNESS_DIR,
+# BUNDLE_DIR, HAZYNC_PROVE_TIMEOUT and friends. WITNESS_DIR and BUNDLE_DIR are *derived from this
+# path*, so without HAZYNC_HOME the tens of gigabytes under the root were redirectable and the 64-byte
+# key was not — the one thing you might actually want to move.
+#
+# Point it somewhere else and you are a DIFFERENT CONTRIBUTOR. That is the point: it lets one box hold
+# more than one identity, and lets you try the party without touching your real key. Before this, the
+# only way to get a clean identity was to override the OS $HOME wholesale, which also redirects
+# ~/.cargo, ~/.risc0 and anything else the prover's children read — a blunt instrument that happens to
+# work. (hazync#92, found when a "fresh contributor" test silently ran as an established one and its
+# work was credited to the handle already on the machine.)
+HOME    = pathlib.Path(os.environ.get("HAZYNC_HOME") or os.path.expanduser("~/.hazync"))
 KEY     = HOME / "key.hex"
 HANDLE  = HOME / "handle"
 RCPTDIR = HOME / "receipts"
