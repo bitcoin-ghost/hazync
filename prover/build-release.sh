@@ -49,7 +49,21 @@ mkdir -p "$OUT"
 NVCC_FLAGS='-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90'
 
 if [ "$MODE" = cuda ]; then
-    docker_args=(--gpus all -e "NVCC_APPEND_FLAGS=$NVCC_FLAGS" -e GPU=1)
+    docker_args=(-e "NVCC_APPEND_FLAGS=$NVCC_FLAGS" -e GPU=1)
+    # --gpus all only if the daemon can actually do it. COMPILING the CUDA backend needs the toolkit,
+    # not a card: every target is named explicitly in NVCC_FLAGS above, so nvcc never probes for a
+    # local device (which is also why -arch=native is not used). Passing --gpus all on a box with no
+    # NVIDIA container runtime fails the run outright, which would tie this build to a GPU box for no
+    # reason — and GPU boxes are exactly where disk is scarce, since they carry the proving artifacts.
+    #
+    # Kept when available: it costs nothing and lets the same command smoke-test on a real card.
+    if docker run --rm --gpus all "$IMAGE" true >/dev/null 2>&1; then
+        docker_args=(--gpus all "${docker_args[@]}")
+    else
+        echo "  (no working --gpus all here — building the CUDA backend without a card attached." >&2
+        echo "   That is fine: NVCC_APPEND_FLAGS names every target, so nothing probes for a device." >&2
+        echo "   The binary is NOT smoke-tested against a real GPU by this build; do that where it runs.)" >&2
+    fi
     asset=hazync-host-x86_64-linux-gnu-cuda
     want_po2=21                       # cuda default; see seg_po2() in host/src/main.rs
 else
