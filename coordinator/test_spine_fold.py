@@ -235,13 +235,50 @@ try:
     for _b in range(1, 6):
         open(os.path.join(server.WITNESS, f"block_{_b}.json"), "w").write("{}")
     c = server.db(); c.execute("DELETE FROM ranges"); c.execute("DELETE FROM vranges"); c.commit(); c.close()
-    A, Bk = "aa" * 32, "bb" * 32
+    # A beat is SIGNED and timestamped (audit #5, L-2), so these tests drive the real protocol.
+    # They used to beat with literal "aa"*32 / "bb"*32 pubkeys and no signature, which is precisely
+    # the hole L-2 closed: pubkeys are public on the board, so anyone could renew anyone else's
+    # claim. Real keypairs are needed now because an unsigned beat is refused outright.
+    _ska = Ed25519PrivateKey.generate()
+    A = _ska.public_key().public_bytes(_ser.Encoding.Raw, _ser.PublicFormat.Raw).hex()
+    _skb = Ed25519PrivateKey.generate()
+    Bk = _skb.public_key().public_bytes(_ser.Encoding.Raw, _ser.PublicFormat.Raw).hex()
+
+    def _beat(rng, sk, pk):
+        # ts is INTEGER unix seconds — the coordinator rebuilds this exact string to verify, so a
+        # float here would fail with a misleading "signature does not verify".
+        ts = int(_t.time())
+        return server.beat({"range": rng, "pubkey": pk, "ts": ts,
+                            "sig": sk.sign(f"{rng}:{ts}".encode()).hex()})
+
     _, r = server.claim({"pubkey": A, "handle": "A"})
     rid = r.get("range")
-    for _ in range(3):
-        _t.sleep(1); server.beat({"range": rid, "pubkey": A})
+
+    # AGE the claim rather than sleeping for it. The property is "a fresh beat holds an OLD claim",
+    # and the previous version established the "old" half by sleeping 3x1s against CLAIM_TTL=2 — a
+    # margin of about one second. That was a race, and adding the L-2 signature made each beat do
+    # ed25519 work and lose it: the last beat landed 3.6s before the claim, so the claim was already
+    # expired and B took the block. The test failed for a reason that had nothing to do with the
+    # behaviour it names. Setting claimed_at directly removes the wall clock from the assertion while
+    # still driving a real signed beat through the real handler.
+    _c = server.db()
+    _c.execute("UPDATE ranges SET claimed_at=? WHERE id=?", (_t.time() - 600, rid))
+    _c.commit(); _c.close()
+    check(_beat(rid, _ska, A)[0] == 200, "a signed beat is accepted")
     _, rb = server.claim({"pubkey": Bk, "handle": "B"})
     check(rb.get("range") != rid, "a worker that keeps beating keeps its block past CLAIM_TTL")
+
+    # L-2 itself, in the repo's own suite rather than only in a by-hand check: an unsigned beat must
+    # not renew a claim, and B must not be able to renew A's claim by quoting A's public key.
+    code, _ = server.beat({"range": rid, "pubkey": A})
+    check(code == 401, "an UNSIGNED beat is refused (L-2)")
+    _ts = int(_t.time())
+    code, _ = server.beat({"range": rid, "pubkey": A, "ts": _ts,
+                           "sig": _skb.sign(f"{rid}:{_ts}".encode()).hex()})
+    check(code == 403, "a beat signed by someone else's key is refused (L-2)")
+    code, _ = server.beat({"range": rid, "pubkey": A, "ts": _ts - 600,
+                           "sig": _ska.sign(f"{rid}:{_ts - 600}".encode()).hex()})
+    check(code == 400, "a stale beat cannot be replayed (L-2)")
 
     c = server.db(); c.execute("DELETE FROM ranges"); c.commit(); c.close()
     _, r2 = server.claim({"pubkey": A, "handle": "A"})
@@ -249,7 +286,8 @@ try:
     _, rc = server.claim({"pubkey": Bk, "handle": "B"})
     check(rc.get("range") == r2.get("range"), "a worker that stops beating releases it")
 
-    code, _ = server.beat({"range": r2.get("range"), "pubkey": Bk})
+    # Signed by B, for a range B does not hold: authentication passes, authorisation does not.
+    code, _ = _beat(r2.get("range"), _skb, Bk)
     check(code in (200, 409), "beat by a non-holder does not crash")
 finally:
     server.CLAIM_TTL = _ttl
