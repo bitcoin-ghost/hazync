@@ -261,8 +261,24 @@ Hazed blocks are never re-proven — they were proven valid when accepted. What 
 **Identity** comes from what the hazed node keeps; **validity** comes from the proof. A hazed node needs
 no GPU.
 
-**Done when:** ghostd performs this binding natively — today it is `prover/hazed-chain-verify.py`, run
-externally — and it holds at arbitrary heights rather than only 1..1000.
+**MET 2026-08-05.** Both conditions are now satisfied. ghostd performs the binding natively via the
+`hazyncverifychain` RPC — `prover/hazed-chain-verify.py` is no longer the mechanism — and it runs at
+whatever height the node's proof reaches rather than only 1..1000. An optional `from_height` allows a
+cheaper suffix run, and the result records whether the whole chain or only a suffix was established,
+so a partial check cannot be read as the stronger claim.
+
+Everything is checked against the header the **archive** stores, not the one in the node's block
+index: the index's linkage is structural, built from `hashPrevBlock` when the header was accepted, so
+checking it against itself would establish nothing.
+
+**It refuses when the proof commits to a different tip than the node holds**, and says the proof is
+not about this chain — that refusal is the point of the check rather than an error path, and it is
+made before the walk, so a proof about another chain costs one comparison rather than thousands of
+merkle roots.
+
+Implementation: bitcoin-ghost/ghost#627. Demonstrated on real mainnet blocks (8/8 from genesis, the
+archive's tip equal to the proven tip) and against a real hazed mainnet node, whose stripped storage
+is served with an empty coinbase scriptSig — the payload genuinely destroyed, not withheld.
 
 ---
 
