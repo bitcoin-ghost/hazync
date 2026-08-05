@@ -176,9 +176,23 @@ is CPU-only.
 
 **A node reaches height N from a proof, without downloading or validating blocks 1..N.**
 
-**Status: the UTXO-set binding is built and demonstrated; adoption is not started.** Updated
-2026-08-05 — this section previously read "not started", which is no longer accurate, but the goal
-itself is still **not met**.
+**Status: MET as a mechanism, demonstrated end to end on mainnet. Not yet demonstrated at scale.**
+Updated 2026-08-05.
+
+A ghostd node has loaded a UTXO set it never validated, on the authority of a genesis-anchored proof,
+and continued validating from the proven height. Verified against the real mainnet header chain:
+adoption loads exactly the proven coin count and bases the chainstate on the proven tip; a coin inside
+the proven range is present and the first coin past it is absent; background validation is disabled,
+since re-downloading the chain below the base is the work the proof replaces; a restart with the proof
+returns to the adopted chainstate; and a restart *without* it is refused, because the exemption is
+re-derived from the proof on every start and never read back from disk as a settled fact.
+
+Implementation: bitcoin-ghost/ghost#543, with the set-binding half in #101.
+
+**What is not yet shown** is that an adopted chainstate is byte-identical to one built by validating
+every block, at a height with real transaction volume. That needs a proof at 200k–400k and is a
+question of GPU-seconds, not of code. Adoption itself needs only the base block in the node's
+**headers** chain — not a synced chain — so it is demonstrable at any height.
 
 What exists is two separate things, and they should not be confused:
 
