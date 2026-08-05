@@ -176,9 +176,56 @@ is CPU-only.
 
 **A node reaches height N from a proof, without downloading or validating blocks 1..N.**
 
-**Status: not started.** What exists is *validate-with-elision*, which is a different thing: the node
-still downloads and connects every block and merely skips script verification. Demonstrated at height
-1000 — 1000 blocks elided, UTXO set byte-identical to full validation, 8/8 adversarial inputs refused.
+**Status: MET as a mechanism, demonstrated end to end on mainnet. Not yet demonstrated at scale.**
+Updated 2026-08-05.
+
+A ghostd node has loaded a UTXO set it never validated, on the authority of a genesis-anchored proof,
+and continued validating from the proven height. Verified against the real mainnet header chain:
+adoption loads exactly the proven coin count and bases the chainstate on the proven tip; a coin inside
+the proven range is present and the first coin past it is absent; background validation is disabled,
+since re-downloading the chain below the base is the work the proof replaces; a restart with the proof
+returns to the adopted chainstate; and a restart *without* it is refused, because the exemption is
+re-derived from the proof on every start and never read back from disk as a settled fact.
+
+Implementation: bitcoin-ghost/ghost#543, with the set-binding half in #101.
+
+**What is not yet shown** is that an adopted chainstate is byte-identical to one built by validating
+every block, at a height with real transaction volume. That needs a proof at 200k–400k and is a
+question of GPU-seconds, not of code. Adoption itself needs only the base block in the node's
+**headers** chain — not a synced chain — so it is demonstrable at any height.
+
+What exists is two separate things, and they should not be confused:
+
+*Validate-with-elision*, which is **not** this goal: the node still downloads and connects every
+block and merely skips script verification. Demonstrated at height 1000 — 1000 blocks elided, UTXO set
+byte-identical to full validation, 8/8 adversarial inputs refused.
+
+*Proven assumeutxo*, which is the first half of this goal and now works end to end. A node can be
+handed a UTXO set and establish that it is exactly what a proven chain produces, with **no
+developer-chosen hash anywhere in the trust chain** — which is what separates this from Core's
+`assumeutxo`, where the snapshot is checked against a hash the developers picked:
+
+```
+$ ghostd -hazyncproof=fold_8.snark -hazyncutxo=dump_h8.bin
+[hazync] proof VERIFIED against guest 4722cec8…
+[hazync]   genesis-anchored through height 8
+[hazync]   UTXO dump … MATCHES the proven set (8 coins)
+```
+
+Driven on real data: the dump is emitted by the archive bridge (`host dump-snapshot`) and checked by
+rebuilding the accumulator and comparing its roots against the ones the proof commits to. A single
+flipped byte in one coin's value is refused — *"UTXO SET DOES NOT MATCH THE PROOF — rebuilt
+accumulator roots differ from the proven ones"*. `getblockchaininfo.hazync.utxodumpmatched` reports
+the verdict on a running node.
+
+**What is still missing is adoption itself:** nothing is loaded into a chainstate. The node verifies
+the set and then validates every block from genesis anyway, so there is no speed to report yet. That
+is deliberate — a change that alters how a node validates should not land before the verification
+path it rests on has been reviewed.
+
+Demonstrated at height 8, which proves the *mechanism* and nothing about the *saving*: blocks 1..1000
+hold ~1,020 transactions in total, so a meaningful measurement needs a proof somewhere in 200k–400k,
+and that is GPU time rather than engineering.
 
 "Seconds" requires adopting the proof's **committed UTXO set** at height N and beginning at N+1. The
 proof already carries everything needed: tip, cumulative work, UTXO roots and leaf count, and the

@@ -281,11 +281,42 @@ Nothing else is required — no node, no peers, no chain data. The reference ver
 ### 11.2 Adopting state from a proof
 
 A node MAY adopt the out-boundary of a verified genesis-anchored proof at height `hi` and resume
-validation at `hi + 1`. To bind a Core-format UTXO snapshot to a proof, the node MUST reconstruct each
-leaf per §4 — deriving `coin_mtp` as `MTP(coin_height - 1)` from its own header chain, since Core's
-snapshot does not carry it — rebuild the forest, and require that the resulting roots and leaf count
-equal the proof's `out_roots` and `out_leaves`. Only then is the snapshot the UTXO set the proof
-attests to.
+validation at `hi + 1`, provided it first establishes that the UTXO set it is about to load is the one
+the proof commits to.
+
+**The roots are a function of history, not of the set.** Deletion is swap-and-shrink (§5), so the
+position of every leaf depends on the whole sequence of additions and deletions that produced the
+forest. Two coins-identical UTXO sets reached by different histories therefore have different roots.
+
+The consequence is easy to miss and decides the shape of any implementation: **a set of coins alone is
+not sufficient to rebuild the forest.** A Core-format `assumeutxo` snapshot is a set — coins in
+CCoinsView cursor order, carrying no accumulator positions — so its roots cannot be computed from it,
+and it cannot be checked against a proof on its own.
+
+A snapshot MUST therefore be accompanied by the accumulator position of each coin. Given those, a
+verifier MUST:
+
+1. reconstruct each leaf per §4, deriving `coin_mtp` as `MTP(coin_height - 1)` from its own header
+   chain, since neither a snapshot nor a position sidecar need carry it;
+2. require that the supplied positions are a permutation of `0..n-1`, where `n` is the coin count —
+   anything else does not describe one accumulator;
+3. require that the coins are in bijection with the snapshot's, so the checked set and the loaded set
+   are the same set;
+4. rebuild the forest by placing each leaf at its position, and require that the resulting roots and
+   leaf count equal the proof's `out_roots` and `out_leaves`.
+
+Only then is the snapshot the UTXO set the proof attests to. A node that skips (4) has trusted
+assumeutxo; a node that skips (2) or (3) has checked something other than what it loaded.
+
+The check MUST be performed by the node that will load the set, not by whatever produced it. A
+producer that verifies its own output moves the trust to the producer, which is the arrangement this
+replaces.
+
+**Interoperability note.** Because positions are not derivable, a proof cannot currently be checked
+against an arbitrary third-party UTXO snapshot — only against one accompanied by position data from a
+source that tracked the same accumulator. Committing an order-independent digest of the set in the
+journal, alongside the roots, would remove that restriction and let anyone check any snapshot against
+any proof. It is not in this version; see §14.
 
 ---
 
@@ -324,3 +355,12 @@ the consensus regression, which is what detects that.
 - **No external audit yet.** Nine rounds of adversarial self-audit are recorded in `SECURITY.md`;
   self-audit is not review.
 - **The wrapped proof is 2,033 bytes**, not the ~200–300 B quoted in some older docs.
+- **The journal commits no transaction count.** A node adopting a proof therefore has no attested
+  figure for `CBlockIndex::m_chain_tx_count` at the adopted height, and must substitute something —
+  a proven lower bound such as `height + 1` is the honest choice. The value is not consensus-relevant
+  but does feed progress estimation, so such a node under-reports its sync progress until the chain
+  catches up. Adding a count to `RangeState` would fix it at the cost of a re-baseline (§13).
+- **UTXO-set commitments are position-dependent.** As set out in §11.2, the accumulator roots commit
+  to the history that produced the set rather than to the set itself, so a proof can only be checked
+  against a snapshot accompanied by position data. An order-independent digest committed beside the
+  roots would let any party check any snapshot against any proof; it would also cost a re-baseline.

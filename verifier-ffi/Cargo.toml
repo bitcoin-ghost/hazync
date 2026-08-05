@@ -12,6 +12,9 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 hazync-rangestate = { path = "../rangestate" }
+# Rebuilding the accumulator to check a UTXO dump is delegated here rather than reimplemented in
+# C++, for the same reason proof verification is: one implementation, exercised by one CI.
+hazync-utreexo = { path = "../accumulator" }
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
 bincode = "1"
 

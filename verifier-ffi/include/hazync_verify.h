@@ -26,6 +26,14 @@ extern "C" {
 #define HAZYNC_ERR_SELF_ID          -6  /* journal self_id != guest image id (S1) */
 #define HAZYNC_ERR_KIND             -7  /* wrong domain tag (H8) */
 #define HAZYNC_ERR_TOO_MANY_ROOTS   -8  /* more accumulator roots than the struct can carry */
+/* hazync_check_utxo_dump */
+#define HAZYNC_ERR_DUMP_MAGIC       -9  /* not an HZUTXO dump */
+#define HAZYNC_ERR_DUMP_VERSION    -10  /* unsupported dump version */
+#define HAZYNC_ERR_DUMP_HEIGHT     -11  /* dump height != the proof's height */
+#define HAZYNC_ERR_DUMP_COUNT      -12  /* coin count != the proof's utxo_leaves */
+#define HAZYNC_ERR_DUMP_TRUNC      -13  /* truncated, or trailing bytes */
+#define HAZYNC_ERR_DUMP_POS        -14  /* positions are not a permutation of 0..n-1 */
+#define HAZYNC_ERR_DUMP_ROOTS      -15  /* rebuilt accumulator roots != the proof's roots */
 
 /* popcount(leaves) roots, so 32 covers mainnet scale with room to spare. */
 #define HAZYNC_MAX_ROOTS 32
@@ -45,6 +53,11 @@ typedef struct {
 
 /* Verify a genesis-anchored range proof; on HAZYNC_OK, *out holds the state a node may adopt. */
 int hazync_verify_proof(const uint8_t* proof, size_t len, HazyncState* out);
+
+/* Check a bridge UTXO dump against the accumulator roots a verified proof commits to — the step
+ * that makes assumeutxo PROVEN rather than trusted. `proven` must come from a SUCCESSFUL
+ * hazync_verify_proof; passing an unverified struct checks the dump against nothing. */
+int hazync_check_utxo_dump(const uint8_t* dump, size_t len, const HazyncState* proven);
 
 /* Guest image id this library trusts, NUL-terminated hex. */
 const char* hazync_method_id(void);
