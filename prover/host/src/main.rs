@@ -2448,6 +2448,92 @@ fn bridge_save_state(dir: &str, st: &BridgeStateRef) {
     std::fs::rename(&tmp, format!("{dir}/state.bin")).expect("commit checkpoint"); // atomic: never a torn state.bin
 }
 
+/// Magic + version for the intermediate UTXO dump consumed by ghostd (see `cmd_dump_snapshot`).
+const HZUTXO_MAGIC: &[u8; 8] = b"HZUTXO\0\0";
+const HZUTXO_VERSION: u32 = 1;
+
+/// Emit the bridge's UTXO set as an UNCOMPRESSED intermediate for ghostd to turn into a chainstate.
+///
+/// This is the emitter half of "proven assumeutxo": instead of trusting a developer-chosen snapshot
+/// hash, ghostd rebuilds the accumulator from what this writes and checks its roots against the ones
+/// a Hazync proof commits to.
+///
+/// WHY AN INTERMEDIATE RATHER THAN CORE'S SNAPSHOT FORMAT. Core serialises `Coin` COMPRESSED (varint
+/// `height*2+coinbase`, `CTxOutCompressor` amount/script compression). Reproducing that byte-exactly
+/// here would be a second implementation of a Core format living in a different language — the same
+/// duplication the project refuses in the other direction, where ghostd delegates proof verification
+/// to Rust rather than reimplementing risc0 in C++. So this writes plain fields and ghostd builds the
+/// chainstate with Core's own serialisers.
+///
+/// WHAT IS DELIBERATELY ABSENT: the accumulator roots. A consumer must take those from the PROOF, not
+/// from the file it is checking — writing them here would invite verifying the dump against itself.
+///
+/// `position` is the coin's index in the accumulator. It cannot be derived from the coin data: the
+/// forest deletes by swap-and-shrink, so its layout is a function of the whole add/delete history,
+/// not of the surviving set. Core's snapshot is txid-grouped and so cannot carry it implicitly either.
+fn cmd_dump_snapshot(out_path: &str) {
+    let dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
+    let st = bridge_load_state(&dir).unwrap_or_else(|| panic!("no bridge checkpoint at {dir}/state.bin"));
+
+    // The forest holds one leaf per live coin. If these ever disagree the dump would be meaningless,
+    // and silently so — a missing coin still produces a well-formed file that simply fails the root
+    // check later, with nothing pointing at the cause.
+    assert_eq!(st.utxo.len(), st.leaves.len(),
+        "bridge checkpoint disagrees with itself: {} utxos vs {} accumulator leaves",
+        st.utxo.len(), st.leaves.len());
+
+    // Invert position->leaf into leaf->position. Leaves are coin-unique (an outpoint occurs once), so
+    // a collision here means the checkpoint is corrupt rather than merely surprising.
+    let mut pos_of: std::collections::HashMap<[u8; 32], u32> =
+        std::collections::HashMap::with_capacity(st.leaves.len());
+    for (i, leaf) in st.leaves.iter().enumerate() {
+        if pos_of.insert(*leaf, i as u32).is_some() {
+            panic!("duplicate accumulator leaf at position {i} — corrupt checkpoint");
+        }
+    }
+
+    // Deterministic order: a dump that reordered between runs could not be diffed or reproduced.
+    let mut keys: Vec<&([u8; 32], u32)> = st.utxo.keys().collect();
+    keys.sort_unstable();
+
+    let mut body: Vec<u8> = Vec::new();
+    for k in &keys {
+        let (value, spk, height, is_coinbase) = &st.utxo[*k];
+        // Same convention the prover uses: block_mtp[h] == MTP(h-1), and a coin's mtp is that of the
+        // block that created it. Indexing past the window means the checkpoint cannot describe its
+        // own coins, which is a bug rather than a coin to skip.
+        let coin_mtp = *st.block_mtp.get(*height as usize).unwrap_or_else(||
+            panic!("no block_mtp for coin height {height} (window len {})", st.block_mtp.len()));
+        let leaf = coin_leaf(&k.0, k.1, *value, spk, *height, *is_coinbase, coin_mtp);
+        let pos = *pos_of.get(&leaf).unwrap_or_else(||
+            panic!("coin {}:{} is not in the accumulator — checkpoint utxo/leaves disagree",
+                k.0.iter().map(|b| format!("{b:02x}")).collect::<String>(), k.1));
+
+        body.extend_from_slice(&k.0);
+        body.extend_from_slice(&k.1.to_le_bytes());
+        body.extend_from_slice(&value.to_le_bytes());
+        body.extend_from_slice(&height.to_le_bytes());
+        body.push(*is_coinbase as u8);
+        body.extend_from_slice(&coin_mtp.to_le_bytes());
+        body.extend_from_slice(&pos.to_le_bytes());
+        body.extend_from_slice(&(spk.len() as u32).to_le_bytes());
+        body.extend_from_slice(spk);
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(body.len() + 32);
+    out.extend_from_slice(HZUTXO_MAGIC);
+    out.extend_from_slice(&HZUTXO_VERSION.to_le_bytes());
+    out.extend_from_slice(&st.height.to_le_bytes());
+    out.extend_from_slice(&(keys.len() as u64).to_le_bytes());
+    out.extend_from_slice(&body);
+
+    let tmp = format!("{out_path}.tmp");
+    std::fs::write(&tmp, &out).expect("write utxo dump");
+    std::fs::rename(&tmp, out_path).expect("commit utxo dump"); // atomic: never a torn dump
+    println!("dump-snapshot: height {}, {} coins -> {} ({} bytes)",
+        st.height, keys.len(), out_path, out.len());
+}
+
 fn cmd_bridge() {
     let out_dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -2675,6 +2761,11 @@ fn main() {
     if let Some(p) = args.iter().position(|a| a == "prove-chunk") {
         let idx: usize = args.get(p + 1).and_then(|s| s.parse().ok()).expect("prove-chunk <index>");
         prove_chunk(idx);
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "dump-snapshot") {
+        let out = args.get(p + 1).expect("dump-snapshot <out-file>");
+        cmd_dump_snapshot(out);
         return;
     }
     if args.iter().any(|a| a == "agg-chunks") {
