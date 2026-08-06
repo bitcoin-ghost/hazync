@@ -27,10 +27,27 @@ From a release's assets, download the binary **keeping its asset filename** (`ha
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt.asc
-gpg --recv-keys 852C2B3190F5B928            # import the key once (from a keyserver / trusted source)
+curl -s https://github.com/defenwycke.gpg | gpg --import   # the key, from the account that publishes
+                                                           # the releases (see "second source" below)
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature from the key above
 sha256sum -c --ignore-missing SHA256SUMS.txt      # → hazync-host-x86_64-linux-gnu: OK
 ```
+
+**The second source is `https://github.com/defenwycke.gpg`.** A fingerprint published in the same
+repository you are auditing is not independent evidence — anyone who could alter the releases could
+alter this file. GitHub serves the maintainer's key from the *account* the releases come from, which is
+a different system with a different compromise path, so agreement between the two is worth something.
+Fetching it is also the whole import step above; `gpg --recv-keys 852C2B3190F5B928` from a keyserver
+works too and is a third, independent source.
+
+Whichever you use, the fingerprint must be:
+
+```
+777FE81F 8CC077FD 3D08055E 852C2B31 90F5B928
+```
+
+**The key expires 2028-04-25.** After that, signatures on releases made before then still verify but
+`gpg` reports the key as expired — that is the key's lifetime ending, not evidence of tampering.
 
 **`gpg` will also warn that the key "is not certified with a trusted signature".** That is expected and
 is not a problem with the signature: it means *you* have not personally signed this key, which nobody
