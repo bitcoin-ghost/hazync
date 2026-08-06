@@ -111,8 +111,23 @@ SRC_REV="$(git rev-parse HEAD 2>/dev/null)"
 host_is_current() {  # $1 = path; $2 = asset name; hosts store the id as [u32;8], so ASK, do not grep
     [ -f "$1" ] || return 1
     [ -n "$SRC_REV" ] || return 1
+    # The load-bearing staleness check. Everything below only asks WHICH GUEST the binary carries.
     [ "$(cat "$DIST/.built-from-$2" 2>/dev/null)" = "$SRC_REV" ] || return 1
-    [ "$("$1" method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)" = "$CANON" ]
+
+    local id
+    id="$("$1" method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)"
+    if [ -n "$id" ]; then
+        [ "$id" = "$CANON" ]
+    else
+        # A CUDA host cannot run without libcuda.so.1, so on a GPU-less release box "ask the binary"
+        # is unanswerable — and an unanswerable question was being read as "stale". The CUDA host
+        # therefore rebuilt on EVERY release here, tens of minutes each time, with a correct binary
+        # already staged. Fall back to reading the id out of its BYTES, exactly as step 4 does and
+        # with the same strength: step 4 already trusts that check to gate publication.
+        command -v python3 >/dev/null || return 1
+        [ "$(python3 -c "import sys;print(open(sys.argv[1],'rb').read().count(bytes.fromhex(sys.argv[2])))" \
+             "$1" "$CANON" 2>/dev/null)" = "1" ]
+    fi
 }
 for mode in cpu cuda; do
     asset="hazync-host-x86_64-linux-gnu"; [ "$mode" = cuda ] && asset="$asset-cuda"
@@ -188,11 +203,24 @@ ok "release published with all assets attached"
 # Everything below answers "what does a DOWNLOADER actually get", which is the only question that
 # matters and the one that has been wrong before while every local check passed.
 step "6. wait for signing"
+# Wait for THIS TAG's signing run, not simply the newest one with the right name.
+#
+# Selecting `[select(.name=="Sign release")][0]` matched the PREVIOUS release's run, which had long
+# since succeeded, and reported "completed" before this tag's run had even been created. v0.18.1 was
+# declared signed while its signing workflow was still queued; step 7 then failed reporting a missing
+# binary, when the manifest simply did not exist yet. Two things were wrong at once, and the visible
+# one was the wrong one.
+#
+# `headBranch` carries the tag for a tag-triggered run, so filtering on it makes "the run for this
+# release" exact rather than approximate. A missing run is NOT success: it means the workflow has not
+# appeared yet, so keep waiting rather than falling through.
 for _ in $(seq 1 40); do
-    S=$(gh run list --limit 8 --json name,status,conclusion \
-        --jq '[.[]|select(.name=="Sign release")][0]|"\(.status)|\(.conclusion)"' 2>/dev/null)
-    case "$S" in completed\|success) ok "Sign release completed"; break;;
-                 completed\|*) die "Sign release FAILED ($S) — assets are public but unsigned";; esac
+    S=$(gh run list --limit 20 --json name,status,conclusion,headBranch \
+        --jq "[.[]|select(.name==\"Sign release\" and .headBranch==\"$TAG\")][0]|\"\(.status)|\(.conclusion)\"" 2>/dev/null)
+    case "$S" in completed\|success) ok "Sign release completed for $TAG"; break;;
+                 completed\|*) die "Sign release FAILED ($S) — assets are public but unsigned";;
+                 ""|null*) ;;                # run not created yet — keep waiting
+    esac
     sleep 30
 done
 
