@@ -120,6 +120,40 @@ def identity():
     handle = HANDLE.read_text().strip() if HANDLE.exists() else ("ghost:" + pub[:6])
     return sk, pub, handle
 
+
+_WARNED_DEFAULT_HANDLE = False
+
+
+def warn_if_default_handle(brief=False):
+    """Say so, ONCE, when work is about to be credited to a machine-generated name.
+
+    `brief` exists because the module-level "once" is once PER PROCESS, and `hazync run` is a fresh
+    process per block — so the full notice on the submit path would print every few seconds forever,
+    which is how a warning becomes wallpaper. The loop gets one line; the pre-flight paths a human
+    actually reads (`selftest`, and run-workers.sh at fleet start) get the whole thing.
+
+    The fallback `ghost:<pubkey[:6]>` is a sensible default and a silent one, and silence is the
+    problem: a fleet ran for weeks attributing 29,676 proofs to `ghost:86cae5` because nobody ran
+    `hazync id`, and it was only noticed by looking at the public board. Nothing was broken — the
+    handle is a display label, the pubkey is the identity, and re-attribution needed no re-proving —
+    but the person doing the work had their name off it the whole time.
+
+    Deliberately a warning and not a prompt or a refusal: proving must run unattended on a fleet, and
+    a default handle is a valid choice for anyone who wants one. It just should not be an ACCIDENT.
+    """
+    global _WARNED_DEFAULT_HANDLE
+    if _WARNED_DEFAULT_HANDLE or HANDLE.exists():
+        return
+    _WARNED_DEFAULT_HANDLE = True
+    _, pub, handle = identity()
+    if brief:
+        print(f"  (crediting '{handle}' — no handle set; `hazync id <yourname>` to change it)")
+        return
+    print(f"\n  ! no handle set — this work will be credited to '{handle}', a name derived from your")
+    print( "    public key. That is fine if you want it; set one now if you do not:")
+    print( "        hazync id <yourname>")
+    print( "    Only the LABEL changes: your key, and every proof you have already made, are untouched.\n")
+
 def _open(req, timeout, tries=4):
     # Open a request with a timeout and retry on TRANSIENT network errors only — a real HTTP response
     # (4xx/5xx, incl. 409 already-claimed / 404 no-witness) is returned to the caller, never retried.
@@ -534,6 +568,10 @@ def _fold_and_save(parts, out, work, env):
     os.replace(os.path.join(work, parts[0]), out)
 
 def cmd_submit(args):
+    # Warn HERE, not only at startup: this is the moment work gets attributed, and it is the path a
+    # long-running worker loop takes every time. `hazync run` calls straight through to it, so keep it
+    # to one line — see warn_if_default_handle's note on why.
+    warn_if_default_handle(brief=True)
     rng = args[0]; sk, pub, handle = identity()
     # Validate BEFORE the id reaches a path (audit #5, N-3). `hazync run` happens to call cmd_prove
     # first, which validates — but `hazync submit <rid>` is a documented standalone command, so that is
@@ -618,6 +656,9 @@ def cmd_selftest(args):
     # its guest id matches this coordinator (else every submit is rejected), and it can actually verify a
     # real board proof end to end. Catches the common "built a different guest" trap up front.
     print("hazync selftest — checking your setup before you prove real work\n")
+    # selftest is the documented "run this before committing a GPU" step, so it is exactly where an
+    # unset handle should surface — before the hours, not after them.
+    warn_if_default_handle()
     ok = True
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("✗ no prover binary found.\n"

@@ -89,6 +89,21 @@ if [ -n "$want" ] && [ "$mine" != "$want" ]; then
 fi
 [ -z "$want" ] && echo "WARNING: coordinator unreachable — starting anyway, id NOT confirmed" >&2
 
+# An unset handle is not an error, but it IS a decision, and here it is about to be made silently for
+# however long this fleet runs. A fleet once proved 29,676 blocks credited to `ghost:<pubkey[:6]>`
+# because nobody ran `hazync id` — nothing broke, the handle is only a display label, but the work
+# carried a machine-generated name on a public board the whole time. This is the last cheap moment to
+# notice: after this line, the next thing that happens is hours of GPU.
+if [ ! -f "${HAZYNC_HOME:-$HOME/.hazync}/handle" ]; then
+    echo >&2
+    echo "NOTE: no handle set — this fleet's work will be credited to a name derived from your" >&2
+    echo "      public key (ghost:<first 6 hex>). Set one first if you want your own:" >&2
+    echo "          $(dirname "$CLI")/$(basename "$CLI") id <yourname>" >&2
+    echo "      Starting in 5s. Only the label is affected; your key and existing proofs are not." >&2
+    echo >&2
+    sleep 5
+fi
+
 for i in $(seq 1 "$N"); do
     # In `mixed`, the LAST worker folds and the rest prove — so `MODE=mixed run-workers.sh 1` still
     # proves, rather than silently starting a box with nothing generating new proofs.
