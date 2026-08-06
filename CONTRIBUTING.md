@@ -161,10 +161,12 @@ You never have to trust the party. Every verified proof is public — fetch any 
 ```
 # 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
-chmod +x host
+chmod +x hazync-host-x86_64-linux-gnu
+ln -sf hazync-host-x86_64-linux-gnu host   # shorter to type; the real file keeps its asset name,
+                                           # which is what SHA256SUMS.txt lists
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code
-curl https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
+curl -f https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
 ./host verify-any proof.bin
 ```
 

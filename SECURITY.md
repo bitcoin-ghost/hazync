@@ -597,7 +597,7 @@ Deliberately **not** enforced (documented trust boundaries, not gaps): the 2-hou
 (node-local wall-clock, unprovable); standardness/policy (not consensus). "Only the coinbase is a
 coinbase" is covered by Core's `CheckTransaction` (null-prevout rejection for non-coinbase inputs).
 The COV fixes were validated for no-regression (check-ibd 550 + 741000 + demo all still VALID) **and by
-adversarial negative tests** (`prover/test_cov_negatives.sh`, evidence `prover/evidence/cov_negatives.txt`):
+adversarial negative tests** (`prover/ci_negative_tests.sh`, evidence `prover/evidence/cov_negatives.txt`):
 - COV-2: an honest `[A,B,C]` tx list and a malleated `[A,B,C,C]` (last tx duplicated) produce the
   *identical* merkle root — the CVE-2012-2459 collision — but the malleated one is flagged `mutated=1`
   and rejected on `merkle_ok`.

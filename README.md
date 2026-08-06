@@ -12,9 +12,9 @@ does not have to answer it.
 ### Check one yourself. It takes about thirty seconds.
 
 ```bash
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
+curl -f https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
 ./hazync-verify-x86_64-linux-gnu proof.bin
 ```
 
@@ -25,7 +25,8 @@ curl https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules — checked in **milliseconds**, on a laptop, with no node, no peers, no chain data and
 nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
-verifier is a 290 KB WebAssembly module that peaks at **1.9 MiB of memory** — small enough for a
+verifier is a WebAssembly module served in **290 KB** (1.0 MB uncompressed) that peaks at **1.9 MiB of
+memory** — small enough for a
 phone.
 
 N is however far the anchored proof currently reaches, and it grows as the board does. Swap the URL
