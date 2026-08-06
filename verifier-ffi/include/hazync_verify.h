@@ -56,7 +56,11 @@ int hazync_verify_proof(const uint8_t* proof, size_t len, HazyncState* out);
 
 /* Check a bridge UTXO dump against the accumulator roots a verified proof commits to — the step
  * that makes assumeutxo PROVEN rather than trusted. `proven` must come from a SUCCESSFUL
- * hazync_verify_proof; passing an unverified struct checks the dump against nothing. */
+ * hazync_verify_proof; passing an unverified struct checks the dump against nothing.
+ *
+ * MEMORY: rebuilds the forest in RAM — order 15-20 GB at a real mainnet height (~140M coins). Not a
+ * soundness concern (the coin count comes from the verified proof, not the untrusted file), but size
+ * the machine for it. Core's loadtxoutset is lighter only because it streams into LevelDB. */
 int hazync_check_utxo_dump(const uint8_t* dump, size_t len, const HazyncState* proven);
 
 /* Guest image id this library trusts, NUL-terminated hex. */

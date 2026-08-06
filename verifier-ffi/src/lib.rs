@@ -157,6 +157,18 @@ pub unsafe extern "C" fn hazync_verify_proof(
 /// surviving set. Positions are therefore verified to be a permutation of `0..n-1` — a dump that
 /// reused or skipped a slot could otherwise present a forest that is not the proven one.
 ///
+/// # Memory, at mainnet scale
+///
+/// This rebuilds the whole forest in RAM and holds three things at once: the slot vector, the leaf
+/// vector, and the forest internals — on the order of **15–20 GB at a real mainnet height** (~140M
+/// coins). That is not a soundness concern (the coin count is bounded by a *verified* proof, not by
+/// the untrusted file), but it is an integration constraint a caller must plan for rather than
+/// discover: Core's own `loadtxoutset` is lighter only because it streams into LevelDB instead of
+/// materialising the set.
+///
+/// So ghostd should check-then-load on a machine sized for it, and treat a streaming variant as the
+/// fix if that becomes impractical — not a smaller check. Raised as F-2 by external audit #6.
+///
 /// # Safety
 /// `dump` must point to `len` readable bytes; `proven` must be a valid `HazyncState`.
 #[no_mangle]
