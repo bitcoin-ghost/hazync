@@ -2753,6 +2753,38 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .init();
+
+    // A prover memory failure surfaces as a raw unwrap deep inside the GPU HAL:
+    //
+    //   panicked at risc0-zkp/src/hal/cuda.rs:246: called `Result::unwrap()` on an `Err` value:
+    //   allocation failed on evaluated: 134217728 bytes  Caused by: "out of memory"
+    //
+    // naming neither the knob that fixes it nor the fact that a smaller segment would just work. On a
+    // CUDA 13 driver the default po2 21 fails on an OTHERWISE IDLE L40S with 45 GB free (#97), so this
+    // is the first thing a contributor on UpCloud's current GPU image meets. `coordinator/hazync` walks
+    // a retry ladder and absorbs it; a direct `host prove-block` gets the bare panic, which is what
+    // RELEASE_PLAN.md §1.4 says must not happen — an OOM has to name HAZYNC_SEG_PO2 and a value to try.
+    //
+    // The hook ADDS the remedy and leaves the original panic intact. The underlying message is still
+    // the most accurate description of what happened, and replacing it would trade one unhelpful
+    // failure for another.
+    let prior = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prior(info);
+        let msg = info.payload().downcast_ref::<String>().map(|s| s.as_str())
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.contains("out of memory") || msg.contains("allocation failed") {
+            let po2 = seg_po2();
+            eprintln!("\nhazync: that is a prover memory failure, not a bad block.");
+            eprintln!("  HAZYNC_SEG_PO2 is currently {po2}. Each step down roughly halves the working");
+            eprintln!("  memory one segment needs, at a few seconds' cost per prove.");
+            eprintln!("      HAZYNC_SEG_PO2={} <the same command again>", po2.saturating_sub(1));
+            eprintln!("  A CUDA 13 driver can fail at 21 on an idle card with tens of GB free (#97);");
+            eprintln!("  20, 19 and 18 are measured working on an L40S and verify against the same id.");
+        }
+    }));
+
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "prove-chain-bad") { prove_chain_bad(); return; }
     if args.iter().any(|a| a == "adversarial") { adversarial(); return; }
