@@ -284,6 +284,18 @@ def gpu_lock(what="prove"):
     if path == "none":
         yield
         return
+    # ACQUIRE and BODY are separate try blocks, and that separation is the whole point.
+    #
+    # They used to share one, with `except OSError: yield` meaning "cannot lock — work anyway". But a
+    # contextmanager receives the body's exceptions THROWN IN at its yield, so any OSError raised
+    # inside `with gpu_lock(...)` landed in that handler too and yielded a SECOND time. A generator
+    # that yields twice makes contextlib raise `RuntimeError: generator didn't stop after throw()`
+    # OVER THE TOP of the original error — so the real failure was never reported.
+    #
+    # It bit folding hardest, because a fold is the long GPU job most likely to fail: every fold error
+    # since has been reported as a lock error, and nothing has been folded from genesis while the
+    # cause stayed invisible. Failing to acquire a lock and failing to do the work are different
+    # things and no longer share a handler.
     fh = None
     try:
         fh = open(path, "a+")
@@ -292,9 +304,13 @@ def gpu_lock(what="prove"):
         waited = time.time() - t0
         if waited > 5:
             print(f"  (waited {waited:.0f}s for the GPU — another worker was {what}ing)", flush=True)
+    except OSError:                # cannot lock (odd filesystem) — proceed rather than refuse to work
+        if fh is not None:
+            try: fh.close()
+            except Exception: pass
+        fh = None
+    try:
         yield
-    except OSError:
-        yield                      # cannot lock (odd filesystem) — proceed rather than refuse to work
     finally:
         if fh is not None:
             try:
