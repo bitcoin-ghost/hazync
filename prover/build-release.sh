@@ -140,7 +140,11 @@ docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninte
     # operator discover the remedy after the wait. Losing it costs a full guest + CUDA-kernel rebuild;
     # shipping is not at risk either way. This also catches a target left by a DIFFERENT container.
     HAVE_GLIBC=$(objdump -T /lib/x86_64-linux-gnu/libc.so.6 2>/dev/null | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1)
-    NEED_GLIBC=$(find prover/target -name "*.so" -type f 2>/dev/null | head -200 | xargs -r objdump -T 2>/dev/null | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1)
+    # Every .so, not the first 200. The cap made this a SAMPLE of the cache, and a stale proc-macro
+    # past the cutoff slips through to fail hours later with a misleading error (audit #6, F-5) — the
+    # precise failure this check exists to pre-empt. Costs a second on a warm cache; it never ships a
+    # wrong artifact either way, only wasted hours.
+    NEED_GLIBC=$(find prover/target -name "*.so" -type f 2>/dev/null | xargs -r objdump -T 2>/dev/null | grep -oE "GLIBC_[0-9]+[.][0-9]+" | sort -V | tail -1)
     if [ -n "$HAVE_GLIBC" ] && [ -n "$NEED_GLIBC" ] && [ "$HAVE_GLIBC" != "$NEED_GLIBC" ] &&
        [ "$(printf "%s\n%s\n" "$HAVE_GLIBC" "$NEED_GLIBC" | sort -V | tail -1)" = "$NEED_GLIBC" ]; then
       echo "== DISCARDING prover/target: its artifacts need $NEED_GLIBC, this image has $HAVE_GLIBC =="

@@ -86,11 +86,29 @@ ok "tag $TAG is free"
 ok "check-versions: every documented id is canonical"
 
 if command -v gh >/dev/null; then
+    # Count TOTAL runs as well as non-green ones. Counting only failures makes "no runs at all" and
+    # "everything passed" the same answer — both are zero — so pushing and releasing inside the minute
+    # before Actions queues anything printed "CI green" having checked nothing (audit #6, F-1). This
+    # script exists so a tired operator does not have to remember traps; a gate that cannot fail is
+    # the exact trap it is here to mechanise away.
+    #
+    # Deliberately still ADVISORY when gh cannot answer: an unreachable API must not block a release,
+    # only an answered "no" or an unanswerable "nothing ran" should.
+    RUNS=$(gh run list --limit 40 --json headSha,conclusion,name \
+           --jq "[.[]|select(.headSha==\"$HEAD_SHA\")]|length" 2>/dev/null || echo "?")
     CONC=$(gh run list --limit 40 --json headSha,conclusion,name \
            --jq "[.[]|select(.headSha==\"$HEAD_SHA\")|select(.conclusion!=\"success\")]|length" 2>/dev/null || echo "?")
-    if [ "$CONC" = "0" ]; then ok "CI green on ${HEAD_SHA:0:8}"
-    elif [ "$CONC" = "?" ]; then echo "  --   could not read CI status (continuing)"
-    else die "$CONC non-green CI run(s) on ${HEAD_SHA:0:8} — fix or re-run before releasing"; fi
+    if [ "$RUNS" = "?" ] || [ "$CONC" = "?" ]; then
+        echo "  --   could not read CI status (continuing)"
+    elif [ "$RUNS" = "0" ]; then
+        die "no CI runs exist for ${HEAD_SHA:0:8} — nothing has tested this commit.
+       Wait for Actions to queue and finish, then re-run. (If Actions is degraded, that is
+       exactly when this matters: check https://www.githubstatus.com before overriding.)"
+    elif [ "$CONC" = "0" ]; then
+        ok "CI green on ${HEAD_SHA:0:8} ($RUNS run(s))"
+    else
+        die "$CONC of $RUNS CI run(s) on ${HEAD_SHA:0:8} non-green — fix or re-run before releasing"
+    fi
 fi
 
 command -v docker >/dev/null || die "docker is required for the canonical container build"

@@ -579,15 +579,20 @@ EX_CONFIG = 78
 
 def _guest_mismatch_exit(err):
     """Re-check our guest id against the coordinator's. Returns the exit status to use."""
+    # Hex case is not part of the identity, so neither side may depend on it (audit #6, F-6). A
+    # lowercase-only regex silently fails to parse an uppercase id, which loops without diagnosing;
+    # a case-sensitive comparison reads an uppercase coordinator id as a permanent mismatch and stops
+    # the whole fleet on EX_CONFIG. Both failures would be false and both would be confusing.
     mine = theirs = None
     try:
         out = subprocess.run([HOSTBIN, "method-id"], capture_output=True, text=True, timeout=60).stdout
-        m = re.search(r"[0-9a-f]{64}", out or "")
-        mine = m.group(0) if m else None
+        m = re.search(r"[0-9a-fA-F]{64}", out or "")
+        mine = m.group(0).lower() if m else None
     except Exception:
         pass
     try:
-        theirs = json.loads(get("/api/meta")).get("method_id")
+        t = json.loads(get("/api/meta")).get("method_id")
+        theirs = t.lower() if isinstance(t, str) else None
     except Exception:
         pass
 
