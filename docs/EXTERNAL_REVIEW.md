@@ -20,6 +20,37 @@ other and none with the chain. Independent reviewers are how that class gets cau
 They also **agreed with each other** about where the residual risk is: the C++ bridge compiled into the
 guest, and the accumulator. Two independent passes landing on the same two places is itself a finding.
 
+## Before reading anything, verify something
+
+Roughly a minute, on any Linux x86-64 box, no GPU and no chain data. The point is not that this proves
+much — it proves one short range — but that a reviewer starts from a thing they checked themselves
+rather than from our description of it.
+
+```sh
+curl -sLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+chmod +x hazync-verify-x86_64-linux-gnu
+curl -sL https://bitcoinghost.org/hazync/api/spine/proof -o spine.snark
+./hazync-verify-x86_64-linux-gnu --json spine.snark
+```
+
+That emits `"verified": true`, `"genesis_anchored": true`, the guest image id it verified against, and
+the chain state a node would adopt. Two things are worth doing by hand with the output, because they
+are what make it a claim about **Bitcoin** rather than a claim about itself:
+
+- **Check `tip_hash` against any independent source.** It is in display order. At the time of writing
+  the spine's tip matched `blockstream.info`'s hash for the same height exactly — if it ever does not,
+  that is the most interesting bug in this repository and nothing else on this page matters.
+- **Check the guest image id against `/api/meta` and `reproduce/METHOD_ID`.** All three must agree. A
+  proof that verifies against the *wrong* guest is a proof of the wrong program.
+
+`epoch_start_time` should be `1231006505` — Bitcoin's genesis timestamp — for any spine, since a spine
+is anchored at genesis by construction.
+
+Note what this deliberately does not show: the spine is short, and it is not the `frontier` the board
+reports. Those are different claims and the panel keeps them separate on purpose — the frontier is the
+coordinator chaining many verified ranges, which you cannot check in one download; the spine is the
+single file you can.
+
 ## The list, in the order worth spending on
 
 ### 1. A clean-machine reproducible build — highest value, lowest cost
