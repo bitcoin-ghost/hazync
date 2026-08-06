@@ -82,10 +82,53 @@ handling, and anything else that treats the coordinator's answer as well-formed.
 
 **Do not commission this until #69 has a design**, or the review will be of a model we are not building.
 
-### 5. ghostd integration, when it lands
+### 5. ghostd integration — landed, and the highest-value consensus surface here
 
-hazync#31, #42, #46 — the consumer side of the trust boundary, and consensus-critical on the node side.
-Nothing to review yet.
+hazync#31, #42 (#46 met and closed). This is the consumer side of the trust boundary: the code that
+decides a proof is good enough to skip validating a million blocks. It is merged in
+bitcoin-ghost/ghost (PRs #543, #627, #630, #631).
+
+**Start here, because it is where a mistake is worst.** A bug in the prover produces a proof nobody
+accepts. A bug here accepts a proof nobody should.
+
+What is worth an outsider's eyes, roughly in order:
+
+- **`haze::HazyncAdoption` — is the capability actually a capability?** Its constructor is private, so
+  `Authorise()` is the only way to obtain one, and it returns nothing unless adoption was armed AND
+  the proof verified AND the UTXO dump matched. It reaches `ActivateSnapshot` as an explicit argument
+  rather than ambient state, which is what stops `loadtxoutset` acquiring a proof's authority for an
+  arbitrary file. The claim to test: there is no path to adoption that skips a check.
+- **The four chainparams dependencies it replaces.** Core refuses a snapshot at a height its
+  developers did not compile in, and checks the coins against a hash they chose. Both are replaced —
+  by a proof's authority and by the accumulator roots. A reviewer should confirm nothing else in that
+  path still trusts a developer-chosen constant, and that where chainparams DOES know a height, its
+  hash is still checked (two authorities disagreeing must be loud, not silently resolved).
+- **`m_chain_tx_count` has no attested value.** The journal commits no transaction count, but the
+  snapshot base must have a non-zero one or it never enters `setBlockIndexCandidates`. A proven lower
+  bound (`height + 1`) is substituted. Only non-zero-ness is load-bearing; the magnitude feeds
+  progress reporting, which under-reports. Worth checking that conclusion independently.
+- **Rebuilt blocks and their txids.** A block rebuilt from stripped storage cannot compute its own
+  txids — anything that had a scriptSig hashes to a different transaction — so the real ids travel on
+  the block. `DisconnectBlock` keys every coin lookup on them. The failure this prevents is silent:
+  wrong ids miss, spent coins survive, and the block reports only "unclean".
+- **The distinction the code got wrong three times:** *is this NODE hazed* versus *is this BLOCK's
+  payload stripped*. Conflating them marked genesis stripped though it is written whole, and a fresh
+  hazed node could not start while every unit test passed. Grep for `IsHazeMode()` and ask, at each
+  site, which question is being asked.
+
+**What is NOT established, so a reviewer does not have to discover it:**
+
+- **B4 acceptance.** That an adopted chainstate is byte-identical to one built by validating every
+  block has been shown at a low height, not at a height with real transaction volume. Outstanding.
+- **CI does not build ghost-core.** Only the release workflow touches cmake, on tag push. Every green
+  check on those PRs is the Rust workspace; the C++ evidence is local runs. Do not read a green tick
+  as "this compiled in CI".
+- **The hazed→hazed receive guard is unreachable in practice.** A hazed node declines `NODE_NETWORK`,
+  so nothing requests blocks from it. The guard is exercised by construction, not by transfer.
+
+**The harnesses are more informative than the diff.** `test/hazync/` in the ghost repo carries the
+adversarial suite, a live mainnet adoption test, a hazed-node suite and a two-node test. Every
+substantive bug found in this work came from running those, not from reading the code.
 
 ## What a reviewer should be told
 
