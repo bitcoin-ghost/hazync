@@ -26,7 +26,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 TAG="${1:-}"
 DRY=0
+VERIFY_ONLY=0
 [ "${2:-}" = "--dry-run" ] && DRY=1
+# Resume at step 6 for a release that is already tagged and published but not yet signed — the state
+# a cancelled signing job leaves behind. Re-running from the top there is impossible by design:
+# preflight refuses because the tag exists. Without this the only route back was reading the script.
+[ "${2:-}" = "--verify-only" ] && VERIFY_ONLY=1
 
 REPO_SLUG="${REPO_SLUG:-bitcoin-ghost/hazync}"
 DIST="${DIST:-dist}"
@@ -40,12 +45,20 @@ step() { echo; echo "=== $* ==="; }
 run()  { [ "$DRY" = 1 ] && { echo "  (dry-run, would run) $*"; return 0; }; "$@"; }
 
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] \
-    || die "usage: $0 vMAJOR.MINOR.PATCH [--dry-run]   (release-sign.yml refuses anything else)"
+    || die "usage: $0 vMAJOR.MINOR.PATCH [--dry-run|--verify-only]   (release-sign.yml refuses anything else)"
 
 CANON=$(grep -vE '^[[:space:]]*#' reproduce/METHOD_ID | grep -oE '[0-9a-f]{64}' | head -1)
 [ -n "$CANON" ] || die "no canonical id in reproduce/METHOD_ID"
 echo "releasing $TAG at guest ${CANON:0:8}…"
 [ "$DRY" = 1 ] && echo "(DRY RUN — nothing will be built, tagged, or published)"
+
+if [ "$VERIFY_ONLY" = 1 ]; then
+    echo "(VERIFY ONLY — steps 1-5 skipped; $TAG must already be tagged and published)"
+    gh release view "$TAG" >/dev/null 2>&1 \
+        || die "$TAG is not published — --verify-only resumes an existing release, it does not create one"
+fi
+
+if [ "$VERIFY_ONLY" = 0 ]; then
 
 # ---- 1. preflight ------------------------------------------------------------------------------
 # All of these are cheap and all of them have bitten. Do them before a 60-minute build, not after.
@@ -199,9 +212,41 @@ if ! gh release view "$TAG" >/dev/null 2>&1; then
 fi
 ok "release published with all assets attached"
 
+fi   # end of the build-and-publish half, skipped by --verify-only
+
 # ---- 6. post-publish verification --------------------------------------------------------------
 # Everything below answers "what does a DOWNLOADER actually get", which is the only question that
 # matters and the one that has been wrong before while every local check passed.
+
+# Die at the one point where the release is HALF DONE — tag pushed, assets public, nothing signed —
+# and say exactly how to finish it. Re-running this script from the top is the wrong move there: the
+# tag already exists, so preflight refuses, and the operator is left guessing.
+recover_unsigned() {
+    echo >&2
+    echo "FAIL  Sign release did not succeed for $TAG ($1)" >&2
+    echo "      The tag is pushed and the assets are PUBLIC, but there is no SHA256SUMS.txt." >&2
+    echo "      Anyone downloading now gets unsigned binaries, so do not leave it here." >&2
+    echo >&2
+    echo "      Check whether this is us or GitHub:" >&2
+    echo "          curl -s https://www.githubstatus.com/api/v2/summary.json | grep -o '\"Actions\"[^}]*'" >&2
+    echo "      An outage cancelled this job twice for v0.18.2; it normally takes about a minute." >&2
+    echo >&2
+    if [ -n "${SIGN_RUN:-}" ]; then
+        echo "      Re-run signing (idempotent — uploads use --clobber):" >&2
+        echo "          gh run rerun $SIGN_RUN && gh run watch $SIGN_RUN" >&2
+    else
+        echo "      No run was created. Re-trigger by re-pushing the tag:" >&2
+        echo "          git push --force origin $TAG" >&2
+    fi
+    echo >&2
+    echo "      Meanwhile, keep 'latest' pointing at the last SIGNED release:" >&2
+    echo "          gh api -X PATCH repos/$REPO_SLUG/releases/\$(gh api repos/$REPO_SLUG/releases/tags/$TAG --jq .id) -F prerelease=true" >&2
+    echo "      (\`gh release edit --prerelease\` silently does nothing here — use the API and re-read.)" >&2
+    echo >&2
+    echo "      Then re-verify from step 7 onward:  ./scripts/release.sh $TAG --verify-only" >&2
+    exit 1
+}
+
 step "6. wait for signing"
 # Wait for THIS TAG's signing run, not simply the newest one with the right name.
 #
@@ -214,15 +259,27 @@ step "6. wait for signing"
 # `headBranch` carries the tag for a tag-triggered run, so filtering on it makes "the run for this
 # release" exact rather than approximate. A missing run is NOT success: it means the workflow has not
 # appeared yet, so keep waiting rather than falling through.
+#
+# "Assets are public but unsigned" is REACHABLE and not always our fault — a GitHub Actions outage
+# cancelled this job twice for v0.18.2, a job that takes about a minute normally. So this must not
+# just report the state; it must say how to get out of it, because at that point the tag is pushed,
+# the assets are up, and re-running the release script from the top is the wrong move.
+SIGN_RUN=""
+SIGNED=0
 for _ in $(seq 1 40); do
-    S=$(gh run list --limit 20 --json name,status,conclusion,headBranch \
-        --jq "[.[]|select(.name==\"Sign release\" and .headBranch==\"$TAG\")][0]|\"\(.status)|\(.conclusion)\"" 2>/dev/null)
-    case "$S" in completed\|success) ok "Sign release completed for $TAG"; break;;
-                 completed\|*) die "Sign release FAILED ($S) — assets are public but unsigned";;
-                 ""|null*) ;;                # run not created yet — keep waiting
+    R=$(gh run list --limit 20 --json name,status,conclusion,headBranch,databaseId \
+        --jq "[.[]|select(.name==\"Sign release\" and .headBranch==\"$TAG\")][0]|\"\(.status)|\(.conclusion)|\(.databaseId)\"" 2>/dev/null)
+    S="${R%|*}"; [ "${R##*|}" != null ] && SIGN_RUN="${R##*|}"
+    case "$S" in
+        completed\|success) ok "Sign release completed for $TAG"; SIGNED=1; break;;
+        completed\|*) recover_unsigned "$S";;
+        ""|null*) ;;                # run not created yet — keep waiting
     esac
     sleep 30
 done
+# Falling out of the loop is NOT success. Before, 20 minutes of "queued" dropped through to step 7,
+# which then failed reporting a missing binary — describing the symptom and hiding the cause.
+[ "$SIGNED" = 1 ] || recover_unsigned "timed out waiting"
 
 step "7. the signed manifest must cover EVERY binary"
 # A manifest covering only some artifacts is worse than none: it looks complete.
