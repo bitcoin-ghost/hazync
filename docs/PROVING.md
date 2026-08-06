@@ -108,17 +108,25 @@ Swapping is not a prove *failure*, so the retry ladder never fires — it just c
 at a hardcoded rung (which on CPU would waste a duplicate attempt at the size that just failed).
 `HAZYNC_SEG_PO2` overrides either way.
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
-either way. **Releases:** the current release ships `METHOD_ID 4722cec8` — a **NEW guest**, so
-**every proof made against `be5e0528` is invalid** and the board restarted from genesis. That was the
-price of two guest fixes from the first external reviews: `cshims.c`'s `_sbrk` bounds and `strtoul`
-base handling (#55), plus documenting `multi_check` (#59). Neither was worth a re-baseline alone —
-they were batched into one deliberately, and taken at 4.8% of the chain rather than later, because a
-re-baseline never gets cheaper.
+either way.
 
-v0.13.5 (`be5e0528`) was the previous release: the response to those same reviews for everything that
-did NOT touch the guest — a release-signing key exposure (a tag spliced into a `run:` block in the job
-holding `GPG_PRIVATE_KEY`), accumulator panic paths reachable from untrusted proof data, and an API
-that could not distinguish a genesis-anchored range from a mid-chain one. v0.13.0 adds the two things that let volunteered
+**Releases.** The current release ships `METHOD_ID 4722cec8`, pinned on 2026-08-04 by the **audit #5**
+re-baseline: guest index guards on `coin_leaf`, a 32-bit-safe overflow check in `coinbase_value`, and a
+missing `return true` whose absence was undefined behaviour on a leaf-commitment path. Only a proof
+made against `4722cec8` verifies today.
+
+It is worth being precise about the chain of guests behind it, because each one reset the board and it
+is easy to attribute the current id to the wrong change:
+
+| id | date | why |
+|---|---|---|
+| `be5e0528` | | the `ruint` RUSTSEC bump |
+| `71790584` | 2026-08-02 | `cshims.c` `_sbrk` bounds + `strtoul` base handling (#55), `multi_check` docs (#59) |
+| `dfc9eeda` | 2026-08-03 | BIP30 closed by a coinbase-only SMT (#54), audit #3's 91842/91880 grandfather |
+| `b161735a` | 2026-08-04 | the id stopped depending on where the repo is checked out (#88) |
+| **`4722cec8`** | **2026-08-04** | **audit #5 — current** |
+
+`reproduce/METHOD_ID` carries the full reasoning for each. v0.13.0 added the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
 (`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
 chunks instead of being re-folded from scratch, and **folding as a task in its own right**

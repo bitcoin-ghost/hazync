@@ -52,10 +52,11 @@ rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md)) and validate
 taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** — CI rebuilds it from
 scratch and checks it matches.
 
-What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-03**
-when v0.15.0 re-baselined the guest to close BIP30 permanently, discarding 16,949 proven blocks — the
-second reset in two days, and the price of changing the guest at all. Re-proving is under way, on an
-open board anyone can join. Proving Bitcoin's real cryptography is deliberately expensive — that cost
+What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
+when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the third
+reset in as many days, and the price of changing the guest at all. Re-proving is under way, on an open
+board anyone can join; [the live board](https://bitcoinghost.org/hazync.html) is the only place a
+current figure belongs, and a genesis-anchored proof is downloadable there. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
 quietly. **Three independent external reviews ran in August 2026. None found a way to make the guest ACCEPT an
 invalid chain — but the third found a canonical-chain break that would have made it REJECT a valid

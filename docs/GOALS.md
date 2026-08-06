@@ -56,18 +56,25 @@ whatever work-distribution scheme is in force (#37).
 **One receipt attesting that every block from genesis to the chain tip is valid under Core consensus.**
 
 **Status: mechanism proven, scale is the entire problem.** `fold_1000` is a genesis-anchored proof of
-blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. The board stands at **26,637 of
-958,301 blocks — 2.78% of blocks, and well under 0.1% of the work** (measured 2026-08-01).
+blocks 1..1000 in **3,441 bytes**, verified in CI and on ARM64. A genesis-anchored **spine** is also
+live and extending — one receipt at `/api/spine`, downloadable and verifiable against the released
+verifier with no node and no chain data.
 
-> Re-baselined again on 2026-08-03 to `dfc9eeda` (BIP30 closed by a coinbase-only SMT, #54; audit #3's
-> 91842/91880 grandfather). Before that, a THIRD time on 2026-08-02 to `71790584` (v0.14.0), discarding
-> 46,177 blocks — see
-> `reproduce/METHOD_ID` for why, and note the rule it established: any guest edit that moves line
-> numbers changes the id, including comments.
+No board figure is written here any more. Every one that has been has gone stale within days, usually
+because a re-baseline reset the board rather than because the number moved — and a stale figure in a
+goals document reads as a claim rather than as a snapshot. The
+[live board](https://bitcoinghost.org/hazync.html) is the only honest source, and `/api/state` is the
+same numbers as JSON.
+
+> **Re-baselines reset the board to genesis**, because receipts made against a superseded guest do not
+> verify under the new one. The current guest `4722cec8` was pinned on **2026-08-04** (audit #5,
+> shipped in v0.17.0). It followed `b161735a` (v0.16.0, #88 — the id no longer depends on where the
+> repo is checked out) and `dfc9eeda` (2026-08-03, BIP30 closed by a coinbase-only SMT, #54, with
+> audit #3's 91842/91880 grandfather), which in turn followed `71790584`.
 >
-> The board was at 39,299 (4.1%) before two guest re-baselines — `85dc0b56`, then `be5e0528` for the
-> `ruint` RUSTSEC bump — each of which resets it to genesis. Those receipts were made against a
-> superseded guest and do not verify today. It is re-proving from genesis under `be5e0528`.
+> Four resets in three days is the real cost of changing the guest at all. `reproduce/METHOD_ID`
+> carries the full history and the rule it established: **any guest edit that moves line numbers
+> changes the id, including comments.**
 
 That gap is the important part and it has been consistently understated:
 
