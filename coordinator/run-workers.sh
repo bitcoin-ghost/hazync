@@ -117,7 +117,20 @@ for i in $(seq 1 "$N"); do
             # `fold` exits 0 with "nothing to fold" when the tree is fully collapsed, which on a small
             # or freshly re-baselined board is the normal state. Sleep before retrying so an idle
             # folder does not spin on the coordinator.
-            while true; do "./$CLI_NAME" '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1 || sleep 3; sleep 2; done
+            # Exit 78 (EX_CONFIG) means the worker established it can never land anything — a guest id
+            # that does not match the coordinator (#99). Retrying that is the failure mode this loop
+            # once had: three GPUs proving for a day into guaranteed rejection, looking busy the whole
+            # time. Every other status is a transient worth retrying.
+            while true; do
+                "./$CLI_NAME" '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1
+                rc=$?
+                if [ "$rc" -eq 78 ]; then
+                    echo "worker '"$i"' stopped: guest id mismatch, see '"$LOG_DIR"'/worker_'"$i"'.log" >&2
+                    break
+                fi
+                [ "$rc" -ne 0 ] && sleep 3
+                sleep 2
+            done
         '
     ) </dev/null >/dev/null 2>&1 &
     disown

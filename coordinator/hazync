@@ -28,7 +28,7 @@ Config (env):
               hold more than one identity on a box, or to try the party without touching your real key.
 Identity + receipts live under $HAZYNC_HOME (default ~/.hazync/).
 """
-import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil, random
+import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil, random, re
 import signal
 import concurrent.futures
 
@@ -555,8 +555,58 @@ def cmd_submit(args):
         # (and cmd_run, seeing exit 0, won't release: the block is already verified).
         print(f"✓ range {rng} was already proved by someone else — nothing to do.")
         sys.exit(0)
-    print("✗ submit rejected:", res.get("error") or res)
+    err = str(res.get("error") or res)
+    print("✗ submit rejected:", err)
+    # A guest-id mismatch is not a bad block, it is a worker that can never land anything (#99). Left
+    # as a plain exit 1 the loop sleeps 3s and claims the next block forever: three GPUs once ran flat
+    # out for a day at 66% utilisation, producing nothing, because a re-baseline landed AFTER they
+    # started and nothing re-asked the question.
+    #
+    # The issue suggested counting ten rejections before giving up. Re-asking /api/meta settles it on
+    # the FIRST one and more sharply: if the coordinator's id still differs from ours, this is not a
+    # race with a re-baseline, it is a worker built against a different guest, and the tenth rejection
+    # would tell us nothing the first did not. If the ids now AGREE we were mid-re-baseline, which is
+    # benign and genuinely worth retrying.
+    if "METHOD_ID" in err or "guest image id" in err:
+        sys.exit(_guest_mismatch_exit(err))
     sys.exit(1)
+
+
+# Exit status for "this worker is misconfigured and retrying cannot help" (EX_CONFIG). Distinct from 1
+# so a supervising loop can stop instead of spinning; run-workers.sh breaks on it.
+EX_CONFIG = 78
+
+
+def _guest_mismatch_exit(err):
+    """Re-check our guest id against the coordinator's. Returns the exit status to use."""
+    mine = theirs = None
+    try:
+        out = subprocess.run([HOSTBIN, "method-id"], capture_output=True, text=True, timeout=60).stdout
+        m = re.search(r"[0-9a-f]{64}", out or "")
+        mine = m.group(0) if m else None
+    except Exception:
+        pass
+    try:
+        theirs = json.loads(get("/api/meta")).get("method_id")
+    except Exception:
+        pass
+
+    if not mine or not theirs:
+        # Could not establish it either way — do NOT escalate to fatal on a failed lookup, or an
+        # unreachable coordinator would stop a fleet that is otherwise fine.
+        print(f"  could not compare guest ids (mine={mine or '?'}, coordinator={theirs or '?'}) — "
+              f"retrying rather than assuming the worst.")
+        return 1
+    if mine == theirs:
+        print(f"  our guest id matches the coordinator ({mine[:8]}…) — that rejection was a race with a "
+              f"re-baseline, not a misconfiguration. Retrying.")
+        return 1
+    print(f"\nFATAL: guest id mismatch — every proof this worker makes will be REJECTED.\n"
+          f"  this worker    : {mine}\n"
+          f"  coordinator    : {theirs}\n"
+          f"  Rebuild the guest, or point HAZYNC_HOST at a binary built from the coordinator's guest.\n"
+          f"  Nothing this worker proves can land until those two ids are equal.", file=sys.stderr)
+    return EX_CONFIG
 
 def cmd_selftest(args):
     # One command a contributor runs BEFORE committing a GPU to real work: confirm the prover is present,
