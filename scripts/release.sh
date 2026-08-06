@@ -93,20 +93,40 @@ ok "disk ${FREE_GB}GB free (>=25 needed for cuda)"
 step "2. build host binaries (canonical container)"
 mkdir -p "$DIST"
 
-host_is_current() {  # $1 = path; hosts store the id as [u32;8], so ASK, do not grep
+# The guest id is NECESSARY but NOT SUFFICIENT evidence that a staged host is current, and this was
+# walked into: v0.18.0 changed only the HOST (a new dump-snapshot command) and the verifier FFI, so
+# METHOD_ID did not move — and the previous release's binary answered `method-id` with the canonical
+# id while containing none of the new code. It would have shipped v0.17.0 under a new tag.
+#
+# Every earlier release was a re-baseline, where a stale artifact failed the id check for free. That
+# made the id look like a staleness signal. It is not one: it is a signal about the GUEST, and a host
+# release can change everything else while leaving it untouched.
+#
+# So staleness is judged against the SOURCE an artifact was built from as well. HEAD is used rather
+# than a hash of the host's own files: it over-rebuilds on a docs-only commit, which costs one
+# container build a release, and it cannot MISS a change, which is the failure that matters. Phase 1
+# already pins HEAD to origin/main, so this is a stable identity.
+SRC_REV="$(git rev-parse HEAD 2>/dev/null)"
+
+host_is_current() {  # $1 = path; $2 = asset name; hosts store the id as [u32;8], so ASK, do not grep
     [ -f "$1" ] || return 1
+    [ -n "$SRC_REV" ] || return 1
+    [ "$(cat "$DIST/.built-from-$2" 2>/dev/null)" = "$SRC_REV" ] || return 1
     [ "$("$1" method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)" = "$CANON" ]
 }
 for mode in cpu cuda; do
     asset="hazync-host-x86_64-linux-gnu"; [ "$mode" = cuda ] && asset="$asset-cuda"
-    if host_is_current "$DIST/$asset"; then
-        ok "$asset already canonical — skipping rebuild"
+    if host_is_current "$DIST/$asset" "$asset"; then
+        ok "$asset already canonical and built from this source — skipping rebuild"
     else
         echo "  building $mode (guest + kernels; cuda is tens of minutes)…"
         # SKIP_GROTH16: a runtime rzup component the host does not link against — pure download cost.
         # RZUP_TIMEOUT: the default is far too short for the 488MB toolchain on a domestic link.
         run env SKIP_GROTH16=1 RZUP_TIMEOUT="${RZUP_TIMEOUT:-7200}" ${IMAGE:+IMAGE="$IMAGE"} \
             ./prover/build-release.sh "$mode" || die "$mode build failed"
+        # Record what it was built from, so the next release can tell a fresh artifact from a stale
+        # one that merely embeds the right guest. Written only after the build succeeds.
+        [ "$DRY" = 1 ] || echo "$SRC_REV" > "$DIST/.built-from-$asset"
     fi
 done
 
