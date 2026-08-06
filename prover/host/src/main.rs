@@ -2777,11 +2777,15 @@ fn main() {
         if msg.contains("out of memory") || msg.contains("allocation failed") {
             let po2 = seg_po2();
             eprintln!("\nhazync: that is a prover memory failure, not a bad block.");
-            eprintln!("  HAZYNC_SEG_PO2 is currently {po2}. Each step down roughly halves the working");
-            eprintln!("  memory one segment needs, at a few seconds' cost per prove.");
+            eprintln!("  The usual cause is TWO proves sharing one card, not a segment that is too big.");
+            eprintln!("  Measured on an L40S (46 GB): one prove at HAZYNC_SEG_PO2=21 peaks near 22 GB, so");
+            eprintln!("  a single prove fits easily and two do not (#97). `hazync run` serialises GPU work");
+            eprintln!("  through a lock; a direct `host prove-*` does not, so it can land on top of one.");
+            eprintln!("  Look for another prove first:");
+            eprintln!("      nvidia-smi --query-compute-apps=pid,used_memory --format=csv");
+            eprintln!("  If the card really is yours alone, drop a rung — each step down roughly halves");
+            eprintln!("  the working memory one segment needs, at a few seconds' cost per prove:");
             eprintln!("      HAZYNC_SEG_PO2={} <the same command again>", po2.saturating_sub(1));
-            eprintln!("  A CUDA 13 driver can fail at 21 on an idle card with tens of GB free (#97);");
-            eprintln!("  20, 19 and 18 are measured working on an L40S and verify against the same id.");
         }
     }));
 
