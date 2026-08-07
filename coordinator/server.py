@@ -428,6 +428,59 @@ def peer_proven_heights():
         _peer_cache.update(t=now, heights=got)
     return got
 
+_peer_busy_cache = {"t": 0.0, "heights": set()}
+# A peer's IN-FLIGHT claims are advisory, so they get a much tighter cap than proven heights. A claim
+# is one block or a small chunk; anything larger is not a claim we should honour, whether it comes from
+# a bug or from a peer trying to reserve the chain.
+PEER_BUSY_MAX_WIDTH = int(os.environ.get("PEER_BUSY_MAX_WIDTH", "10000"))
+PEER_BUSY_MAX_TOTAL = int(os.environ.get("PEER_BUSY_MAX_TOTAL", "200000"))
+
+def peer_busy_heights():
+    """Heights peers say are CLAIMED right now — work in flight, not yet proven (hazync#69).
+
+    `peer_proven_heights` stops us redoing FINISHED work. This stops us starting work someone else is
+    doing at this moment, which is the rest of the collision window the issue describes.
+
+    Three things make this safe to act on despite coming from an untrusted peer:
+
+      * **Stale claims are ignored.** `/api/state` already marks a claim stale once its heartbeat
+        exceeds CLAIM_TTL. An abandoned claim on a peer must not reserve a block here for an hour.
+      * **It is capped**, per entry and in total. A peer cannot reserve the chain by reporting one
+        enormous claim, by accident or otherwise.
+      * **It is a PREFERENCE, not a veto** — see `pick`. If avoiding peer claims leaves nothing to do,
+        we take the work anyway. Duplicate work is waste; an idle prover is also waste, and a peer
+        must never be able to choose the second one for us.
+
+    Fails open, like its sibling: an unreachable or malformed peer contributes nothing.
+    """
+    if not PEERS:
+        return set()
+    now = time.time()
+    with _state_lock:
+        if now - _peer_busy_cache["t"] < PEER_TTL:
+            return _peer_busy_cache["heights"]
+    got = set()
+    for base in PEERS:
+        try:
+            req = urllib.request.Request(f"{base}/api/state?slim=1",
+                                         headers={"User-Agent": "hazync-coordinator"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                doc = json.loads(r.read(64 * 1024 * 1024).decode())
+            for b in doc.get("board", []):
+                if b.get("status") != "claimed" or b.get("stale"):
+                    continue
+                lo, hi = int(b["lo"]), int(b["hi"])
+                if 0 <= lo <= hi and hi - lo < PEER_BUSY_MAX_WIDTH:
+                    got.update(range(lo, hi + 1))
+                if len(got) > PEER_BUSY_MAX_TOTAL:
+                    got = set()                 # implausible: treat the whole peer as uninformative
+                    break
+        except Exception:
+            continue
+    with _state_lock:
+        _peer_busy_cache.update(t=now, heights=got)
+    return got
+
 def sync_from_peers(limit=200):
     """Pull proofs peers have that we do not, RE-VERIFY each, and adopt the ones that pass (hazync#69).
 
@@ -540,14 +593,28 @@ def pick(body):
     taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
     c.close()
     peers = peer_proven_heights()          # empty unless PEER_COORDINATORS is set
-    n = max(1, fr + 1)
-    for _ in range(2_000_000):
-        if n >= TIP:
-            break
-        rid = str(n)
-        if rid not in taken and n not in peers:
-            return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
-        n += 1
+    busy = peer_busy_heights()             # ditto — heights a peer is proving RIGHT NOW (#69)
+
+    # TWO PASSES, and the second one is the point.
+    #
+    # Pass 1 avoids both finished peer work and peer work in flight. Pass 2 drops the in-flight part.
+    # Without that fallback, a peer could idle every other coordinator by claiming a wide span — and so
+    # could a peer that simply died holding claims, until its TTL expired. Duplicate work is waste; an
+    # idle prover is also waste, and a peer must not get to choose which one we suffer.
+    #
+    # Proven heights are NOT relaxed in pass 2: redoing finished work buys nothing at any time, and
+    # unlike a claim it cannot be a transient state we are racing.
+    for avoid_busy in (True, False):
+        n = max(1, fr + 1)
+        for _ in range(2_000_000):
+            if n >= TIP:
+                break
+            rid = str(n)
+            if rid not in taken and n not in peers and not (avoid_busy and n in busy):
+                return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
+            n += 1
+        if not busy:
+            break                          # pass 2 would ask exactly the same question
     return 404, {"error": "no open block available"}
 
 def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
