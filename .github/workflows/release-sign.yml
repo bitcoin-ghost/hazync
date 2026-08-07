@@ -162,7 +162,19 @@ jobs:
           #
           # hazync-verify.wasm is the browser verifier. It is served from a web page, which is exactly
           # the delivery path where a substituted artifact is least likely to be noticed.
-          bins=$(ls hazync-host-* hazync-verify-* hazync-worker hazync-verify.wasm 2>/dev/null | sort)
+          # Sign EVERY hazync-* artifact that was downloaded, rather than a hand-maintained list.
+          #
+          # The list used to name the four assets that existed when it was written. Adding
+          # hazync-coordinator.py and hazync-run-workers.sh to the release then failed signing outright
+          # — correctly, because the assertion below spotted that two assets would go unsigned. But the
+          # remedy was to edit a second list in a second repository file, which is the same
+          # hand-maintained-copy problem `reproduce/METHOD_ID` and build.rs already document: a list
+          # that must be updated in step with another list eventually is not.
+          #
+          # The download above is already `-p 'hazync-*'`, so the glob here IS the release's own set.
+          # The assertion stops being about a stale list and becomes what it should always have been:
+          # a check that everything on the release actually arrived.
+          bins=$(ls hazync-* 2>/dev/null | sort)
           if [ -z "$bins" ]; then echo "::error::no hazync-* artifacts on the release to sign"; exit 1; fi
 
           # "Some artifacts" is not the bar — the bar is EVERY artifact the release carries. A glob that
