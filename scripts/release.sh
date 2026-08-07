@@ -94,20 +94,30 @@ if command -v gh >/dev/null; then
     #
     # Deliberately still ADVISORY when gh cannot answer: an unreachable API must not block a release,
     # only an answered "no" or an unanswerable "nothing ran" should.
-    RUNS=$(gh run list --limit 40 --json headSha,conclusion,name \
-           --jq "[.[]|select(.headSha==\"$HEAD_SHA\")]|length" 2>/dev/null || echo "?")
-    CONC=$(gh run list --limit 40 --json headSha,conclusion,name \
-           --jq "[.[]|select(.headSha==\"$HEAD_SHA\")|select(.conclusion!=\"success\")]|length" 2>/dev/null || echo "?")
-    if [ "$RUNS" = "?" ] || [ "$CONC" = "?" ]; then
+    # Count PASSES and FAILURES separately, and treat `cancelled` as neither.
+    #
+    # "Zero non-green" was the obvious reading and it is wrong, measured the first time it ran: the
+    # concurrency group cancels a superseded push run, so a commit that was pushed and then also
+    # dispatched carries one `success` and one `cancelled` forever. Counting cancelled as non-green
+    # made that commit permanently unreleasable, with the failure text claiming CI had not passed when
+    # it had. A cancelled run is a run that was never allowed to have an opinion.
+    #
+    # Requiring a PASS rather than merely "no failures" keeps the audit-#6 property that made this
+    # check exist: zero runs and all-green must not look the same.
+    Q() { gh run list --limit 40 --json headSha,conclusion \
+          --jq "[.[]|select(.headSha==\"$HEAD_SHA\")|select($1)]|length" 2>/dev/null || echo "?"; }
+    PASS=$(Q '.conclusion=="success"')
+    BAD=$(Q '.conclusion|IN("failure","timed_out","startup_failure","action_required")')
+    if [ "$PASS" = "?" ] || [ "$BAD" = "?" ]; then
         echo "  --   could not read CI status (continuing)"
-    elif [ "$RUNS" = "0" ]; then
-        die "no CI runs exist for ${HEAD_SHA:0:8} — nothing has tested this commit.
-       Wait for Actions to queue and finish, then re-run. (If Actions is degraded, that is
-       exactly when this matters: check https://www.githubstatus.com before overriding.)"
-    elif [ "$CONC" = "0" ]; then
-        ok "CI green on ${HEAD_SHA:0:8} ($RUNS run(s))"
+    elif [ "$BAD" != "0" ]; then
+        die "$BAD failed CI run(s) on ${HEAD_SHA:0:8} — fix or re-run before releasing"
+    elif [ "$PASS" = "0" ]; then
+        die "no PASSING CI run for ${HEAD_SHA:0:8} — nothing has tested this commit.
+       (Cancelled or queued runs do not count. If Actions is degraded, that is exactly when this
+       matters: check https://www.githubstatus.com before overriding.)"
     else
-        die "$CONC of $RUNS CI run(s) on ${HEAD_SHA:0:8} non-green — fix or re-run before releasing"
+        ok "CI green on ${HEAD_SHA:0:8} ($PASS passing run(s))"
     fi
 fi
 
