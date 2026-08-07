@@ -37,7 +37,7 @@ REPO_SLUG="${REPO_SLUG:-bitcoin-ghost/hazync}"
 DIST="${DIST:-dist}"
 # Every artifact that must carry the current guest id. The aarch64 verifier is NOT here: CI builds it
 # from the tag and attaches it during signing (#85/#90), so it cannot exist before publish.
-BINS="hazync-host-x86_64-linux-gnu hazync-host-x86_64-linux-gnu-cuda hazync-verify-x86_64-linux-gnu hazync-verify.wasm hazync-worker"
+BINS="hazync-host-x86_64-linux-gnu hazync-host-x86_64-linux-gnu-cuda hazync-verify-x86_64-linux-gnu hazync-verify.wasm hazync-worker hazync-coordinator.py hazync-run-workers.sh"
 
 die()  { echo; echo "FAIL  $*" >&2; exit 1; }
 ok()   { echo "  ok   $*"; }

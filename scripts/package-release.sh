@@ -33,6 +33,31 @@ chmod +x "$OUT/hazync-worker"
     || "$OUT/hazync-worker" 2>&1 | head -1 | grep -qi hazync \
     || { echo "::error::hazync-worker does not run"; exit 1; }
 
+# ---- coordinator + fleet launcher -----------------------------------------------------------------
+# Everything a person DOWNLOADS AND EXECUTES should be covered by SHA256SUMS.txt.asc, and two things
+# were not:
+#
+#   * `run-workers.sh` — CONTRIBUTING fetched it from raw.githubusercontent, unsigned, on the line
+#     immediately after boasting that hazync-worker is "a SIGNED release artifact". HTTPS gives
+#     transport security and GitHub's word; it does not give the release signature the same paragraph
+#     is selling. This is the script that launches the fleet.
+#   * `server.py` — hazync#69 is about third parties running their OWN coordinator, and there was no
+#     documented way to get it at all except cloning the repo.
+#
+# Both are plain scripts, so packaging is a copy — but a copy that lands in the manifest.
+python3 -c "import ast,sys; ast.parse(open('coordinator/server.py').read())" \
+    || { echo "::error::coordinator/server.py does not parse — refusing to ship it"; exit 1; }
+cp coordinator/server.py "$OUT/hazync-coordinator.py"
+
+bash -n coordinator/run-workers.sh \
+    || { echo "::error::coordinator/run-workers.sh does not parse — refusing to ship it"; exit 1; }
+cp coordinator/run-workers.sh "$OUT/hazync-run-workers.sh"
+chmod +x "$OUT/hazync-run-workers.sh"
+
+# Named `hazync-*` deliberately: release-sign.yml downloads the release assets by that glob, so an
+# asset outside it is published and then silently left out of the signed manifest — the exact failure
+# step 7 of release.sh exists to catch.
+
 # ---- browser verifier ---------------------------------------------------------------------------
 if command -v cargo >/dev/null && rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
     ./verifier-wasm/build.sh >/dev/null
@@ -42,7 +67,9 @@ else
 fi
 
 echo "packaged into $OUT:"
-for f in hazync-worker hazync-verify.wasm; do
+# List everything this script stages, not a subset. A summary that under-reports is how an asset gets
+# dropped without anyone noticing — the operator reads the summary, not the source.
+for f in hazync-worker hazync-coordinator.py hazync-run-workers.sh hazync-verify.wasm; do
     [ -f "$OUT/$f" ] && printf '  %-22s %9d bytes  %s\n' "$f" "$(stat -c%s "$OUT/$f")" "$(sha256sum "$OUT/$f" | cut -c1-16)"
 done
 echo
