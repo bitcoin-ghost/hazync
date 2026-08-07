@@ -55,9 +55,10 @@ scratch and checks it matches.
 
 What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
 when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the third
-reset in as many days, and the price of changing the guest at all. Re-proving is under way, on an open
-board anyone can join; [the live board](https://bitcoinghost.org/hazync.html) is the only place a
-current figure belongs, and a genesis-anchored proof is downloadable there. Proving Bitcoin's real cryptography is deliberately expensive — that cost
+reset in as many days, and the price of changing the guest at all. The board is open and anyone can
+join, but **no proving fleet is running at the moment** — so the frontier is where the last one left
+it. [The live board](https://bitcoinghost.org/hazync.html) is the only place a current figure belongs,
+and a genesis-anchored proof is downloadable there whether or not anyone is proving today. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
 quietly. **Three independent external reviews ran in August 2026. None found a way to make the guest ACCEPT an
 invalid chain — but the third found a canonical-chain break that would have made it REJECT a valid

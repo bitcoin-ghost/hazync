@@ -27,9 +27,9 @@ much — it proves one short range — but that a reviewer starts from a thing t
 rather than from our description of it.
 
 ```sh
-curl -sLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+curl -fsLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl -sL https://bitcoinghost.org/hazync/api/spine/proof -o spine.snark
+curl -f https://bitcoinghost.org/hazync/api/spine/proof -o spine.snark
 ./hazync-verify-x86_64-linux-gnu --json spine.snark
 ```
 
@@ -115,9 +115,10 @@ handling, and anything else that treats the coordinator's answer as well-formed.
 
 ### 5. ghostd integration — landed, and the highest-value consensus surface here
 
-hazync#31, #42 (#46 met and closed). This is the consumer side of the trust boundary: the code that
-decides a proof is good enough to skip validating a million blocks. It is merged in
-bitcoin-ghost/ghost (PRs #543, #627, #630, #631).
+hazync#31, #42 and #46 are all met and closed — the work landed, which is exactly why it needs outside
+eyes rather than less. This is the consumer side of the trust boundary: the code that decides a proof
+is good enough to skip validating a million blocks. It is merged in bitcoin-ghost/ghost (PRs #543,
+#627, #630, #631).
 
 **Start here, because it is where a mistake is worst.** A bug in the prover produces a proof nobody
 accepts. A bug here accepts a proof nobody should.
