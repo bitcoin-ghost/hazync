@@ -1529,4 +1529,32 @@ if __name__ == "__main__":
     print(f"[hazync-coordinator] :{PORT}  db={DB}  verify={VERIFY}  sigs={'ed25519' if HAVE_ED else 'dev'}")
     print(f"  dashboard  http://localhost:{PORT}/")
     print(f"  api        GET /api/state · POST /api/claim · POST /api/submit · GET /api/witness/<h> · GET /api/witnesses?from=&count=")
+
+    # hazync#69 — actually RUN the peer sync.
+    #
+    # `sync_from_peers` has existed, been hardened (audit #3 F-4) and been tested for some time while
+    # nothing ever called it: its own comment says "code that is not wired up yet and will be". A
+    # federation feature that is never invoked federates nothing, and the tests passed throughout
+    # because they call the function directly — which is exactly the shape of a check that cannot fail.
+    #
+    # Starts ONLY when peers are configured, so a solo coordinator is byte-for-byte unaffected: no
+    # thread, no timer, no network. The loop can never kill the server — a peer being down, slow or
+    # hostile must not take the board offline, and `sync_from_peers` already declines to raise.
+    if PEERS:
+        PEER_SYNC_INTERVAL = int(os.environ.get("PEER_SYNC_INTERVAL", "300"))
+
+        def _peer_sync_loop():
+            while True:
+                try:
+                    r = sync_from_peers()
+                    if r.get("adopted") or r.get("rejected"):
+                        print(f"[peer-sync] adopted={r['adopted']} rejected={r['rejected']} "
+                              f"peers={r['peers']}", flush=True)
+                except Exception as e:                      # noqa: BLE001 — never let this thread die
+                    print(f"[peer-sync] pass failed, will retry: {e}", flush=True)
+                time.sleep(PEER_SYNC_INTERVAL)
+
+        threading.Thread(target=_peer_sync_loop, daemon=True, name="peer-sync").start()
+        print(f"  peer-sync  every {PEER_SYNC_INTERVAL}s from {len(PEERS)} peer(s): {', '.join(PEERS)}")
+
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()
