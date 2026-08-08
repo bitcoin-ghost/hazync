@@ -32,10 +32,15 @@ Download the prebuilt prover — it's the **canonical guest**, so the coordinato
 # the prover binary (canonical guest, GPU)
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
 chmod +x hazync-host-x86_64-linux-gnu-cuda
-# the contributor CLI — a SIGNED release artifact, covered by SHA256SUMS.txt.asc
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-worker
-curl -LO https://raw.githubusercontent.com/bitcoin-ghost/hazync/main/coordinator/run-workers.sh
-chmod +x hazync-worker run-workers.sh
+# the contributor CLI and the fleet launcher — both SIGNED release artifacts, covered by
+# SHA256SUMS.txt.asc. run-workers.sh used to come unsigned from raw.githubusercontent, on the line
+# right after this comment claimed a signature; it is the script that launches your fleet, so it is
+# now attested like everything else you run.
+curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-worker
+curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-run-workers.sh
+ln -sf hazync-run-workers.sh run-workers.sh   # shorter to type; the real file keeps the asset name,
+                                              # which is what SHA256SUMS.txt lists
+chmod +x hazync-worker hazync-run-workers.sh
 ln -sf hazync-worker hazync      # a shorter name to type; the real file keeps the asset name
 sudo apt install -y python3-cryptography
 ```
