@@ -121,6 +121,19 @@ echo "  prover/evidence/**                  records of runs made under the OLD g
 echo "  verifier/dist/hazync-verify-aarch64 a binary; it must be REBUILT, not edited"
 echo "  the DEPLOYED site                   a live host; step 5 below, and nothing here can do it for you"
 echo
+# Step 0 is printed FROM reproduce/METHOD_ID rather than restated here, so the two cannot drift.
+# A re-baseline is the only moment these changes are free. Miss it and they wait for the next reset,
+# or rot on a branch until the tooling misreports them as merged and someone deletes them.
+echo "STEP 0 — the pending list. A re-baseline is the ONLY moment these cost nothing:"
+echo
+pending=$(awk '/^# >>> PENDING/,/^# <<< END PENDING/' reproduce/METHOD_ID | sed 's/^# \{0,1\}//')
+if [ -n "$pending" ]; then
+    printf '%s\n' "$pending" | sed 's/^/    /'
+else
+    echo "    ::error:: could not read the PENDING block from reproduce/METHOD_ID — check its markers"
+fi
+echo
+
 echo "Now, and in this order:"
 echo "  1. write WHY into reproduce/METHOD_ID (the supersession note) — it is the audit trail"
 echo "  2. regenerate prover/testdata/snark/*.snark with the NEW guest (they are old proofs)"

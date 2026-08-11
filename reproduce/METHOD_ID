@@ -10,6 +10,62 @@
 #
 # ⚠ ANY EDIT TO GUEST SOURCE THAT MOVES LINE NUMBERS CHANGES THIS ID — INCLUDING COMMENTS.
 #
+# >>> PENDING — LAND THESE AT THE NEXT RE-BASELINE
+#
+# Changes that are finished but NOT worth triggering a reset on their own. A re-baseline is the only
+# moment they cost nothing, so this is the checklist for that moment; `scripts/rebaseline-id.sh`
+# prints it as step 0. Nothing here is ever a REASON to re-baseline.
+#
+# Kept here rather than on branches because branches rot silently. A merged-and-deleted upstream makes
+# `git branch -d` AND `git cherry` both report "unmerged" — squash merges destroy patch identity — so
+# the tooling cannot distinguish landed work from unlanded work, and says the same thing about both.
+# One of the entries below was nearly deleted on 2026-08-11 on exactly that mistake.
+#
+#   1. L-3 `multi_check` documentation — branch `fix/l3-multicheck-doc` (e73c7a7). Fifteen lines of
+#      doc comment, NO behaviour change; it moves the id only because comments move line numbers.
+#      Marks `multi_check` as a debug exerciser whose coin metadata is hardcoded (height 700_000,
+#      coinbase and mtp 0, all-zero block hash). Inert for soundness: the mode commits a bare
+#      Vec<SpendResult> with no RangeState, ChainState, root or height binding, so a receipt from it
+#      cannot be folded, submitted or verified as a range. The doc is a TRIPWIRE for anyone who
+#      reaches for it believing it exercises real coin metadata — they would get script flags for an
+#      unrelated height, maturity never enforced, and BIP68 time locks against MTP 0.
+#      External review 2026-08-01 (opencode, L-3), #59. Verified 2026-08-11: NOT in main.
+#
+#      THE TEXT IS INLINED BELOW rather than left on the branch, because a list whose point is "do not
+#      rely on branches" must not itself rely on one. Apply above `fn multi_check()` in
+#      prover/methods/guest/src/main.rs (was line ~1033, after `struct SpendResult`); the branch is a
+#      convenience, not the source of truth, and may be deleted.
+#
+#      ----------------------------------------------------------------------------------------------
+#      /// DEBUG EXERCISER — NOT a consensus path, and it does not prove a block.
+#      ///
+#      /// It commits a bare `Vec<SpendResult>`: no `RangeState`, no `ChainState`, no accumulator root, no
+#      /// height binding. A receipt from this mode therefore attests nothing about any chain and cannot be
+#      /// folded, submitted or verified as a range — which is why the hardcoded metadata below is safe.
+#      ///
+#      /// It is documented rather than deleted because the hardcoding is a TRIPWIRE: `coin_height` is fixed
+#      /// at 700_000, `coin_is_coinbase` and `coin_mtp` at 0, and the flag-exception block hash at all-zero.
+#      /// Anyone reaching for this believing it exercises real coin metadata would get script flags for a
+#      /// height that has nothing to do with their input, coinbase maturity never enforced, and every
+#      /// BIP68 time-based lock evaluated against MTP 0. Same shape as the round-9 harnesses that printed
+#      /// results without asserting them (see SECURITY.md): it looks like it is checking more than it is.
+#      ///
+#      /// Raised by external review 2026-08-01 (opencode, L-3); see #59.
+#
+#      …and, separately, inside the body on the metadata line:
+#                      // coin_height / coin_is_coinbase / coin_mtp — PLACEHOLDERS, see the doc comment.
+#      ----------------------------------------------------------------------------------------------
+#
+# REJECTED — recorded so it is not re-proposed:
+#
+#   -  `-Zlocation-detail=none`, which makes the id insensitive to comments and reformatting.
+#      Measured and consensus-neutral (hazync#103: regress PASS, check-full 130000/741000 VALID with
+#      identical tips and leaf counts). Not adopted. It costs file+line on every guest panic, in code
+#      whose panics are all consensus rejections, and it adds a nightly-only -Z flag to the one build
+#      whose entire value is having no variables. No board has ever been reset by a comment.
+#
+# <<< END PENDING
+#
 # ⚠ AND "GUEST SOURCE" IS WIDER THAN prover/methods/guest/. The guest #[path]-INCLUDES source from
 # elsewhere in the tree, and it compiles into the ELF like any other guest code:
 #
