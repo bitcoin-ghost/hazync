@@ -519,7 +519,7 @@ Verdict: consensus-critical core sound. One High, one Medium, three Low.
 | **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
 | **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
 | **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
-| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#56) — could only land with a re-baseline; see the line-number note below |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#56) — held back until a re-baseline was happening anyway, because a guest comment moves the id; landed, and in `main` |
 
 **H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
 into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
@@ -561,7 +561,10 @@ does not use it at all; it has its own `prover/methods/guest/src/utreexo.rs`.
   because the opposite was assumed and CI was asked to prove it. The consequence is easy to get wrong:
   a "harmless" comment in the guest is a re-baseline that invalidates every proof on the board, so
   guest documentation must be batched into a change that is already re-baselining. Recorded in
-  `reproduce/METHOD_ID`. It is also why L-3 above is *fixed but unmerged* rather than closed.
+  `reproduce/METHOD_ID`. It is also why L-3 above waited for a re-baseline instead of landing on its
+  own — it has since landed, and this line said "fixed but unmerged" for long after that was true.
+  Verified 2026-08-11: the doc comment is in `main`'s guest. A status line that goes stale in the
+  *pessimistic* direction is the cheaper failure, but it still cost a branch audit to disprove.
 
 ## Earlier findings (2026-07-15 self-audit) — status
 
