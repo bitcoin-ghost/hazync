@@ -344,6 +344,25 @@ jobs:
           export PATH="$HOME/.risc0/bin:$PATH" HAZYNC_BASE="$HOME/hazync-build"
           cd prover && ./test_bip68_real.sh
 
+  deployed-verifier:
+    # Everything else in this file tests an artifact we BUILD. This one tests the artifact we SERVE.
+    #
+    # On 2026-08-11 the browser verifier on bitcoinghost.org was two re-baselines behind — it reported
+    # guest b161735a while the coordinator served proofs under 4722cec8 — so the site told every
+    # visitor the live spine was "forged, tampered, corrupt". It had been that way for a week. CI was
+    # green throughout and correctly so: the release shipped the right wasm, the build was never at
+    # fault, and the web deploy is a manual step no gate here could see. The two modules are also
+    # byte-for-byte the SAME SIZE, so nothing short of executing method_id() notices.
+    #
+    # Scheduled + manual only, deliberately. The failure mode is drift over days, not per-commit, and
+    # a momentarily unreachable web box must not fail somebody's push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The verifier the public actually loads still checks the proof the site actually serves
+        run: ./scripts/check-deployed-verifier.sh
+
   dependency-audit:
     # Nothing was scanning dependencies for known advisories until now. This job fails on any NEW one.
     #
