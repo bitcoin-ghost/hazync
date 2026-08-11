@@ -1,0 +1,87 @@
+METHOD_ID stability under -Zlocation-detail=none (2026-08-11)
+=============================================================
+
+STATUS: MEASURED, NOT ADOPTED. The manifest key described below is NOT set in the tree. This file
+records a measurement; the guest is unchanged and the canonical id is unaffected. Adopting the flag
+would move the id, so it must ride along with a change that is already re-baselining — never on its
+own. The working change is on the local branch `experiment/stable-method-id` (`feae5b4`).
+
+QUESTION. The guest image id is sensitive to LINE NUMBERS, because every assert!/panic! embeds its
+own file+line via core::panic::Location. Adding fifteen lines of pure comment moved the id from
+be5e0528 to 2a334ebe (SECURITY.md) — i.e. documenting the guest is a re-baseline that wipes the
+board. Can that sensitivity be removed?
+
+MECHANISM. rustc can collapse the location to a fixed placeholder. Checked before building anything:
+
+  - pinned rzup toolchain (rustc 1.94.1-dev) ACCEPTS -Zlocation-detail=none
+  - it genuinely redacts: '<redacted>' occurs 1x in a flagged binary, 0x unflagged (host target,
+    -C debuginfo=0 on both so debug info could not account for the difference)
+
+It needs NO build.rs change. risc0-build 3.0.5's GuestOptions has no rustc_flags field, but
+GuestMetadata reads `rustc-flags` from the guest's own manifest:
+
+    # prover/methods/guest/Cargo.toml
+    [package.metadata.risc0]
+    rustc-flags = ["-Zlocation-detail=none"]
+
+EXPERIMENT. Three builds, not two. Two would not be honest: a build that silently cached would
+produce A == B and read as success. C is the positive control.
+
+  A  flag on, tree as-is                    e496d37196b40c5c55cf6945c3e8c6d27d525aca70ce1de2493b64ee9e73af68
+  B  flag on + 15 lines of pure comment     e496d37196b40c5c55cf6945c3e8c6d27d525aca70ce1de2493b64ee9e73af68
+  C  flag on + one assert MESSAGE changed   8faba062f3b93ee71c04010ba1f3c37c9e6d9e8ba06d4754e53c81ac3ded414e
+
+  A == B  -> comments no longer move the id          HYPOTHESIS HOLDS
+  A != C  -> a real source change still moves it     CONTROL OK, rebuilds are real
+
+The control was not ceremonial. `rm -rf target/riscv-guest` partially FAILED throughout, on
+root-owned artifacts left by an earlier container build, so the tree was never as clean as intended.
+A == B alone would have been worthless; C moving is what makes it a result.
+
+DETERMINISM. Rebuilding at the restored source returned to A exactly (e496d371…).
+
+STILL CORRECT? A stable id says nothing about a correct guest. Execute-mode, flagged guest:
+
+  regress                block 170 chain_step: tip MATCH, height 170, self_id-ok true    PASS
+  check-full 130000      VALID, 2s, 24,402,631 cycles
+                         tip 211c58f63c5c779b190b86ca33b190e6f0160fab8318496b9011000000000000
+                         cum_work 2436441257208094, UTXO leaves 126
+  check-full 741000      VALID, 38s, 1,797,636,318 cycles
+                         tip f0e89160dbdf8d2d7ffe2676f041390e11f308404ba101000000000000000000
+                         cum_work 130067740078906534883430, UTXO leaves 393
+
+Both tip hashes and both leaf counts are IDENTICAL to the recorded values for the current guest, and
+130000's cycle count matches the 24,401,107 recorded in tasks/overnight_2026-08-03.md to within
+~1.5k cycles. So the flag is consensus-neutral: it changes panic metadata, not what is validated.
+
+SCOPE / CAVEATS.
+
+  1. e496d371 is NOT canonical. These are local WSL2 builds and the guest ELF bakes local paths, so
+     the absolute id will never match a fixed-path container build. Irrelevant here — the experiment
+     is differential, comparing two local builds against each other.
+  2. The unflagged half was NOT re-measured locally. That comments move the id without the flag is
+     taken from SECURITY.md's recorded be5e0528 -> 2a334ebe measurement.
+  3. ADOPTING THIS IS ITSELF A RE-BASELINE. The flag changes the id, so it must ride along with a
+     change that is already re-baselining — never on its own.
+  4. COST: with locations redacted, a guest panic no longer reports its file and line. For a program
+     whose panics are nearly all "reject this block" that is probably acceptable, but it is a real
+     loss of diagnostics and should be a deliberate decision.
+
+ORIGIN, AND WHAT WAS REJECTED ALONGSIDE IT.
+
+This came out of hazync#103, which asked whether a new guest could honour receipts made under its
+predecessors' ids, so that a re-baseline stopped voiding the board. **#103 was CLOSED, rejected.**
+
+The reason is worth carrying here, because it decides which of these ideas survive. Today anyone can
+rebuild the guest and know that EVERY proof on the board was produced by the code they just read:
+one program, one review, no ancestors taken on trust. The board wipe is not merely the cost of a
+re-baseline, it is the ENFORCEMENT MECHANISM for that property. Any scheme that lets old proofs
+survive means, by definition, that more than one program contributed to what a verifier is looking
+at — and an auditor reading the current guest cannot see whether the honoured ancestors were sound.
+That is the trade itself, not a problem with a clever fix. The 46,177 blocks lost to the v0.14.0
+re-baseline were the correct price.
+
+The flag measured in this file SURVIVES that decision, because it does not create multi-program
+history — it only stops the id moving for changes that alter no code. Reopen #103's question if the
+board ever reaches roughly a quarter to a third of the chain, where the compute on one side of the
+trade is worth vastly more than it is at 3%.
