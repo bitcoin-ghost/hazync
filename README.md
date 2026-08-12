@@ -44,7 +44,7 @@ single succinct receipt — the same size whether it covers two blocks or two hu
 receipt, one check, no re-execution.
 
 The end this builds toward: **a node that verifies the whole chain from a single proof, instead of
-re-executing sixteen years of it.**
+re-executing seventeen years of it.**
 
 ### Where it actually is
 
@@ -54,20 +54,23 @@ taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** �
 scratch and checks it matches.
 
 What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
-when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the third
-reset in as many days, and the price of changing the guest at all. The board is open and anyone can
+when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the fourth
+reset in three days, and the price of changing the guest at all. The board is open and anyone can
 join, but **no proving fleet is running at the moment** — so the frontier is where the last one left
 it. [The live board](https://bitcoinghost.org/hazync.html) is the only place a current figure belongs,
 and a genesis-anchored proof is downloadable there whether or not anyone is proving today. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
-quietly. **Three independent external reviews ran in August 2026. None found a way to make the guest ACCEPT an
-invalid chain — but the third found a canonical-chain break that would have made it REJECT a valid
-one**, stalling any from-genesis prover at block 91841, roughly 10% in. Blocks 91842 and 91880
-duplicate coinbases that were still unspent, which is the reason BIP30 exists, and the new
-non-membership check had no exception for them. Fixed in v0.15.0, with the real blocks now in the
-fixture set. The first two reviews flagged the same two places as the residual risk, and
-everything they raised is fixed or tracked ([`SECURITY.md`](SECURITY.md)). Those were code reviews,
-not a commissioned professional audit — that has still not happened.**
+quietly. **Two independent external reviews ran in August 2026 ([`SECURITY.md`](SECURITY.md), rounds
+10 and 11). Neither found a way to make the guest ACCEPT an invalid chain.** Both found real defects
+anyway, and both landed on the same two places as the residual risk — the C++ shim layer compiled
+into the guest, and the accumulator. Everything they raised is fixed or tracked. Those were
+AI-assisted code reviews, not a commissioned professional audit — that has still not happened.
+
+The most serious finding of that period was **ours, not theirs. Internal audit #3 found a
+canonical-chain break that would have made the guest REJECT a valid chain**, stalling any
+from-genesis prover at block 91841, roughly 10% in. Blocks 91842 and 91880 duplicate coinbases that
+were still unspent, which is the reason BIP30 exists, and the new non-membership check had no
+exception for them. Fixed in v0.15.0, with the real blocks now in the fixture set.
 
 [**Watch the board**](https://bitcoinghost.org/hazync) · [**Join in**](CONTRIBUTING.md) ·
 [**Read the spec**](docs/SPEC.md)

@@ -1,10 +1,19 @@
 # Hazync — security review & status
 
-**This is an internal self-review, not an external audit.** No third party has audited Hazync yet.
-The findings below were surfaced by our own adversarial passes over the guest/host code; we fix them,
-re-run the regression to identical results, and record them here in the open. **Independent review is
-explicitly invited** — the open items at the bottom are the starting bounty list. If you find a way to
-make an invalid input prove valid, that is the finding that matters most.
+**No commissioned professional audit has happened.** Most findings below were surfaced by our own
+adversarial passes over the guest/host code; two rounds (10 and 11) were AI-assisted full-source
+reviews by people outside the project, which is a real distinction but not the same thing as a paid
+audit. We fix what is found, re-run the regression to identical results, and record it here in the
+open. **Independent review is explicitly invited** — the open items at the bottom are the starting
+bounty list. If you find a way to make an invalid input prove valid, that is the finding that matters
+most.
+
+> ⚠️ **Two numbering schemes run through this repo, and they do not line up.** The **rounds** below
+> (1–9 self, 10–11 external) are the review passes recorded in this file. The **internal audits**
+> (#1–#5, counted in [`docs/EXTERNAL_REVIEW.md`](docs/EXTERNAL_REVIEW.md)) are a separate series, and
+> they are what `reproduce/METHOD_ID`, `docs/ROADMAP.md` and `docs/PROVING.md` mean by "audit #3" and
+> "audit #5". Audit #3 is *not* round 3: it is the 2026-08-03 pass that found the BIP30 F-1
+> canonical-chain break, and audit #5 is the 2026-08-04 pass that pinned the current guest.
 
 The property that makes this worth reviewing: the prover runs **real Bitcoin Core v28 consensus code**
 (unmodified `interpreter.cpp`, `SignatureHash`, `libsecp256k1`) inside a RISC0 zkVM, plus a Utreexo
