@@ -891,6 +891,35 @@ def submit_spine(body):
         tmp_js = os.path.join(SPINE_DIR, ".spine.json.tmp")
         with open(tmp_js, "w") as f: json.dump(head, f)
         os.replace(tmp_js, os.path.join(SPINE_DIR, "spine.json"))
+
+        # Record it as WORK, not just as an artifact (#114). Until now this path verified a
+        # signature and then discarded the identity: `spine.json` kept the handle of whoever last
+        # advanced the head, and nothing recorded the other N-1 absorptions at all. A contributor
+        # running `MODE=spine` — which CONTRIBUTING actively recommends — watched the activity feed
+        # stay silent and their leaderboard number stay frozen while their GPU ran flat out, and the
+        # only rational conclusion available to them was that it was broken.
+        #
+        # `contributors.blocks` is deliberately NOT incremented. That column means "blocks of chain
+        # covered", and an absorption covers nothing new — it re-expresses blocks already proven as
+        # one checkable file. Adding to it would double-count coverage and inflate the board's
+        # headline number. Crediting effort separately is a real design question; showing the work is
+        # not, so this does the second and leaves the first open.
+        #
+        # `spine:` prefix rather than a bare `1-N` so consumers can tell an absorption from a fold of
+        # the same span. It is deliberately NOT parseable by parse_any_range, which is what sanitises
+        # /api/proof/<id>: there is no per-range receipt to serve for a spine head, and a row that
+        # cannot be turned into a path cannot be used to reach for one.
+        try:
+            c = db()
+            c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
+                      " VALUES(?,?,?,?,?,1,?,?)",
+                      (f"spine:1-{meta['hi']}", pk, handle, head["sha256"], sig,
+                       f"spine advanced to [1..{meta['hi']}] ({len(receipt)} bytes)", head["ts"]))
+            c.commit(); c.close()
+        except Exception as e:
+            # The spine is already written and advertised; failing to log it must not fail the
+            # submission. Losing a feed row is cosmetic, rejecting a valid spine is not.
+            print(f"[spine] submitted ok but could not record the submission row: {e}")
     return 200, {"ok": True, "note": note, "head": head}
 
 def _tree_node(lo, hi):
@@ -1154,7 +1183,11 @@ def state(slim=False):
         key=lambda d: d["blocks"], reverse=True)[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
-              for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 8")]
+              # 40, not 8: the feed now carries three kinds of work (proved / folded / spine) and the
+              # board filters them client-side. At 8 rows a single fast prover fills the window and
+              # the other two kinds are invisible under every filter, which is the problem #114 was
+              # about. Still a few KB.
+              for s in c.execute("SELECT * FROM submissions ORDER BY ts DESC LIMIT 40")]
     # full verified + claimed lists so the client can browse/search/filter any block, not just the
     # frontier window (each is small: claims are few, verified ranges are RANGE_SIZE-coarse).
     vranges = build_vranges(c, blk) if not slim else []
