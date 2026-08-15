@@ -7,6 +7,11 @@ actual `libsecp256k1`, compiled to RISC-V and executed inside a prover. Every pr
 effort inherits the question *"does your rewrite match Core in every edge case, forever?"* This one
 does not have to answer it.
 
+**Discussion:** [Proving Bitcoin — running Core's real consensus code inside a zkVM](https://delvingbitcoin.org/t/running-cores-real-consensus-code-inside-a-zkvm/2811)
+(Delving Bitcoin). That post is the long-form argument, the measurements, and the list of things
+that are *not* covered. Adversarial review is what this needs most — see
+[`docs/EXTERNAL_REVIEW.md`](docs/EXTERNAL_REVIEW.md) for where it is worth spending an hour.
+
 ---
 
 ### Check one yourself. It takes about thirty seconds.
@@ -25,7 +30,7 @@ curl -f https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules — checked in **milliseconds**, on a laptop, with no node, no peers, no chain data and
 nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
-verifier is a WebAssembly module served in **290 KB** (1.0 MB uncompressed) that peaks at **1.9 MiB of
+verifier is a WebAssembly module served in **~295 KB** gzipped (1,065,791 bytes raw) that peaks at **1.9 MiB of
 memory** — small enough for a
 phone.
 
@@ -55,10 +60,11 @@ scratch and checks it matches.
 
 What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
 when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the fourth
-reset in three days, and the price of changing the guest at all. The board is open and anyone can
-join, but **no proving fleet is running at the moment** — so the frontier is where the last one left
-it. [The live board](https://bitcoinghost.org/hazync.html) is the only place a current figure belongs,
-and a genesis-anchored proof is downloadable there whether or not anyone is proving today. Proving Bitcoin's real cryptography is deliberately expensive — that cost
+reset in three days, and the price of changing the guest at all. The board is open and anyone can join.
+Whatever figure it shows is not seventeen years of accumulated work — it is what has been re-proved
+since that re-baseline. [The live board](https://bitcoinghost.org/hazync.html) is the only place a
+current figure belongs, and this file will not try to duplicate one; a genesis-anchored proof is
+downloadable there whether or not anyone is proving today. Proving Bitcoin's real cryptography is deliberately expensive — that cost
 *is* the security argument — which is why this is a public proof party rather than something finished
 quietly. **Two independent external reviews ran in August 2026 ([`SECURITY.md`](SECURITY.md), rounds
 10 and 11). Neither found a way to make the guest ACCEPT an invalid chain.** Both found real defects
