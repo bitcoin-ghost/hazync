@@ -54,12 +54,34 @@ done
 [ -n "$CLI" ] || CLI="$_here/hazync"      # keep the old path for the error message below
 
 if [ "$STOP" = "--stop" ]; then
-    pkill -f 'hazync-worker-loop' 2>/dev/null
-    pkill -f 'hazync-fold-loop' 2>/dev/null
-    pkill -f 'hazync run' 2>/dev/null
-    pkill -f 'hazync fold' 2>/dev/null
+    # Match the loop names this script sets, AND the worker's own command line. The old patterns
+    # 'hazync run' / 'hazync fold' matched neither: the binary is hazync-worker, so a running child
+    # is `python3 ./hazync-worker run`. They only ever appeared to work because killing the parent
+    # loops stopped new children being spawned — the ones already running were orphaned, not stopped.
+    #
+    # Spine was missing entirely. MODE=spine and MODE=mixed both start one, and neither the loop nor
+    # its child was covered, so every start/stop cycle left another spine worker behind. One observed
+    # on a live box had survived a --stop and was still taking its turn on the GPU two hours later,
+    # competing with the prove-only fleet the operator had asked for.
+    for _pat in 'hazync-worker-loop' 'hazync-fold-loop' 'hazync-spine-loop' \
+                'hazync-worker (run|fold|spine)' 'prove-range-bridge' 'extend-spine'; do
+        pkill -f "$_pat" 2>/dev/null
+    done
     sleep 2
-    echo "stopped (remaining: $(pgrep -fc "hazync-worker-loop" 2>/dev/null || true))"
+    # Count what is ACTUALLY still running, not what we tried to kill. The old count only looked for
+    # 'hazync-worker-loop', so it reported "remaining: 0" while a spine worker was alive — and an
+    # operator who reads that has no reason to look.
+    # `pgrep -c` PRINTS 0 and EXITS 1 when nothing matches, so `|| echo 0` fires as well and the
+    # variable becomes "0\n0" — which then fails `[ -gt ]` with "integer expression expected". Count
+    # with wc instead, which always exits 0 and yields one clean integer.
+    _left=$(pgrep -f 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' 2>/dev/null | wc -l)
+    echo "stopped (remaining: $_left)"
+    if [ "${_left:-0}" -gt 0 ]; then
+        echo "WARNING: $_left process(es) survived --stop. They still take the GPU lock." >&2
+        pgrep -af 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' >&2 2>/dev/null || true
+        echo "Kill them by PID before starting a new fleet." >&2
+        exit 1
+    fi
     exit 0
 fi
 

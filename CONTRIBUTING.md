@@ -5,7 +5,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 ## What you need
 
 - A Linux machine (x86-64), Ubuntu 22.04+ (glibc 2.34+) for the prebuilt binaries. A cloud GPU box works well.
-- An NVIDIA GPU + the CUDA 12.6 runtime for fast proving. No GPU still works (the CPU binary proves the early blocks, just slower).
+- An NVIDIA GPU and a driver recent enough for it. **No CUDA toolkit or runtime install is needed** — the prebuilt prover links only `libcuda.so.1`, which ships with the driver, so a stock cloud GPU image works as it comes (CUDA 13 included). No GPU still works (the CPU binary proves the early blocks, just slower).
 - **No build.** Grab the prebuilt binary below — proving an early block takes seconds on a GPU.
 
 ## Minimum spec, by what you want to do
@@ -13,7 +13,7 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 | You want to | You need |
 |-------------|----------|
 | Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done |
-| Prove early or small blocks | An NVIDIA GPU + CUDA 12.6 (or the CPU binary, slower) |
+| Prove early or small blocks | An NVIDIA GPU + its driver (or the CPU binary, slower) |
 | Prove big modern blocks (thousands of inputs) | 64 GB+ RAM and a serious GPU |
 | Run your own party (coordinator + archive bridge) | An always-on box with a full `bitcoind` — ~8-core, 32 GB, 1 TB+ NVMe |
 
@@ -26,7 +26,7 @@ even block 170, a 2.3M-cycle toy block, peaks around 8.7 GB at po2 21.
 
 ## Step 1: get the prover (no build needed)
 
-Download the prebuilt prover — it's the **canonical guest**, so the coordinator accepts your proofs. Needs an NVIDIA GPU + the CUDA 12.6 runtime.
+Download the prebuilt prover — it's the **canonical guest**, so the coordinator accepts your proofs. Needs an NVIDIA GPU and its driver; no CUDA toolkit.
 
 ```
 # the prover binary (canonical guest, GPU)
@@ -186,7 +186,20 @@ If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instea
 ## If something breaks
 
 - `./host: cannot execute` or a `GLIBC` error — the prebuilt binaries need glibc 2.34+ (Ubuntu 22.04+). On an older distro (pre-22.04, e.g. Ubuntu 20.04 / Debian 11), build from source (canonical guest — see the repo README) or run in the reproducible container.
-- The CUDA prover needs the **CUDA 12.6 runtime**. If proving fails to find CUDA, install it (`cuda-toolkit-12-6`) or use the CPU binary (slower, no CUDA).
+- The CUDA prover needs **only the NVIDIA driver** (`libcuda.so.1`), not a CUDA toolkit or runtime.
+  Verified on a stock Ubuntu 24.04 cloud GPU image shipping **CUDA 13.2** and no `nvcc` at all: the
+  binary reported the canonical `METHOD_ID`, passed `selftest` including a real GPU prove, and went
+  on to prove several hundred blocks. `ldd` shows the whole story:
+
+  ```
+  $ ldd hazync-host-x86_64-linux-gnu-cuda | grep -i cuda
+  	libcuda.so.1 => /lib/x86_64-linux-gnu/libcuda.so.1
+  ```
+
+  CUDA **12** is a BUILD requirement, not a runtime one: risc0-sys 1.5.0's kernels do not compile
+  under CUDA 13 (see `prover/build-release.sh`). `provision-vps.sh` installs `cuda-toolkit-12-6` for
+  that reason. If you are downloading the prebuilt binary you are not building, and it does not
+  apply to you. If proving genuinely cannot find the GPU, check the driver with `nvidia-smi`.
 - The coordinator rejects your proof with a `METHOD_ID` mismatch — you're proving with a non-canonical guest. Use the prebuilt binary, or reproduce the canonical id with `reproduce/Dockerfile`.
 - Anything else, open an issue on the repo.
 
