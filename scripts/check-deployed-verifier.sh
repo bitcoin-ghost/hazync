@@ -66,6 +66,60 @@ else
     bad "deployed hazync-verify.js differs from verifier-wasm/hazync-verify.js"
 fi
 
+# ── Sizes: build, release, deployment and the README must agree ──────────────────────────────────
+#
+# The README hardcodes the module's size and nothing asserted it, so it drifted — it claimed 1,063,570
+# bytes long after the build, the release asset and the deployment had all moved to 1,065,791. Harmless
+# by itself, but that README is what a reader consults to decide whether the file they downloaded is
+# the file we published, and a stale figure there teaches people to ignore a mismatch.
+#
+# Size is a WEAK check on its own: the 2026-08-11 stale module was byte-for-byte the same length as the
+# correct one. It is asserted here because it is nearly free and catches a different failure (a partial
+# or wrong-artifact deploy), never as a substitute for the id and verdict checks below.
+README=verifier-wasm/README.md
+BUILD_WASM=verifier-wasm/target/wasm32-unknown-unknown/release/hazync_verify_wasm.wasm
+RELEASE_URL=https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify.wasm
+
+DEPLOYED_SZ=$(wc -c < "$TMP/live.wasm" | tr -d ' ')
+README_SZ=$(grep -oE '^raw[[:space:]]+[0-9,]+' "$README" 2>/dev/null | head -1 | tr -cd '0-9')
+RELEASE_SZ=$(curl -sIL --max-time 60 "$RELEASE_URL" \
+    | awk 'tolower($1)=="content-length:" {n=$2} END {gsub(/\r/,"",n); print n}')
+BUILD_SZ=""
+[ -f "$BUILD_WASM" ] && BUILD_SZ=$(wc -c < "$BUILD_WASM" | tr -d ' ')
+
+note "size deployed     ${DEPLOYED_SZ}"
+note "size release      ${RELEASE_SZ:-unavailable}"
+note "size local build  ${BUILD_SZ:-not built}"
+note "size README       ${README_SZ:-unparsed}  ($README)"
+
+if [ -z "$README_SZ" ]; then
+    bad "could not parse a 'raw <n> bytes' figure from $README — the size table has moved or gone"
+elif [ "$README_SZ" != "$DEPLOYED_SZ" ]; then
+    bad "$README says raw $README_SZ bytes, the deployed module is $DEPLOYED_SZ — update the README"
+else
+    note "ok   README raw size matches the deployed module"
+fi
+
+if [ -z "$RELEASE_SZ" ]; then
+    note "warn could not read a content-length for the release asset — size cross-check skipped"
+elif [ "$RELEASE_SZ" != "$DEPLOYED_SZ" ]; then
+    bad "release asset is $RELEASE_SZ bytes, the deployment is $DEPLOYED_SZ — the site is serving something the release did not ship"
+else
+    note "ok   deployed size matches the release asset"
+fi
+
+if [ -n "$BUILD_SZ" ] && [ "$BUILD_SZ" != "$DEPLOYED_SZ" ]; then
+    note "warn local build is $BUILD_SZ bytes and the deployment is $DEPLOYED_SZ — your working tree differs from what is live (not a failure)"
+fi
+
+# Informational only. gzip output depends on the implementation and level, so asserting equality here
+# would fail on somebody else's machine for no reason. The wire figure the README quotes is this one.
+#
+# Redirect rather than pass the path: `gzip -c FILE` writes the FILENAME into the gzip header, so the
+# byte count changes with what the file is called (295,243 via a path, 295,219 via stdin, same bytes).
+# A figure that moves when you rename the file is not a figure worth printing.
+note "size gzipped      $(gzip -c < "$TMP/live.wasm" | wc -c | tr -d ' ')  (not asserted — implementation-dependent)"
+
 # Perturb the proof body, not the header: a truncated or empty file is refused by parsing alone, which
 # would let a verifier that accepts everything still pass this control.
 python3 - "$TMP/spine.bin" "$TMP/bitflip.bin" <<'PY'
