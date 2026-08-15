@@ -26,11 +26,77 @@ PORT       = int(os.environ.get("COORD_PORT", "8899"))
 BIND       = os.environ.get("COORD_BIND", "0.0.0.0")   # set to 127.0.0.1 when behind a reverse proxy
 DB         = os.environ.get("COORD_DB", "coordinator.db")
 WEB        = os.environ.get("COORD_WEB", os.path.join(os.path.dirname(__file__), "web"))
-TIP        = int(os.environ.get("TIP_HEIGHT", "958301"))
+TIP_FLOOR  = int(os.environ.get("TIP_HEIGHT", "958301"))  # a FLOOR now, not the answer — see chain_tip()
+TIP_TTL    = float(os.environ.get("TIP_CACHE_TTL", "300"))
 RANGE_SIZE = int(os.environ.get("RANGE_SIZE", "1000"))
 SEED       = int(os.environ.get("SEED_RANGES", "60"))
 WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__), "witnesses"))
 BRIDGE_DIR = os.environ.get("HAZYNC_BRIDGE_OUT", "")   # archive-node bundle dir (co-located); serves bundle_<n>.json
+
+# ── How high does this coordinator go? ────────────────────────────────────────────────────────────
+#
+# This used to be one constant, `TIP_HEIGHT`, hardcoded to a chain height. That is a value which goes
+# stale at ~144 blocks a day by construction, and it was answering three questions that do not have
+# the same answer:
+#
+#   1. Which range ids are ACCEPTABLE on submission?  Should be generous. Rejecting a valid proof of a
+#      real block because our constant lagged the chain is the worst failure of the three.
+#   2. Which blocks may we HAND OUT?                  The honest ceiling is what the bridge can serve.
+#                                                     Offering work we cannot supply a bundle for just
+#                                                     burns a contributor's time.
+#   3. What is the progress DENOMINATOR?              Public, so it should not silently overstate.
+#
+# So: scan for the highest block we can actually serve, cache it, and derive both answers from that.
+#
+# `chain_tip()` is floored at TIP_HEIGHT and used for (1) and (3). The floor matters — without it a
+# bridge that is still backfilling would shrink the valid-id window under submissions that are already
+# in flight, and an unmounted bridge directory would take the board to zero.
+#
+# `provable_tip()` is NOT floored and is used for (2). If we cannot serve a single bundle it returns 0
+# and `pick` honestly reports that it has nothing, rather than handing out a height that will fail.
+_tip_cache = {"t": 0.0, "v": None}
+_tip_lock  = threading.Lock()
+
+def _servable_high(force=False):
+    """Highest block with a bundle (or legacy witness) on local disk, or None. Cached for TIP_TTL.
+
+    One `scandir` per directory rather than a stat per height: the bundle set is ~220,000 files and a
+    per-height probe would be O(chain). Not a `max()` over a listing comprehension either — the point
+    is to touch each name once and keep no list.
+    """
+    now = time.time()
+    with _tip_lock:
+        if not force and _tip_cache["v"] is not None and now - _tip_cache["t"] < TIP_TTL:
+            return _tip_cache["v"]
+    hi = None
+    for d, pre in ((BRIDGE_DIR, "bundle_"), (WITNESS, "block_")):
+        if not d:
+            continue
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    n = e.name
+                    if n.startswith(pre) and n.endswith(".json"):
+                        core = n[len(pre):-5]
+                        if core.isdigit():
+                            v = int(core)
+                            if hi is None or v > hi:
+                                hi = v
+        except OSError:
+            continue          # missing or unreadable directory is "nothing here", not a crash
+    with _tip_lock:
+        _tip_cache.update(t=now, v=hi)
+    return hi
+
+def chain_tip():
+    """Exclusive upper bound for range-id validation and the progress denominator. Never below TIP_HEIGHT."""
+    h = _servable_high()
+    return max(TIP_FLOOR, 0 if h is None else h + 1)
+
+def provable_tip():
+    """Exclusive upper bound for ALLOCATION. Zero when we cannot serve anything at all."""
+    h = _servable_high()
+    return 0 if h is None else h + 1
 # Bulk bundle sync (#69). Seeding a new coordinator from a peer means ~220,000 bundles; one request
 # each is not a sync, it is a denial of service you perform on yourself. The cap is per REQUEST, not
 # per operator — a client walks it in chunks — and defaults to one RANGE_SIZE so a chunk is the same
@@ -245,7 +311,7 @@ def init_db():
     c.commit(); c.close()
 
 def parse_any_range(rid):
-    """Validate a range id for SUBMISSION (not for claiming). Any `n` or `lo-hi` with lo <= hi < TIP.
+    """Validate a range id for SUBMISSION (not for claiming). Any `n` or `lo-hi` with lo <= hi < chain_tip().
 
     Claims are restricted to an aligned grid so two claim ids can never partially overlap — that is
     what parse_range enforces, and it is right for allocation. Submissions are a different question:
@@ -266,17 +332,17 @@ def parse_any_range(rid):
         return None
     if len(parts) == 1:
         n = parts[0]
-        return (n, n) if 0 <= n < TIP else None
+        return (n, n) if 0 <= n < chain_tip() else None
     if len(parts) != 2:
         return None
     lo, hi = parts
-    if lo < 0 or hi >= TIP or hi < lo:
+    if lo < 0 or hi >= chain_tip() or hi < lo:
         return None
     return (lo, hi)
 
 def parse_range(rid):
     """Validate a claim id. Two accepted forms:
-         'n'      → a single block n (any n in [0, TIP)) — 'I just want to do one block'.
+         'n'      → a single block n (any n in [0, chain_tip())) — 'I just want to do one block'.
          'lo-hi'  → a range, must be RANGE_SIZE-aligned and exactly RANGE_SIZE long.
        Aligned ranges and single blocks are the only shapes allowed, so two different claim
        ids can never partially overlap (no double-claim ambiguity). Returns (lo, hi)."""
@@ -286,11 +352,11 @@ def parse_range(rid):
         return None
     if len(parts) == 1:                                  # single block
         n = parts[0]
-        return (n, n) if 0 <= n < TIP else None
+        return (n, n) if 0 <= n < chain_tip() else None
     if len(parts) != 2:
         return None
     lo, hi = parts
-    if lo < 0 or hi >= TIP or hi < lo:
+    if lo < 0 or hi >= chain_tip() or hi < lo:
         return None
     width = hi - lo + 1
     # Two accepted grids: the legacy RANGE_SIZE one (existing board ids) and the current CLAIM_WIDTH.
@@ -604,13 +670,18 @@ def pick(body):
     #
     # Proven heights are NOT relaxed in pass 2: redoing finished work buys nothing at any time, and
     # unlike a claim it cannot be a transient state we are racing.
+    # The ceiling is what the BRIDGE can serve, not a hardcoded chain height. `witness_available` is
+    # the exact check and the ceiling is what stops it running away: without the bound, a coordinator
+    # with no bundles would stat its way through two million heights before admitting it has nothing.
+    _ceiling = provable_tip()
     for avoid_busy in (True, False):
         n = max(1, fr + 1)
         for _ in range(2_000_000):
-            if n >= TIP:
+            if n >= _ceiling:
                 break
             rid = str(n)
-            if rid not in taken and n not in peers and not (avoid_busy and n in busy):
+            if rid not in taken and n not in peers and not (avoid_busy and n in busy) \
+               and witness_available(n):
                 return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
             n += 1
         if not busy:
@@ -995,7 +1066,8 @@ def timeline(fr, segs=240):
     Returns {segs, per_seg (bytes 0=open/1=claimed/2=ahead/3=frontier), frontier_seg}.
     """
     per = bytearray(segs)  # 0 open
-    bps = TIP / segs if segs else TIP
+    _tip = chain_tip()
+    bps = _tip / segs if segs else _tip
     c = db()
     vr = c.execute("SELECT lo,hi FROM vranges").fetchall()
     cl = c.execute("SELECT lo,hi FROM ranges WHERE status='claimed'").fetchall()
@@ -1046,6 +1118,7 @@ def vranges_cached():
 
 def state(slim=False):
     now = time.time()
+    _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
     c = db()
     proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
     ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
@@ -1059,7 +1132,7 @@ def state(slim=False):
     board = []
     for i in range(18):
         lo = start + i * RANGE_SIZE; hi = lo + RANGE_SIZE - 1
-        if lo >= TIP: break
+        if lo >= chain_tip(): break
         rid = f"{lo}-{hi}"; r = existing.get(rid)
         if r and r["status"] in ("claimed", "verified"):
             _h = r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"
@@ -1129,8 +1202,8 @@ def state(slim=False):
         # green, and only this number quietly stops. Reporting it beside frontier makes the gap
         # (frontier - spine_hi) a thing you can see rather than something you have to notice.
         # None means no spine at all, which is different from a stale one and should read differently.
-        "progress": {"proven": proven, "frontier": fr, "tip": TIP,
-                     "pct": round(100.0*fr/TIP, 3) if TIP else 0, "contributors": ncontrib,
+        "progress": {"proven": proven, "frontier": fr, "tip": _tip_now,
+                     "pct": round(100.0*fr/_tip_now, 3) if _tip_now else 0, "contributors": ncontrib,
                      "spine_hi": (spine_head() or {}).get("hi")},
         "failed": failed,
         # `block` is the block the frontier needs next; `id` is the RANGE responsible for it, which is
@@ -1233,7 +1306,8 @@ def claim(body):
             " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
             (now - CLAIM_TTL, now - CLAIM_MAX))}
         h = 1
-        while h < TIP:
+        _ceiling = provable_tip()          # what the bridge can serve, not a hardcoded chain height
+        while h < _ceiling:
             if h not in proven and h not in held and witness_available(h):
                 break
             h += 1

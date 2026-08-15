@@ -40,6 +40,10 @@ os.environ["COORD_SPINE"] = _tmpspine
 os.environ["COORD_PROOFS"] = _tmpproofs
 os.environ["VERIFY_MODE"] = "mock"
 os.environ["COORD_ALLOW_MOCK"] = "1"
+# The servable-height scan is cached for 5 minutes in production, which is right there and wrong here:
+# this file writes witness files DURING the run, so a cached "nothing available" from before those
+# writes would make claim() fail depending on nothing but call ordering. Disable the cache for tests.
+os.environ["TIP_CACHE_TTL"] = "0"
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

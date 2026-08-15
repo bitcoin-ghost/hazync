@@ -23,7 +23,11 @@ os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server
 
-TIP, RS, MAXH = server.TIP, server.RANGE_SIZE, server.MAX_HANDLE
+# The ceiling is derived from what the bridge can serve rather than being a constant, so the ORACLE
+# must re-read it at check time — capturing it once here and comparing against a parser that reads it
+# live would make this fuzzer disagree with the implementation the moment the value moved. `TIP` below
+# is used only to pick plausible magnitudes when GENERATING ids, where a stale value is harmless.
+TIP, RS, MAXH = server.chain_tip(), server.RANGE_SIZE, server.MAX_HANDLE
 FORBIDDEN = set('<>&"\'')
 
 def splitmix(s):
@@ -64,8 +68,9 @@ def check_parse_range(rid):
         return
     lo, hi = r
     assert isinstance(lo, int) and isinstance(hi, int), f"non-int result {r} for {rid!r}"
-    single = (lo == hi and 0 <= lo < TIP)
-    aligned = (hi - lo + 1 == RS and lo % RS == 0 and lo >= 0 and hi < TIP)
+    tip = server.chain_tip()                                   # live, for the reason given at the top
+    single = (lo == hi and 0 <= lo < tip)
+    aligned = (hi - lo + 1 == RS and lo % RS == 0 and lo >= 0 and hi < tip)
     assert single or aligned, f"parse_range accepted out-of-spec id {rid!r} -> {r}"
     return r
 
