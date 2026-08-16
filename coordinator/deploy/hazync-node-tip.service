@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish the archive node's height for the Hazync coordinator
+After=bitcoind.service
+Documentation=https://github.com/bitcoin-ghost/hazync
+
+[Service]
+Type=oneshot
+# Root, because the whole reason this exists is that bitcoind's datadir is not readable by `hazync`.
+User=root
+Environment=HAZYNC_BITCOIN_DATADIR=/root/.bitcoin
+Environment=TIP_FILE=/var/lib/hazync/node_tip
+ExecStart=/opt/hazync/coordinator/deploy/hazync-node-tip.sh

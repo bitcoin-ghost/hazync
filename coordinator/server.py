@@ -28,6 +28,12 @@ DB         = os.environ.get("COORD_DB", "coordinator.db")
 WEB        = os.environ.get("COORD_WEB", os.path.join(os.path.dirname(__file__), "web"))
 TIP_FLOOR  = int(os.environ.get("TIP_HEIGHT", "958301"))  # a FLOOR now, not the answer — see chain_tip()
 TIP_TTL    = float(os.environ.get("TIP_CACHE_TTL", "300"))
+# Where the node's REAL height is published. The coordinator runs as `hazync` and bitcoind's datadir is
+# root-only (mode 700, cookie 600), so it cannot ask the node itself; a small root-side timer writes the
+# height here instead (see deploy/hazync-node-tip.*). Absent or stale -> we fall back to the floor,
+# which is exactly the behaviour that existed before this file was consulted at all.
+TIP_FILE     = os.environ.get("TIP_FILE", "/var/lib/hazync/node_tip")
+TIP_FILE_AGE = float(os.environ.get("TIP_FILE_MAX_AGE", "3600"))   # older than this = not to be trusted
 RANGE_SIZE = int(os.environ.get("RANGE_SIZE", "1000"))
 SEED       = int(os.environ.get("SEED_RANGES", "60"))
 WITNESS    = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(__file__), "witnesses"))
@@ -88,10 +94,34 @@ def _servable_high(force=False):
         _tip_cache.update(t=now, v=hi)
     return hi
 
+def node_tip():
+    """The archive node's real height, or None if we cannot currently trust an answer.
+
+    Published to a file by a root-side timer because bitcoind's datadir is not readable by the user this
+    process runs as. Staleness is the whole point of the check: if the writer dies, the last number it
+    left behind would otherwise freeze the denominator at a value that looks live and is not — which is
+    the failure this function exists to end, just with a different constant."""
+    try:
+        st = os.stat(TIP_FILE)
+        if time.time() - st.st_mtime > TIP_FILE_AGE:
+            return None                       # writer has stopped; prefer an honest fallback to a fossil
+        with open(TIP_FILE) as f:
+            v = int(f.read().strip())
+        return v if v > 0 else None
+    except (OSError, ValueError):
+        return None                           # missing, unreadable or garbage — same as never configured
+
 def chain_tip():
-    """Exclusive upper bound for range-id validation and the progress denominator. Never below TIP_HEIGHT."""
+    """Exclusive upper bound for range-id validation and the progress denominator. Never below TIP_HEIGHT.
+
+    Takes the highest of three answers, because each one is a lower bound on the truth and none of them
+    is reliably the truth on its own: the node's height when a fresh one is published, whatever the
+    bridge can serve, and the compiled-in floor. A hardcoded floor used alone goes stale the day it is
+    written — the board reported a chain height of 958,301 while the node sat at 962,795 — and it
+    silently overstates progress, which point (3) above says it must not do."""
     h = _servable_high()
-    return max(TIP_FLOOR, 0 if h is None else h + 1)
+    n = node_tip()
+    return max(TIP_FLOOR, 0 if h is None else h + 1, 0 if n is None else n + 1)
 
 def provable_tip():
     """Exclusive upper bound for ALLOCATION. Zero when we cannot serve anything at all."""
