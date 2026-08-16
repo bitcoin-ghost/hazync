@@ -30,7 +30,8 @@ clearly flagged in `/api/state` and on the dashboard). Install it for the real s
 |-----|---------|---------|
 | `COORD_PORT` | `8899` | listen port |
 | `COORD_DB` | `coordinator.db` | SQLite file |
-| `TIP_HEIGHT` | `958301` | chain tip (denominator for % complete) |
+| `TIP_HEIGHT` | `958301` | **floor**, not the answer. The ceiling is derived from the highest bundle the bridge can serve; this is the fallback when that is lower (a backfilling or absent bridge) and the denominator for % complete |
+| `TIP_CACHE_TTL` | `300` | seconds to cache that bundle scan (~0.17s over 220,000 files) |
 | `RANGE_SIZE` | `1000` | blocks per claimable range |
 | `SEED_RANGES` | `60` | ranges to create on first run |
 | `HAZYNC_BRIDGE_OUT` | — | archive-bridge bundle dir; `/api/witness/<n>` serves `bundle_<n>.json` from here |
@@ -67,17 +68,32 @@ into one with `fold-range`. You need no node of your own and no local witness da
 ## API
 
 - `GET /api/state` — progress, board (with per-claim `elapsed`/`beat`/`stale`), leaderboard, recent
-- `GET /api/pick` — suggest the next open range past the frontier (skips claimed/verified)
-- `POST /api/hint` `{count}` — **advisory** next-block suggestion. Writes nothing: no lease, no
-  expiry, nothing to reap if the asker dies. A worker may prove and submit any height regardless.
+- `GET /api/pick` — suggest the next open **block** past the frontier (skips claimed/verified, and
+  anything the bridge cannot serve a bundle for). Width is one block; a wider aligned chunk is opt-in
+  via `hazync run <lo>-<hi>`.
+- `POST /api/claim` `{pubkey, handle}` — take the earliest available block. Held by a heartbeat
+  (`POST /api/beat`), reopens after `CLAIM_TTL`, hard ceiling `CLAIM_MAX`. **Advisory on top**:
+  `submit` accepts any height regardless of who claimed it, so an allocator bug can waste effort and
+  can never lock a contributor out.
 - `POST /api/submit` `{range, pubkey, handle, sig, receipt(base64)}` — verify + credit
 - `GET /api/witness/<n>` — serve block `n`'s archive **bundle** (in-boundary + the real accumulator root + inclusion proofs) from the bridge; falls back to a legacy per-block witness. Accepts a block number or a `lo-hi` range id
 - `GET /api/proof/<id>` — **download the verified proof receipt** for a block/range so anyone can
   re-verify it themselves (`host verify-any proof_<id>.bin`). Retained on every successful submit;
-  the `vranges` list in `/api/state` carries a `proof` pointer for each. (Receipts are ~0.2–1.7 MB each,
-  so full-chain retention is archive-scale — a rolling window for launch; a `verify-anywhere` Groth16
-  wrap is the later upgrade so a proof checks with no RISC0 runtime.)
-- `GET /api/foldable` — adjacent verified pairs whose fold does not exist yet, for `hazync fold`.
+  the `vranges` list in `/api/state` carries a `proof` pointer for each. Retention is **per proven
+  height, not a rolling window**: `check-retention.py` is a nightly gate that walks every height the
+  board calls proven and fails if any one of them cannot be handed over on its own. It has caught a
+  real regression before — an earlier fold path discarded the per-block leaves after folding, leaving
+  800 blocks with no individual receipt. (Receipts run ~0.2–1.7 MB each, so this is archive-scale by
+  construction; a `verify-anywhere` Groth16 wrap is the later upgrade so a proof checks with no RISC0
+  runtime.)
+- `POST /api/spine` also records the absorption in `submissions`, so spine work shows in the board's
+  Recent work feed under its contributor's handle (#114). It deliberately does **not** increment
+  `contributors.blocks`: that column means blocks of chain covered, and an absorption covers nothing
+  new — it re-expresses already-proven blocks as one checkable file. Crediting effort separately is
+  still open.
+- `GET /api/foldable` — aligned **sibling pairs of equal width** whose parent does not exist yet, for
+  `hazync fold`. Not any adjacent pair: that does not converge, and on this board it once produced 581
+  folds covering 96 blocks where a tree needs 95.
   Advisory and stateless: several candidates are returned so concurrent workers spread out without
   anything being leased. A duplicate fold is wasteful, not incorrect — the loser's submission is
   discarded as already proven, and folding is far cheaper than proving.

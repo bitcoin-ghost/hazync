@@ -51,7 +51,7 @@ curl -s localhost:8899/api/state | head -c 300      # smoke test
 # (WAL-safe DB + receipts, old→new) BEFORE repointing the nginx proxy; decommission the old box only after.
 ```
 
-Set `TIP_HEIGHT` in the unit to the real chain tip. `RANGE_SIZE=1000`. The unit binds `127.0.0.1`
+Set `TIP_HEIGHT` in the unit to the real chain tip. It is a **floor**, not the ceiling: the coordinator derives what it will hand out from the highest bundle the bridge can actually serve, and only falls back to this when that is lower (a backfilling or absent bridge). Setting it too low understates % complete; setting it high is harmless. `RANGE_SIZE=1000`. The unit binds `127.0.0.1`
 (behind the proxy); if the web box is a different machine, set `COORD_BIND` to the private-network IP
 and firewall `:8899` to the web box only.
 

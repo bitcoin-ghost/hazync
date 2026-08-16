@@ -30,7 +30,7 @@ trusts the server — we would have replaced "trust Bitcoin Core's developers ch
 hash" with "trust our API", which is a *larger* trust assumption than the status quo, not a smaller
 one. The entire argument for this project is that the check is cheap enough to do yourself.
 
-290 KB is cheap enough to do yourself.
+295 KB is cheap enough to do yourself.
 
 ## Why no wasm-bindgen
 
