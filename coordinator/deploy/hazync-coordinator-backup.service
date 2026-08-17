@@ -24,5 +24,15 @@ Environment=HZ_HOME=/opt/hazync
 # up and dies with the box. Uncomment and point at your remote (rclone:remote:path or user@host:/path):
 # Environment=BACKUP_REMOTE=rclone:hazync-backup:hazync
 ExecStart=/bin/sh -c 'exec "${HZ_REPO:-$HZ_HOME}/coordinator/deploy/backup.sh"'
+# Bound the run (hazync#123). Type=oneshot defaults TimeoutStartSec to INFINITY, which is not a tuning
+# choice here — it is the difference between a failure and a silent outage. On 2026-08-17 an offsite
+# rsync stalled against a full remote disk and the unit sat in `activating` for 3.5 hours holding 9 GB
+# of RAM. systemd will not start a unit that is already activating, so the daily timer became a no-op
+# and EVERY backup stopped, with nothing in `systemctl is-failed` to say so, because it had not failed.
+#
+# A healthy run is about 5 minutes (8.3 GB local copy). An hour is generous while still guaranteeing the
+# unit reaches a terminal state before the next firing, so a stall becomes a visible failed unit that
+# the following day retries, instead of a permanent silent stop.
+TimeoutStartSec=60m
 Nice=10
 IOSchedulingClass=idle
