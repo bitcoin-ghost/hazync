@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh the published node height for the Hazync coordinator
+
+[Timer]
+# Every 5 minutes. Bitcoin produces a block every ~10, and the coordinator's own TIP_CACHE_TTL is 300s,
+# so anything faster would be refreshing a number nothing reads sooner. Well inside the one-hour
+# staleness window, which leaves room for a dozen consecutive failures before the board falls back.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
