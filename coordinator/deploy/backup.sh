@@ -16,6 +16,14 @@ DB="${COORD_DB:-$HZ_HOME/coordinator/coordinator.db}"
 PROOFS="${COORD_PROOFS:-$HZ_HOME/coordinator/proofs}"
 OUT="${BACKUP_DIR:-$HZ_HOME/backups}"
 KEEP="${BACKUP_KEEP:-14}"                 # keep this many local snapshots
+# Every network call is bounded (hazync#123). rsync waits FOREVER by default on a peer that has stopped
+# reading: when the offsite target filled on 2026-08-17 the receiver died, the sender did not, and the
+# unit sat in `activating` for three and a half hours holding 9 GB of RAM. A systemd timer will not
+# start a unit that is already activating, so that one stall silently suppressed every subsequent
+# backup — a full disk on ANOTHER machine stopped local snapshots entirely.
+NET_TIMEOUT="${BACKUP_NET_TIMEOUT:-600}"  # seconds of no I/O before a transfer is abandoned
+SSH_CONNECT_TIMEOUT="${BACKUP_SSH_CONNECT_TIMEOUT:-30}"
+RSYNC_OPTS=(-a "--timeout=$NET_TIMEOUT" -e "ssh -o BatchMode=yes -o ConnectTimeout=$SSH_CONNECT_TIMEOUT")
 REMOTE="${BACKUP_REMOTE:-}"              # optional: rsync/rclone target, e.g. rclone:remote:path or user@host:/path
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$OUT/$STAMP"
@@ -106,6 +114,16 @@ echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1))"
 # Note --link-dest would NOT help here: the receipts are archived into a single proofs.tar.gz that
 # differs every run, so there are no unchanged files to hardlink. Making that work would mean syncing
 # the receipts directory instead of a tarball — a layout change, deliberately not done here.
+
+# Rotate LOCAL snapshots before going anywhere near the network (hazync#123). This used to be the last
+# step in the script, which made local retention depend on the offsite copy succeeding: when a remote
+# rsync hung on 2026-08-17, rotation never ran and 15 full snapshots (78 GB, against an 8.6 GB live
+# store) piled up behind it. Local retention is the cheap, always-possible half and must not be hostage
+# to the half that involves another machine. Safe to run here: the snapshot just written is the newest,
+# so keeping the newest $KEEP always keeps it.
+ls -1dt "$OUT"/*/ 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -rf
+echo "[backup] kept newest $KEEP local snapshots in $OUT"
+
 if [ -n "$REMOTE" ]; then
     # BACKUP_REMOTE_DB_ONLY=1 ships the LEDGER offsite but leaves the proofs local.
     #
@@ -157,37 +175,37 @@ if [ -n "$REMOTE" ]; then
             echo "[backup]          writing receipts to an unnamespaced path" >&2
         else
             case "$REMOTE" in
-                rclone:*) rclone copy "$PROOFS" "${REMOTE#rclone:}/proofs-$_mid" ;;
-                *:*)      rsync -a --ignore-existing "$PROOFS/" "$REMOTE/proofs-$_mid/" ;;
+                rclone:*) rclone copy --timeout "${NET_TIMEOUT}s" "$PROOFS" "${REMOTE#rclone:}/proofs-$_mid" ;;
+                *:*)      rsync "${RSYNC_OPTS[@]}" --ignore-existing "$PROOFS/" "$REMOTE/proofs-$_mid/" ;;
             esac && echo "[backup] receipts mirrored offsite -> proofs-$_mid ($(du -sh "$PROOFS" | cut -f1), append-only)"                  || echo "[backup] WARNING: receipt mirror failed — ledger snapshot still shipped" >&2
         fi
     fi
     case "$REMOTE" in
         rclone:*)
             _rc="${REMOTE#rclone:}"
-            rclone copy "$SRC" "$_rc/$STAMP"
+            rclone copy --timeout "${NET_TIMEOUT}s" "$SRC" "$_rc/$STAMP"
             # Prune oldest-first, keeping $KEEP. `lsf --dirs-only` sorts lexically, and the stamp format
             # (UTC %Y%m%dT%H%M%SZ) is lexically ordered, so this is chronological.
-            _old=$(rclone lsf --dirs-only "$_rc" 2>/dev/null | sed 's:/$::' | sort | head -n -"$KEEP")
+            _old=$(rclone lsf --timeout "${NET_TIMEOUT}s" --dirs-only "$_rc" 2>/dev/null | sed 's:/$::' | sort | head -n -"$KEEP")
             for _d in $_old; do
-                rclone purge "$_rc/$_d" >/dev/null 2>&1 \
+                rclone purge --timeout "${NET_TIMEOUT}s" "$_rc/$_d" >/dev/null 2>&1 \
                     && echo "[backup] pruned remote snapshot $_d" \
                     || echo "[backup] WARNING: could not prune remote snapshot $_d" >&2
             done
             ;;
         *:*)
-            rsync -a "$SRC/" "$REMOTE/$STAMP/"
+            rsync "${RSYNC_OPTS[@]}" "$SRC/" "$REMOTE/$STAMP/"
             # user@host:/path — prune over ssh on the same host. Split on the FIRST colon only, so
             # paths containing colons still work.
             _host="${REMOTE%%:*}"; _path="${REMOTE#*:}"
-            if ! ssh -o BatchMode=yes "$_host" \
+            if ! ssh -o BatchMode=yes -o ConnectTimeout="$SSH_CONNECT_TIMEOUT" "$_host" \
                     "ls -1d '$_path'/*/ 2>/dev/null | sort | head -n -$KEEP | xargs -r rm -rf"; then
                 echo "[backup] WARNING: remote prune failed on $_host — $_path will grow unbounded" >&2
             fi
             ;;
         *)
             # A bare local path (no host): rsync it, then prune in place.
-            rsync -a "$SRC/" "$REMOTE/$STAMP/"
+            rsync "${RSYNC_OPTS[@]}" "$SRC/" "$REMOTE/$STAMP/"
             ls -1dt "$REMOTE"/*/ 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -rf
             ;;
     esac
@@ -197,6 +215,5 @@ else
     echo "[backup] WARNING: BACKUP_REMOTE unset — this snapshot is on the SAME DISK as the data it backs up."
 fi
 
-# 5. Rotate local snapshots.
-ls -1dt "$OUT"/*/ 2>/dev/null | tail -n +"$((KEEP+1))" | xargs -r rm -rf
-echo "[backup] done; kept newest $KEEP local snapshots in $OUT"
+# 5. Done. Local rotation happened BEFORE the offsite block — see the note there (hazync#123).
+echo "[backup] done"
