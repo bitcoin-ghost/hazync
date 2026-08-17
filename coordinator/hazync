@@ -3,6 +3,7 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
+  hazync rotate <key.hex>   # move an older key's blocks onto this box's identity (both keys sign)
   hazync pick               # show the board frontier (does not claim anything)
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
@@ -244,6 +245,47 @@ def cmd_id(args):
     # HAS set one reads as though it did not take.
     if not args:
         print("(set a handle:  hazync id <name>)")
+
+def cmd_rotate(args):
+    """Move a previous key's blocks onto THIS box's identity (#113).
+
+    The old secret is read, used to sign exactly one message, and never sent anywhere — the
+    coordinator only ever sees the two public keys and the two signatures."""
+    if not args:
+        sys.exit("usage: hazync rotate <old-key.hex>\n"
+                 "\n"
+                 "  Moves the blocks proved by an older key onto this box's current identity, so a\n"
+                 "  rebuilt or replaced prover keeps its place on the board.\n"
+                 "\n"
+                 "  <old-key.hex> is the 32-byte hex secret from the old box's ~/.hazync/key.hex.\n"
+                 "  It is used locally to sign one message and is never transmitted.\n"
+                 "\n"
+                 "  Both keys must sign, so this can neither take someone else's blocks nor push\n"
+                 "  yours onto them.")
+    Ed25519PrivateKey, ser = _ed()
+    p = pathlib.Path(args[0]).expanduser()
+    if not p.exists():
+        sys.exit(f"no such key file: {p}")
+    try:
+        old_sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(p.read_text().strip()))
+    except Exception:
+        sys.exit(f"{p} does not contain a 32-byte hex ed25519 secret key")
+    new_sk, new_pub, handle = identity()
+    old_pub = old_sk.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw).hex()
+    if old_pub == new_pub:
+        sys.exit("that key IS this box's identity — nothing to rotate")
+    ts = int(time.time())
+    # Must match the coordinator's rotate_message() byte for byte.
+    msg = f"hazync-rotate-v1:{old_pub}:{new_pub}:{ts}".encode()
+    print(f"  from : {old_pub}")
+    print(f"  to   : {new_pub}  ('{handle}')")
+    r = post("/api/rotate", {"old_pubkey": old_pub, "new_pubkey": new_pub, "ts": ts,
+                             "sig_old": old_sk.sign(msg).hex(), "sig_new": new_sk.sign(msg).hex(),
+                             "handle": handle})
+    if r.get("error"):
+        sys.exit(f"rotation refused: {r['error']}")
+    print(f"\n✓ done — blocks proved by {old_pub[:10]}… now count towards '{handle}'.")
+    print("  The old key still works if a forgotten box is still running; its work resolves here too.")
 
 def cmd_pick(args):
     """Show what you would be given next. Does NOT claim it — use `hazync run` for that."""
@@ -978,7 +1020,8 @@ def main():
         print(__doc__); sys.exit(0 if argv else 1)   # explicit --help succeeds; a bare invocation is an error
     c, a = argv[0], argv[1:]
     fn = {"id": cmd_id, "pick": cmd_pick, "prove": cmd_prove, "selftest": cmd_selftest,
-          "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine, "fold": cmd_fold}.get(c)
+          "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine, "fold": cmd_fold,
+          "rotate": cmd_rotate}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
     if c in ("claim", "prove", "submit") and not a:  # these require a range; don't traceback on a bare call

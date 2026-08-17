@@ -318,6 +318,14 @@ def init_db():
       CREATE TABLE IF NOT EXISTS vranges(
         id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER, in_tip TEXT, out_tip TEXT,
         pubkey TEXT, handle TEXT, ts REAL, out_leaves INTEGER, range_work TEXT);
+      -- #113 key rotation. APPEND-ONLY: no row here ever rewrites `vranges` or `submissions`, so the
+      -- ledger still says exactly which key signed which proof and the audit trail is unchanged.
+      -- Attribution is resolved at READ time by following the edges. `old_pubkey` is the PRIMARY KEY,
+      -- which is what makes the graph a forest of simple paths: a key may rotate at most once, so it
+      -- can never fork into two heads and leave "which one owns the blocks" ambiguous.
+      CREATE TABLE IF NOT EXISTS rotations(
+        old_pubkey TEXT PRIMARY KEY, new_pubkey TEXT NOT NULL,
+        msg_ts REAL, sig_old TEXT, sig_new TEXT, created REAL);
     """)
     n = c.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
     if n == 0:
@@ -731,6 +739,52 @@ def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
     except Exception:
         return False
 
+# ---------------------------------------------------------------- #113 key rotation ---------------
+# A contributor who loses the box holding `key.hex` loses the ability to add to their own total, and
+# their existing blocks are stranded under a name nobody can sign for again. They do still hold the
+# one thing that proves continuity — the ability to sign with the OLD key — and until now there was
+# nothing to present it to.
+#
+# The message is signed by BOTH keys. That is what makes the endpoint safe without any operator
+# involvement: signing with the old key is the only way to make the claim at all (so nobody can annex
+# your blocks), and requiring the new key too means nobody can push their history onto someone else's
+# identity without that person's consent. `msg_ts` bounds replay.
+ROTATE_MSG_VERSION = "hazync-rotate-v1"
+ROTATE_MAX_SKEW    = float(os.environ.get("ROTATE_MAX_SKEW", "300"))  # seconds either side of our clock
+ROTATE_MAX_DEPTH   = 32   # cycle/runaway guard; a real contributor rotates a handful of times at most
+
+def rotate_message(old_pk: str, new_pk: str, ts) -> bytes:
+    """The exact bytes both keys sign. Lowercased and integer-truncated so the client and the server
+    cannot disagree about casing or float formatting and produce a signature that will not verify."""
+    return f"{ROTATE_MSG_VERSION}:{old_pk.lower()}:{new_pk.lower()}:{int(ts)}".encode()
+
+def rotation_map():
+    """All rotation edges as {old: new}. Small (one row per rotation ever), so read it whole."""
+    c = db()
+    try:
+        rows = c.execute("SELECT old_pubkey,new_pubkey FROM rotations").fetchall()
+    except Exception:
+        return {}                       # table absent on a coordinator that has not migrated yet
+    finally:
+        c.close()
+    return {r["old_pubkey"]: r["new_pubkey"] for r in rows}
+
+def resolve_pubkey(pk, rmap=None):
+    """Follow rotation edges to the current head. Terminates on a cycle or a corrupt chain rather than
+    hanging the request thread — `rotate()` refuses to create a cycle, but a hand-edited DB must not be
+    able to wedge the board."""
+    if rmap is None:
+        rmap = rotation_map()
+    cur = (pk or "").lower()
+    seen = {cur}
+    for _ in range(ROTATE_MAX_DEPTH):
+        nxt = rmap.get(cur)
+        if nxt is None or nxt in seen:
+            return cur
+        seen.add(nxt)
+        cur = nxt
+    return cur
+
 def meta_get(k):
     c = db(); r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone(); c.close()
     return r["v"] if r else None
@@ -880,6 +934,70 @@ def verify_spine(receipt: bytes):
     finally:
         try: os.remove(tmp)
         except Exception: pass
+
+def rotate(body):
+    """#113 — move attribution from one key to a new one, proven by a signature from BOTH.
+
+    Records an edge; never rewrites history. `/api/state` resolves through it, so the leaderboard and
+    the contributor count follow immediately while `vranges` and `submissions` keep saying exactly
+    which key signed what.
+
+    The old key is NOT retired. A still-running box that nobody has stopped keeps submitting happily
+    and its work resolves forward to the head, which is the failure-free outcome; retiring it would
+    turn a forgotten worker into silent data loss."""
+    old  = (body.get("old_pubkey") or "").strip().lower()
+    new  = (body.get("new_pubkey") or "").strip().lower()
+    s_old, s_new = body.get("sig_old", ""), body.get("sig_new", "")
+    if HAVE_ED:
+        if not is_hex(old, 32) or not is_hex(new, 32):
+            return 400, {"error": "old_pubkey and new_pubkey must be 32-byte hex (ed25519)"}
+        if not is_hex(s_old, 64) or not is_hex(s_new, 64):
+            return 400, {"error": "sig_old and sig_new must be 64-byte hex (ed25519)"}
+    if not old or not new:
+        return 400, {"error": "old_pubkey and new_pubkey required"}
+    if old == new:
+        return 400, {"error": "old_pubkey and new_pubkey are the same key"}
+    try:
+        ts = float(body.get("ts"))
+    except (TypeError, ValueError):
+        return 400, {"error": "ts required (unix seconds, and must be inside the signed message)"}
+    if abs(time.time() - ts) > ROTATE_MAX_SKEW:
+        return 400, {"error": f"ts is more than {int(ROTATE_MAX_SKEW)}s from server time — replay guard"}
+
+    msg = rotate_message(old, new, ts)
+    if not verify_sig(old, s_old, msg):
+        return 403, {"error": "old-key signature invalid"}
+    if not verify_sig(new, s_new, msg):
+        return 403, {"error": "new-key signature invalid"}
+
+    blk = blocked_pubkeys()
+    if old in blk or new in blk:
+        return 403, {"error": "key is on the moderation list"}
+
+    with _lock:
+        rmap = rotation_map()
+        if old in rmap:
+            return 409, {"error": f"{old[:10]} has already rotated to {rmap[old][:10]}"}
+        # Following the NEW key must not lead back to the old one. Without this, A->B then B->A makes a
+        # closed loop with no head, and every read of either identity depends on which key it started
+        # from. resolve_pubkey() would survive it (bounded), but the totals would be nonsense.
+        if resolve_pubkey(new, rmap) == old:
+            return 400, {"error": "rotation would create a cycle"}
+        c = db()
+        c.execute("INSERT INTO rotations(old_pubkey,new_pubkey,msg_ts,sig_old,sig_new,created)"
+                  " VALUES(?,?,?,?,?,?)", (old, new, ts, s_old, s_new, time.time()))
+        # The head needs a contributors row for its handle, and it may never have submitted anything —
+        # rotating to a brand-new key is the whole point. Carry the old handle unless one was supplied.
+        row = c.execute("SELECT handle FROM contributors WHERE pubkey=?", (old,)).fetchone()
+        handle = clean_handle(body.get("handle") or (row["handle"] if row else None))
+        if handle_reserved(handle):
+            c.close()
+            return 400, {"error": "that handle is reserved — please pick another"}
+        c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
+                  (new, handle, time.time()))
+        c.commit(); c.close()
+        head = resolve_pubkey(old)
+    return 200, {"ok": True, "old": old, "new": new, "resolved": head, "handle": handle}
 
 def submit_spine(body):
     """Accept an extended spine. Monotonic: a head that does not advance is refused."""
@@ -1086,25 +1204,30 @@ def distinct_blocks_by_pubkey():
     """Per-contributor DISTINCT blocks proven, computed the SAME way as proven_count (interval-merge) so
     the leaderboard always reconciles with the headline 'proven' number. A stored per-submit counter can
     drift (e.g. a block proved both as a single and inside an overlapping range double-counts); deriving
-    from vranges makes that impossible. Cheap: vranges are RANGE_SIZE-coarse + a few singles."""
+    from vranges makes that impossible. Cheap: vranges are RANGE_SIZE-coarse + a few singles.
+
+    Keyed by RESOLVED pubkey (#113), so a rotated key's blocks land on its current head.
+
+    The resolve has to happen BEFORE the sort, and that is the whole subtlety. Two keys belonging to
+    the same person interleave — the old box proved 100-199 and the new one 150-249 — so summing their
+    separately-merged totals would count 150-199 twice and hand a rotation a phantom bonus. Merging is
+    only overlap-safe over a single ordered sequence, so the merged identity must be re-sorted as one."""
+    rmap = rotation_map()
     c = db()
-    rows = c.execute("SELECT pubkey,lo,hi FROM vranges ORDER BY pubkey,lo,hi").fetchall()
+    rows = c.execute("SELECT pubkey,lo,hi FROM vranges").fetchall()
     c.close()
-    out, cur_pk, cur_lo, cur_hi, tot = {}, None, None, None, 0
-    def flush():
-        if cur_pk is not None:
-            out[cur_pk] = out.get(cur_pk, 0) + tot
-    for r in rows:
-        pk = r["pubkey"]
+    items = sorted((resolve_pubkey(r["pubkey"], rmap), r["lo"], r["hi"]) for r in rows)
+    out, cur_pk, cur_lo, cur_hi = {}, None, None, None
+    for pk, lo, hi in items:
         if pk != cur_pk:
             if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
-            cur_pk, cur_lo, cur_hi = pk, r["lo"], r["hi"]
+            cur_pk, cur_lo, cur_hi = pk, lo, hi
             continue
-        if r["lo"] > cur_hi + 1:
+        if lo > cur_hi + 1:
             out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
-            cur_lo, cur_hi = r["lo"], r["hi"]
+            cur_lo, cur_hi = lo, hi
         else:
-            cur_hi = max(cur_hi, r["hi"])
+            cur_hi = max(cur_hi, hi)
     if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
     return out
 
@@ -1180,7 +1303,6 @@ def state(slim=False):
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
     c = db()
     proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
-    ncontrib = c.execute("SELECT COUNT(*) FROM contributors WHERE blocks>0").fetchone()[0]
     blk = blocked_pubkeys()   # moderation takedown list — hide these pubkeys from the public board
     # board window: all verified + claimed, then a few open around the frontier
     fr = frontier_hi()
@@ -1206,10 +1328,20 @@ def state(slim=False):
     # DISTINCT blocks per contributor (interval-merge) — reconciles with the headline 'proven' by
     # construction; a stored per-submit counter can drift on overlapping submissions.
     _dbp = distinct_blocks_by_pubkey()
+    _rmap = rotation_map()
+    # Moderation has to follow rotations too, or a takedown is trivially escaped by rotating to a fresh
+    # key: the blocked key's blocks would reappear on a head that is not itself on the list. rotate()
+    # refuses when either key is blocked, but a key can be blocked AFTER it has rotated, so the read
+    # path cannot rely on that. Blocking any key in a chain hides the head it resolves to.
+    _blk_resolved = blk | {resolve_pubkey(b, _rmap) for b in blk}
+    # One row per RESOLVED identity. Iterating `contributors` would emit a rotated-away key as well,
+    # and rotate() guarantees the head has a row, so key off the resolved totals instead.
+    _handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
+    ncontrib = sum(1 for v in _dbp.values() if v > 0)
     leaders = sorted(
-        (dict(id=x["pubkey"][:10], handle=x["handle"], blocks=_dbp.get(x["pubkey"], 0))
-         for x in c.execute("SELECT * FROM contributors")
-         if x["pubkey"].lower() not in blk and _dbp.get(x["pubkey"], 0) > 0),
+        (dict(id=pk[:10], handle=_handles.get(pk), blocks=n)
+         for pk, n in _dbp.items()
+         if pk.lower() not in _blk_resolved and n > 0),
         key=lambda d: d["blocks"], reverse=True)[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
@@ -1703,7 +1835,7 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
@@ -1711,7 +1843,7 @@ class H(BaseHTTPRequestHandler):
         if body is None:
             return self._send(413, {"error": "request body too large"})
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
-              "/api/beat": beat}[p]
+              "/api/beat": beat, "/api/rotate": rotate}[p]
         code, obj = fn(body)
         return self._send(code, obj)
 
