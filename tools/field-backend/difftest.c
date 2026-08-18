@@ -104,6 +104,25 @@ static void check_pair(const unsigned char ab[32], const unsigned char bb[32]) {
               report("a * inv(a) != 1", w2, g2, ab, NULL); } }
     }
 
+    /* mul_int and add_int, over the small multipliers the EC layer actually uses */
+    for (int k = 0; k <= 32; k += 4) {   /* libsecp documents a in [0,32] */
+        { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
+          secp256k1_fe_mul_int_unchecked(&t, k); secp256k1_fe_normalize_var(&t); secp256k1_fe_get_b32(want, &t); }
+        hzfe_mul_int(hr, ha, k); hzfe_get_b32(got, hr);
+        checks++; if (memcmp(want, got, 32)) { char nm[32]; snprintf(nm, sizeof nm, "mul_int(%d)", k); report(nm, want, got, ab, NULL); }
+
+        { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
+          secp256k1_fe_add_int(&t, k);  /* add_int takes a runtime int */ secp256k1_fe_normalize_var(&t); secp256k1_fe_get_b32(want, &t); }
+        hzfe_add_int(hr, ha, k); hzfe_get_b32(got, hr);
+        checks++; if (memcmp(want, got, 32)) { char nm[32]; snprintf(nm, sizeof nm, "add_int(%d)", k); report(nm, want, got, ab, NULL); }
+    }
+
+    /* cmp_var */
+    { secp256k1_fe x = sa, y = sb; secp256k1_fe_normalize_var(&x); secp256k1_fe_normalize_var(&y);
+      int w = secp256k1_fe_cmp_var(&x, &y), g = hzfe_cmp(ha, hb);
+      checks++; if ((w > 0) != (g > 0) || (w < 0) != (g < 0)) {
+          failures++; if (failures <= 5) printf("\n  MISMATCH cmp_var: secp=%d hzfe=%d\n", w, g); } }
+
     /* predicates */
     { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
       int w = secp256k1_fe_is_zero(&t), g = hzfe_is_zero(ha);

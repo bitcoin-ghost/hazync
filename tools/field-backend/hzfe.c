@@ -81,6 +81,44 @@ void hzfe_half(uint32_t r[8], const uint32_t a[8]) {
     r[7] = (t[7] >> 1) | (top << 31);
 }
 
+/* --- small-integer helpers --------------------------------------------------------------------- */
+
+/* r = a * k mod p. Double-and-add over the bits of k, so cost scales with log(k) rather than k.
+ *
+ * CONTRACT, taken from libsecp's own: "a must be an integer constant expression in [0,32]". Negative
+ * multipliers are not part of the interface, so they are not handled here either. An earlier version
+ * carried a k<0 branch; no test could catch its removal, because nothing can legitimately reach it.
+ * Dead code that cannot be exercised is worse than absent code -- it reads as tested. */
+void hzfe_mul_int(uint32_t r[8], const uint32_t a[8], int k) {
+    uint32_t acc[8] = {0,0,0,0,0,0,0,0};
+    uint32_t base[8];
+    memcpy(base, a, sizeof(base));
+    unsigned int m = (unsigned int)k;          /* k in [0,32] per the contract above */
+    while (m) {
+        if (m & 1u) hzfe_add(acc, acc, base);
+        hzfe_add(base, base, base);
+        m >>= 1;
+    }
+    memcpy(r, acc, sizeof(acc));
+}
+
+/* r = a + k mod p, k small and non-negative, matching libsecp's add_int. */
+void hzfe_add_int(uint32_t r[8], const uint32_t a[8], int k) {
+    uint32_t t[8];
+    hzfe_set_int(t, (uint32_t)k);
+    hzfe_add(r, a, t);
+}
+
+/* Integer comparison. Variable time by design -- libsecp's cmp_var is too, and it is only used where
+ * the values are already public. */
+int hzfe_cmp(const uint32_t a[8], const uint32_t b[8]) {
+    for (int i = 7; i >= 0; i--) {
+        if (a[i] > b[i]) return 1;
+        if (a[i] < b[i]) return -1;
+    }
+    return 0;
+}
+
 /* --- serialisation ------------------------------------------------------------------------------ */
 
 void hzfe_get_b32(unsigned char out[32], const uint32_t a[8]) {

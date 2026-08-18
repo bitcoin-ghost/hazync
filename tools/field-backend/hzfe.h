@@ -51,6 +51,17 @@ int  hzfe_set_b32_limit(uint32_t r[8], const unsigned char in[32]);
 void hzfe_inv    (uint32_t r[8], const uint32_t a[8]);
 void hzfe_inv_var(uint32_t r[8], const uint32_t a[8]);
 
+/* r = a * k mod p, for the small integer multipliers the EC layer uses (typically 2..8). Done by
+ * double-and-add rather than a modmul: at 127 calls per verify, a precompile invocation each would
+ * cost more than the additions it replaces. */
+void hzfe_mul_int(uint32_t r[8], const uint32_t a[8], int k);
+
+/* r = a + k mod p, k a small non-negative integer. */
+void hzfe_add_int(uint32_t r[8], const uint32_t a[8], int k);
+
+/* Integer comparison of two reduced elements: -1, 0, 1. Variable time, matching cmp_var. */
+int  hzfe_cmp(const uint32_t a[8], const uint32_t b[8]);
+
 int  hzfe_is_zero(const uint32_t a[8]);
 int  hzfe_is_odd (const uint32_t a[8]);
 int  hzfe_equal  (const uint32_t a[8], const uint32_t b[8]);
