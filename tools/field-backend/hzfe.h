@@ -50,6 +50,7 @@ int  hzfe_set_b32_limit(uint32_t r[8], const unsigned char in[32]);
  * conversion at the boundary is free and reimplementing safegcd would be risk without reward. */
 void hzfe_inv    (uint32_t r[8], const uint32_t a[8]);
 void hzfe_inv_var(uint32_t r[8], const uint32_t a[8]);
+int  hzfe_is_square_var(const uint32_t a[8]);
 
 /* r = a * k mod p, for the small integer multipliers the EC layer uses (typically 2..8). Done by
  * double-and-add rather than a modmul: at 127 calls per verify, a precompile invocation each would

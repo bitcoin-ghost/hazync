@@ -123,6 +123,11 @@ static void check_pair(const unsigned char ab[32], const unsigned char bb[32]) {
       checks++; if ((w > 0) != (g > 0) || (w < 0) != (g < 0)) {
           failures++; if (failures <= 5) printf("\n  MISMATCH cmp_var: secp=%d hzfe=%d\n", w, g); } }
 
+    /* is_square_var */
+    { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
+      int w = secp256k1_fe_is_square_var(&t), g = hzfe_is_square_var(ha);
+      checks++; if (!!w != !!g) { failures++; if (failures<=5) printf("\n  MISMATCH is_square_var: secp=%d hzfe=%d\n", w, g); } }
+
     /* predicates */
     { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
       int w = secp256k1_fe_is_zero(&t), g = hzfe_is_zero(ha);
