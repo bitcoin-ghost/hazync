@@ -63,7 +63,9 @@
 > card — so two do not fit (OOM in `risc0-zkp` `cuda.rs:246`, on a 128 MB allocation). Dropping to po2=20
 > halves the segment and makes room, but concurrency then returns only **1.047x** while po2=20 itself
 > costs 22.9%: it needed **1.229x** to break even and delivered a fifth of that. `po2=21, CONC=1` is
-> optimal here. `HAZYNC_GPU_CONC` exists for cards where this arithmetic differs; default 1.
+> optimal here. (`HAZYNC_GPU_CONC` was written on the branch this measurement came from, and that branch
+> was deleted before it landed — see `c9e6bca`. **The knob does not exist**; this line claimed it did
+> until 2026-08-18. Concurrency is fixed at 1 because nothing implements anything else.)
 >
 > The experiment was motivated by `nvidia-smi` showing 29-81% utilisation mid-proof, read as headroom.
 > It is not: that figure means "a kernel was resident during the sample", not "the card is saturated".
@@ -80,6 +82,48 @@
 > the penalty by 4x. **Parameters tuned on early blocks do not transfer to modern ones** — early blocks
 > are nearly empty (block 20000 holds 19,023 UTXOs in total), so they exercise none of the cost that
 > dominates at scale. Sweep on a signature-heavy block, or the result is about the wrong workload.
+>
+> **Update 2026-08-18 — the po2 sweep re-run on a near-tip block, and concurrency re-confirmed as a
+> loss.** Measured on the same 46 GB L40S, block **962,000** (8,006 inputs), chunk 11 of 64.
+>
+> Point 2 above says the po2 sweep was taken on a 10-input block and warns it does not transfer. It did
+> not. "Flat beyond 21" is a small-block result:
+>
+> | po2 | segments | wall | peak VRAM |
+> |---|---|---|---|
+> | 20 | 1,717 | 2,461 s | 13,835 MiB |
+> | 21 | 841 | ~1,931 s | 22,905 MiB |
+> | **22** | **415** | **1,779 s** | **41,089 MiB** |
+>
+> po2 22 is **~8% faster than 21** here, not flat. Segment count halves cleanly with each step, which
+> also matters for hazync#119: that fault is per-segment at roughly 8e-5, so 415 segments is a 3.3%
+> chunk-failure rate against 12.8% at 1,717. Lower po2 loses twice, and phase C below lost a job to
+> exactly that.
+>
+> **This is NOT a recommendation to raise the default.** 41,089 MiB is 89% of the card, above the
+> 42,942 MiB that OOMed at po2 21 CONC=2, and hazync#97 records unexplained *intermittent* po2-21 OOMs
+> on this same box and driver (OOM with 39 GB free, proved with 24 GB free — non-monotonic, never root
+> caused). One chunk of one block is not enough to justify a default that leaves 11% headroom on a card
+> with a known intermittent allocation failure. It needs several chunks across several blocks, and
+> ideally a second card, before anyone changes `seg_po2`.
+>
+> **Concurrency was re-measured and lost again**, with equal-sized jobs this time (same chunk index, so
+> per-job cost is identical by construction):
+>
+> | config | wall | chunks/hr |
+> |---|---|---|
+> | po2 22, 1 job | 1,779 s | **2.02** |
+> | po2 20, 2 jobs | 4,607 s | 1.56 |
+> | po2 20, 3 jobs | 5,961 s | 1.21 (one job failed with hazync#119) |
+>
+> A caution for whoever measures this next, because it caught me: pairing a **big** job with a **small**
+> one looks like 63% of the second job is absorbed free. It is not — small jobs slot into scheduling
+> gaps. Equal jobs contend properly and the gain collapses to ~7%. Use identical workloads.
+>
+> **And read this file before measuring.** The 30 July result above already answered the concurrency
+> question, including the `nvidia-smi` caveat, and it was re-derived from scratch on 2026-08-18 at a
+> cost of several GPU-hours. That is the fourth instance of the pattern in point 3, in a different form:
+> not a parameter tuned on the wrong workload, but an answer that already existed.
 >
 > **4. What is left, given the above.** Scheduling is closed off. Guest compute is closed off (69.5% is
 > Core's own field arithmetic; the SHA marshalling win was 3.8% and was rejected as not worth touching
