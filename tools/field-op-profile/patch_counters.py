@@ -15,6 +15,11 @@ import re, sys, pathlib
 SRC = pathlib.Path(sys.argv[1])            # scratch secp256k1 root
 hdr = SRC / "src" / "field_10x26_impl.h"
 text = hdr.read_text()
+# The scalar backend is counted too. It is already uint32_t d[8] with no magnitude system, so it needs
+# no representation change -- but whether routing its multiply through sys_bigint is worth doing depends
+# entirely on how often it runs, which is what this measures.
+shdr = SRC / "src" / "scalar_8x32_impl.h"
+stext = shdr.read_text()
 
 # Every backend entry point, in declaration order. The signature is always
 #   [SECP256K1_INLINE] static <ret> secp256k1_fe_impl_<name>(<args>) {
@@ -30,7 +35,19 @@ def inject(m):
         names.append(name)
     return f'{head}\n    hz_field_ops[HZ_{name.upper()}]++;'
 
+spat = re.compile(
+    r'((?:SECP256K1_INLINE\s+)?static\s+(?:[A-Za-z_][A-Za-z0-9_ *]*?)\s*'
+    r'secp256k1_scalar_([a-z0-9_]+)\s*\([^;{]*?\)\s*\{)',
+    re.S)
+def sinject(m):
+    head, name = m.group(1), 'sc_' + m.group(2)
+    if name not in names:
+        names.append(name)
+    return f'{head}\n    hz_field_ops[HZ_{name.upper()}]++;'
+
 patched, n = pat.subn(inject, text)
+spatched, sn = spat.subn(sinject, stext)
+n += sn
 if n == 0:
     sys.exit("FATAL: injected nothing — the signature pattern no longer matches this libsecp version")
 
@@ -47,7 +64,8 @@ decl.append("extern const char *hz_field_op_names[HZ_FIELD_OP_COUNT];")
 decl.append("#endif")
 patched = "\n".join(decl) + "\n\n" + patched
 
-hdr.write_text(patched)
+hdr.write_text("\n".join(decl) + "\n\n" + patched if False else patched)
+shdr.write_text("\n".join(decl) + "\n\n" + spatched)
 
 # The names table, emitted for the harness to print.
 tbl = SRC / "hz_field_ops.c"
