@@ -53,7 +53,7 @@ if n == 0:
 
 # The counter array has to exist before the first use, and the header is included from several TUs, so
 # the array is declared extern here and defined once in the harness.
-decl = ["/* hazync: field-op counters, injected by tools/field-op-profile */",
+decl = ["/* hazync: field-op counters, injected by experimental/field-op-profile */",
         "#ifndef HZ_FIELD_OPS_DECLARED",
         "#define HZ_FIELD_OPS_DECLARED"]
 for i, nm in enumerate(names):

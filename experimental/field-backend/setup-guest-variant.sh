@@ -28,9 +28,9 @@ rm -rf "$OUT/base/secp256k1/.git" "$OUT/base/bitcoin-core/.git"
 S="$OUT/base/secp256k1"
 
 # 2. the backend, into libsecp's own source tree
-cp "$REPO/tools/field-backend/hzfe.h" "$REPO/tools/field-backend/hzfe.c" \
-   "$REPO/tools/field-backend/hzfe_inv.c" \
-   "$REPO/tools/field-backend/field_hzfe.h" "$REPO/tools/field-backend/field_hzfe_impl.h" "$S/src/"
+cp "$REPO/experimental/field-backend/hzfe.h" "$REPO/experimental/field-backend/hzfe.c" \
+   "$REPO/experimental/field-backend/hzfe_inv.c" \
+   "$REPO/experimental/field-backend/field_hzfe.h" "$REPO/experimental/field-backend/field_hzfe_impl.h" "$S/src/"
 
 # 3. backend selection. Prepend a branch to the existing #if/#elif chain rather than wrapping it --
 #    inserting #else before an #elif is invalid and silently drops the header.

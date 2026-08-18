@@ -28,8 +28,8 @@ point, builds it natively, and runs N ECDSA verifications. Nothing in the repo o
 ## Run
 
 ```sh
-tools/field-op-profile/run.sh          # defaults to 100 verifications
-N=1000 tools/field-op-profile/run.sh
+experimental/field-op-profile/run.sh          # defaults to 100 verifications
+N=1000 experimental/field-op-profile/run.sh
 ```
 
 ## Reading the result
