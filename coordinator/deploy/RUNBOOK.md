@@ -51,9 +51,59 @@ curl -s localhost:8899/api/state | head -c 300      # smoke test
 # (WAL-safe DB + receipts, old→new) BEFORE repointing the nginx proxy; decommission the old box only after.
 ```
 
-Set `TIP_HEIGHT` in the unit to the real chain tip. It is a **floor**, not the ceiling: the coordinator derives what it will hand out from the highest bundle the bridge can actually serve, and only falls back to this when that is lower (a backfilling or absent bridge). Setting it too low understates % complete; setting it high is harmless. `RANGE_SIZE=1000`. The unit binds `127.0.0.1`
-(behind the proxy); if the web box is a different machine, set `COORD_BIND` to the private-network IP
-and firewall `:8899` to the web box only.
+`TIP_HEIGHT` is a **floor**, not the ceiling, and it is the *last* of three answers the coordinator
+consults. `chain_tip()` takes the highest of: the node height published by the tip timer (below),
+the highest bundle the bridge can serve, and this constant. Each is a lower bound on the truth and
+none is reliably the truth alone.
+
+**Do not hand-set this to "the real chain tip" and consider it done.** A constant is correct on the
+day it is written and wrong every day after. Install the tip timer in §1b so the real height is
+published automatically; leave `TIP_HEIGHT` at whatever the unit ships with, as the fallback for when
+the publisher is absent or stale. Setting it too low understates % complete and, worse, rejects valid
+submissions above it as out of range.
+
+`RANGE_SIZE=1000`. The unit binds `127.0.0.1` (behind the proxy); if the web box is a different
+machine, set `COORD_BIND` to the private-network IP and firewall `:8899` to the web box only.
+
+## 1b. Publish the node height (required for a correct chain tip)
+
+The coordinator runs as `hazync`, and bitcoind's datadir is typically mode 700 with a 600 cookie owned
+by root, so it cannot ask the node how tall the chain is. A small root-side timer publishes the height
+to a file instead, and the coordinator reads that.
+
+Without this the board advertises a compiled-in constant. It happened: the public board showed a chain
+height of 958,301 while the node was at 962,795, drifting further every day, and submissions for real
+blocks above the constant were refused.
+
+```bash
+sudo install -m 0755 coordinator/deploy/hazync-node-tip.sh  /opt/hazync/coordinator/deploy/
+sudo install -m 0644 coordinator/deploy/hazync-node-tip.service /etc/systemd/system/
+sudo install -m 0644 coordinator/deploy/hazync-node-tip.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hazync-node-tip.timer
+sudo systemctl start hazync-node-tip.service        # publish once now
+cat /var/lib/hazync/node_tip                        # should print the node's height
+```
+
+Check `HAZYNC_BITCOIN_DATADIR` and `TIP_FILE` in the unit match this box. The file must be readable by
+the coordinator's user; the script chowns it to `hazync:hazync` by default (`TIP_FILE_OWNER`).
+
+Knobs, all optional:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TIP_FILE` | `/var/lib/hazync/node_tip` | where the height is published and read |
+| `TIP_FILE_MAX_AGE` | `3600` | older than this and the file is ignored, falling back to the floor |
+| `TIP_FILE_OWNER` | `hazync:hazync` | ownership the publisher sets |
+
+The staleness window is the point of the design. A height left behind by a dead publisher looks
+exactly like a live one, so anything older than `TIP_FILE_MAX_AGE` is treated as absent. A broken node
+degrades to the old floor behaviour instead of pinning the board to a number that has quietly stopped
+moving. The timer refreshes every 5 minutes, so an hour is roughly a dozen consecutive failures before
+the board notices.
+
+The publisher writes atomically and writes **nothing** on failure, so a node that is still starting
+leaves the last good height in place rather than truncating it.
 
 ## 1a. Updating a running coordinator
 
@@ -241,6 +291,37 @@ systemctl list-timers hazync-coordinator-backup.timer   # confirm it is schedule
 # daily, offsite (rclone or rsync target); keeps 14 local snapshots
 17 3 * * *  BACKUP_REMOTE=rclone:hazync-backup:hazync /opt/hazync/coordinator/deploy/backup.sh >> /var/log/hazync-backup.log 2>&1
 ```
+
+### Knobs
+
+| Variable | Default | What it does |
+|---|---|---|
+| `BACKUP_REMOTE` | unset | offsite target, `user@host:/path` or `rclone:remote:path`. Unset means the snapshot sits on the same disk as the data. |
+| `BACKUP_REMOTE_DB_ONLY` | `0` | ship only the ledger offsite (~45 MB) and keep receipts local |
+| `BACKUP_REMOTE_PROOFS` | `0` | mirror receipts offsite as well, append-only and namespaced by guest id |
+| `BACKUP_KEEP` | `14` | local snapshots retained |
+| `BACKUP_NET_TIMEOUT` | `600` | seconds of no I/O before a transfer is abandoned |
+| `BACKUP_SSH_CONNECT_TIMEOUT` | `30` | ssh connect timeout for the offsite copy and its prune |
+
+**Size `BACKUP_KEEP` against the receipt store, not out of habit.** Every snapshot is a *full* copy of
+the receipts, so 14 of them is 14x the thing being protected, against a store that grows with the
+party. On 2026-08-17 that was 78 GB of local backups for an 8.6 GB live store; it is now `2`.
+
+**Think before enabling `BACKUP_REMOTE_PROOFS`.** It was enabled when the store was 759 MB and the
+target had 14 GB free. Two weeks later it filled that target's root filesystem to 100%, nginx could no
+longer buffer proxied responses, and the public board went down. A backup took out the thing it was
+protecting. The receipt store is a few hundred GB at full chain, so this needs a target sized for it,
+not a web VM.
+
+**Timeouts exist because a stall is worse than a failure.** rsync waits forever on a peer that has
+stopped reading. When the offsite target filled, the sender hung for three and a half hours holding
+9 GB of RAM, and because systemd will not start a unit that is already `activating`, the daily timer
+became a no-op and *every* backup silently stopped. Nothing appeared in `systemctl is-failed`, because
+nothing had failed. The unit now sets `TimeoutStartSec=60m` (a healthy run is about five minutes) and
+every network call is bounded, so a stall becomes a visible failed unit that the next firing retries.
+
+Local rotation runs **before** the offsite copy, so a remote that is full, slow or gone can no longer
+prevent local retention from happening.
 
 **Restore drill** (do this once so you know it works):
 

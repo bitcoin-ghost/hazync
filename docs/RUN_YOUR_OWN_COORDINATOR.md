@@ -127,6 +127,29 @@ while `/api/spine/proof` quietly serves nothing, and no other signal tells you.
 **Back up the ledger off-box.** The receipts are re-provable, expensively; `coordinator.db` — who
 proved what — is not re-provable at any price.
 
+**Size the backup target for the receipt store, or ship the ledger only.** `BACKUP_REMOTE_PROOFS=1`
+mirrors receipts offsite, and the store grows to a few hundred GB at full chain. Pointing it at
+something too small does not degrade gracefully: it fills the target, and on a box that also serves web
+traffic it takes the site down with it. `BACKUP_REMOTE_DB_ONLY=1` ships the irreplaceable half for
+about 45 MB. See `coordinator/deploy/RUNBOOK.md` § Backup & restore.
+
+**Publish the node height.** The coordinator cannot read bitcoind's datadir if it runs unprivileged, so
+without `hazync-node-tip.timer` its idea of the chain tip is a compiled-in constant that is wrong the
+day after it ships. That understates progress and rejects valid submissions above the constant as out
+of range. RUNBOOK § 1b.
+
+**Contributors can move their blocks between keys.** `POST /api/rotate` takes both public keys and a
+signature from each over one canonical message, and the contributor side is `hazync rotate
+<old-key.hex>`. Requiring both signatures is what makes it safe unattended: the old key is the only way
+to make the claim, and the new key's signature stops anyone pushing history onto a stranger. Rotations
+are recorded as append-only edges and resolved when the board is rendered, so `vranges` and
+`submissions` still record exactly which key signed which proof.
+
+Two consequences worth knowing before someone asks. Moderation follows rotations in both directions, so
+a takedown cannot be escaped by rotating to a fresh key. And the old key is not retired, so a forgotten
+box that is still proving keeps contributing to its owner's current identity instead of silently
+vanishing.
+
 ## Reporting problems
 
 If your coordinator disagrees with another about the frontier, that is interesting and worth an issue:

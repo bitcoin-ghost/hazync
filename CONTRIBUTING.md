@@ -84,6 +84,25 @@ export WITNESS_DIR=$PWD/w
 
 Your name can be anything. It is tied to a signing key the tool makes for you and keeps in `~/.hazync`, so nobody else can claim your blocks. Back that folder up if you care about keeping the same identity.
 
+**Back it up now, not later.** Losing the box loses the key, and the blocks it proved stay under a name
+you can no longer sign for. This has already happened once on the public board: 29,669 blocks sit under
+an identity whose key died with a deleted machine, and nothing can recover them.
+
+### Moved to a new box, or rebuilt one?
+
+If you still have the old `key.hex`, move its blocks onto the new machine's identity:
+
+```
+./hazync rotate /path/to/old/key.hex
+```
+
+Both keys sign one message, so this can neither take someone else's blocks nor push yours onto them.
+The old secret is read locally to produce that signature and is never transmitted; the coordinator only
+ever sees two public keys and two signatures. Your totals merge and the leaderboard shows one row.
+
+The old key is not retired. If you forgot a box somewhere and it is still proving, its work resolves
+onto your current identity rather than being lost.
+
 **Before you prove, run a pre-flight:**
 
 ```
