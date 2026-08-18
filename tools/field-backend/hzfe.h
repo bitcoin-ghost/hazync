@@ -46,6 +46,11 @@ void hzfe_get_b32(unsigned char out[32], const uint32_t a[8]);
 void hzfe_set_b32_mod(uint32_t r[8], const unsigned char in[32]);
 int  hzfe_set_b32_limit(uint32_t r[8], const unsigned char in[32]);
 
+/* Inverse delegates to libsecp's safegcd (hzfe_inv.c). Measured at <=1 call per verification, so the
+ * conversion at the boundary is free and reimplementing safegcd would be risk without reward. */
+void hzfe_inv    (uint32_t r[8], const uint32_t a[8]);
+void hzfe_inv_var(uint32_t r[8], const uint32_t a[8]);
+
 int  hzfe_is_zero(const uint32_t a[8]);
 int  hzfe_is_odd (const uint32_t a[8]);
 int  hzfe_equal  (const uint32_t a[8], const uint32_t b[8]);

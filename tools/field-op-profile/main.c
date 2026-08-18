@@ -11,6 +11,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <secp256k1.h>
+#include <secp256k1_schnorrsig.h>
+#include <secp256k1_extrakeys.h>
 
 #define HZ_DECL_ONLY
 extern unsigned long long hz_field_ops[];
@@ -44,8 +46,21 @@ int main(int argc, char **argv) {
     int nops = hz_n_ops();
     for (int i = 0; i < nops; i++) hz_field_ops[i] = 0;
 
-    for (int i = 0; i < n; i++) {
-        if (!secp256k1_ecdsa_verify(ctx, &sig, msg, &pub)) { fprintf(stderr, "verify failed at %d\n", i); return 1; }
+    const char *phase = getenv("HZ_PHASE") ? getenv("HZ_PHASE") : "ecdsa";
+    if (!strcmp(phase, "schnorr")) {
+        secp256k1_keypair kp;
+        secp256k1_xonly_pubkey xpub;
+        unsigned char sig64[64];
+        if (!secp256k1_keypair_create(ctx, &kp, seckey)) { fprintf(stderr, "keypair failed\n"); return 1; }
+        if (!secp256k1_keypair_xonly_pub(ctx, &xpub, NULL, &kp)) { fprintf(stderr, "xonly failed\n"); return 1; }
+        if (!secp256k1_schnorrsig_sign32(ctx, sig64, msg, &kp, NULL)) { fprintf(stderr, "schnorr sign failed\n"); return 1; }
+        for (int i = 0; i < nops; i++) hz_field_ops[i] = 0;   /* re-zero: signing above used field ops */
+        for (int i = 0; i < n; i++)
+            if (!secp256k1_schnorrsig_verify(ctx, sig64, msg, 32, &xpub)) { fprintf(stderr, "schnorr verify failed at %d\n", i); return 1; }
+    } else {
+        for (int i = 0; i < n; i++) {
+            if (!secp256k1_ecdsa_verify(ctx, &sig, msg, &pub)) { fprintf(stderr, "verify failed at %d\n", i); return 1; }
+        }
     }
 
     unsigned long long total = 0;
@@ -60,7 +75,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    printf("\n  %d ECDSA verification(s), 10x26 backend (the one riscv32im selects)\n\n", n);
+    printf("\n  %d %s verification(s), 10x26 backend (the one riscv32im selects)\n\n", n, phase);
     printf("  %-26s %14s %12s %7s\n", "operation", "total", "per verify", "share");
     printf("  %-26s %14s %12s %7s\n", "--------------------------", "--------------", "------------", "-------");
 

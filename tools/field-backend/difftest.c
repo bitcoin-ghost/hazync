@@ -83,6 +83,27 @@ static void check_pair(const unsigned char ab[32], const unsigned char bb[32]) {
     hzfe_half(hr, ha); hzfe_get_b32(got, hr);
     checks++; if (memcmp(want, got, 32)) report("half", want, got, ab, NULL);
 
+    /* inverse: skip zero, which has none. libsecp's inv(0) is defined as 0; check that too. */
+    if (!hzfe_is_zero(ha)) {
+        { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
+          secp256k1_fe_inv(&sr, &t); secp256k1_fe_normalize_var(&sr); secp256k1_fe_get_b32(want, &sr); }
+        hzfe_inv(hr, ha); hzfe_get_b32(got, hr);
+        checks++; if (memcmp(want, got, 32)) report("inv", want, got, ab, NULL);
+
+        { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
+          secp256k1_fe_inv_var(&sr, &t); secp256k1_fe_normalize_var(&sr); secp256k1_fe_get_b32(want, &sr); }
+        hzfe_inv_var(hr, ha); hzfe_get_b32(got, hr);
+        checks++; if (memcmp(want, got, 32)) report("inv_var", want, got, ab, NULL);
+
+        /* and the property that matters: a * a^-1 == 1 */
+        { uint32_t one[8]; hzfe_set_int(one, 1);
+          uint32_t prod[8]; hzfe_inv(hr, ha); hzfe_mul(prod, ha, hr);
+          checks++; if (!hzfe_equal(prod, one)) {
+              unsigned char g2[32]; hzfe_get_b32(g2, prod);
+              unsigned char w2[32]; memset(w2, 0, 32); w2[31] = 1;
+              report("a * inv(a) != 1", w2, g2, ab, NULL); } }
+    }
+
     /* predicates */
     { secp256k1_fe t = sa; secp256k1_fe_normalize(&t);
       int w = secp256k1_fe_is_zero(&t), g = hzfe_is_zero(ha);
