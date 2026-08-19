@@ -164,7 +164,7 @@
 > 2026-08-19: the cost is the point.
 >
 > The implementation, the differential harness and the integration path are preserved under
-> `tools/field-backend/`, and the profilers under `tools/field-op-profile/`. Anyone reaching for this
+> `experimental/field-backend/`, and the profilers under `experimental/field-op-profile/`. Anyone reaching for this
 > idea again will find it built, measured and answered.
 >
 > **4. What is left, given the above.** Scheduling is closed off. Guest compute is closed off (69.5% is
