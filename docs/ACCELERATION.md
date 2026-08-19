@@ -125,6 +125,48 @@
 > cost of several GPU-hours. That is the fourth instance of the pattern in point 3, in a different form:
 > not a parameter tuned on the wrong workload, but an answer that already existed.
 >
+> **Update 2026-08-19 — the bigint field backend was BUILT and MEASURED at 1.67x, and rejected.**
+> Not the naive multiply swap this file already disproved, but the full field-backend rework it
+> recommends instead: a third libsecp backend holding field elements in precompile-native `[u32; 8]`
+> permanently, so nothing converts per operation.
+>
+> Block 962,000, 8,006 inputs, execute mode, both sides same machine and day:
+>
+> | | cycles | per input | execute |
+> |---|---|---|---|
+> | baseline (10x26) | 17,394,637,671 | 2,172,700 | 838 s |
+> | hzfe + `sys_bigint` | 10,388,552,466 | 1,297,596 | 334 s |
+> | | **1.67x** | | |
+>
+> **It is correct.** Identical `tip_hash`, all consensus flags true, and libsecp's EC layer runs
+> without a magnitude system at all. 1.4M differential comparisons against the stock backend, mutation
+> checked. The approach works; it is not worth what it costs.
+>
+> **The number that killed it: `sys_bigint` costs about 678 cycles per 256-bit modular multiply.** The
+> projection assumed 10-100 instruction-equivalents and predicted 6-8x. Every other input to that
+> projection was measured; the estimated one decided the answer. 678 is only ~40% below the
+> 1,141-instruction software multiply it replaces, and mul+sqr are 94.8% of the field work, so 40% off
+> the dominant term is all you get.
+>
+> **Caveat, stated because it is unresolved rather than settled.** This file specifies **bigint2**, and
+> the ~6x precedent came from the removed k256 experiment which used `risc0-bigint2`. The measurement
+> above used `sys_bigint` — the older 256-bit `OP_MULTIPLY` syscall, which is what
+> `risc0-zkvm-platform` exposes directly and what Step 0's "Precompile API — resolved" paragraph
+> documents. `sys_bigint2_*` takes a `blob_ptr` and invokes a compiled bigint2 program, needing the
+> `risc0-bigint2` crate. **Whether bigint2 is materially cheaper than 678 cycles is untested, and it is
+> the single number that would reopen this.**
+>
+> **Why it was closed rather than retried.** At 7x, replacing one field backend with 1.4M differential
+> comparisons behind it is a trade worth defending. At 1.67x it spends the project's strongest claim —
+> that this runs Bitcoin Core's real code — for a 40% cycle reduction. The weakening was real: arithmetic
+> Core ships replaced by arithmetic written here; the magnitude contract the EC layer was written
+> against removed; a Rust shim and a direct platform dependency added to the guest. Operator decision,
+> 2026-08-19: the cost is the point.
+>
+> The implementation, the differential harness and the integration path are preserved under
+> `tools/field-backend/`, and the profilers under `tools/field-op-profile/`. Anyone reaching for this
+> idea again will find it built, measured and answered.
+>
 > **4. What is left, given the above.** Scheduling is closed off. Guest compute is closed off (69.5% is
 > Core's own field arithmetic; the SHA marshalling win was 3.8% and was rejected as not worth touching
 > Core). That leaves exactly two levers, both procurement rather than engineering: **more cards**
