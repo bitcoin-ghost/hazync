@@ -1235,8 +1235,6 @@ fn multi_check() {
 }
 
 // ---- Segmentation: chunk (map) + aggregate (reduce) ----
-#[derive(Deserialize)]
-struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
 #[derive(Serialize, Deserialize)]
 struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 
@@ -1249,20 +1247,38 @@ fn chunk_prove() {
     let n: u32 = env::read();
     let mut binds: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
     let mut all_valid = true;
+    // #135: the byte payloads arrive as raw bytes via read_slice, not as serde `Vec<u8>`. Serde walks
+    // the word stream a byte at a time — measured at ~147 cycles/byte, half this guest's entire cost on
+    // a transaction-heavy chunk. Each payload is padded to a word by the host so the u32 reads stay
+    // aligned; we truncate back to the declared length. Nothing about WHAT is proven changes: the same
+    // bytes reach verify_input and input_bind commits the same digest.
+    fn read_bytes(len: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (len as usize).div_ceil(4) * 4];
+        env::read_slice(&mut v);
+        v.truncate(len as usize);
+        v
+    }
     for _ in 0..n {
-        let c: ChunkInput = env::read();
+        let tx_len: u32 = env::read();
+        let prevouts_len: u32 = env::read();
+        let input_idx: u32 = env::read();
+        let coin_height: u32 = env::read();
+        let coin_is_coinbase: u32 = env::read();
+        let coin_mtp: u32 = env::read();
+        let raw_tx = read_bytes(tx_len);
+        let prevouts = read_bytes(prevouts_len);
         let mut leaf = [0u8; 32];
         let r = unsafe {
             verify_input(
-                c.raw_tx.as_ptr(), c.raw_tx.len() as u32, c.input_idx,
-                c.prevouts.as_ptr(), c.prevouts.len() as u32, flags,
-                c.coin_height, c.coin_is_coinbase, c.coin_mtp, leaf.as_mut_ptr(),
+                raw_tx.as_ptr(), raw_tx.len() as u32, input_idx,
+                prevouts.as_ptr(), prevouts.len() as u32, flags,
+                coin_height, coin_is_coinbase, coin_mtp, leaf.as_mut_ptr(),
             )
         };
         if r != 1 { all_valid = false; }
         // Bind exactly what was verified (tx bytes, input idx, prevouts, coin metadata, flags) so the
         // aggregation can prove the block's input is the one this chunk validated — see input_bind (#2).
-        binds.push(input_bind(&c.raw_tx, c.input_idx, &c.prevouts, c.coin_height, c.coin_is_coinbase, c.coin_mtp, flags));
+        binds.push(input_bind(&raw_tx, input_idx, &prevouts, coin_height, coin_is_coinbase, coin_mtp, flags));
     }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds });
 }
