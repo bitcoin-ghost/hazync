@@ -1569,10 +1569,20 @@ fn prove_seg() {
 // block 741000 in execute mode and these two coefficients reproduce every one of the 16 chunks' real
 // cycle counts to within ~1%.
 //
-// REFITTED for the read_slice payload (#135). The byte term was 182 when the guest read its payload
-// through serde; that path cost ~147 cycles/byte on its own, and removing it leaves ~35. Measured
-// straggler with the stale 182 was 1.64x — WORSE than not packing by cost at all, because the model
-// then rates a byte-heavy chunk far more expensive than it now is. The EC coefficient did not move.
+// REFITTED TWICE for #135, and the pattern is the point: every time a byte-scaling cost is removed the
+// coefficient drops and the model must be re-measured, or the packer optimises against work that is no
+// longer there.
+//
+//   182  serde `env::read` payload, transaction shipped per input
+//    36  read_slice payload (the ~147 cycles/byte serde cost removed)
+//     6  payload grouped per transaction (deserialise and Init now run once, not once per input)
+//
+// Each stale value did visible harm: at 182 the measured straggler was 1.64x, WORSE than not packing by
+// cost at all, because byte-heavy chunks were rated far more expensive than they had become. The EC
+// coefficient has not moved across any of it.
+//
+// What remains in the byte term is mostly `input_bind`, which still hashes the whole transaction once
+// per input. That is ~2.5 cycles/byte of the 6 and is the next thing to disappear if it is ever hoisted.
 //
 // The byte term is the part that is easy to get wrong, and costing purely by EC verifies does get it
 // wrong. Every ChunkInput carries the WHOLE spending transaction and the WHOLE prevouts blob, so a
@@ -1583,7 +1593,7 @@ fn prove_seg() {
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
 const COST_PER_EC_OP: u64 = 1_950_000;
-const COST_PER_INPUT_BYTE: u64 = 36;
+const COST_PER_INPUT_BYTE: u64 = 6;
 
 /// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
 /// used only to balance chunks, so being wrong costs some balance and never correctness.
@@ -1799,33 +1809,62 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
     println!("        journal sha256 {}  kind={:#x} all_valid={} binds={}", hex(&d), w(0), w(4), w(8));
     s.cycles()
 }
-/// Write a chunk's inputs onto the guest's stdin (mode 4's payload).
+/// Write a chunk's inputs onto the guest's stdin (mode 4's payload), grouped by transaction.
 ///
-/// #135: the bytes go through `write_slice` as raw bytes rather than as serde `Vec<u8>`. Measured on
-/// block 741000 chunk 1, `env::read` of the serde form was 50.9% of the chunk's cycles — ~147 per byte,
-/// because serde walks risc0's word stream a byte at a time. `read_slice` is a bulk copy; risc0's own
-/// optimisation guide says to use it for raw bytes.
+/// #135. Two things are going on:
 ///
-/// Byte payloads are padded to a word so the serde reads that follow stay word-aligned on the same
-/// stream. The guest truncates back to the declared length.
+/// **Grouped by transaction.** A chunk used to carry a full copy of the spending transaction and its
+/// prevouts for EVERY input, so a 501-input consolidation was shipped 501 times — block 741000 sent
+/// 6,995,621 bytes of a distinct 123,883, a factor of 56.5. The guest then deserialised and ran
+/// `PrecomputedTransactionData::Init` once per input, which is exactly the quadratic sighash work
+/// BIP143 precomputation exists to avoid. Now each transaction goes once, followed by the indices of
+/// the inputs this chunk owns.
+///
+/// **Raw bytes.** The blobs go through `write_slice` rather than serde `Vec<u8>`; serde walked risc0's
+/// word stream a byte at a time at ~147 cycles/byte. Blobs are padded to a word so the u32 reads that
+/// follow stay aligned, and the guest truncates back to the declared length.
+///
+/// Ordering is load-bearing. `w.inputs` is built transaction by transaction, inputs in index order, so
+/// a contiguous chunk groups into consecutive transaction runs with no reordering. The aggregation
+/// concatenates chunk binds and indexes them by the block's own input index — emit them in any other
+/// order and it compares the wrong input, silently.
 fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, lo: usize, hi: usize) {
     fn padded(v: &[u8]) -> Vec<u8> {
         let mut p = v.to_vec();
         p.resize(v.len().div_ceil(4) * 4, 0);
         p
     }
-    b.write(&((hi - lo) as u32)).unwrap();
-    for inp in &w.inputs[lo..hi] {
-        let tx = &w.txs[inp.tx_idx as usize].0;
-        let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
+    // Consecutive runs sharing a tx_idx. Debug-asserted rather than assumed: if the witness builder
+    // ever emits inputs out of order this must fail loudly here, not produce a chunk that binds the
+    // wrong inputs.
+    let mut groups: Vec<(u32, usize, usize)> = Vec::new();
+    for i in lo..hi {
+        let t = w.inputs[i].tx_idx;
+        match groups.last_mut() {
+            Some((gt, _, end)) if *gt == t => *end = i + 1,
+            _ => groups.push((t, i, i + 1)),
+        }
+    }
+    debug_assert!(
+        w.inputs[lo..hi].windows(2).all(|p| (p[0].tx_idx, p[0].input_idx) < (p[1].tx_idx, p[1].input_idx)),
+        "chunk inputs are not in (tx_idx, input_idx) order — grouping would reorder binds"
+    );
+
+    b.write(&(groups.len() as u32)).unwrap();
+    for (tx_idx, gs, ge) in groups {
+        let tx = &w.txs[tx_idx as usize].0;
+        let prevouts = &w.tx_prevouts[tx_idx as usize].0;
         b.write(&(tx.len() as u32)).unwrap();
         b.write(&(prevouts.len() as u32)).unwrap();
-        b.write(&inp.input_idx).unwrap();
-        b.write(&inp.coin_height).unwrap();
-        b.write(&inp.coin_is_coinbase).unwrap();
-        b.write(&inp.coin_mtp).unwrap();
+        b.write(&((ge - gs) as u32)).unwrap();
         b.write_slice(&padded(tx));
         b.write_slice(&padded(prevouts));
+        for inp in &w.inputs[gs..ge] {
+            b.write(&inp.input_idx).unwrap();
+            b.write(&inp.coin_height).unwrap();
+            b.write(&inp.coin_is_coinbase).unwrap();
+            b.write(&inp.coin_mtp).unwrap();
+        }
     }
 }
 
@@ -3530,10 +3569,11 @@ mod chunk_packing_tests {
         let real = |ec: u64, bytes: u64| super::COST_PER_EC_OP * ec + super::COST_PER_INPUT_BYTE * bytes;
         let (lean, fat) = (real(42, 37_933), real(42, 765_282));
 
-        // Within 1% of what those two chunks actually measured — the coefficients are fitted, so this
-        // fails loudly if either is changed without re-measuring.
-        assert!((fat as f64 - 109_113_751.0).abs() / 109_113_751.0 < 0.01, "fat chunk: {fat}");
-        assert!((lean as f64 - 83_264_971.0).abs() / 83_264_971.0 < 0.01, "lean chunk: {lean}");
+        // Within 2% of what those two chunks actually measured — the coefficients are fitted, so this
+        // fails loudly if either is changed without re-measuring. Values are post-dedup: chunk 1 fell
+        // 221,538,730 -> 109,113,751 -> 86,495,630 across the two halves of #135.
+        assert!((fat as f64 - 86_495_630.0).abs() / 86_495_630.0 < 0.02, "fat chunk: {fat}");
+        assert!((lean as f64 - 82_090_232.0).abs() / 82_090_232.0 < 0.02, "lean chunk: {lean}");
         assert!(fat > lean, "an EC-only model cannot tell these apart: {fat} vs {lean}");
 
         // And the packer must act on it. Assert the PROPERTY, not a fixed partition: which split wins

@@ -556,6 +556,54 @@ extern "C" uint32_t core_flag_csv()                { return (uint32_t)SCRIPT_VER
 extern "C" uint32_t core_flag_witness()            { return (uint32_t)SCRIPT_VERIFY_WITNESS; }
 extern "C" uint32_t core_flag_taproot()            { return (uint32_t)SCRIPT_VERIFY_TAPROOT; }
 
+// #135: verify SEVERAL of one transaction's inputs in a single call, so the transaction is
+// deserialised once and PrecomputedTransactionData::Init runs once — which is what BIP143's
+// precomputation is FOR. Calling verify_input per input repeated both for every input of the
+// transaction: measured at 16.6M (deserialise) + 6.5M (Init) cycles on a 42-input chunk of block
+// 741000, against 83.6M of actual VerifyScript.
+//
+// `out_results[k]` receives exactly what verify_input would have returned for `input_idx[k]`. The
+// return value covers only the structural check that applies to the whole transaction.
+extern "C" int verify_inputs_batch(const uint8_t* tx_bytes, unsigned tx_len,
+                                   const uint8_t* prevouts, unsigned prevouts_len,
+                                   unsigned flags, unsigned n,
+                                   const uint32_t* input_idx,
+                                   const uint32_t* coin_height,
+                                   const uint32_t* coin_is_coinbase,
+                                   const uint32_t* coin_mtp,
+                                   int32_t* out_results,
+                                   uint8_t* out_leaves /* 32*n bytes, may be null */) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    CTransaction tx{mtx};
+
+    MiniReader pr{reinterpret_cast<const std::byte*>(prevouts),
+                  reinterpret_cast<const std::byte*>(prevouts) + prevouts_len};
+    std::vector<CTxOut> spent;
+    pr >> spent;
+    if (spent.size() != tx.vin.size()) return -60; // SEC-3: prevouts must match inputs
+
+    // Once per transaction, not once per input.
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx, std::vector<CTxOut>(spent), true);
+
+    for (unsigned k = 0; k < n; k++) {
+        const unsigned i = input_idx[k];
+        if (i >= spent.size()) { out_results[k] = -60; continue; } // SEC-3, per input as before
+        if (out_leaves) coin_leaf(tx, spent, i, coin_height[k], coin_is_coinbase[k], coin_mtp[k],
+                                  out_leaves + 32 * k);
+        const CTxIn& in = tx.vin[i];
+        TransactionSignatureChecker checker(&tx, i, spent[i].nValue, txdata, MissingDataBehavior::FAIL);
+        ScriptError err = SCRIPT_ERR_OK;
+        bool ok = VerifyScript(in.scriptSig, spent[i].scriptPubKey, &in.scriptWitness, flags,
+                               checker, &err);
+        out_results[k] = ok ? 1 : -(int)err - 1;
+    }
+    return 1;
+}
+
 extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             unsigned input_idx,
                             const uint8_t* prevouts, unsigned prevouts_len,
