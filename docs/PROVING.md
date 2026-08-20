@@ -38,6 +38,33 @@ HAZYNC_BLOCK=block_741000.json ./target/release/host prove-full   # monolithic
 HAZYNC_BLOCK=block_741000.json HAZYNC_CHUNKS=16 ./target/release/host prove-seg   # segmented
 ```
 
+### Chunk packing and `chunk-profile`
+
+Chunks are packed to equal predicted **cost**, not equal input counts (#132). A block's chunks prove in
+parallel, so its wall-clock is its slowest chunk, and equal input counts leave that straggler fat — on
+block 741000, 1.22x the mean, i.e. fifteen provers waiting on one. Cost is predicted as
+`1_950_000 * ec_verifies + 182 * bytes`, coefficients fitted against a measured execute-mode run.
+
+`chunk-profile` reports how the work actually falls out, under both the old and new packing:
+
+```
+HAZYNC_BLOCK=block_741000.json HAZYNC_CHUNKS=16 ./target/release/host chunk-profile
+HAZYNC_BLOCK=block_741000.json HAZYNC_CHUNKS=16 HAZYNC_PROFILE_EXEC=1 \
+    ./target/release/host chunk-profile   # + real cycle counts, execute mode
+```
+
+Without `HAZYNC_PROFILE_EXEC` it only predicts, and is instant. With it, each chunk is additionally run
+through the guest in execute mode for its true cycle count — slower, but **no GPU is needed**, so a
+block's straggler ratio can be measured before any hardware is rented. The `straggler: max ... = N.NNx`
+line is the number to read: it is the factor by which fan-out falls short of the work being shared
+evenly. Sample output is kept at `prover/evidence/chunk_packing_741000.txt`.
+
+`HAZYNC_CHUNK_PACK=count` restores the old equal-input-count split, for A/B comparison.
+
+Note that `HAZYNC_CHUNKS` is a request, not a guarantee — an uneven block can pack into fewer runs.
+`prove-chunk <i>` and `agg-chunks` both derive the partition from the witness through the same function,
+so a fan-out spread across machines cannot disagree about which inputs a chunk holds.
+
 `prove-full` validates the whole block in one guest run and commits a `ChainState`. `prove-seg`
 splits the block's inputs into chunks, proves each chunk's scripts in parallel (`chunk_prove`, mode
 4), then aggregates (`aggregate`, mode 5) — each chunk commits a per-input binding digest

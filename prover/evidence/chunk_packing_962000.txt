@@ -1,0 +1,48 @@
+### hazync #132 — chunk packing, block 962,000 (near-tip), execute mode
+### 8,006 inputs / 6,303 txs, HAZYNC_CHUNKS=16, WSL2, no GPU
+### witness rebuilt with prover/tools/mkblock.py against the coordinator's archive node (mainnet 963,350)
+###
+### MEASURED straggler: count-packed 4.07x -> cost-packed 1.10x
+### totals identical (25,755,187,882 vs 25,755,187,867) — packing moves work, it does not remove it
+
+=== CHUNK PROFILE block 962000: 8006 inputs → 16 chunks ===
+predicted EC verifies: 8108 across 8006 inputs (1.01 per input)
+
+--- count-packed (old): 16 chunks ---
+  chunk   0  inputs   501  ec   527  bytes    503216  predicted 1119235312  cycles     1100636203
+  chunk   1  inputs   501  ec   501  bytes   3482317  predicted 1610731694  cycles     1628971703
+  chunk   2  inputs   501  ec   501  bytes  29739858  predicted 6389604156  cycles     6555897455
+  chunk   3  inputs   501  ec   509  bytes  26579358  predicted 5829993156  cycles     5867777259
+  chunk   4  inputs   501  ec   569  bytes   3401122  predicted 1728554204  cycles     1666619513
+  chunk   5  inputs   501  ec   501  bytes     81042  predicted  991699644  cycles      243896489
+  chunk   6  inputs   501  ec   501  bytes     80941  predicted  991681262  cycles      242062495
+  chunk   7  inputs   501  ec   501  bytes     96126  predicted  994444932  cycles      491750028
+  chunk   8  inputs   501  ec   501  bytes    126801  predicted 1000027782  cycles      997196973
+  chunk   9  inputs   501  ec   501  bytes    126910  predicted 1000047620  cycles      997036357
+  chunk  10  inputs   501  ec   501  bytes    126807  predicted 1000028874  cycles      996396558
+  chunk  11  inputs   501  ec   501  bytes    126753  predicted 1000019046  cycles      996880664
+  chunk  12  inputs   501  ec   501  bytes    126753  predicted 1000019046  cycles      997394038
+  chunk  13  inputs   501  ec   501  bytes    126922  predicted 1000049804  cycles      997164820
+  chunk  14  inputs   501  ec   501  bytes    126468  predicted  999967176  cycles      997798303
+  chunk  15  inputs   491  ec   491  bytes    124257  predicted  980064774  cycles      977709024
+  straggler: max 6389604156 vs mean 1727260530 = 3.70x
+
+--- cost-packed (new): 16 chunks ---
+  chunk   0  inputs   787  ec   813  bytes    797628  predicted 1730518296  cycles     1712774089
+  chunk   1  inputs   323  ec   323  bytes   6018126  predicted 1725148932  cycles     1757914710
+  chunk   2  inputs   117  ec   117  bytes   8197605  predicted 1720114110  cycles     1766538803
+  chunk   3  inputs   117  ec   117  bytes   8197605  predicted 1720114110  cycles     1766099831
+  chunk   4  inputs   117  ec   117  bytes   8197605  predicted 1720114110  cycles     1766049539
+  chunk   5  inputs   239  ec   247  bytes   6806020  predicted 1720345640  cycles     1732681592
+  chunk   6  inputs   114  ec   114  bytes   8283810  predicted 1729953420  cycles     1744306731
+  chunk   7  inputs   114  ec   114  bytes   8283810  predicted 1729953420  cycles     1744216167
+  chunk   8  inputs   114  ec   114  bytes   8283810  predicted 1729953420  cycles     1744753733
+  chunk   9  inputs   755  ec   823  bytes    687457  predicted 1729967174  cycles     1230514968
+  chunk  10  inputs   874  ec   874  bytes    140775  predicted 1729921050  cycles      418802530
+  chunk  11  inputs   868  ec   868  bytes    204120  predicted 1729749840  cycles     1470209588
+  chunk  12  inputs   867  ec   867  bytes    219562  predicted 1730610284  cycles     1724632563
+  chunk  13  inputs   867  ec   867  bytes    219351  predicted 1730571882  cycles     1725185480
+  chunk  14  inputs   866  ec   866  bytes    219332  predicted 1728618424  cycles     1724006334
+  chunk  15  inputs   867  ec   867  bytes    219035  predicted 1730514370  cycles     1726501209
+  straggler: max 1730610284 vs mean 1727260530 = 1.00x
+REAL_EXIT=0

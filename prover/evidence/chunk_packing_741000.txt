@@ -1,0 +1,44 @@
+### hazync #132 — chunk packing, block 741000, execute mode (WSL2, no GPU)
+### host binary: fix/cost-weighted-chunk-packing
+### 'predicted' is the fitted model; 'cycles' is what the executor actually reported.
+
+=== CHUNK PROFILE block 741000: 670 inputs → 16 chunks ===
+predicted EC verifies: 723 across 670 inputs (1.08 per input)
+
+--- count-packed (old): 16 chunks ---
+  chunk   0  inputs    42  ec    49  bytes    212532  predicted  134230824  cycles      133736665
+  chunk   1  inputs    42  ec    42  bytes    765282  predicted  221181324  cycles      221537878
+  chunk   2  inputs    42  ec    42  bytes    765282  predicted  221181324  cycles      221449395
+  chunk   3  inputs    42  ec    42  bytes    765393  predicted  221201526  cycles      221819923
+  chunk   4  inputs    42  ec    42  bytes    765408  predicted  221204256  cycles      221988699
+  chunk   5  inputs    42  ec    42  bytes    765534  predicted  221227188  cycles      221996327
+  chunk   6  inputs    42  ec    42  bytes    765660  predicted  221250120  cycles      222560920
+  chunk   7  inputs    42  ec    42  bytes    765675  predicted  221252850  cycles      222503844
+  chunk   8  inputs    42  ec    42  bytes    765786  predicted  221273052  cycles      221973214
+  chunk   9  inputs    42  ec    42  bytes    765786  predicted  221273052  cycles      221944971
+  chunk  10  inputs    42  ec    44  bytes    210872  predicted  124178704  cycles      124198262
+  chunk  11  inputs    42  ec    42  bytes     37933  predicted   88803806  cycles       88835289
+  chunk  12  inputs    42  ec    45  bytes     19202  predicted   91244764  cycles       87114511
+  chunk  13  inputs    42  ec    57  bytes     35458  predicted  117603356  cycles      117061812
+  chunk  14  inputs    42  ec    68  bytes    378968  predicted  201572176  cycles      202648376
+  chunk  15  inputs    40  ec    40  bytes    498277  predicted  168686414  cycles      171814933
+  straggler: max 221273052 vs mean 182335296 = 1.21x
+
+--- cost-packed (new): 16 chunks ---
+  chunk   0  inputs    51  ec    58  bytes    376521  predicted  181626822  cycles      181194965
+  chunk   1  inputs    35  ec    35  bytes    637735  predicted  184317770  cycles      184599088
+  chunk   2  inputs    35  ec    35  bytes    637735  predicted  184317770  cycles      184558047
+  chunk   3  inputs    35  ec    35  bytes    637810  predicted  184331420  cycles      184889859
+  chunk   4  inputs    35  ec    35  bytes    637840  predicted  184336880  cycles      184954788
+  chunk   5  inputs    35  ec    35  bytes    637840  predicted  184336880  cycles      184912494
+  chunk   6  inputs    35  ec    35  bytes    638020  predicted  184369640  cycles      185380975
+  chunk   7  inputs    34  ec    34  bytes    619820  predicted  179107240  cycles      180011333
+  chunk   8  inputs    34  ec    34  bytes    619820  predicted  179107240  cycles      180283340
+  chunk   9  inputs    34  ec    34  bytes    619916  predicted  179124712  cycles      179635981
+  chunk  10  inputs    34  ec    34  bytes    619922  predicted  179125804  cycles      179644089
+  chunk  11  inputs    36  ec    36  bytes    621088  predicted  183238016  cycles      183772022
+  chunk  12  inputs    87  ec    89  bytes     56968  predicted  183918176  cycles      183545962
+  chunk  13  inputs    69  ec    89  bytes     48241  predicted  182329862  cycles      177723894
+  chunk  14  inputs    38  ec    62  bytes    336195  predicted  182087490  cycles      183009350
+  chunk  15  inputs    43  ec    43  bytes    537577  predicted  181689014  cycles      185068822
+  straggler: max 184369640 vs mean 182335296 = 1.01x

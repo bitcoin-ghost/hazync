@@ -1,5 +1,9 @@
 target/
+# Run logs are noise, EXCEPT the ones under prover/evidence/ — those are measurements we cite and must
+# not lose. block_741000_proof.log survived only by being force-added; the ~9h block 962,000 run did not,
+# and its numbers now exist solely in a Delving comment (#132, #133).
 *.log
+!prover/evidence/*.log
 # prover/build-release.sh output (184-330MB binaries).
 # NB: .gitignore has no trailing comments — a comment after the pattern becomes PART of the pattern.
 # This line used to read `dist/    # ...` and therefore ignored nothing at all, leaving the release

@@ -1498,8 +1498,8 @@ fn prove_seg() {
     use std::time::Instant;
     let (anchor, w) = build_full();
     let n = w.inputs.len();
-    let nchunks: usize = std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1).min(n.max(1));
-    let sz = n.div_ceil(nchunks);
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let nchunks = bounds.len();
     // ADVERSARIAL #2 (test-only, inert unless HAZYNC_H2_BADHEIGHT set): prove the chunk at height 1
     // (script flags 0) while aggregating into the real modern block. The chunk's committed binding
     // digest folds in flags(1)=0, but the aggregation recomputes it with the block's real flags, so the
@@ -1512,10 +1512,7 @@ fn prove_seg() {
     let t = Instant::now();
 
     let mut chunk_receipts: Vec<risc0_zkvm::Receipt> = Vec::new();
-    for c in 0..nchunks {
-        let lo = c * sz;
-        let hi = ((c + 1) * sz).min(n);
-        if lo >= hi { break; }
+    for (c, &(lo, hi)) in bounds.iter().enumerate() {
         let mut b = ExecutorEnv::builder();
         b.segment_limit_po2(seg_po2());
         b.write(&4u32).unwrap();
@@ -1562,9 +1559,250 @@ fn prove_seg() {
 
 // ---- Multi-GPU fan-out: prove ONE chunk to a file (run one process per GPU via CUDA_VISIBLE_DEVICES),
 // then aggregate from the chunk-receipt files. HAZYNC_CHUNKS = total chunks; chunk index from arg. ----
-fn chunk_range(n: usize, nchunks: usize, idx: usize) -> (usize, usize) {
-    let sz = n.div_ceil(nchunks);
-    ((idx * sz).min(n), ((idx + 1) * sz).min(n))
+// ---- Chunk packing: balance predicted work, not input counts (#132) ----
+//
+// An input's cost is dominated by EC verification — ~95% of proving, per docs/ACCELERATION.md — and how
+// many signature checks an input performs depends on its script type, not on it being one input. A
+// keypath taproot spend is one verify; a 15-of-15 bare multisig is fifteen. Splitting a block into equal
+// INPUT COUNTS therefore leaves chunks with very unequal work, and since chunks prove in parallel a
+// block's wall-clock is its slowest chunk. The straggler caps the fan-out however many GPUs are added.
+//
+// Chunks stay CONTIGUOUS and in input order; only their widths vary. That is not a simplification, it
+// is required: the guest's `aggregate()` concatenates each chunk's `binds` in receipt order and
+// `validate_block` indexes the result by the block's own input index. Reordering inputs across chunks
+// would need each chunk to commit its indices and the aggregate to scatter rather than concatenate —
+// a guest change, hence a new METHOD_ID, hence every existing proof invalidated. Widths are free.
+
+// Per-input cost in guest cycles. FITTED to measurement, not assumed: `chunk-profile` was run over
+// block 741000 in execute mode and these two coefficients reproduce every one of the 16 chunks' real
+// cycle counts to within ~2%.
+//
+// The byte term is the part that is easy to get wrong, and costing purely by EC verifies does get it
+// wrong. Every ChunkInput carries the WHOLE spending transaction and the WHOLE prevouts blob, so a
+// many-input transaction ships and re-hashes its entire body once per input. On block 741000's fattest
+// chunks that marshalling is ~63% of the cycles — chunk 11 and chunk 1 have identical input counts and
+// identical EC counts, and chunk 1 costs 2.5x more purely because its transactions are bigger. An
+// EC-only model rates them equal and packs them as if they were.
+//
+// Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
+const COST_PER_EC_OP: u64 = 1_950_000;
+const COST_PER_INPUT_BYTE: u64 = 182;
+
+/// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
+/// used only to balance chunks, so being wrong costs some balance and never correctness.
+fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 {
+    use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_CHECKSIGVERIFY};
+    use bitcoin::blockdata::script::{Instruction, Script};
+
+    // Anything unparseable is charged one verify: it should not happen, and a wrong guess here must not
+    // be able to panic a prover run over what is only a scheduling hint.
+    let Ok(tx) = deserialize::<Transaction>(raw_tx) else { return 1 };
+    let Ok(prevouts) = deserialize::<Vec<TxOut>>(prevouts_blob) else { return 1 };
+    let i = input_idx as usize;
+    let (Some(txin), Some(prevout)) = (tx.input.get(i), prevouts.get(i)) else { return 1 };
+    let spk = &prevout.script_pubkey;
+    let wit = &txin.witness;
+
+    // Tapscript's OP_CHECKSIGADD is not counted by count_sigops (it post-dates the legacy rules), so
+    // taproot leaves need their own pass.
+    let tapscript_ops = |leaf: &[u8]| -> u64 {
+        Script::from_bytes(leaf)
+            .instructions()
+            .filter(|ins| {
+                matches!(ins, Ok(Instruction::Op(op))
+                    if *op == OP_CHECKSIG || *op == OP_CHECKSIGVERIFY || *op == OP_CHECKSIGADD)
+            })
+            .count() as u64
+    };
+
+    if spk.is_p2tr() {
+        // A trailing 0x50-prefixed annex is not part of the spend path.
+        let mut n = wit.len();
+        if n >= 2 && wit.last().is_some_and(|e| e.first() == Some(&0x50)) { n -= 1; }
+        return match n {
+            0 | 1 => 1, // key path (or malformed): one Schnorr verify
+            _ => wit.iter().nth(n - 2).map_or(1, |leaf| tapscript_ops(leaf).max(1)),
+        };
+    }
+    if spk.is_p2wpkh() { return 1; }
+    if spk.is_p2wsh() {
+        return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+    }
+    if spk.is_p2sh() {
+        // The redeem script is the last push of the scriptSig; a wrapped segwit spend then defers to the
+        // witness exactly as the unwrapped form does.
+        let redeem: Vec<u8> = txin
+            .script_sig
+            .instructions()
+            .last()
+            .and_then(|r| r.ok())
+            .and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec()))
+            .unwrap_or_default();
+        let rs = Script::from_bytes(&redeem);
+        if rs.is_p2wpkh() { return 1; }
+        if rs.is_p2wsh() {
+            return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+        }
+        return rs.count_sigops().max(1) as u64;
+    }
+    // Bare output: P2PK, P2PKH, bare multisig, or something unrecognised.
+    spk.count_sigops().max(1) as u64
+}
+
+/// Predicted cost of every input of the block, in the order the block spends them.
+fn input_costs(w: &BlockWitness) -> Vec<u64> {
+    w.inputs
+        .iter()
+        .map(|inp| {
+            let tx = &w.txs[inp.tx_idx as usize].0;
+            let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
+            let ec = predicted_ec_ops(tx, inp.input_idx, prevouts);
+            let bytes = (tx.len() + prevouts.len()) as u64;
+            COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes
+        })
+        .collect()
+}
+
+/// Runs needed to cover `costs` when no run may exceed `cap`. `cap` is always >= max(costs), so every
+/// input fits somewhere and this terminates.
+fn runs_at_cap(costs: &[u64], cap: u64) -> usize {
+    let (mut runs, mut acc) = (1usize, 0u64);
+    for &c in costs {
+        if acc + c > cap { runs += 1; acc = c } else { acc += c }
+    }
+    runs
+}
+
+/// Split `costs` into contiguous runs, each within `cap`.
+fn split_at_cap(costs: &[u64], cap: u64) -> Vec<(usize, usize)> {
+    let (mut out, mut lo, mut acc) = (Vec::new(), 0usize, 0u64);
+    for (i, &c) in costs.iter().enumerate() {
+        if acc + c > cap && i > lo {
+            out.push((lo, i));
+            lo = i;
+            acc = c;
+        } else {
+            acc += c;
+        }
+    }
+    out.push((lo, costs.len()));
+    out
+}
+
+/// Partition a block's inputs into at most `nchunks` contiguous runs, minimising the cost of the
+/// heaviest run. Binary-searches the answer and checks feasibility greedily — exact, not a heuristic.
+///
+/// Guarantees, relied on by `prove_chunk`/`agg_chunks` and asserted in the tests: the runs are ordered,
+/// non-empty, non-overlapping, and cover `0..n` exactly.
+fn pack_chunks(costs: &[u64], nchunks: usize) -> Vec<(usize, usize)> {
+    let n = costs.len();
+    if n == 0 { return Vec::new() }
+    let k = nchunks.max(1).min(n);
+    if k == 1 { return vec![(0, n)] }
+
+    let (mut lo, mut hi) = (costs.iter().copied().max().unwrap_or(1), costs.iter().sum::<u64>());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if runs_at_cap(costs, mid) <= k { hi = mid } else { lo = mid + 1 }
+    }
+    let mut runs = split_at_cap(costs, lo);
+
+    // The optimal cap may need fewer than k runs. Idle provers help nobody, so keep splitting the widest
+    // run until there are k of them — this can only lower the maximum, never raise it.
+    while runs.len() < k {
+        let Some(w) = (0..runs.len()).max_by_key(|&i| runs[i].1 - runs[i].0) else { break };
+        let (a, b) = runs[w];
+        if b - a < 2 { break } // nothing left wide enough to divide
+        let mid = a + (b - a) / 2;
+        runs[w] = (a, mid);
+        runs.insert(w + 1, (mid, b));
+    }
+    runs
+}
+
+/// The block's chunk partition. Every command that touches chunks derives it from the witness through
+/// this one function, so a fan-out across machines cannot disagree about which inputs a chunk holds.
+///
+/// `HAZYNC_CHUNK_PACK=count` restores the old equal-input-count split, for A/B measurement.
+fn chunk_bounds(w: &BlockWitness, nchunks: usize) -> Vec<(usize, usize)> {
+    let n = w.inputs.len();
+    if std::env::var("HAZYNC_CHUNK_PACK").as_deref() == Ok("count") {
+        if n == 0 { return Vec::new() }
+        let k = nchunks.max(1).min(n);
+        let sz = n.div_ceil(k);
+        return (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect();
+    }
+    pack_chunks(&input_costs(w), nchunks)
+}
+
+// `chunk-profile`: report how work is spread across a block's chunks, under both packing strategies.
+// Prediction alone is free and needs no GPU; `HAZYNC_PROFILE_EXEC=1` additionally runs each chunk in
+// execute mode for its real cycle count, which is the measurement #132 asks for before any GPU time is
+// bought. Execute mode is slow but costs nothing but wall-clock.
+fn chunk_profile() {
+    let (_anchor, w) = build_full();
+    let n = w.inputs.len();
+    let nchunks = nchunks_env();
+    let costs = input_costs(&w);
+    let exec = std::env::var("HAZYNC_PROFILE_EXEC").is_ok();
+
+    println!("=== CHUNK PROFILE block {}: {} inputs → {} chunks ===", w.height, n, nchunks);
+    let total_ec: u64 = w.inputs.iter().map(|inp| predicted_ec_ops(
+        &w.txs[inp.tx_idx as usize].0, inp.input_idx, &w.tx_prevouts[inp.tx_idx as usize].0)).sum();
+    println!("predicted EC verifies: {} across {} inputs ({:.2} per input)",
+        total_ec, n, total_ec as f64 / n.max(1) as f64);
+
+    for (label, bounds) in [
+        ("count-packed (old)", {
+            let k = nchunks.max(1).min(n.max(1));
+            let sz = n.div_ceil(k.max(1));
+            (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect::<Vec<_>>()
+        }),
+        ("cost-packed (new)", pack_chunks(&costs, nchunks)),
+    ] {
+        println!("\n--- {label}: {} chunks ---", bounds.len());
+        let mut predicted: Vec<u64> = Vec::new();
+        for (i, &(lo, hi)) in bounds.iter().enumerate() {
+            let c: u64 = costs[lo..hi].iter().sum();
+            predicted.push(c);
+            let bytes: u64 = w.inputs[lo..hi].iter().map(|inp|
+                (w.txs[inp.tx_idx as usize].0.len() + w.tx_prevouts[inp.tx_idx as usize].0.len()) as u64).sum();
+            let ec: u64 = w.inputs[lo..hi].iter().map(|inp| predicted_ec_ops(
+                &w.txs[inp.tx_idx as usize].0, inp.input_idx, &w.tx_prevouts[inp.tx_idx as usize].0)).sum();
+            let cycles = if exec { Some(exec_chunk_cycles(&w, lo, hi)) } else { None };
+            match cycles {
+                Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, bytes, c, cy),
+                None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, bytes, c),
+            }
+        }
+        // The straggler ratio is the number that matters: a block's wall-clock is its slowest chunk, so
+        // this is the factor by which fan-out falls short of the work being evenly shared.
+        let max = predicted.iter().copied().max().unwrap_or(0);
+        let mean = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
+        println!("  straggler: max {} vs mean {:.0} = {:.2}x", max, mean, max as f64 / mean.max(1.0));
+    }
+}
+
+/// Run one chunk's inputs through the guest in execute mode and return the cycles it took. Same mode 4
+/// the prover uses, so the count is the real cost of proving that chunk, minus the proving itself.
+fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    b.write(&((hi - lo) as u32)).unwrap();
+    for inp in &w.inputs[lo..hi] {
+        b.write(&ChunkInput {
+            raw_tx: w.txs[inp.tx_idx as usize].0.clone(),
+            input_idx: inp.input_idx,
+            prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
+            coin_height: inp.coin_height,
+            coin_is_coinbase: inp.coin_is_coinbase,
+            coin_mtp: inp.coin_mtp,
+        }).unwrap();
+    }
+    default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec chunk").cycles()
 }
 fn nchunks_env() -> usize {
     std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1)
@@ -1574,9 +1812,9 @@ fn nchunks_env() -> usize {
 fn prove_chunk(idx: usize) {
     use std::time::Instant;
     let (_anchor, w) = build_full();
-    let n = w.inputs.len();
-    let nchunks = nchunks_env().min(n.max(1));
-    let (lo, hi) = chunk_range(n, nchunks, idx);
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).unwrap_or_else(|| panic!(
+        "prove-chunk {idx}: block has only {} chunks at HAZYNC_CHUNKS={}", bounds.len(), nchunks_env()));
     let mut b = ExecutorEnv::builder();
     b.segment_limit_po2(seg_po2());
     b.write(&4u32).unwrap();
@@ -1606,7 +1844,9 @@ fn prove_chunk(idx: usize) {
 fn agg_chunks() {
     use std::time::Instant;
     let (anchor, w) = build_full();
-    let nchunks = nchunks_env().min(w.inputs.len().max(1));
+    // The partition decides how many chunk files exist — an uneven pack can yield fewer runs than
+    // HAZYNC_CHUNKS asked for, and reading a fixed count would look for a file that was never written.
+    let nchunks = chunk_bounds(&w, nchunks_env()).len();
     let mut receipts: Vec<risc0_zkvm::Receipt> = Vec::new();
     for i in 0..nchunks {
         let f = format!("chunk_{i}.bin");
@@ -2804,6 +3044,10 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "chunk-profile") {
+        chunk_profile();
+        return;
+    }
     if args.iter().any(|a| a == "agg-chunks") {
         agg_chunks();
         return;
@@ -3159,5 +3403,127 @@ mod smt_bridge {
         root = apply_block(&root, &to_update(dup, 1, &w2))
             .expect("duplicating a fully-spent coinbase was rejected — this is legal under BIP30");
         assert_eq!(root, bridge.root());
+    }
+}
+
+#[cfg(test)]
+mod chunk_packing_tests {
+    use super::{pack_chunks, runs_at_cap};
+
+    /// The invariants `prove_chunk` and `agg_chunks` rely on. If any of these break, chunks stop lining
+    /// up with the block's inputs and the guest's `all_binds[idx]` lookup silently compares the wrong
+    /// input — so these are correctness properties, not tidiness.
+    fn assert_partitions(costs: &[u64], runs: &[(usize, usize)]) {
+        assert!(!runs.is_empty() || costs.is_empty(), "no runs for a non-empty block");
+        let mut expect = 0usize;
+        for &(lo, hi) in runs {
+            assert_eq!(lo, expect, "runs must be contiguous and in order: {runs:?}");
+            assert!(lo < hi, "runs must be non-empty: {runs:?}");
+            expect = hi;
+        }
+        assert_eq!(expect, costs.len(), "runs must cover every input exactly once: {runs:?}");
+    }
+
+    fn max_run(costs: &[u64], runs: &[(usize, usize)]) -> u64 {
+        runs.iter().map(|&(lo, hi)| costs[lo..hi].iter().sum::<u64>()).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn partitions_hold_for_any_shape() {
+        let shapes: Vec<Vec<u64>> = vec![
+            vec![],
+            vec![1_950_000],
+            vec![1_950_000; 16],
+            vec![1_950_000, 1_950_000, 29_250_000, 1_950_000, 1_950_000],          // one fat multisig input
+            vec![29_250_000, 1_950_000, 1_950_000, 1_950_000, 1_950_000],          // fat input first
+            vec![1_950_000, 1_950_000, 1_950_000, 1_950_000, 29_250_000],          // fat input last
+            (0..100).map(|i| if i % 17 == 0 { 39_000_000 } else { 1_950_000 }).collect(),
+        ];
+        for costs in &shapes {
+            for k in [1usize, 2, 3, 8, 16, 64] {
+                assert_partitions(costs, &pack_chunks(costs, k));
+            }
+        }
+    }
+
+    #[test]
+    fn never_returns_more_runs_than_asked_for() {
+        let costs: Vec<u64> = (0..50).map(|i| 1_950_000 + i * 13_000).collect();
+        for k in [1usize, 2, 7, 50, 500] {
+            let runs = pack_chunks(&costs, k);
+            assert!(runs.len() <= k.max(1), "asked for {k}, got {}", runs.len());
+            assert!(runs.len() <= costs.len(), "more runs than inputs");
+        }
+    }
+
+    #[test]
+    fn uses_every_chunk_when_there_is_work_to_fill_it() {
+        // An optimal cap can be reached with fewer runs than requested. Leaving provers idle is a real
+        // cost, so the packer keeps dividing.
+        let costs = vec![1_950_000u64; 32];
+        assert_eq!(pack_chunks(&costs, 8).len(), 8);
+        assert_eq!(pack_chunks(&costs, 32).len(), 32);
+    }
+
+    #[test]
+    fn beats_equal_input_counts_on_a_skewed_block() {
+        // Two 15-of-15 multisig inputs among singles, all landing in the same count-packed chunk.
+        let mut costs = vec![1_950_000u64; 64];
+        costs[4] = 1_950_000 * 15;
+        costs[5] = 1_950_000 * 15;
+        let k = 8;
+
+        let by_count: Vec<(usize, usize)> =
+            (0..k).map(|c| (c * 8, (c + 1) * 8)).collect();
+        let by_cost = pack_chunks(&costs, k);
+        assert_partitions(&costs, &by_cost);
+
+        assert!(max_run(&costs, &by_cost) < max_run(&costs, &by_count),
+            "cost packing did not lower the straggler: {} vs {}",
+            max_run(&costs, &by_cost), max_run(&costs, &by_count));
+    }
+
+    #[test]
+    fn minimises_the_heaviest_run() {
+        // The binary search should land on a cap no smaller than achievable: one fewer must need more
+        // runs than we are allowed.
+        let costs: Vec<u64> = (0..40).map(|i| 100 + (i * 37) % 900).collect();
+        let k = 6;
+        let runs = pack_chunks(&costs, k);
+        let cap = max_run(&costs, &runs);
+        assert!(runs.len() <= k);
+        assert!(cap >= *costs.iter().max().unwrap(), "a run cannot be lighter than its heaviest input");
+        assert!(runs_at_cap(&costs, cap - 1) > k,
+            "cap {cap} was not minimal — {} runs fit under {}", runs_at_cap(&costs, cap - 1), cap - 1);
+    }
+
+    /// Locks in the measurement that forced the byte term. Block 741000's chunk 1 and chunk 11 hold the
+    /// same number of inputs performing the same number of EC verifies, and chunk 1 costs 2.5x more
+    /// because its transactions are 20x bigger. An EC-only model rates the two equal, packs them as
+    /// though they were, and leaves the straggler where it found it — measured 1.22x before, and 1.31x
+    /// after, i.e. worse than doing nothing. If this test ever fails, the byte term has been dropped.
+    #[test]
+    fn marshalling_bytes_are_costed_not_just_signatures() {
+        let ec_only = |ec: u64| super::COST_PER_EC_OP * ec;
+        let real = |ec: u64, bytes: u64| super::COST_PER_EC_OP * ec + super::COST_PER_INPUT_BYTE * bytes;
+
+        // The two real chunks, as measured.
+        let (lean, fat) = (real(42, 37_933), real(42, 765_282));
+        assert_eq!(ec_only(42), ec_only(42), "an EC-only model cannot tell these apart");
+        assert!(fat > lean * 2, "the fat chunk must cost at least twice the lean one: {fat} vs {lean}");
+
+        // And the packer must act on it.
+        let costs = vec![lean, lean, fat, fat];
+        let runs = pack_chunks(&costs, 2);
+        assert_partitions(&costs, &runs);
+        assert_eq!(runs, vec![(0, 3), (3, 4)],
+            "the two fat inputs must be separated, not paired: {runs:?}");
+    }
+
+    #[test]
+    fn single_input_and_single_chunk_degenerate_cleanly() {
+        assert_eq!(pack_chunks(&[1_950_000], 8), vec![(0, 1)]);
+        assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
+        assert!(pack_chunks(&[], 8).is_empty());
     }
 }
