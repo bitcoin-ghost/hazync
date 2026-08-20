@@ -1519,6 +1519,7 @@ fn prove_seg() {
         b.write(&chunk_height).unwrap();
         b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
         b.write(&((hi - lo) as u32)).unwrap();
+    b.write(&bench_stage()).unwrap();
         for inp in &w.inputs[lo..hi] {
             b.write(&ChunkInput {
                 raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
@@ -1762,7 +1763,9 @@ fn chunk_profile() {
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
+        let only: Option<usize> = std::env::var("HAZYNC_PROFILE_CHUNK").ok().and_then(|s| s.parse().ok());
         for (i, &(lo, hi)) in bounds.iter().enumerate() {
+            if only.is_some_and(|o| o != i) { continue }
             let c: u64 = costs[lo..hi].iter().sum();
             predicted.push(c);
             let bytes: u64 = w.inputs[lo..hi].iter().map(|inp|
@@ -1792,6 +1795,7 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
     b.write(&w.height).unwrap();
     b.write(&header_hash(&w.header)).unwrap();
     b.write(&((hi - lo) as u32)).unwrap();
+    b.write(&bench_stage()).unwrap();
     for inp in &w.inputs[lo..hi] {
         b.write(&ChunkInput {
             raw_tx: w.txs[inp.tx_idx as usize].0.clone(),
@@ -1803,6 +1807,10 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
         }).unwrap();
     }
     default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec chunk").cycles()
+}
+/// hazync #135: which prefix of `verify_input` to run. 0 is production; see verify_input.cpp.
+fn bench_stage() -> u32 {
+    std::env::var("HAZYNC_BENCH_STAGE").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 fn nchunks_env() -> usize {
     std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1)
@@ -1821,6 +1829,7 @@ fn prove_chunk(idx: usize) {
     b.write(&w.height).unwrap();
     b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
     b.write(&((hi - lo) as u32)).unwrap();
+    b.write(&bench_stage()).unwrap();
     for inp in &w.inputs[lo..hi] {
         b.write(&ChunkInput {
             raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),

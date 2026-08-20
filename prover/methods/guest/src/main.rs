@@ -78,6 +78,7 @@ extern "C" {
         prevouts: *const u8, prevouts_len: u32, flags: u32,
         coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32,
         out_leaf: *mut u8,
+        bench_stage: u32,
     ) -> i32;
     // Absolute locktime finality (real Core IsFinalTx). 1 = final.
     fn is_final_tx(tx: *const u8, tx_len: u32, height: i64, block_time: i64) -> i32;
@@ -544,7 +545,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                     raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
                     prevouts.as_ptr(), prevouts.len() as u32, flags,
                     inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp,
-                    leaf.as_mut_ptr(),
+                    leaf.as_mut_ptr(), 0,
                 )
             },
             Some((chunk_binds, all_valid)) => {
@@ -1219,7 +1220,7 @@ fn multi_check() {
                 s.raw_tx.as_ptr(), s.raw_tx.len() as u32, 0,
                 s.prevouts.as_ptr(), s.prevouts.len() as u32, flags,
                 // coin_height / coin_is_coinbase / coin_mtp — PLACEHOLDERS, see the doc comment.
-                700_000, 0, 0, leaf.as_mut_ptr(),
+                700_000, 0, 0, leaf.as_mut_ptr(), 0,
             )
         };
         let sigops = unsafe {
@@ -1247,6 +1248,8 @@ fn chunk_prove() {
     let block_hash: [u8; 32] = env::read(); // real block hash — needed for flag exceptions; a wrong
     let flags = block_script_flags(height, &block_hash); // hash yields wrong flags -> aggregate bind mismatch
     let n: u32 = env::read();
+    // hazync #135 instrumentation. 0 is the production path; see verify_input.cpp for the ladder.
+    let bench_stage: u32 = env::read();
     let mut binds: Vec<[u8; 32]> = Vec::with_capacity(n as usize);
     let mut all_valid = true;
     for _ in 0..n {
@@ -1256,12 +1259,15 @@ fn chunk_prove() {
             verify_input(
                 c.raw_tx.as_ptr(), c.raw_tx.len() as u32, c.input_idx,
                 c.prevouts.as_ptr(), c.prevouts.len() as u32, flags,
-                c.coin_height, c.coin_is_coinbase, c.coin_mtp, leaf.as_mut_ptr(),
+                c.coin_height, c.coin_is_coinbase, c.coin_mtp, leaf.as_mut_ptr(), bench_stage,
             )
         };
         if r != 1 { all_valid = false; }
         // Bind exactly what was verified (tx bytes, input idx, prevouts, coin metadata, flags) so the
         // aggregation can prove the block's input is the one this chunk validated — see input_bind (#2).
+        // Stage 5 also skips input_bind, which hashes the whole tx + prevouts — so stage 1 minus
+        // stage 5 is that hashing, and stage 5 alone is env::read plus the loop. #135.
+        if bench_stage == 5 { binds.push([0u8; 32]); continue }
         binds.push(input_bind(&c.raw_tx, c.input_idx, &c.prevouts, c.coin_height, c.coin_is_coinbase, c.coin_mtp, flags));
     }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds });

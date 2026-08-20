@@ -556,12 +556,25 @@ extern "C" uint32_t core_flag_csv()                { return (uint32_t)SCRIPT_VER
 extern "C" uint32_t core_flag_witness()            { return (uint32_t)SCRIPT_VERIFY_WITNESS; }
 extern "C" uint32_t core_flag_taproot()            { return (uint32_t)SCRIPT_VERIFY_TAPROOT; }
 
+// `bench_stage` exists to answer one question: of the cycles that scale with transaction SIZE, how
+// many are deserialisation and how many are PrecomputedTransactionData::Init? See hazync #135 — the
+// chunk interface ships a whole transaction per input, and whether deduplicating it is worth a
+// METHOD_ID change depends on that split. Stage 0 is the real function; every other value returns
+// early so a run measures one prefix of the work.
+//
+//   0  full verify (production)
+//   1  nothing — isolates the caller's own per-input overhead
+//   2  + deserialise tx and prevouts
+//   3  + coin_leaf
+//   4  + PrecomputedTransactionData::Init      (so 0 minus 4 is VerifyScript, i.e. the EC work)
 extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                             unsigned input_idx,
                             const uint8_t* prevouts, unsigned prevouts_len,
                             unsigned flags,
                             uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp,
-                            uint8_t* out_leaf /* 32 bytes */) {
+                            uint8_t* out_leaf /* 32 bytes */,
+                            unsigned bench_stage) {
+    if (bench_stage == 1 || bench_stage == 5) return 1;
     MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
                  reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
     CMutableTransaction mtx;
@@ -574,13 +587,16 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
     std::vector<CTxOut> spent;
     pr >> spent;
     if (input_idx >= spent.size() || spent.size() != tx.vin.size()) return -60; // SEC-3: prevouts must match inputs
+    if (bench_stage == 2) return 1;
 
     // Canonical leaf of the coin being spent (binds VerifyScript's coin + its height/coinbase flag).
     if (out_leaf) coin_leaf(tx, spent, input_idx, coin_height, coin_is_coinbase, coin_mtp, out_leaf);
+    if (bench_stage == 3) return 1;
 
     // Precompute BIP143/BIP341 hashes with the spent outputs (needed for segwit + taproot).
     PrecomputedTransactionData txdata;
     txdata.Init(tx, std::vector<CTxOut>(spent), true);
+    if (bench_stage == 4) return 1;
 
 
     const CTxIn& in = tx.vin[input_idx];
