@@ -87,8 +87,6 @@ struct ChainState {
     self_id: [u32; 8],  // S1: image id recursed against; verifier asserts == METHOD_ID
 }
 #[derive(Serialize, Deserialize)]
-struct ChunkInput { raw_tx: Vec<u8>, input_idx: u32, prevouts: Vec<u8>, coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32 }
-#[derive(Serialize, Deserialize)]
 struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct SpendCheck { raw_tx: Vec<u8>, prevouts: Vec<u8>, block_height: u32 }
@@ -1518,13 +1516,7 @@ fn prove_seg() {
         b.write(&4u32).unwrap();
         b.write(&chunk_height).unwrap();
         b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
-        b.write(&((hi - lo) as u32)).unwrap();
-        for inp in &w.inputs[lo..hi] {
-            b.write(&ChunkInput {
-                raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
-                coin_height: inp.coin_height, coin_is_coinbase: inp.coin_is_coinbase, coin_mtp: inp.coin_mtp,
-            }).unwrap();
-        }
+        write_chunk_inputs(&mut b, &w, lo, hi);
         let receipt = default_prover()  // succinct: lift now, cheap aggregate later (see prove_chunk note)
             .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
         receipt.verify(METHOD_ID).unwrap();
@@ -1575,7 +1567,12 @@ fn prove_seg() {
 
 // Per-input cost in guest cycles. FITTED to measurement, not assumed: `chunk-profile` was run over
 // block 741000 in execute mode and these two coefficients reproduce every one of the 16 chunks' real
-// cycle counts to within ~2%.
+// cycle counts to within ~1%.
+//
+// REFITTED for the read_slice payload (#135). The byte term was 182 when the guest read its payload
+// through serde; that path cost ~147 cycles/byte on its own, and removing it leaves ~35. Measured
+// straggler with the stale 182 was 1.64x — WORSE than not packing by cost at all, because the model
+// then rates a byte-heavy chunk far more expensive than it now is. The EC coefficient did not move.
 //
 // The byte term is the part that is easy to get wrong, and costing purely by EC verifies does get it
 // wrong. Every ChunkInput carries the WHOLE spending transaction and the WHOLE prevouts blob, so a
@@ -1586,7 +1583,7 @@ fn prove_seg() {
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
 const COST_PER_EC_OP: u64 = 1_950_000;
-const COST_PER_INPUT_BYTE: u64 = 182;
+const COST_PER_INPUT_BYTE: u64 = 36;
 
 /// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
 /// used only to balance chunks, so being wrong costs some balance and never correctness.
@@ -1791,19 +1788,47 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
     b.write(&4u32).unwrap();
     b.write(&w.height).unwrap();
     b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+    let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec chunk");
+    // Report what the chunk COMMITTED, not just how long it took. A payload-format change that
+    // silently mis-reads its input would show up as fewer cycles and look like a win; the journal
+    // digest is what makes an A/B trustworthy. #135.
+    let d = <sha2::Sha256 as sha2::Digest>::digest(&s.journal.bytes);
+    let j = &s.journal.bytes;
+    let w = |i: usize| u32::from_le_bytes([j[i], j[i + 1], j[i + 2], j[i + 3]]);
+    println!("        journal sha256 {}  kind={:#x} all_valid={} binds={}", hex(&d), w(0), w(4), w(8));
+    s.cycles()
+}
+/// Write a chunk's inputs onto the guest's stdin (mode 4's payload).
+///
+/// #135: the bytes go through `write_slice` as raw bytes rather than as serde `Vec<u8>`. Measured on
+/// block 741000 chunk 1, `env::read` of the serde form was 50.9% of the chunk's cycles — ~147 per byte,
+/// because serde walks risc0's word stream a byte at a time. `read_slice` is a bulk copy; risc0's own
+/// optimisation guide says to use it for raw bytes.
+///
+/// Byte payloads are padded to a word so the serde reads that follow stay word-aligned on the same
+/// stream. The guest truncates back to the declared length.
+fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, lo: usize, hi: usize) {
+    fn padded(v: &[u8]) -> Vec<u8> {
+        let mut p = v.to_vec();
+        p.resize(v.len().div_ceil(4) * 4, 0);
+        p
+    }
     b.write(&((hi - lo) as u32)).unwrap();
     for inp in &w.inputs[lo..hi] {
-        b.write(&ChunkInput {
-            raw_tx: w.txs[inp.tx_idx as usize].0.clone(),
-            input_idx: inp.input_idx,
-            prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
-            coin_height: inp.coin_height,
-            coin_is_coinbase: inp.coin_is_coinbase,
-            coin_mtp: inp.coin_mtp,
-        }).unwrap();
+        let tx = &w.txs[inp.tx_idx as usize].0;
+        let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
+        b.write(&(tx.len() as u32)).unwrap();
+        b.write(&(prevouts.len() as u32)).unwrap();
+        b.write(&inp.input_idx).unwrap();
+        b.write(&inp.coin_height).unwrap();
+        b.write(&inp.coin_is_coinbase).unwrap();
+        b.write(&inp.coin_mtp).unwrap();
+        b.write_slice(&padded(tx));
+        b.write_slice(&padded(prevouts));
     }
-    default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec chunk").cycles()
 }
+
 fn nchunks_env() -> usize {
     std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1)
 }
@@ -1820,13 +1845,7 @@ fn prove_chunk(idx: usize) {
     b.write(&4u32).unwrap();
     b.write(&w.height).unwrap();
     b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
-    b.write(&((hi - lo) as u32)).unwrap();
-    for inp in &w.inputs[lo..hi] {
-        b.write(&ChunkInput {
-            raw_tx: w.txs[inp.tx_idx as usize].0.clone(), input_idx: inp.input_idx, prevouts: w.tx_prevouts[inp.tx_idx as usize].0.clone(),
-            coin_height: inp.coin_height, coin_is_coinbase: inp.coin_is_coinbase, coin_mtp: inp.coin_mtp,
-        }).unwrap();
-    }
+    write_chunk_inputs(&mut b, &w, lo, hi);
     let t = Instant::now();
     // SCALING: prove the chunk to a SUCCINCT receipt (not the default composite). This runs the
     // STARK-to-STARK "lift" NOW, in parallel across the chunk fleet — so agg-chunks resolves each
@@ -3497,27 +3516,41 @@ mod chunk_packing_tests {
             "cap {cap} was not minimal — {} runs fit under {}", runs_at_cap(&costs, cap - 1), cap - 1);
     }
 
-    /// Locks in the measurement that forced the byte term. Block 741000's chunk 1 and chunk 11 hold the
-    /// same number of inputs performing the same number of EC verifies, and chunk 1 costs 2.5x more
-    /// because its transactions are 20x bigger. An EC-only model rates the two equal, packs them as
-    /// though they were, and leaves the straggler where it found it — measured 1.22x before, and 1.31x
-    /// after, i.e. worse than doing nothing. If this test ever fails, the byte term has been dropped.
+    /// Locks in the byte term. Block 741000's chunk 1 and chunk 11 hold the same number of inputs
+    /// performing the same number of EC verifies, and chunk 1 still costs more because its
+    /// transactions are 20x bigger. An EC-only model rates the two equal and packs them as though
+    /// they were.
+    ///
+    /// The margin shrank when the guest stopped reading its payload through serde (#135): bytes were
+    /// 63% of a fat chunk at 182 cycles each, and are ~25% at 36. The term is smaller, not gone —
+    /// dropping it costs roughly 1.3x on the straggler here, and more on blocks with fatter
+    /// transactions. Measured: chunk 1 109,113,751 cycles against chunk 11 83,264,971.
     #[test]
     fn marshalling_bytes_are_costed_not_just_signatures() {
-        let ec_only = |ec: u64| super::COST_PER_EC_OP * ec;
         let real = |ec: u64, bytes: u64| super::COST_PER_EC_OP * ec + super::COST_PER_INPUT_BYTE * bytes;
-
-        // The two real chunks, as measured.
         let (lean, fat) = (real(42, 37_933), real(42, 765_282));
-        assert_eq!(ec_only(42), ec_only(42), "an EC-only model cannot tell these apart");
-        assert!(fat > lean * 2, "the fat chunk must cost at least twice the lean one: {fat} vs {lean}");
 
-        // And the packer must act on it.
+        // Within 1% of what those two chunks actually measured — the coefficients are fitted, so this
+        // fails loudly if either is changed without re-measuring.
+        assert!((fat as f64 - 109_113_751.0).abs() / 109_113_751.0 < 0.01, "fat chunk: {fat}");
+        assert!((lean as f64 - 83_264_971.0).abs() / 83_264_971.0 < 0.01, "lean chunk: {lean}");
+        assert!(fat > lean, "an EC-only model cannot tell these apart: {fat} vs {lean}");
+
+        // And the packer must act on it. Assert the PROPERTY, not a fixed partition: which split wins
+        // depends on the coefficients, and an earlier version of this test hard-coded the answer that
+        // was optimal at 182 cycles/byte and broke when the byte term was refitted.
         let costs = vec![lean, lean, fat, fat];
         let runs = pack_chunks(&costs, 2);
         assert_partitions(&costs, &runs);
-        assert_eq!(runs, vec![(0, 3), (3, 4)],
-            "the two fat inputs must be separated, not paired: {runs:?}");
+        let best = (1..costs.len())
+            .map(|split| {
+                let l: u64 = costs[..split].iter().sum();
+                let r: u64 = costs[split..].iter().sum();
+                l.max(r)
+            })
+            .min()
+            .unwrap();
+        assert_eq!(max_run(&costs, &runs), best, "not the optimal 2-way split: {runs:?}");
     }
 
     #[test]
