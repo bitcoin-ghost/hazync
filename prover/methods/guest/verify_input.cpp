@@ -591,3 +591,21 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                            checker, &err);
     return ok ? 1 : -(int)err - 1; // negative encodes the ScriptError code
 }
+
+// ---------------------------------------------------------------------------------------------
+// #135 / EC acceleration bake-off (experimental, mode 10). Isolates ONE ECDSA verification so the
+// libsecp256k1 path can be timed against a bigint2-accelerated one on identical inputs. Nothing in
+// the consensus path calls this; it exists to produce the number that decides whether replacing the
+// EC primitive is worth a METHOD_ID change at all.
+//
+// Uses the same static context libsecp exposes for verification — no context creation per call, so
+// the measurement is the verify itself.
+#include <secp256k1.h>
+
+extern "C" int hz_bench_ecdsa_verify(const uint8_t* sig64, const uint8_t* pk33, const uint8_t* msg32) {
+    secp256k1_ecdsa_signature sig;
+    if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_context_static, &sig, sig64)) return -1;
+    secp256k1_pubkey pk;
+    if (!secp256k1_ec_pubkey_parse(secp256k1_context_static, &pk, pk33, 33)) return -2;
+    return secp256k1_ecdsa_verify(secp256k1_context_static, &sig, msg32, &pk);
+}

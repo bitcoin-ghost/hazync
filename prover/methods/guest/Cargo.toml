@@ -12,6 +12,9 @@ edition = "2021"
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ['std', 'unstable'] }
 sha2 = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# EC acceleration bake-off (mode 10, experimental). bigint2-backed secp256k1 — the precompile path
+# ACCELERATION.md never tested, having used the older sys_bigint syscall instead.
+risc0-crypto = "0.1.0-rc.1"
 
 [build-dependencies]
 cc = "1"

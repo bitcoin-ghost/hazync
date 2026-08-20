@@ -3044,6 +3044,10 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "ec-bench") {
+        ec_bench();
+        return;
+    }
     if args.iter().any(|a| a == "chunk-profile") {
         chunk_profile();
         return;
@@ -3526,4 +3530,67 @@ mod chunk_packing_tests {
         assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
         assert!(pack_chunks(&[], 8).is_empty());
     }
+}
+
+// `ec-bench`: time ONE ECDSA verification through libsecp256k1 against risc0-crypto's bigint2-backed
+// secp256k1, on identical signatures, in execute mode. No GPU.
+//
+// This is the number that decides whether the remaining ~97% of a chunk's cost is addressable.
+// ACCELERATION.md's field backend was built end to end and only then measured its primitive at 40%
+// cheaper rather than the projected 6-8x; the point of this command is to not repeat that.
+fn ec_bench() {
+    use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+    let n: u32 = std::env::var("HAZYNC_EC_N").ok().and_then(|s| s.parse().ok()).unwrap_or(16);
+    let secp = Secp256k1::new();
+
+    // Deterministic, valid, low-S signatures — what libsecp's verify accepts on a real input.
+    let mut vectors: Vec<([u8; 64], [u8; 33], [u8; 32])> = Vec::new();
+    for i in 1..=n {
+        let mut sk_b = [0u8; 32];
+        sk_b[28..].copy_from_slice(&i.to_be_bytes());
+        sk_b[0] = 1;
+        let sk = SecretKey::from_slice(&sk_b).expect("sk");
+        let mut msg_b = [0u8; 32];
+        msg_b[24..28].copy_from_slice(&i.to_be_bytes());
+        msg_b[0] = 0x5a;
+        let sig = secp.sign_ecdsa(&Message::from_digest(msg_b), &sk);
+        vectors.push((sig.serialize_compact(), sk.public_key(&secp).serialize(), msg_b));
+    }
+
+    println!("=== EC BAKE-OFF: {n} ECDSA verifications, execute mode ===");
+    let mut results = Vec::new();
+    for (which, label) in [(0u32, "libsecp256k1 (baseline)"), (1u32, "risc0-crypto / bigint2")] {
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&10u32).unwrap();
+        b.write(&which).unwrap();
+        b.write(&n).unwrap();
+        for (sig, pk, msg) in &vectors {
+            b.write_slice(sig);
+            b.write_slice(pk);
+            b.write_slice(msg);
+        }
+        let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("exec");
+        let passed: u32 = s.journal.decode().unwrap();
+        let cycles = s.cycles();
+        println!("  {label:26}  {cycles:>14} cycles  {:>12} per verify  {passed}/{n} verified",
+            cycles / n.max(1) as u64);
+        results.push((label, cycles, passed));
+    }
+
+    // Agreement is the first half of the soundness question. A faster implementation that disagrees
+    // with libsecp on even one input is not a candidate, however fast it is.
+    let (base, cand) = (&results[0], &results[1]);
+    if base.2 != cand.2 {
+        println!("  >>> DISAGREEMENT: baseline verified {} of {n}, candidate {} — not comparable", base.2, cand.2);
+    } else if base.2 != n {
+        println!("  >>> both verified only {}/{n} — the vectors are wrong, not the implementations", base.2);
+    } else {
+        println!("  >>> both verified {n}/{n}");
+    }
+    println!("  >>> SPEEDUP {:.2}x on the EC primitive", base.1 as f64 / cand.1.max(1) as f64);
+
+    // What that is worth in context: EC is ~97% of a transaction-heavy chunk after #135.
+    let f = base.1 as f64 / cand.1.max(1) as f64;
+    println!("  >>> at 97% EC share, whole-chunk speedup would be {:.2}x", 1.0 / (0.03 + 0.97 / f));
 }

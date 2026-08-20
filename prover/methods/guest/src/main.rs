@@ -79,6 +79,8 @@ extern "C" {
         coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32,
         out_leaf: *mut u8,
     ) -> i32;
+    /// EC bake-off (mode 10): one isolated libsecp256k1 ECDSA verification.
+    fn hz_bench_ecdsa_verify(sig64: *const u8, pk33: *const u8, msg32: *const u8) -> i32;
     // Absolute locktime finality (real Core IsFinalTx). 1 = final.
     fn is_final_tx(tx: *const u8, tx_len: u32, height: i64, block_time: i64) -> i32;
     // Coinbase maturity + BIP68 relative locktime (height AND time based) for one input.
@@ -1345,6 +1347,7 @@ fn main() {
         7 => fold_range(),
         8 => test_locks(),
         9 => test_merkle(),
+        10 => ec_bench(),
         _ => panic!("unknown guest mode {mode}"),
     }
 }
@@ -1377,4 +1380,45 @@ fn test_merkle() {
     let mut mutated = 0u8;
     unsafe { merkle_root(flat.as_ptr(), n, root.as_mut_ptr(), &mut mutated) };
     env::commit(&(root, mutated));
+}
+
+// Mode 10: EC acceleration bake-off (EXPERIMENTAL — not on any consensus path).
+//
+// Verifies the same signatures two ways and reports how many passed, so the host can compare cycle
+// counts on identical inputs. `which` selects the implementation:
+//
+//   0  libsecp256k1, exactly as VerifyScript calls it — the baseline
+//   1  risc0-crypto, whose secp256k1 runs on the bigint2 precompile
+//
+// This exists because ACCELERATION.md's field-backend work was built end to end and only then found
+// its primitive was 40% cheaper rather than the projected 6-8x. Measure the primitive first.
+fn ec_bench() {
+    let which: u32 = env::read();
+    let n: u32 = env::read();
+    let mut passed = 0u32;
+    for _ in 0..n {
+        let mut sig = [0u8; 64];
+        let mut pk = [0u8; 33];
+        let mut msg = [0u8; 32];
+        env::read_slice(&mut sig);
+        env::read_slice(&mut pk);
+        env::read_slice(&mut msg);
+        let ok = match which {
+            0 => unsafe { hz_bench_ecdsa_verify(sig.as_ptr(), pk.as_ptr(), msg.as_ptr()) == 1 },
+            1 => {
+                use risc0_crypto::curves::secp256k1::{Affine, Config, Fq, Fr};
+                use risc0_crypto::ecdsa::Signature;
+                let r = Fr::from_be_bytes_mod_order(&sig[..32]);
+                let s = Fr::from_be_bytes_mod_order(&sig[32..]);
+                let x = Fq::from_be_bytes_mod_order(&pk[1..]);
+                match (Signature::<Config, 8>::new(r, s), Affine::decompress(x, pk[0] == 3)) {
+                    (Some(sg), Some(q)) => sg.verify(&q, &msg),
+                    _ => false,
+                }
+            }
+            _ => panic!("ec_bench: unknown implementation {which}"),
+        };
+        if ok { passed += 1 }
+    }
+    env::commit(&passed);
 }
