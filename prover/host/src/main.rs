@@ -3599,7 +3599,7 @@ fn ec_bench() {
             let mut msg_b = [0u8; 32];
             msg_b[24..28].copy_from_slice(&i.to_be_bytes());
             msg_b[0] = 0x5a;
-            let sig = secp.sign_schnorr_no_aux_rand(&msg_b, &kp);
+            let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(msg_b), &kp);
             sch.push((*sig.as_ref(), kp.public_key().serialize(), msg_b));
         }
     }
@@ -3718,19 +3718,49 @@ fn ec_bench() {
             b.write(&n).unwrap();
             for (sig, pk, msg) in src { b.write_slice(sig); b.write_slice(pk); b.write_slice(msg); }
             let t = std::time::Instant::now();
-            let receipt = default_prover()
-                .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
-                .expect("prove").receipt;
-            // #119 watch: a succinct receipt that fails its own verify is the fault under test.
-            match receipt.verify(METHOD_ID) {
-                Ok(()) => {}
-                Err(e) => println!("  !!! hazync#119 REPRODUCED on arm {which}: {e}"),
-            }
+            let proved = default_prover()
+                .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct());
             let w = t.elapsed().as_secs_f64();
-            println!("  {label:24}  PROVED in {w:>8.1}s   ({:>8.4}s per verify)", w / n as f64);
-            walls.insert(which, w);
+            match proved {
+                Ok(info) => {
+                    // Belt and braces. risc0 already verified every segment as it was produced, so
+                    // this rarely has anything left to catch — but a succinct receipt that fails its
+                    // own verify would be a different and worse fault than #119, so look anyway.
+                    if let Err(e) = info.receipt.verify(METHOD_ID) {
+                        println!("  !!! arm {which} receipt FAILED its own verify: {e}");
+                    }
+                    println!("  {label:24}  PROVED in {w:>8.1}s   ({:>8.4}s per verify)", w / n as f64);
+                    walls.insert(which, w);
+                }
+                Err(e) => {
+                    // hazync#119 aborts the PROVE, not the receipt check: risc0 verifies each segment
+                    // inside prove_segment_core, so a bad segment surfaces here. Measured at roughly
+                    // one chunk in five on 2026-08-21, so an arm dying is expected often enough that
+                    // it must not take the other two arms down with it.
+                    let msg = format!("{e:#}");
+                    println!("  {label:24}  FAILED after {w:>8.1}s", );
+                    println!("      {msg}");
+                    println!("      -> {}", if msg.contains("proof is invalid") {
+                        "hazync#119 SIGNATURE MATCHES (invalid segment proof). Re-run this arm."
+                    } else {
+                        "NOT the #119 signature — a different failure, investigate before re-running."
+                    });
+                }
+            }
         }
-        let (e0, e1, s4) = (walls[&0], walls[&1], walls[&4]);
+        // An arm that hit #119 leaves no entry. Indexing would panic and throw away the arms that
+        // DID complete, which is the whole reason the failure above is non-fatal.
+        let (e0, e1, s4) = match (walls.get(&0), walls.get(&1), walls.get(&4)) {
+            (Some(&a), Some(&b), Some(&c)) => (a, b, c),
+            _ => {
+                println!();
+                println!("  >>> SUMMARY SKIPPED — {} of 3 arms completed. Re-run to finish the bake-off.",
+                    walls.len());
+                println!("      Do NOT compare across separate runs: proving time varies with the box,");
+                println!("      and a partial bake-off is not a bake-off.");
+                return;
+            }
+        };
         println!();
         println!("  >>> #139 PROVING speedup on ECDSA   {:.2}x   (execute mode said {:.2}x)",
             e0 / e1.max(1e-9), results[0].1 as f64 / results[1].1.max(1) as f64);
