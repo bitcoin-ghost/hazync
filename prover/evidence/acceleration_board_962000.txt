@@ -1,0 +1,41 @@
+# docs/ACCELERATION.md 'The board as of 2026-08-21' — reproduction
+# generated 2026-08-21T11:35:23Z by prover/tools/{classify_inputs,model_acceleration}.py
+
+$ python3 prover/tools/classify_inputs.py prover/block_962000.json
+block 962,000 — 8,006 inputs, 6,303 txs
+
+type                          inputs    share
+P2WPKH                         6,212    77.6%
+P2A-anchor                     1,093    13.7%
+P2PKH                            474     5.9%
+P2TR-keypath                     110     1.4%
+P2SH                              63     0.8%
+P2TR-script                       35     0.4%
+P2WSH                             19     0.2%
+
+signature verifications        count    share
+ECDSA                          7,015    97.3%
+SCHNORR                          191     2.7%
+TOTAL                          7,206
+
+inputs verifying nothing: 1,093 (13.7%)
+
+$ python3 prover/tools/model_acceleration.py
+block 962,000: unique payload 2,009,532 B, shipped per-input 76,071,193 B (37.9x dup)
+
+stage                                         G cycles  vs main    step
+main today (182 c/B, per-input payload)         28.17    1.00x       —
++ #136 read_slice (36 c/B)                      17.06    1.65x   1.65x
++ #137 group-by-tx (6 c/B, unique)              14.34    1.96x   1.19x
++ #139 middle path (ECDSA 6.52x)                 2.75   10.23x   5.20x
++ #139 wholesale (ECDSA 13.77x)                  1.65   17.07x   1.67x
+
+--- composition after #136+#137, before any EC change ---
+  ECDSA verify        13.68 G   95.4%
+  Schnorr verify       0.37 G    2.6%
+  per-input base       0.27 G    1.9%
+  payload bytes        0.01 G    0.1%
+
+--- the Schnorr floor: bigint2 has no BIP340 ---
+  middle path   5.20x   (if Schnorr were also accelerated: 5.88x)
+  wholesale     8.69x   (if Schnorr were also accelerated: 10.99x)
