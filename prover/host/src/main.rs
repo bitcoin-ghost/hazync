@@ -1586,6 +1586,9 @@ fn prove_seg() {
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
 const COST_PER_EC_OP: u64 = 1_950_000;
+// An input that verifies no signature still costs something to read, deserialise and hash. Measured at
+// ~34K cycles on block 962,000's anchor spends, against ~1,953K for a P2WPKH.
+const COST_INPUT_BASE: u64 = 34_000;
 const COST_PER_INPUT_BYTE: u64 = 182;
 
 /// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
@@ -1614,6 +1617,23 @@ fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 
             })
             .count() as u64
     };
+
+    // Anyone-can-spend witness programs verify NOTHING: a v0 program that is not 20 or 32 bytes, or any
+    // version above v1. The common case today is P2A, `OP_1 <0x4e73>` — Core v28's ephemeral anchor.
+    // It is not a rounding error: **13.7% of block 962,000's 8,006 inputs are anchor spends**, each
+    // measured at ~34K cycles against ~1,953K for a P2WPKH. Charging them one verify apiece put 2.13 G
+    // cycles of a 16.2 G block on inputs that do essentially no work, and the packer then built chunks
+    // around a cost that was not there — chunk 5 was predicted at 979,867,512 and measured 232,024,236.
+    if let Some(ver) = spk.witness_version() {
+        use bitcoin::blockdata::script::witness_version::WitnessVersion;
+        let program_len = spk.len().saturating_sub(2);
+        let spendable_by_signature = match ver {
+            WitnessVersion::V0 => program_len == 20 || program_len == 32,
+            WitnessVersion::V1 => program_len == 32,
+            _ => false,
+        };
+        if !spendable_by_signature { return 0 }
+    }
 
     if spk.is_p2tr() {
         // A trailing 0x50-prefixed annex is not part of the spend path.
@@ -1658,7 +1678,7 @@ fn input_costs(w: &BlockWitness) -> Vec<u64> {
             let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
             let ec = predicted_ec_ops(tx, inp.input_idx, prevouts);
             let bytes = (tx.len() + prevouts.len()) as u64;
-            COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes
+            COST_INPUT_BASE + COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes
         })
         .collect()
 }
