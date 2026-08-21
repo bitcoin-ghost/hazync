@@ -74,10 +74,10 @@ board and nothing about it is contingent on #139.
 | Option | Gain | New `METHOD_ID`? | Core code no longer proven |
 |---|---|---|---|
 | **More cards** | Near-linear | **No** | **None** — chunks are independent and every parallel proof is independently verified |
-| **Host-side pipelining** | ≤1.34x, unmeasured | **No** | **None** — the lever the H100 run exposed: a quarter of the run has the GPU doing nothing |
-| Host-side tree-fold | part of the ~14% fold overhead | **No** | **None** |
-| **#139 middle path** | **5.20x** on the block | **Yes** | **~85%** |
-| **#139 wholesale** | **8.69x** on the block | **Yes** | **~95%** |
+| **Host-side pipelining** | **1.39x on segment proving, ~1.31x on a chunk — MEASURED** | **No** | **None** — overlaps host preflight with the GPU; changes the schedule, not the proof |
+| Host-side tree-fold | **not supported as the serial section** — a profile names preflight instead | **No** | **None** |
+| **#139 middle path** | **5.25x** on the block (execute-derived) | **Yes** | **~85%** |
+| **#139 wholesale** | **7.18x on the block, MEASURED at proving time** (8.85x execute-derived) | **Yes** | **~95%** |
 
 The pipelining row is new and follows from the H100 measurement rather than from any plan. It is the
 only remaining zero-fidelity lever that has not been costed, and it is host-side, so it costs no
@@ -155,21 +155,21 @@ same. After #139 they do not:
 | Schnorr (untouched) | 1,950,000 |
 | | **13.8x apart** |
 
-A block's wall-clock is its slowest chunk, so a packer blind to a 13.8x per-input divergence does not
+A block's wall-clock is its slowest chunk, so a packer blind to a 10.4x per-input divergence does not
 merely balance badly — it throws away most of the win. Simulated on block 962,000, which is only 2.7%
 Schnorr:
 
 | | slowest chunk | block speedup |
 |---|---|---|
 | before #139 | 900 M cycles | 1.00x |
-| after #139, packer unchanged | 289 M cycles | **3.12x** |
-| after #139, packer type-aware | 105 M cycles | **8.59x** |
+| after #139, packer unchanged | 305 M cycles | **2.95x** |
+| after #139, packer type-aware | 130 M cycles | **6.95x** |
 
-**Refitting the packer is worth 2.76x. It is a prerequisite for #139, not a follow-up.** Without it the
-8.69x that the rest of this section argues about is really 3.12x, and the fidelity is spent either way.
+**Refitting the packer is worth 2.36x. It is a prerequisite for #139, not a follow-up.** Without it the
+win the rest of this section argues about is really 2.95x, and the fidelity is spent either way.
 
 Two things sharpen this. The damage above is measured on a block that is 97.3% ECDSA — the mildest case
-available, and it still costs a factor of 2.76. A taproot-heavy block would be worse, and taproot only
+available, and it still costs a factor of 2.36. A taproot-heavy block would be worse, and taproot only
 grows. And this is the FOURTH time a stale packer coefficient has done measurable harm: the byte term
 went 182 → 36 → 6 across #136 and #137, each stale value optimising against work that was no longer
 there. This one is not a coefficient refit but a missing dimension — the model has no term for input
@@ -177,7 +177,7 @@ type at all — so it cannot be fixed by re-fitting a constant.
 
 Reproduce with `python3 prover/tools/pack_after_139.py prover/block_962000.json`. That script simulates
 the packer's shape rather than calling it, but the finding does not rest on the approximation: it
-follows from the 13.8x divergence, which the real packer is equally blind to.
+follows from the 10.4x divergence, which the real packer is equally blind to.
 
 ### The `METHOD_ID` constraint, which orders everything above
 
@@ -621,3 +621,95 @@ differential gate, Step 2). Everything above the modmul stays literally libsecp'
   swap (same soundness posture as this task).
 - `prover/methods/guest/build.rs` — how the Core C++ + libsecp256k1 TUs are compiled into the guest.
 - `HAZYNC_ARCHITECTURE.md` — the full-run cost model this speedup feeds into.
+
+---
+
+## The B200 run (2026-08-21) — the card axis is closed, and the host axis is open
+
+A single B200 (183 GB, sm_100, CUDA 12.9). Everything below is measured on chunk 9 of block 962,000,
+which profiles at +0.3% off the sixteen-chunk mean, so it is a fair sample rather than a lucky one.
+
+### Three cards now agree, across ~4x bandwidth and 2x cores
+
+| card | cycles/sec | vs L40S |
+|---|---|---|
+| L40S 46 GB | 978,435 | 1.00x |
+| H100 80GB HBM3 | 926,349 | 0.95x |
+| **B200 183 GB** | **1,029,790** | **1.05x** |
+
+This section used to say the remaining levers were "more cards, a faster card". **The second lever is
+not weak, it is absent.** A third architecture returns the same throughput.
+
+### The serial section is risc0 preflight, not the tree-fold
+
+`perf record -F 199 --call-graph dwarf` on a live chunk prove, 29,855 samples, debug symbols intact:
+
+| DSO | po2 20 | po2 22 |
+|---|---|---|
+| libcuda | 56.42% | 55.55% |
+| kernel | 15.73% | 17.69% |
+| host | 16.04% | 16.02% |
+| vdso | 9.26% | 9.67% |
+| **GPU wait** | **65.68%** | **65.22%** |
+
+The libcuda time is **not work** — it unwinds to `cuStreamSynchronize` under `eval_check`, i.e. the
+host thread spin-waiting on the GPU, which `perf` samples because a spinning sync burns a core. The
+host work that remains is preflight: `witgen::preflight::Preflight::body`, `SegmentProverImpl::preflight`,
+`wrap_memory_txns`, `paged_map::PagedMap::insert`, and the page-fault kernel time those generate.
+
+⚠ **po2 20 carries 4.2x the segments of po2 22 for the same cycles and the split moves by under half a
+percentage point.** Per-segment overhead is therefore not what limits this — host cost tracks CYCLES.
+(A two-point fit does put ~15% of po2 22's wall in per-segment cost, but bigger segments means po2 23,
+which is verifier-blocked, so that part is not recoverable.)
+
+`vmstat` says the same thing on two machines: H100 12 cores at us 7.2%, B200 24 cores at us 3.4% —
+**0.86 and 0.82 busy cores.** Doubling the core count changed nothing. It is one thread.
+
+### Pipelining preflight against prove_core: 1.39x, measured
+
+| arm | wall | GPU mean | busy>=90% |
+|---|---|---|---|
+| sequential | 776 s | 60.3% | 55.3% |
+| **pipelined** | **554 s / 560 s** | **84.7% / 83.6%** | **77.6% / 73.9%** |
+
+Two runs of the pipelined arm agree to 1.1%. The utilisation jump is the preflight gap being filled.
+
+⛔ **This is the discriminator against the concurrency null.** Running two chunk proves concurrently
+raised utilisation 66% -> 84% and throughput FELL. Pipelining raises it to the same place and
+wall-clock DROPS 29%. Inter-process contention (two CUDA contexts, driver time-slicing) is not
+intra-process pipelining (one context, CPU phase overlapped with GPU phase).
+
+⚠ **1.39x is on SEGMENT PROVING, not on a chunk.** A `prove-chunk` is ~18 s execute + 776 s segments +
+~121 s succinct lift; the lift is untouched, so a chunk goes ~915 s -> ~699 s = **~1.31x**. The lift is
+then ~17% of what remains, unoverlapped, and `lift(N)` does not depend on `prove_core(N+1)` either.
+
+`ProverServer` already exposes `segment_preflight` and `prove_segment_core` as separate public methods
+with a `PreflightResults` handoff, so this needs no fork of risc0 — `bench-pipeline` on
+`feat/pipeline-preflight` measures it. It is host-only: `METHOD_ID` was rebuilt as `b62d2a60`, unchanged.
+
+### #139 at proving time, and the Schnorr floor measured rather than assumed
+
+| arm (n=256) | execute cycles | proved |
+|---|---|---|
+| libsecp ECDSA | 485,729,284 | 574.5 s |
+| **bigint2 ECDSA** | **34,227,063** | **56.3 s** |
+| libsecp BIP340 | 487,884,833 | 583.4 s |
+
+**10.20x proved**, against 14.19x in execute mode — so **72% of the execute-mode ratio carries through**.
+Block bound on the proving factor: **7.18x**.
+
+⚠ The bigint2 arm takes the same ~56 s on the H100 and the B200. That is this page's main finding
+appearing again: the work is host-bound, not card-bound.
+
+**BIP340 costs the same as libsecp ECDSA — 1,905,800 against 1,897,380 cycles per verify, 0.4% apart.**
+They are interchangeable today, which is exactly why a flat cost model packs evenly. After #139 they
+are 10.4x apart at proving time, and the packer cannot see it.
+
+### Open, and it blocks the packer numbers above
+
+The ECDSA/Schnorr split for block 962,000 has three figures in circulation — **8,108** in the committed
+evidence, **7,015** after #138 zero-priced anyone-can-spend programs, and **7,206** from
+`prover/tools/classify_inputs.py`. They have not been reconciled here, and the packer simulation is
+built on the third. The 2.36x conclusion is robust to the discrepancy (it follows from the per-type
+divergence, which is measured), but **the absolute cycle figures in the packer table should not be
+quoted until one classifier is agreed and validated against `predicted_ec_ops`.**

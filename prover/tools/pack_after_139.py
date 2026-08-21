@@ -15,7 +15,12 @@ import json,sys,os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from classify_inputs import parse_tx, count_sigops   # reuse the verified classifier
 d=json.load(open(sys.argv[1] if len(sys.argv)>1 else 'prover/block_962000.json'))
-EC=1_950_000; BASE=34_000; BYTE=6; F=13.77
+EC=1_950_000; BASE=34_000; BYTE=6
+# F is the ECDSA speedup the packer is blind to. DEFAULT IS THE *PROVING* figure: this script's
+# subject is WALL-CLOCK, and execute-mode cycles are not proving cost. Measured on a B200
+# 2026-08-21, n=256: 574.5s -> 56.3s = 10.20x proved, where execute mode said 14.19x.
+# HZ_F re-derives the old execute-mode framing for comparison.
+F=float(os.environ.get('HZ_F', '10.20'))
 
 per=[]   # (ec_ops_ecdsa, ec_ops_schnorr, bytes)
 for t in d['txs']:
