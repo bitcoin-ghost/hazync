@@ -81,6 +81,8 @@ extern "C" {
     ) -> i32;
     /// EC bake-off (mode 10): one isolated libsecp256k1 ECDSA verification.
     fn hz_bench_ecdsa_verify(sig64: *const u8, pk33: *const u8, msg32: *const u8) -> i32;
+    /// EC bake-off (mode 10, which=2): the same parsing, WITHOUT the verification.
+    fn hz_bench_ecdsa_parse_only(sig64: *const u8, pk33: *const u8) -> i32;
     // Absolute locktime finality (real Core IsFinalTx). 1 = final.
     fn is_final_tx(tx: *const u8, tx_len: u32, height: i64, block_time: i64) -> i32;
     // Coinbase maturity + BIP68 relative locktime (height AND time based) for one input.
@@ -1415,6 +1417,25 @@ fn ec_bench() {
                     (Some(sg), Some(q)) => sg.verify(&q, &msg),
                     _ => false,
                 }
+            }
+            // 2/3: PARSE-ONLY arms. The middle path #139 describes keeps libsecp's ECDSA logic —
+            // parsing, low-S, the final r comparison — and swaps ONLY the group arithmetic
+            // underneath. Nobody has built that, so it cannot be timed directly; but it can be
+            // BOUNDED without building it. Time each side's non-group work on its own, and the
+            // middle path is libsecp's non-group work plus bigint2's group work.
+            //
+            // Public API only, deliberately: libsecp's internal ecmult is `static` inside
+            // secp256k1.c and reaching it means compiling a wrapper TU, which is a build change to
+            // measure a number that subtraction already gives.
+            2 => unsafe { hz_bench_ecdsa_parse_only(sig.as_ptr(), pk.as_ptr()) == 1 },
+            3 => {
+                use risc0_crypto::curves::secp256k1::{Affine, Config, Fq, Fr};
+                use risc0_crypto::ecdsa::Signature;
+                let r = Fr::from_be_bytes_mod_order(&sig[..32]);
+                let s = Fr::from_be_bytes_mod_order(&sig[32..]);
+                let x = Fq::from_be_bytes_mod_order(&pk[1..]);
+                matches!((Signature::<Config, 8>::new(r, s), Affine::decompress(x, pk[0] == 3)),
+                         (Some(_), Some(_)))
             }
             _ => panic!("ec_bench: unknown implementation {which}"),
         };

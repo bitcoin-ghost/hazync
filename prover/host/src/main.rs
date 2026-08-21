@@ -3559,7 +3559,8 @@ fn ec_bench() {
 
     println!("=== EC BAKE-OFF: {n} ECDSA verifications, execute mode ===");
     let mut results = Vec::new();
-    for (which, label) in [(0u32, "libsecp256k1 (baseline)"), (1u32, "risc0-crypto / bigint2")] {
+    for (which, label) in [(0u32, "libsecp256k1 (baseline)"), (1u32, "risc0-crypto / bigint2"),
+                           (2u32, "libsecp parse only"), (3u32, "risc0-crypto parse only")] {
         let mut b = ExecutorEnv::builder();
         b.segment_limit_po2(seg_po2());
         b.write(&10u32).unwrap();
@@ -3593,4 +3594,40 @@ fn ec_bench() {
     // What that is worth in context: EC is ~97% of a transaction-heavy chunk after #135.
     let f = base.1 as f64 / cand.1.max(1) as f64;
     println!("  >>> at 97% EC share, whole-chunk speedup would be {:.2}x", 1.0 / (0.03 + 0.97 / f));
+
+    // THE MIDDLE PATH (#139), BOUNDED WITHOUT BUILDING IT.
+    //
+    // Using risc0-crypto's `ecdsa` module wholesale substitutes libsecp's verification — the
+    // reimplementation-equivalence question this project exists to delete, and why the k256
+    // experiment was removed. The middle path keeps libsecp's ECDSA logic (parsing, low-S, the final
+    // r comparison) and swaps only the group arithmetic beneath it.
+    //
+    // Nobody has built it, so it cannot be timed. But each side's NON-group work can be, and the
+    // middle path is one side's non-group work plus the other's group work:
+    //
+    //     middle  =  libsecp_parse  +  (bigint2_total - bigint2_parse)
+    //
+    // ESTIMATE, NOT A MEASUREMENT OF AN IMPLEMENTATION. It assumes the middle path's non-group cost
+    // equals libsecp's parse cost, and it ignores the marshalling between libsecp's internal field
+    // representation and bigint2's, which a real implementation must pay and which cannot be known
+    // until one exists. Treat it as an upper bound on the middle path, and read the group SHARE as
+    // the durable number: that is what decides whether the layer is worth attacking at all.
+    if results.len() >= 4 {
+        let (secp_tot, r0_tot) = (results[0].1 as f64, results[1].1 as f64);
+        let (secp_parse, r0_parse) = (results[2].1 as f64, results[3].1 as f64);
+        let secp_group = secp_tot - secp_parse;
+        let r0_group = r0_tot - r0_parse;
+        let middle = secp_parse + r0_group;
+        println!();
+        println!("=== MIDDLE PATH (#139): keep libsecp's ECDSA logic, swap the group arithmetic ===");
+        println!("  libsecp        total {:>12.0}  parse {:>10.0}  group {:>12.0}  ({:.1}% of verify)",
+            secp_tot, secp_parse, secp_group, 100.0 * secp_group / secp_tot);
+        println!("  bigint2        total {:>12.0}  parse {:>10.0}  group {:>12.0}  ({:.1}% of verify)",
+            r0_tot, r0_parse, r0_group, 100.0 * r0_group / r0_tot);
+        println!("  group arithmetic alone: {:.2}x faster", secp_group / r0_group.max(1.0));
+        println!("  >>> MIDDLE PATH  {:>12.0} cycles  = {:.2}x   (wholesale is {:.2}x)",
+            middle, secp_tot / middle.max(1.0), f);
+        println!("  >>> at 97.3% ECDSA share (block 962,000 measured), block-level bound {:.2}x",
+            1.0 / (0.027 + 0.973 / (secp_tot / middle.max(1.0))));
+    }
 }

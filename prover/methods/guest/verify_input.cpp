@@ -602,6 +602,17 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
 // the measurement is the verify itself.
 #include <secp256k1.h>
 
+// EC bake-off (mode 10, which=2): parse ONLY — everything hz_bench_ecdsa_verify does except the
+// verification itself. Subtracting this from the full verify isolates the group arithmetic, which is
+// the layer #139's middle path would replace.
+extern "C" int hz_bench_ecdsa_parse_only(const uint8_t* sig64, const uint8_t* pk33) {
+    secp256k1_ecdsa_signature sig;
+    if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_context_static, &sig, sig64)) return -1;
+    secp256k1_pubkey pk;
+    if (!secp256k1_ec_pubkey_parse(secp256k1_context_static, &pk, pk33, 33)) return -2;
+    return 1;
+}
+
 extern "C" int hz_bench_ecdsa_verify(const uint8_t* sig64, const uint8_t* pk33, const uint8_t* msg32) {
     secp256k1_ecdsa_signature sig;
     if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_context_static, &sig, sig64)) return -1;
