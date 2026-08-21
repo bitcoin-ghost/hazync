@@ -1918,6 +1918,110 @@ fn prove_chunk(idx: usize) {
     println!("chunk {idx} ({} inputs) proved in {:.0}s -> {out}", hi - lo, t.elapsed().as_secs_f64());
 }
 
+// `bench-pipeline`: prove one chunk's segments with preflight (CPU) OVERLAPPED against
+// prove_core (GPU), and time it against the same work done sequentially.
+//
+// WHY. risc0's `ProverServer::prove_segment` is preflight-then-prove_core in sequence
+// (risc0-zkvm-3.0.5 `host/server/prove/mod.rs:72`), and `prove_session` walks the segments
+// in a plain `for` loop with no overlap (`prover_impl.rs:83`). Profiling a chunk-9 prove on
+// a B200 put ~35% of on-CPU time in host-side preflight with the GPU waiting — and the split
+// was the same at po2 20 and po2 22 despite 4.2x the segment count, so the cost tracks
+// CYCLES, not per-segment overhead. Overlapping the two phases bounds the win at ~1.5x.
+//
+// Nothing here touches the guest, so METHOD_ID does not move and no re-baseline is implied.
+//
+// Mode is chosen by HAZYNC_PIPELINE (set = pipelined, unset = sequential) so each run is
+// directly comparable with a plain `prove-chunk` wall-clock. Both modes print a digest over
+// the segment seals: identical inputs must give identical seals, which is the correctness
+// check that the overlap changed only the schedule.
+fn bench_pipeline() {
+    use risc0_zkvm::{get_prover_server, ExecutorImpl, SegmentRef, VerifierContext};
+    use std::sync::mpsc::sync_channel;
+    use std::time::Instant;
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let pipelined = std::env::var("HAZYNC_PIPELINE").is_ok();
+
+    let (_anchor, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).unwrap_or_else(|| panic!(
+        "bench-pipeline {idx}: block has only {} chunks at HAZYNC_CHUNKS={}", bounds.len(), nchunks_env()));
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let opts = ProverOpts::succinct();
+    let ctx = VerifierContext::default();
+
+    let t_exec = Instant::now();
+    let mut session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+        .expect("executor").run().expect("execute");
+    // `Session::segments` is a public `Vec<Box<dyn SegmentRef>>` and `SegmentRef: Send`, so the
+    // whole list can be moved into the preflight worker. `Segment` itself carries no Send bound,
+    // so `resolve()` has to happen on whichever thread preflights it — never across the channel.
+    let refs: Vec<Box<dyn SegmentRef>> = std::mem::take(&mut session.segments);
+    let n = refs.len();
+    println!("chunk {idx} ({} inputs): {n} segments at po2 {}, executed in {:.1}s",
+        hi - lo, seg_po2(), t_exec.elapsed().as_secs_f64());
+    println!("mode: {}", if pipelined { "PIPELINED (preflight || prove_core)" } else { "SEQUENTIAL (risc0 default)" });
+
+    let t = Instant::now();
+    let receipts: Vec<risc0_zkvm::SegmentReceipt> = if pipelined {
+        // Depth 1 => at most two PreflightResults alive at once: one being proved, one buffered.
+        // Deeper buys no speed — the GPU consumer is strictly serial — and each one holds a full
+        // segment witness, so the depth is a MEMORY knob. Raise it only if the GPU is ever seen
+        // starving, and measure the RSS when you do.
+        // The error is carried as an owned String: `host` does not depend on `anyhow`, and an
+        // owned message crosses the channel without dragging a foreign error type into the bound.
+        let (tx, rx) = sync_channel::<Result<risc0_zkvm::PreflightResults, String>>(1);
+        let opts_w = opts.clone();
+        let worker = std::thread::spawn(move || {
+            // `get_prover_server` hands back an `Rc<dyn ProverServer>`, which is !Send, so the
+            // worker builds its own. That is free and safe: `ProverImpl` holds only `ProverOpts`,
+            // and risc0 constructs a fresh `segment_prover()` inside every call, so the two
+            // threads share no prover state — only the channel.
+            let p = get_prover_server(&opts_w).expect("prover (preflight worker)");
+            for r in refs {
+                let res = r.resolve().and_then(|seg| p.segment_preflight(&seg)).map_err(|e| e.to_string());
+                let failed = res.is_err();
+                // A send error means the consumer is gone; stop rather than block forever.
+                if tx.send(res).is_err() || failed { break; }
+            }
+        });
+        let p = get_prover_server(&opts).expect("prover (main)");
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let pre = rx.recv()
+                .unwrap_or_else(|_| panic!("preflight worker stopped after {i}/{n} segments"))
+                .expect("preflight");
+            out.push(p.prove_segment_core(&ctx, pre).expect("prove_core"));
+        }
+        worker.join().expect("preflight worker panicked");
+        out
+    } else {
+        let p = get_prover_server(&opts).expect("prover");
+        refs.iter().map(|r| {
+            let seg = r.resolve().expect("resolve");
+            let pre = p.segment_preflight(&seg).expect("preflight");
+            p.prove_segment_core(&ctx, pre).expect("prove_core")
+        }).collect()
+    };
+    let wall = t.elapsed().as_secs_f64();
+
+    let mut bytes = Vec::new();
+    for r in &receipts { bytes.extend_from_slice(&r.get_seal_bytes()); }
+    let digest = bitcoin::hashes::sha256d::Hash::hash(&bytes);
+
+    println!("segments proved  {}", receipts.len());
+    println!("WALL_SECONDS     {wall:.0}");
+    println!("seal digest      {digest}");
+    println!(">>> run both modes: the digests must MATCH, and the wall-clock ratio is the win.");
+}
+
+
 // `agg-chunks`: read all chunk receipt files, aggregate into the block/chain proof.
 fn agg_chunks() {
     use std::time::Instant;
@@ -3120,6 +3224,10 @@ fn main() {
     if let Some(p) = args.iter().position(|a| a == "dump-snapshot") {
         let out = args.get(p + 1).expect("dump-snapshot <out-file>");
         cmd_dump_snapshot(out);
+        return;
+    }
+    if args.iter().any(|a| a == "bench-pipeline") {
+        bench_pipeline();
         return;
     }
     if args.iter().any(|a| a == "chunk-profile") {
