@@ -685,7 +685,8 @@ then ~17% of what remains, unoverlapped, and `lift(N)` does not depend on `prove
 
 `ProverServer` already exposes `segment_preflight` and `prove_segment_core` as separate public methods
 with a `PreflightResults` handoff, so this needs no fork of risc0 — `bench-pipeline` on
-`feat/pipeline-preflight` measures it. It is host-only: `METHOD_ID` was rebuilt as `b62d2a60`, unchanged.
+`feat/pipeline-preflight` measures it. It is host-only: rebuilding the branch reproduced its base
+tree's guest id unchanged, so no re-baseline is implied and no board reset follows.
 
 ### #139 at proving time, and the Schnorr floor measured rather than assumed
 
