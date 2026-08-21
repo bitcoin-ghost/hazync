@@ -3587,16 +3587,35 @@ fn ec_bench() {
         vectors.push((sig.serialize_compact(), sk.public_key(&secp).serialize(), msg_b));
     }
 
+    // BIP340 vectors, same wire shape (sig64, pk33, msg32); the guest reads pk33[1..33] as x-only.
+    let mut sch: Vec<([u8; 64], [u8; 33], [u8; 32])> = Vec::new();
+    {
+        use bitcoin::secp256k1::Keypair;
+        for i in 1..=n {
+            let mut sk_b = [0u8; 32];
+            sk_b[28..].copy_from_slice(&i.to_be_bytes());
+            sk_b[0] = 1;
+            let kp = Keypair::from_seckey_slice(&secp, &sk_b).expect("kp");
+            let mut msg_b = [0u8; 32];
+            msg_b[24..28].copy_from_slice(&i.to_be_bytes());
+            msg_b[0] = 0x5a;
+            let sig = secp.sign_schnorr_no_aux_rand(&msg_b, &kp);
+            sch.push((*sig.as_ref(), kp.public_key().serialize(), msg_b));
+        }
+    }
+
     println!("=== EC BAKE-OFF: {n} ECDSA verifications, execute mode ===");
     let mut results = Vec::new();
     for (which, label) in [(0u32, "libsecp256k1 (baseline)"), (1u32, "risc0-crypto / bigint2"),
-                           (2u32, "libsecp parse only"), (3u32, "risc0-crypto parse only")] {
+                           (2u32, "libsecp parse only"), (3u32, "risc0-crypto parse only"),
+                           (4u32, "libsecp BIP340 (Schnorr)")] {
         let mut b = ExecutorEnv::builder();
         b.segment_limit_po2(seg_po2());
         b.write(&10u32).unwrap();
         b.write(&which).unwrap();
         b.write(&n).unwrap();
-        for (sig, pk, msg) in &vectors {
+        let src = if which == 4 { &sch } else { &vectors };
+        for (sig, pk, msg) in src {
             b.write_slice(sig);
             b.write_slice(pk);
             b.write_slice(msg);
@@ -3674,4 +3693,52 @@ fn ec_bench() {
             1.0 / ((ECDSA_CYCLE_SHARE + SCHNORR_CYCLE_SHARE) / (secp_tot / middle.max(1.0))
                    + (1.0 - ECDSA_CYCLE_SHARE - SCHNORR_CYCLE_SHARE)));
     }
+
+    // ---- PROVING, which is the only measurement that decides anything here ----
+    //
+    // Execute-mode cycles are not proving cost, and for a precompile the gap is the whole
+    // question: bigint2 runs on a separate coprocessor circuit. The H100 run of 2026-08-21
+    // measured 10.82x proving against 14.19x cycles, so the gap is real and costs ~24%.
+    //
+    // Arms proved: 0 (libsecp ECDSA, today), 1 (bigint2 ECDSA, #139), 4 (libsecp BIP340, the
+    // floor #139 cannot move). The ratio of 4 to 1 is the per-type divergence a type-aware
+    // chunk packer must be fitted against; predicted_ec_ops currently has no term for it.
+    if std::env::var("HAZYNC_EC_PROVE").is_ok() {
+        println!();
+        println!("=== EC BAKE-OFF: PROVING, {n} verifications per arm ===");
+        let mut walls = std::collections::HashMap::new();
+        for (which, label) in [(0u32, "libsecp ECDSA (today)"),
+                               (1u32, "bigint2 ECDSA (#139)"),
+                               (4u32, "libsecp BIP340 (floor)")] {
+            let src = if which == 4 { &sch } else { &vectors };
+            let mut b = ExecutorEnv::builder();
+            b.segment_limit_po2(seg_po2());
+            b.write(&10u32).unwrap();
+            b.write(&which).unwrap();
+            b.write(&n).unwrap();
+            for (sig, pk, msg) in src { b.write_slice(sig); b.write_slice(pk); b.write_slice(msg); }
+            let t = std::time::Instant::now();
+            let receipt = default_prover()
+                .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
+                .expect("prove").receipt;
+            // #119 watch: a succinct receipt that fails its own verify is the fault under test.
+            match receipt.verify(METHOD_ID) {
+                Ok(()) => {}
+                Err(e) => println!("  !!! hazync#119 REPRODUCED on arm {which}: {e}"),
+            }
+            let w = t.elapsed().as_secs_f64();
+            println!("  {label:24}  PROVED in {w:>8.1}s   ({:>8.4}s per verify)", w / n as f64);
+            walls.insert(which, w);
+        }
+        let (e0, e1, s4) = (walls[&0], walls[&1], walls[&4]);
+        println!();
+        println!("  >>> #139 PROVING speedup on ECDSA   {:.2}x   (execute mode said {:.2}x)",
+            e0 / e1.max(1e-9), results[0].1 as f64 / results[1].1.max(1) as f64);
+        println!("  >>> per-type divergence AFTER #139  {:.1}x   (Schnorr {:.4}s vs ECDSA {:.4}s per verify)",
+            s4 / e1.max(1e-9), s4 / n as f64, e1 / n as f64);
+        println!("      that divergence is what a type-aware packer must price; it is 1.0x today");
+        println!("  >>> block bound on the PROVING factor {:.2}x  ({})",
+            block_bound(e0 / e1.max(1e-9)), EC_SHARE_PROVENANCE);
+    }
+
 }

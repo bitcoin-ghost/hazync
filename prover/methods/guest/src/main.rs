@@ -81,6 +81,8 @@ extern "C" {
     ) -> i32;
     /// EC bake-off (mode 10): one isolated libsecp256k1 ECDSA verification.
     fn hz_bench_ecdsa_verify(sig64: *const u8, pk33: *const u8, msg32: *const u8) -> i32;
+    /// EC bake-off (mode 10, which=4): one libsecp BIP340 verification.
+    fn hz_bench_schnorr_verify(sig64: *const u8, pk33: *const u8, msg32: *const u8) -> i32;
     /// EC bake-off (mode 10, which=2): the same parsing, WITHOUT the verification.
     fn hz_bench_ecdsa_parse_only(sig64: *const u8, pk33: *const u8) -> i32;
     // Absolute locktime finality (real Core IsFinalTx). 1 = final.
@@ -1437,6 +1439,8 @@ fn ec_bench() {
                 matches!((Signature::<Config, 8>::new(r, s), Affine::decompress(x, pk[0] == 3)),
                          (Some(_), Some(_)))
             }
+            // 4: BIP340. The arm bigint2 cannot touch, and therefore the packer floor.
+            4 => unsafe { hz_bench_schnorr_verify(sig.as_ptr(), pk.as_ptr(), msg.as_ptr()) == 1 },
             _ => panic!("ec_bench: unknown implementation {which}"),
         };
         if ok { passed += 1 }

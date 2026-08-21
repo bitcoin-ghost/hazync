@@ -613,6 +613,20 @@ extern "C" int hz_bench_ecdsa_parse_only(const uint8_t* sig64, const uint8_t* pk
     return 1;
 }
 
+#include <secp256k1_schnorrsig.h>
+#include <secp256k1_extrakeys.h>
+
+// EC bake-off (mode 10, which=4): one isolated libsecp BIP340 verification. This is the arm
+// #139 CANNOT accelerate -- risc0-crypto exports no BIP340 -- so it is the floor the packer
+// needs a cost for. Takes the x-only key as pk33[1..33]: x-only is x-only regardless of the
+// compressed prefix byte, so the bake-off wire format is reused unchanged.
+extern "C" int hz_bench_schnorr_verify(const uint8_t* sig64, const uint8_t* pk33,
+                                       const uint8_t* msg32) {
+    secp256k1_xonly_pubkey xpk;
+    if (!secp256k1_xonly_pubkey_parse(secp256k1_context_static, &xpk, pk33 + 1)) return -1;
+    return secp256k1_schnorrsig_verify(secp256k1_context_static, sig64, msg32, 32, &xpk) ? 1 : 0;
+}
+
 extern "C" int hz_bench_ecdsa_verify(const uint8_t* sig64, const uint8_t* pk33, const uint8_t* msg32) {
     secp256k1_ecdsa_signature sig;
     if (!secp256k1_ecdsa_signature_parse_compact(secp256k1_context_static, &sig, sig64)) return -1;
