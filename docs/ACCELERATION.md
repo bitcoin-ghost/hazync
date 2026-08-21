@@ -134,6 +134,51 @@ transactions:
 | P2TR script-path | 35 | 0.4% |
 | P2WSH | 19 | 0.2% |
 
+### #139 is selective already, and that is what breaks the packer
+
+A natural reading of the composition table above is that Schnorr and the per-input base *regress*
+under #139. They do not. Both are unchanged to the cycle — 0.372 G and 0.272 G before and after. They
+only grow as a SHARE because ECDSA shrinks underneath them, which is Amdahl's law and not a cost.
+
+Nor is there a "best of both worlds" variant left to design: #139 substitutes only the ECDSA
+verification path. Schnorr keeps running libsecp's BIP340 code, and the per-input base — deserialisation,
+hashing, `interpreter.cpp` — keeps running Core's. The 95.4% fidelity figure IS the ECDSA fraction, and
+the surviving 4.6% is exactly that selectivity. Nothing needs building to get it.
+
+**But the selectivity has a consequence nothing has costed, and it is large.** `predicted_ec_ops`
+counts signature verifications without distinguishing ECDSA from Schnorr, because today they cost the
+same. After #139 they do not:
+
+| | cycles per verification |
+|---|---|
+| ECDSA (accelerated) | ~141,612 |
+| Schnorr (untouched) | 1,950,000 |
+| | **13.8x apart** |
+
+A block's wall-clock is its slowest chunk, so a packer blind to a 13.8x per-input divergence does not
+merely balance badly — it throws away most of the win. Simulated on block 962,000, which is only 2.7%
+Schnorr:
+
+| | slowest chunk | block speedup |
+|---|---|---|
+| before #139 | 900 M cycles | 1.00x |
+| after #139, packer unchanged | 289 M cycles | **3.12x** |
+| after #139, packer type-aware | 105 M cycles | **8.59x** |
+
+**Refitting the packer is worth 2.76x. It is a prerequisite for #139, not a follow-up.** Without it the
+8.69x that the rest of this section argues about is really 3.12x, and the fidelity is spent either way.
+
+Two things sharpen this. The damage above is measured on a block that is 97.3% ECDSA — the mildest case
+available, and it still costs a factor of 2.76. A taproot-heavy block would be worse, and taproot only
+grows. And this is the FOURTH time a stale packer coefficient has done measurable harm: the byte term
+went 182 → 36 → 6 across #136 and #137, each stale value optimising against work that was no longer
+there. This one is not a coefficient refit but a missing dimension — the model has no term for input
+type at all — so it cannot be fixed by re-fitting a constant.
+
+Reproduce with `python3 prover/tools/pack_after_139.py prover/block_962000.json`. That script simulates
+the packer's shape rather than calling it, but the finding does not rest on the approximation: it
+follows from the 13.8x divergence, which the real packer is equally blind to.
+
 ### The `METHOD_ID` constraint, which orders everything above
 
 There is exactly one pinned id — `4722cec8` — and no allowlist. The recursion asserts

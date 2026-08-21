@@ -3,7 +3,7 @@
 # verifications. Sources the input-mix table in docs/ACCELERATION.md 'The board'.
 # Usage: python3 prover/tools/classify_inputs.py [prover/block_962000.json]
 import json, collections
-d=json.load(open(__import__('sys').argv[1] if len(__import__('sys').argv)>1 else 'prover/block_962000.json'))
+import sys
 
 def rd(b,o,n): return b[o:o+n], o+n
 def varint(b,o):
@@ -51,37 +51,43 @@ def count_sigops(s):
         i+=1
     return n
 
-cnt=collections.Counter(); ec=collections.Counter(); inputs=0
-for t in d['txs']:
-    try: vins,wits=parse_tx(t['raw'])
-    except Exception: continue
-    for i,po in enumerate(t['prevouts']):
-        inputs+=1
-        spk=bytes.fromhex(po['spk']); w=wits[i] if i<len(wits) else []
-        if spk[:2]==b'\x00\x14' and len(spk)==22: cnt['P2WPKH']+=1; ec['ECDSA']+=1
-        elif spk[:2]==b'\x00\x20' and len(spk)==34:
-            cnt['P2WSH']+=1; ec['ECDSA']+= (count_sigops(w[-1]) if w else 1)
-        elif spk[:2]==b'\x51\x20' and len(spk)==34:
-            if len(w)>=2 and w[-1][:1]==b'\x50': w=w[:-1]  # annex
-            if len(w)==1: cnt['P2TR-keypath']+=1; ec['SCHNORR']+=1
-            elif len(w)>=2: cnt['P2TR-script']+=1; ec['SCHNORR']+=count_sigops(w[-2])
-            else: cnt['P2TR-other']+=1
-        elif spk==bytes.fromhex('51024e73'): cnt['P2A-anchor']+=1
-        elif spk[:3]==b'\x76\xa9\x14' and len(spk)==25: cnt['P2PKH']+=1; ec['ECDSA']+=1
-        elif spk[:2]==b'\xa9\x14' and len(spk)==23:
-            cnt['P2SH']+=1
-            if w: ec['ECDSA']+= (count_sigops(w[-1]) if len(w)>1 else 1)
-            else: ec['ECDSA']+=1
-        elif len(spk)>1 and spk[-1]==0xac: cnt['P2PK']+=1; ec['ECDSA']+=1
-        elif len(spk)>=4 and spk[0]==0x51 and len(spk)<=42: cnt['witness-vN(unencumbered)']+=1
-        else: cnt['other']+=1; ec['ECDSA']+=count_sigops(spk) or 0
+def main(path):
+    d=json.load(open(path))
+    cnt=collections.Counter(); ec=collections.Counter(); inputs=0
+    for t in d['txs']:
+        try: vins,wits=parse_tx(t['raw'])
+        except Exception: continue
+        for i,po in enumerate(t['prevouts']):
+            inputs+=1
+            spk=bytes.fromhex(po['spk']); w=wits[i] if i<len(wits) else []
+            if spk[:2]==b'\x00\x14' and len(spk)==22: cnt['P2WPKH']+=1; ec['ECDSA']+=1
+            elif spk[:2]==b'\x00\x20' and len(spk)==34:
+                cnt['P2WSH']+=1; ec['ECDSA']+= (count_sigops(w[-1]) if w else 1)
+            elif spk[:2]==b'\x51\x20' and len(spk)==34:
+                if len(w)>=2 and w[-1][:1]==b'\x50': w=w[:-1]  # annex
+                if len(w)==1: cnt['P2TR-keypath']+=1; ec['SCHNORR']+=1
+                elif len(w)>=2: cnt['P2TR-script']+=1; ec['SCHNORR']+=count_sigops(w[-2])
+                else: cnt['P2TR-other']+=1
+            elif spk==bytes.fromhex('51024e73'): cnt['P2A-anchor']+=1
+            elif spk[:3]==b'\x76\xa9\x14' and len(spk)==25: cnt['P2PKH']+=1; ec['ECDSA']+=1
+            elif spk[:2]==b'\xa9\x14' and len(spk)==23:
+                cnt['P2SH']+=1
+                if w: ec['ECDSA']+= (count_sigops(w[-1]) if len(w)>1 else 1)
+                else: ec['ECDSA']+=1
+            elif len(spk)>1 and spk[-1]==0xac: cnt['P2PK']+=1; ec['ECDSA']+=1
+            elif len(spk)>=4 and spk[0]==0x51 and len(spk)<=42: cnt['witness-vN(unencumbered)']+=1
+            else: cnt['other']+=1; ec['ECDSA']+=count_sigops(spk) or 0
+    
+    print(f"block {d['height']:,} — {inputs:,} inputs, {len(d['txs']):,} txs\n")
+    print(f"{'type':<28}{'inputs':>8}{'share':>9}")
+    for k,v in cnt.most_common(): print(f"{k:<28}{v:>8,}{v/inputs*100:>8.1f}%")
+    tot=ec['ECDSA']+ec['SCHNORR']
+    print(f"\n{'signature verifications':<28}{'count':>8}{'share':>9}")
+    for k in ('ECDSA','SCHNORR'): print(f"{k:<28}{ec[k]:>8,}{ec[k]/tot*100:>8.1f}%")
+    print(f"{'TOTAL':<28}{tot:>8,}")
+    print(f"\ninputs verifying nothing: {cnt['P2A-anchor']+cnt['witness-vN(unencumbered)']:,} "
+          f"({(cnt['P2A-anchor']+cnt['witness-vN(unencumbered)'])/inputs*100:.1f}%)")
+    
 
-print(f"block 962,000 — {inputs:,} inputs, {len(d['txs']):,} txs\n")
-print(f"{'type':<28}{'inputs':>8}{'share':>9}")
-for k,v in cnt.most_common(): print(f"{k:<28}{v:>8,}{v/inputs*100:>8.1f}%")
-tot=ec['ECDSA']+ec['SCHNORR']
-print(f"\n{'signature verifications':<28}{'count':>8}{'share':>9}")
-for k in ('ECDSA','SCHNORR'): print(f"{k:<28}{ec[k]:>8,}{ec[k]/tot*100:>8.1f}%")
-print(f"{'TOTAL':<28}{tot:>8,}")
-print(f"\ninputs verifying nothing: {cnt['P2A-anchor']+cnt['witness-vN(unencumbered)']:,} "
-      f"({(cnt['P2A-anchor']+cnt['witness-vN(unencumbered)'])/inputs*100:.1f}%)")
+if __name__ == '__main__':
+    main(sys.argv[1] if len(sys.argv)>1 else 'prover/block_962000.json')

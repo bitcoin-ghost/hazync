@@ -1,5 +1,5 @@
 # docs/ACCELERATION.md 'The board as of 2026-08-21' — reproduction
-# generated 2026-08-21T11:35:23Z by prover/tools/{classify_inputs,model_acceleration}.py
+# generated 2026-08-21T11:47:45Z
 
 $ python3 prover/tools/classify_inputs.py prover/block_962000.json
 block 962,000 — 8,006 inputs, 6,303 txs
@@ -20,6 +20,23 @@ TOTAL                          7,206
 
 inputs verifying nothing: 1,093 (13.7%)
 
+$ python3 prover/tools/classify_inputs.py prover/block_741000.json
+block 741,000 — 670 inputs, 146 txs
+
+type                          inputs    share
+P2PKH                            430    64.2%
+P2SH                             114    17.0%
+P2WPKH                           112    16.7%
+P2WSH                             12     1.8%
+P2TR-keypath                       2     0.3%
+
+signature verifications        count    share
+ECDSA                          1,110    99.8%
+SCHNORR                            2     0.2%
+TOTAL                          1,112
+
+inputs verifying nothing: 0 (0.0%)
+
 $ python3 prover/tools/model_acceleration.py
 block 962,000: unique payload 2,009,532 B, shipped per-input 76,071,193 B (37.9x dup)
 
@@ -39,3 +56,17 @@ main today (182 c/B, per-input payload)         28.17    1.00x       —
 --- the Schnorr floor: bigint2 has no BIP340 ---
   middle path   5.20x   (if Schnorr were also accelerated: 5.88x)
   wholesale     8.69x   (if Schnorr were also accelerated: 10.99x)
+
+$ python3 prover/tools/pack_after_139.py prover/block_962000.json
+BEFORE #139: straggler 1.00x   (chunk max 900M vs mean 896M)
+AFTER  #139: straggler 2.80x   (chunk max 289M vs mean 103M)
+AFTER  #139, type-aware packer: straggler 1.02x
+
+WALL-CLOCK (16 chunks, one card each — the slowest chunk IS the block)
+  before #139                     900M cycles      1.00x
+  after, packer unchanged         289M cycles     3.12x
+  after, packer type-aware        105M cycles     8.59x
+  >>> refitting the packer is worth 2.76x — it is a PREREQUISITE, not a follow-up
+
+per-verify cost after #139:  ECDSA    141,612   Schnorr  1,950,000   ratio 13.8x
+block 962,000 is only 2.7% Schnorr, which is why the damage is small HERE
