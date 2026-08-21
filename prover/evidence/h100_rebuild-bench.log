@@ -1,0 +1,43 @@
+== 8. build the prover (release + CUDA) — HAZYNC_BASE is exported above ==
+   Compiling methods v0.1.0 (/root/hazync/prover/methods)
+warning: unused import: `Sha256`
+  --> /root/hazync/coinbase-smt/src/lib.rs:70:20
+   |
+70 | use sha2::{Digest, Sha256};
+   |                    ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Digest`
+  --> /root/hazync/coinbase-smt/src/lib.rs:70:12
+   |
+70 | use sha2::{Digest, Sha256};
+   |            ^^^^^^
+
+warning: `hazync-coinbase-smt` (lib) generated 2 warnings (run `cargo fix --lib -p hazync-coinbase-smt` to apply 1 suggestion)
+   Compiling host v0.1.0 (/root/hazync/prover/host)
+warning: constant `KIND_CHUNK` is never used
+  --> host/src/main.rs:47:7
+   |
+47 | const KIND_CHUNK: u32 = 0xC4A1_0004;
+   |       ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ChunkOut` is never constructed
+  --> host/src/main.rs:90:8
+   |
+90 | struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
+   |        ^^^^^^^^
+
+warning: `host` (bin "host") generated 2 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 2m 23s
+
+DONE. Verify the build with the self-contained checks (no GPU, no files):
+  cd /root/hazync/prover && ./target/release/host regress        # block 170 consensus regression
+  cd /root/hazync/prover && ./target/release/host adversarial    # soundness suite (all holes must REJECT)
+Then prove:
+  ./target/release/host prove-block                           # single block 170 -> real STARK receipt
+  (CUDA env is set in this shell and persisted to ~/.bashrc for future logins)
+Or join the proof party — see CONTRIBUTING.md.
+BUILD_EXIT=0
