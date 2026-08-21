@@ -95,10 +95,22 @@
 > | 21 | 841 | ~1,931 s | 22,905 MiB |
 > | **22** | **415** | **1,779 s** | **41,089 MiB** |
 >
-> po2 22 is **~8% faster than 21** here, not flat. Segment count halves cleanly with each step, which
-> also matters for hazync#119: that fault is per-segment at roughly 8e-5, so 415 segments is a 3.3%
-> chunk-failure rate against 12.8% at 1,717. Lower po2 loses twice, and phase C below lost a job to
-> exactly that.
+> po2 22 is **~8% faster than 21** here, not flat. Segment count also halves cleanly with each step,
+> which plausibly matters for hazync#119: if that fault is per-segment, fewer segments is less exposure.
+>
+> **No rate is quoted here, deliberately.** An earlier revision of this file claimed the fault was
+> "per-segment at roughly 8e-5" and derived a 3.3%-against-12.8% chunk-failure comparison from it. That
+> number had no provenance anywhere in the repo or in #119, and two things rule it out as evidence.
+> #119 rests on **3 runs**, which bounds the chunk-failure rate only to **9%-99%** (Clopper-Pearson on
+> 2 of 3) — a per-segment rate anywhere across a 48x spread, of which 8e-5 is the optimistic edge. And
+> #119 measured a **different split**: block 962,000 chunk 2 of **16** (501 inputs), where the sweep
+> above is chunk 11 of **64**, so 415 and 1,717 were never #119's segment counts. Direction only, until
+> someone runs enough attempts to bound it.
+>
+> #119 also records that failure durations vary 8x on identical input and suspects a ceiling effect, so
+> the independent-per-segment model may be wrong in kind and not merely in magnitude.
+>
+> Lower po2 loses on wall-clock regardless, and phase C below lost a job to #119.
 >
 > **This is NOT a recommendation to raise the default.** 41,089 MiB is 89% of the card, above the
 > 42,942 MiB that OOMed at po2 21 CONC=2, and hazync#97 records unexplained *intermittent* po2-21 OOMs
