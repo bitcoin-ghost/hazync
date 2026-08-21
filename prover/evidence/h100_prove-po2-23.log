@@ -1,0 +1,27 @@
+[2m2026-08-21T08:22:16.654664Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::exec::executor[0m[2m:[0m execution time: 14.518144133s
+[2m2026-08-21T08:22:16.654820Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m number of segments: 107
+[2m2026-08-21T08:22:16.654823Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 897581056 total cycles
+[2m2026-08-21T08:22:16.654825Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 880780859 user cycles (98.13%)
+[2m2026-08-21T08:22:16.654828Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 10945851 paging cycles (1.22%)
+[2m2026-08-21T08:22:16.654829Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 5854346 reserved cycles (0.65%)
+[2m2026-08-21T08:22:16.654831Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m ecalls
+[2m2026-08-21T08:22:16.654832Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	13099 Sha2 calls, 1061330 cycles, (0.12%)
+[2m2026-08-21T08:22:16.654834Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	22628 Read calls, 59761 cycles, (0.01%)
+[2m2026-08-21T08:22:16.654835Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	1 Terminate calls, 2 cycles, (0.00%)
+[2m2026-08-21T08:22:16.654837Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Write calls, 0 cycles, (0.00%)
+[2m2026-08-21T08:22:16.654838Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 User calls, 0 cycles, (0.00%)
+[2m2026-08-21T08:22:16.654839Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Poseidon2 calls, 0 cycles, (0.00%)
+[2m2026-08-21T08:22:16.654840Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 BigInt calls, 0 cycles, (0.00%)
+[2m2026-08-21T08:22:16.654841Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m syscalls
+[2m2026-08-21T08:22:16.654842Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	14435 Write calls
+[2m2026-08-21T08:22:16.654844Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	4094 Read calls
+[2m2026-08-21T08:22:16.654845Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 VerifyIntegrity2 calls
+[2m2026-08-21T08:22:16.654846Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 VerifyIntegrity calls
+[2m2026-08-21T08:22:16.654847Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 ProveKeccak calls
+[2m2026-08-21T08:22:16.654848Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Keccak calls
+
+thread 'main' (66686) panicked at host/src/main.rs:1914:83:
+called `Result::unwrap()` on an `Err` value: segment po2 exceeds max on ProverOpts: 23 > 22
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REAL_EXIT=101 WALL=16s PO2=23 CHUNK=9
+PEAK_VRAM 0 MiB, 0 %

@@ -1,0 +1,21 @@
+=== execute-only, n=16 (reproduce the published 13.78x) ===
+=== EC BAKE-OFF: 16 ECDSA verifications, execute mode ===
+  libsecp256k1 (baseline)           30558620 cycles       1909913 per verify  16/16 verified
+  risc0-crypto / bigint2             2218302 cycles        138643 per verify  16/16 verified
+  >>> both verified 16/16
+  >>> SPEEDUP 13.78x on the EC primitive
+  >>> at 97% EC share, whole-chunk speedup would be 9.96x
+
+=== execute + PROVE, n=256 (both sides many segments) ===
+=== EC BAKE-OFF: 256 ECDSA verifications, execute mode ===
+  libsecp256k1 (baseline)          485723139 cycles       1897356 per verify  256/256 verified
+  risc0-crypto / bigint2            34220406 cycles        133673 per verify  256/256 verified
+  >>> both verified 256/256
+  >>> SPEEDUP 14.19x on the EC primitive
+  >>> at 97% EC share, whole-chunk speedup would be 10.17x
+=== EC BAKE-OFF: PROVING time, 256 verifications ===
+  libsecp256k1 (baseline)     PROVED in    614.4s
+  risc0-crypto / bigint2      PROVED in     56.8s
+  >>> PROVING speedup 10.82x   (execute mode said 14.19x)
+REAL_EXIT=0
+DONE139

@@ -1,0 +1,22 @@
+block 962000 — /home/defenwycke/dev/projects/hazync/prover/block_962000.json
+inputs                8006   (taproot inputs 145)
+predicted EC verifies 8108
+  ECDSA      7917  (97.64%)
+  Schnorr     191  (2.36%)
+
+Derived 2026-08-21 by sigsplit.rs (this directory), which mirrors
+prover/host/src/main.rs::predicted_ec_ops exactly and adds one attribution: taproot spends
+(key path and tapscript) verify with Schnorr, every other script type with ECDSA.
+
+CORROBORATION: total 8,108 verifies across 8,006 inputs reproduces
+prover/evidence/chunk_packing_962000.txt line "predicted EC verifies: 8108 across 8006 inputs"
+exactly, which is what establishes that the classification rules match the prover's.
+
+CORRECTION: the in-flight session of 2026-08-21 recorded this split as ECDSA 6,824 (97.3%) /
+Schnorr 191 (2.7%). The Schnorr count is right; the ECDSA count is not, and 6,824+191=7,015 does
+not reconcile with the 8,108 the packer predicts. Use 7,917 / 191.
+
+BLOCK-LEVEL BOUND for a wholesale bigint2 swap, which accelerates ECDSA only:
+    1 / (0.0236 + 0.9764/10.82) = 8.78x
+ASSUMPTION: verify COUNT is used as a proxy for cycle SHARE. ECDSA and Schnorr verifies cost
+about the same, so this is close, but it is not a measured cycle split.

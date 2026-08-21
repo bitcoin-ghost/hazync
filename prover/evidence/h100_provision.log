@@ -1,0 +1,1717 @@
+== 1. system packages ==
+Get:1 https://download.docker.com/linux/ubuntu noble InRelease [48.5 kB]
+Get:2 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages [64.1 kB]
+Get:3 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  InRelease [1,578 B]
+Get:4 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1,477 B]
+Hit:5 http://archive.ubuntu.com/ubuntu noble InRelease
+Get:6 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64  Packages [1,748 kB]
+Get:7 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Get:8 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  Packages [27.1 kB]
+Get:9 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages [967 kB]
+Get:10 http://security.ubuntu.com/ubuntu noble-security/main Translation-en [205 kB]
+Get:11 http://security.ubuntu.com/ubuntu noble-security/main amd64 Components [46.4 kB]
+Get:12 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1,201 kB]
+Get:13 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:14 http://security.ubuntu.com/ubuntu noble-security/universe Translation-en [240 kB]
+Get:15 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Components [76.2 kB]
+Get:16 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [1,385 kB]
+Get:17 http://security.ubuntu.com/ubuntu noble-security/restricted Translation-en [320 kB]
+Get:18 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages [40.3 kB]
+Get:19 http://security.ubuntu.com/ubuntu noble-security/multiverse Translation-en [10.9 kB]
+Get:20 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1,227 kB]
+Get:21 http://archive.ubuntu.com/ubuntu noble-updates/main Translation-en [286 kB]
+Get:22 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [181 kB]
+Get:23 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [1,687 kB]
+Get:24 http://archive.ubuntu.com/ubuntu noble-updates/universe Translation-en [337 kB]
+Get:25 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [388 kB]
+Get:26 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [1,483 kB]
+Get:27 http://archive.ubuntu.com/ubuntu noble-updates/restricted Translation-en [339 kB]
+Get:28 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages [45.4 kB]
+Get:29 http://archive.ubuntu.com/ubuntu noble-updates/multiverse Translation-en [12.8 kB]
+Get:30 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+Fetched 12.6 MB in 1s (9,253 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+build-essential is already the newest version (12.10ubuntu1).
+git is already the newest version (1:2.43.0-1ubuntu7.3).
+ca-certificates is already the newest version (20260601~24.04.1).
+python3 is already the newest version (3.12.3-0ubuntu2.1).
+The following additional packages will be installed:
+  clang-18 cmake-data icu-devtools lib32gcc-s1 lib32stdc++6 libc-bin
+  libc-dev-bin libc-devtools libc6 libc6-dev libc6-i386 libclang-common-18-dev
+  libclang-rt-18-dev libcurl3t64-gnutls libcurl4t64 libffi-dev libgc1
+  libicu-dev libjsoncpp25 libncurses-dev libobjc-13-dev libobjc4 libpfm4
+  libpkgconf3 libprotobuf-dev libprotobuf-lite32t64 libprotobuf32t64
+  libprotoc32t64 librhash0 libssl3t64 libxml2-dev libz3-4 libz3-dev lld-18
+  llvm-18 llvm-18-dev llvm-18-linker-tools llvm-18-runtime llvm-18-tools
+  locales openssl pkgconf pkgconf-bin zlib1g-dev
+Suggested packages:
+  clang-18-doc wasi-libc cmake-doc cmake-format elpa-cmake-mode ninja-build
+  glibc-doc libnss-nis libnss-nisplus icu-doc ncurses-doc libssl-doc
+  llvm-18-doc protobuf-mode-el
+The following NEW packages will be installed:
+  clang clang-18 cmake cmake-data icu-devtools lib32gcc-s1 lib32stdc++6
+  libc6-i386 libclang-common-18-dev libclang-rt-18-dev libffi-dev libgc1
+  libicu-dev libjsoncpp25 libncurses-dev libobjc-13-dev libobjc4 libpfm4
+  libpkgconf3 libprotobuf-dev libprotobuf-lite32t64 libprotobuf32t64
+  libprotoc32t64 librhash0 libssl-dev libxml2-dev libz3-4 libz3-dev lld lld-18
+  llvm-18 llvm-18-dev llvm-18-linker-tools llvm-18-runtime llvm-18-tools
+  pkg-config pkgconf pkgconf-bin protobuf-compiler zlib1g-dev
+The following packages will be upgraded:
+  curl libc-bin libc-dev-bin libc-devtools libc6 libc6-dev libcurl3t64-gnutls
+  libcurl4t64 libssl3t64 locales openssl
+11 upgraded, 40 newly installed, 0 to remove and 140 not upgraded.
+Need to get 137 MB of archives.
+After this operation, 705 MB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-devtools amd64 2.39-0ubuntu8.8 [29.3 kB]
+Get:2 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6-dev amd64 2.39-0ubuntu8.8 [2,125 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-dev-bin amd64 2.39-0ubuntu8.8 [20.4 kB]
+Get:4 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6 amd64 2.39-0ubuntu8.8 [3,262 kB]
+Get:5 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-bin amd64 2.39-0ubuntu8.8 [682 kB]
+Get:6 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libssl3t64 amd64 3.0.13-0ubuntu3.12 [1,942 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 locales all 2.39-0ubuntu8.8 [4,231 kB]
+Get:8 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 openssl amd64 3.0.13-0ubuntu3.12 [1,003 kB]
+Get:9 http://archive.ubuntu.com/ubuntu noble/main amd64 libgc1 amd64 1:8.2.6-1build1 [90.3 kB]
+Get:10 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libobjc4 amd64 14.2.0-4ubuntu2~24.04.1 [47.1 kB]
+Get:11 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libobjc-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [194 kB]
+Get:12 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libclang-common-18-dev amd64 1:18.1.3-1ubuntu1 [736 kB]
+Get:13 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18-linker-tools amd64 1:18.1.3-1ubuntu1 [1,314 kB]
+Get:14 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 clang-18 amd64 1:18.1.3-1ubuntu1 [80.0 kB]
+Get:15 http://archive.ubuntu.com/ubuntu noble/universe amd64 clang amd64 1:18.0-59~exp2 [5,846 B]
+Get:16 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 curl amd64 8.5.0-2ubuntu10.12 [227 kB]
+Get:17 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcurl4t64 amd64 8.5.0-2ubuntu10.12 [343 kB]
+Get:18 http://archive.ubuntu.com/ubuntu noble/main amd64 libjsoncpp25 amd64 1.9.5-6build1 [82.8 kB]
+Get:19 http://archive.ubuntu.com/ubuntu noble/main amd64 librhash0 amd64 1.4.3-3build1 [129 kB]
+Get:20 http://archive.ubuntu.com/ubuntu noble/main amd64 cmake-data all 3.28.3-1build7 [2,155 kB]
+Get:21 http://archive.ubuntu.com/ubuntu noble/main amd64 cmake amd64 3.28.3-1build7 [11.2 MB]
+Get:22 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 icu-devtools amd64 74.2-1ubuntu3.1 [212 kB]
+Get:23 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6-i386 amd64 2.39-0ubuntu8.8 [2,787 kB]
+Get:24 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 lib32gcc-s1 amd64 14.2.0-4ubuntu2~24.04.1 [92.3 kB]
+Get:25 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 lib32stdc++6 amd64 14.2.0-4ubuntu2~24.04.1 [814 kB]
+Get:26 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libclang-rt-18-dev amd64 1:18.1.3-1ubuntu1 [3,772 kB]
+Get:27 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libcurl3t64-gnutls amd64 8.5.0-2ubuntu10.12 [335 kB]
+Get:28 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libicu-dev amd64 74.2-1ubuntu3.1 [11.9 MB]
+Get:29 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libncurses-dev amd64 6.4+20240113-1ubuntu2.1 [384 kB]
+Get:30 http://archive.ubuntu.com/ubuntu noble/main amd64 libpkgconf3 amd64 1.8.1-2build1 [30.7 kB]
+Get:31 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libprotobuf-lite32t64 amd64 3.21.12-8.2ubuntu0.3 [238 kB]
+Get:32 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libprotobuf32t64 amd64 3.21.12-8.2ubuntu0.3 [923 kB]
+Get:33 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libprotoc32t64 amd64 3.21.12-8.2ubuntu0.3 [683 kB]
+Get:34 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libssl-dev amd64 3.0.13-0ubuntu3.12 [2,408 kB]
+Get:35 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libxml2-dev amd64 2.9.14+dfsg-1.3ubuntu3.8 [782 kB]
+Get:36 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 lld-18 amd64 1:18.1.3-1ubuntu1 [1,372 kB]
+Get:37 http://archive.ubuntu.com/ubuntu noble/universe amd64 lld amd64 1:18.0-59~exp2 [5,494 B]
+Get:38 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18-runtime amd64 1:18.1.3-1ubuntu1 [538 kB]
+Get:39 http://archive.ubuntu.com/ubuntu noble/universe amd64 libpfm4 amd64 4.13.0+git32-g0d4ed0e-1 [414 kB]
+Get:40 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18 amd64 1:18.1.3-1ubuntu1 [25.3 MB]
+Get:41 http://archive.ubuntu.com/ubuntu noble/main amd64 libffi-dev amd64 3.4.6-1build1 [62.8 kB]
+Get:42 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18-tools amd64 1:18.1.3-1ubuntu1 [534 kB]
+Get:43 http://archive.ubuntu.com/ubuntu noble/universe amd64 libz3-4 amd64 4.8.12-3.1build1 [5,836 kB]
+Get:44 http://archive.ubuntu.com/ubuntu noble/universe amd64 libz3-dev amd64 4.8.12-3.1build1 [72.2 kB]
+Get:45 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 llvm-18-dev amd64 1:18.1.3-1ubuntu1 [45.1 MB]
+Get:46 http://archive.ubuntu.com/ubuntu noble/main amd64 pkgconf-bin amd64 1.8.1-2build1 [20.7 kB]
+Get:47 http://archive.ubuntu.com/ubuntu noble/main amd64 pkgconf amd64 1.8.1-2build1 [16.8 kB]
+Get:48 http://archive.ubuntu.com/ubuntu noble/main amd64 pkg-config amd64 1.8.1-2build1 [7,264 B]
+Get:49 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 zlib1g-dev amd64 1:1.3.dfsg-3.1ubuntu2.1 [894 kB]
+Get:50 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libprotobuf-dev amd64 3.21.12-8.2ubuntu0.3 [1,413 kB]
+Get:51 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 protobuf-compiler amd64 3.21.12-8.2ubuntu0.3 [29.0 kB]
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+dpkg-preconfigure: unable to re-open stdin: 
+Fetched 137 MB in 1s (107 MB/s)
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 116973 files and directories currently installed.)
+Preparing to unpack .../libc-devtools_2.39-0ubuntu8.8_amd64.deb ...
+Unpacking libc-devtools (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Preparing to unpack .../libc6-dev_2.39-0ubuntu8.8_amd64.deb ...
+Unpacking libc6-dev:amd64 (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Preparing to unpack .../libc-dev-bin_2.39-0ubuntu8.8_amd64.deb ...
+Unpacking libc-dev-bin (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Preparing to unpack .../libc6_2.39-0ubuntu8.8_amd64.deb ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+Unpacking libc6:amd64 (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Setting up libc6:amd64 (2.39-0ubuntu8.8) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 116973 files and directories currently installed.)
+Preparing to unpack .../libc-bin_2.39-0ubuntu8.8_amd64.deb ...
+Unpacking libc-bin (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Setting up libc-bin (2.39-0ubuntu8.8) ...
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 116973 files and directories currently installed.)
+Preparing to unpack .../libssl3t64_3.0.13-0ubuntu3.12_amd64.deb ...
+Unpacking libssl3t64:amd64 (3.0.13-0ubuntu3.12) over (3.0.13-0ubuntu3.11) ...
+Setting up libssl3t64:amd64 (3.0.13-0ubuntu3.12) ...
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 116973 files and directories currently installed.)
+Preparing to unpack .../00-locales_2.39-0ubuntu8.8_all.deb ...
+Unpacking locales (2.39-0ubuntu8.8) over (2.39-0ubuntu8.7) ...
+Preparing to unpack .../01-openssl_3.0.13-0ubuntu3.12_amd64.deb ...
+Unpacking openssl (3.0.13-0ubuntu3.12) over (3.0.13-0ubuntu3.11) ...
+Selecting previously unselected package libgc1:amd64.
+Preparing to unpack .../02-libgc1_1%3a8.2.6-1build1_amd64.deb ...
+Unpacking libgc1:amd64 (1:8.2.6-1build1) ...
+Selecting previously unselected package libobjc4:amd64.
+Preparing to unpack .../03-libobjc4_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+Unpacking libobjc4:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+Selecting previously unselected package libobjc-13-dev:amd64.
+Preparing to unpack .../04-libobjc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+Unpacking libobjc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+Selecting previously unselected package libclang-common-18-dev:amd64.
+Preparing to unpack .../05-libclang-common-18-dev_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking libclang-common-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package llvm-18-linker-tools.
+Preparing to unpack .../06-llvm-18-linker-tools_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking llvm-18-linker-tools (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package clang-18.
+Preparing to unpack .../07-clang-18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking clang-18 (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package clang.
+Preparing to unpack .../08-clang_1%3a18.0-59~exp2_amd64.deb ...
+Unpacking clang (1:18.0-59~exp2) ...
+Preparing to unpack .../09-curl_8.5.0-2ubuntu10.12_amd64.deb ...
+Unpacking curl (8.5.0-2ubuntu10.12) over (8.5.0-2ubuntu10.10) ...
+Preparing to unpack .../10-libcurl4t64_8.5.0-2ubuntu10.12_amd64.deb ...
+Unpacking libcurl4t64:amd64 (8.5.0-2ubuntu10.12) over (8.5.0-2ubuntu10.10) ...
+Selecting previously unselected package libjsoncpp25:amd64.
+Preparing to unpack .../11-libjsoncpp25_1.9.5-6build1_amd64.deb ...
+Unpacking libjsoncpp25:amd64 (1.9.5-6build1) ...
+Selecting previously unselected package librhash0:amd64.
+Preparing to unpack .../12-librhash0_1.4.3-3build1_amd64.deb ...
+Unpacking librhash0:amd64 (1.4.3-3build1) ...
+Selecting previously unselected package cmake-data.
+Preparing to unpack .../13-cmake-data_3.28.3-1build7_all.deb ...
+Unpacking cmake-data (3.28.3-1build7) ...
+Selecting previously unselected package cmake.
+Preparing to unpack .../14-cmake_3.28.3-1build7_amd64.deb ...
+Unpacking cmake (3.28.3-1build7) ...
+Selecting previously unselected package icu-devtools.
+Preparing to unpack .../15-icu-devtools_74.2-1ubuntu3.1_amd64.deb ...
+Unpacking icu-devtools (74.2-1ubuntu3.1) ...
+Selecting previously unselected package libc6-i386.
+Preparing to unpack .../16-libc6-i386_2.39-0ubuntu8.8_amd64.deb ...
+Unpacking libc6-i386 (2.39-0ubuntu8.8) ...
+Selecting previously unselected package lib32gcc-s1.
+Preparing to unpack .../17-lib32gcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+Unpacking lib32gcc-s1 (14.2.0-4ubuntu2~24.04.1) ...
+Selecting previously unselected package lib32stdc++6.
+Preparing to unpack .../18-lib32stdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+Unpacking lib32stdc++6 (14.2.0-4ubuntu2~24.04.1) ...
+Selecting previously unselected package libclang-rt-18-dev:amd64.
+Preparing to unpack .../19-libclang-rt-18-dev_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking libclang-rt-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+Preparing to unpack .../20-libcurl3t64-gnutls_8.5.0-2ubuntu10.12_amd64.deb ...
+Unpacking libcurl3t64-gnutls:amd64 (8.5.0-2ubuntu10.12) over (8.5.0-2ubuntu10.10) ...
+Selecting previously unselected package libicu-dev:amd64.
+Preparing to unpack .../21-libicu-dev_74.2-1ubuntu3.1_amd64.deb ...
+Unpacking libicu-dev:amd64 (74.2-1ubuntu3.1) ...
+Selecting previously unselected package libncurses-dev:amd64.
+Preparing to unpack .../22-libncurses-dev_6.4+20240113-1ubuntu2.1_amd64.deb ...
+Unpacking libncurses-dev:amd64 (6.4+20240113-1ubuntu2.1) ...
+Selecting previously unselected package libpkgconf3:amd64.
+Preparing to unpack .../23-libpkgconf3_1.8.1-2build1_amd64.deb ...
+Unpacking libpkgconf3:amd64 (1.8.1-2build1) ...
+Selecting previously unselected package libprotobuf-lite32t64:amd64.
+Preparing to unpack .../24-libprotobuf-lite32t64_3.21.12-8.2ubuntu0.3_amd64.deb ...
+Unpacking libprotobuf-lite32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Selecting previously unselected package libprotobuf32t64:amd64.
+Preparing to unpack .../25-libprotobuf32t64_3.21.12-8.2ubuntu0.3_amd64.deb ...
+Unpacking libprotobuf32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Selecting previously unselected package libprotoc32t64:amd64.
+Preparing to unpack .../26-libprotoc32t64_3.21.12-8.2ubuntu0.3_amd64.deb ...
+Unpacking libprotoc32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Selecting previously unselected package libssl-dev:amd64.
+Preparing to unpack .../27-libssl-dev_3.0.13-0ubuntu3.12_amd64.deb ...
+Unpacking libssl-dev:amd64 (3.0.13-0ubuntu3.12) ...
+Selecting previously unselected package libxml2-dev:amd64.
+Preparing to unpack .../28-libxml2-dev_2.9.14+dfsg-1.3ubuntu3.8_amd64.deb ...
+Unpacking libxml2-dev:amd64 (2.9.14+dfsg-1.3ubuntu3.8) ...
+Selecting previously unselected package lld-18.
+Preparing to unpack .../29-lld-18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking lld-18 (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package lld:amd64.
+Preparing to unpack .../30-lld_1%3a18.0-59~exp2_amd64.deb ...
+Unpacking lld:amd64 (1:18.0-59~exp2) ...
+Selecting previously unselected package llvm-18-runtime.
+Preparing to unpack .../31-llvm-18-runtime_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking llvm-18-runtime (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package libpfm4:amd64.
+Preparing to unpack .../32-libpfm4_4.13.0+git32-g0d4ed0e-1_amd64.deb ...
+Unpacking libpfm4:amd64 (4.13.0+git32-g0d4ed0e-1) ...
+Selecting previously unselected package llvm-18.
+Preparing to unpack .../33-llvm-18_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking llvm-18 (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package libffi-dev:amd64.
+Preparing to unpack .../34-libffi-dev_3.4.6-1build1_amd64.deb ...
+Unpacking libffi-dev:amd64 (3.4.6-1build1) ...
+Selecting previously unselected package llvm-18-tools.
+Preparing to unpack .../35-llvm-18-tools_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking llvm-18-tools (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package libz3-4:amd64.
+Preparing to unpack .../36-libz3-4_4.8.12-3.1build1_amd64.deb ...
+Unpacking libz3-4:amd64 (4.8.12-3.1build1) ...
+Selecting previously unselected package libz3-dev:amd64.
+Preparing to unpack .../37-libz3-dev_4.8.12-3.1build1_amd64.deb ...
+Unpacking libz3-dev:amd64 (4.8.12-3.1build1) ...
+Selecting previously unselected package llvm-18-dev.
+Preparing to unpack .../38-llvm-18-dev_1%3a18.1.3-1ubuntu1_amd64.deb ...
+Unpacking llvm-18-dev (1:18.1.3-1ubuntu1) ...
+Selecting previously unselected package pkgconf-bin.
+Preparing to unpack .../39-pkgconf-bin_1.8.1-2build1_amd64.deb ...
+Unpacking pkgconf-bin (1.8.1-2build1) ...
+Selecting previously unselected package pkgconf:amd64.
+Preparing to unpack .../40-pkgconf_1.8.1-2build1_amd64.deb ...
+Unpacking pkgconf:amd64 (1.8.1-2build1) ...
+Selecting previously unselected package pkg-config:amd64.
+Preparing to unpack .../41-pkg-config_1.8.1-2build1_amd64.deb ...
+Unpacking pkg-config:amd64 (1.8.1-2build1) ...
+Selecting previously unselected package zlib1g-dev:amd64.
+Preparing to unpack .../42-zlib1g-dev_1%3a1.3.dfsg-3.1ubuntu2.1_amd64.deb ...
+Unpacking zlib1g-dev:amd64 (1:1.3.dfsg-3.1ubuntu2.1) ...
+Selecting previously unselected package libprotobuf-dev:amd64.
+Preparing to unpack .../43-libprotobuf-dev_3.21.12-8.2ubuntu0.3_amd64.deb ...
+Unpacking libprotobuf-dev:amd64 (3.21.12-8.2ubuntu0.3) ...
+Selecting previously unselected package protobuf-compiler.
+Preparing to unpack .../44-protobuf-compiler_3.21.12-8.2ubuntu0.3_amd64.deb ...
+Unpacking protobuf-compiler (3.21.12-8.2ubuntu0.3) ...
+Setting up libprotobuf-lite32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Setting up libprotobuf32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Setting up libcurl4t64:amd64 (8.5.0-2ubuntu10.12) ...
+Setting up libcurl3t64-gnutls:amd64 (8.5.0-2ubuntu10.12) ...
+Setting up llvm-18-tools (1:18.1.3-1ubuntu1) ...
+Setting up libffi-dev:amd64 (3.4.6-1build1) ...
+Setting up locales (2.39-0ubuntu8.8) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+Generating locales (this might take a while)...
+  en_US.UTF-8... done
+Generation complete.
+Setting up libz3-4:amd64 (4.8.12-3.1build1) ...
+Setting up libpkgconf3:amd64 (1.8.1-2build1) ...
+Setting up libpfm4:amd64 (4.13.0+git32-g0d4ed0e-1) ...
+Setting up libssl-dev:amd64 (3.0.13-0ubuntu3.12) ...
+Setting up libjsoncpp25:amd64 (1.9.5-6build1) ...
+Setting up icu-devtools (74.2-1ubuntu3.1) ...
+Setting up pkgconf-bin (1.8.1-2build1) ...
+Setting up libclang-common-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+Setting up libgc1:amd64 (1:8.2.6-1build1) ...
+Setting up llvm-18-linker-tools (1:18.1.3-1ubuntu1) ...
+Setting up librhash0:amd64 (1.4.3-3build1) ...
+Setting up libc6-i386 (2.39-0ubuntu8.8) ...
+Setting up cmake-data (3.28.3-1build7) ...
+Setting up curl (8.5.0-2ubuntu10.12) ...
+Setting up libprotoc32t64:amd64 (3.21.12-8.2ubuntu0.3) ...
+Setting up libc-dev-bin (2.39-0ubuntu8.8) ...
+Setting up openssl (3.0.13-0ubuntu3.12) ...
+Setting up llvm-18-runtime (1:18.1.3-1ubuntu1) ...
+Setting up lld-18 (1:18.1.3-1ubuntu1) ...
+Setting up libc-devtools (2.39-0ubuntu8.8) ...
+Setting up libz3-dev:amd64 (4.8.12-3.1build1) ...
+Setting up protobuf-compiler (3.21.12-8.2ubuntu0.3) ...
+Setting up lld:amd64 (1:18.0-59~exp2) ...
+Setting up libobjc4:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+Setting up pkgconf:amd64 (1.8.1-2build1) ...
+Setting up lib32gcc-s1 (14.2.0-4ubuntu2~24.04.1) ...
+Setting up lib32stdc++6 (14.2.0-4ubuntu2~24.04.1) ...
+Setting up pkg-config:amd64 (1.8.1-2build1) ...
+Setting up llvm-18 (1:18.1.3-1ubuntu1) ...
+Setting up cmake (3.28.3-1build7) ...
+Setting up libc6-dev:amd64 (2.39-0ubuntu8.8) ...
+Setting up libicu-dev:amd64 (74.2-1ubuntu3.1) ...
+Setting up libclang-rt-18-dev:amd64 (1:18.1.3-1ubuntu1) ...
+Setting up libobjc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+Setting up libncurses-dev:amd64 (6.4+20240113-1ubuntu2.1) ...
+Setting up clang-18 (1:18.1.3-1ubuntu1) ...
+Setting up libxml2-dev:amd64 (2.9.14+dfsg-1.3ubuntu3.8) ...
+Setting up clang (1:18.0-59~exp2) ...
+Setting up zlib1g-dev:amd64 (1:1.3.dfsg-3.1ubuntu2.1) ...
+Setting up llvm-18-dev (1:18.1.3-1ubuntu1) ...
+Setting up libprotobuf-dev:amd64 (3.21.12-8.2ubuntu0.3) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.8) ...
+Processing triggers for systemd (255.4-1ubuntu8.16) ...
+Processing triggers for man-db (2.12.0-4build2) ...
+Processing triggers for install-info (7.1-3build2) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+
+Running kernel seems to be up-to-date.
+
+Restarting services...
+ /etc/needrestart/restart.d/systemd-manager
+ systemctl restart acpid.service containerd.service cron.service multipathd.service nvidia-persistenced.service packagekit.service polkit.service rsyslog.service ssh.service systemd-journald.service systemd-networkd.service systemd-resolved.service systemd-timesyncd.service systemd-udevd.service udisks2.service
+
+Service restarts being deferred:
+ systemctl restart ModemManager.service
+ /etc/needrestart/restart.d/dbus.service
+ systemctl restart docker.service
+ systemctl restart getty@tty1.service
+ systemctl restart systemd-logind.service
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+User sessions running outdated binaries:
+ root @ session #6: bash[1848], sh[1850]
+ root @ user manager service: systemd[1720]
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+== 2. Rust ==
+info: downloading installer
+warn: It looks like you have an existing rustup settings file at:
+warn: /root/.rustup/settings.toml
+warn: Rustup will install the default toolchain as specified in the settings file,
+warn: instead of the one inferred from the default host triple.
+info: profile set to default
+info: default host triple is x86_64-unknown-linux-gnu
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-08-20 for version 1.98.0 (88d9e12ae 2026-08-18)
+info: downloading 6 components
+info: default toolchain set to stable-x86_64-unknown-linux-gnu
+
+  stable-x86_64-unknown-linux-gnu installed - rustc 1.98.0 (88d9e12ae 2026-08-18)
+
+
+Rust is installed now. Great!
+
+To get started you may need to restart your current shell.
+This would reload your PATH environment variable to include
+Cargo's bin directory ($HOME/.cargo/bin).
+
+To configure your current shell, you need to source
+the corresponding env file under $HOME/.cargo.
+
+This is usually done by running one of the following (note the leading DOT):
+. "$HOME/.cargo/env"            # For sh/bash/zsh/ash/dash/pdksh
+source "$HOME/.cargo/env.fish"  # For fish
+source "~/.cargo/env.nu"  # For nushell
+source "$HOME/.cargo/env.tcsh"  # For tcsh
+. "$HOME/.cargo/env.ps1"        # For pwsh
+source "$HOME/.cargo/env.xsh"   # For xonsh
+== 3. RISC0 toolchain (rzup -> cargo-risczero, r0vm, riscv32 C/C++ + Rust guest toolchains) ==
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    15    0    15    0     0    137      0 --:--:-- --:--:-- --:--:--   137
+  0  5947    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  5947  100  5947    0     0   8348      0 --:--:-- --:--:-- --:--:-- 5807k
+[0;34m→[0m Starting rzup installation...
+[0;34m→[0m Downloading rzup...
+#=#=#                                                                          ##O#-#                                                                                                                                                    0.1%                                                                           0.4%                                                                           0.5%                                                                           1.2%#                                                                          2.4%###                                                                        5.1%#######                                                                   10.0%###############                                                           21.2%############################                                              39.8%##############################################                            64.8%###############################################################           88.4%######################################################################## 100.0%
+[0;34m→[0m Configuring shell...
+[0;32m✓[0m Updated shell profile
+[0;32m✓[0m Installation complete! rzup is installed in /root/.risc0/bin
+
+[0;32mTo get started:[0m
+1. Restart your shell or run:
+   [1msource "/root/.bashrc"[0m
+2. Verify the installation:
+   [1mrzup --help[0m
+
+Installing rust version 1.94.1
+Downloading rust version 1.94.1
+✓ Downloaded rust version 1.94.1
+Installing rust version 1.94.1
+✓ Installed rust version 1.94.1
+✓ Setting rust version 1.94.1 as default
+Installing cpp version 2024.1.5
+Downloading cpp version 2024.1.5
+✓ Downloaded cpp version 2024.1.5
+Installing cpp version 2024.1.5
+✓ Installed cpp version 2024.1.5
+✓ Setting cpp version 2024.1.5 as default
+Installing cargo-risczero version 3.0.5
+Downloading cargo-risczero version 3.0.5
+✓ Downloaded cargo-risczero version 3.0.5
+Installing cargo-risczero version 3.0.5
+✓ Installed cargo-risczero version 3.0.5
+✓ Setting cargo-risczero version 3.0.5 as default
+Installing r0vm version 3.0.5
+Downloading cargo-risczero version 3.0.5
+✓ Downloaded cargo-risczero version 3.0.5
+Installing cargo-risczero version 3.0.5
+✓ Installed r0vm version 3.0.5
+✓ Setting r0vm version 3.0.5 as default
+Installing risc0-groth16 version 0.1.0
+Downloading risc0-groth16 version 0.1.0
+✓ Downloaded risc0-groth16 version 0.1.0
+Installing risc0-groth16 version 0.1.0
+✓ Installed risc0-groth16 version 0.1.0
+✓ Setting risc0-groth16 version 0.1.0 as default
+== 4. real consensus source (re-fetchable; not vendored). Layout: $HAZYNC_BASE/{bitcoin-core,secp256k1,coreshim} ==
+Cloning into '/root/hazync-build/bitcoin-core'...
+Note: switching to '110183746150428e6385880c79f8c5733b1361ba'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+Cloning into '/root/hazync-build/secp256k1'...
+Note: switching to '642c885b6102725e25623738529895a95addc4f4'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+== 5. apply the target shims (patches 0001 + 0002 — portability only, no consensus-logic change) ==
+== 6. env wiring (guest build.rs reads HAZYNC_BASE; toolchain auto-discovered under RISC0_HOME) ==
+== 7. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x
+   that some L40S boxes ship — cccl header errors; 12.6 works). ==
+(Reading database ... 125237 files and directories currently installed.)
+Preparing to unpack .../cuda-keyring.deb ...
+Unpacking cuda-keyring (1.1-1) over (1.1-1) ...
+Setting up cuda-keyring (1.1-1) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+dpkg-preconfigure: unable to re-open stdin: 
+Selecting previously unselected package cuda-cccl-12-6.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 125237 files and directories currently installed.)
+Preparing to unpack .../00-cuda-cccl-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-cccl-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-cupti-12-6.
+Preparing to unpack .../01-cuda-cupti-12-6_12.6.80-1_amd64.deb ...
+Unpacking cuda-cupti-12-6 (12.6.80-1) ...
+Selecting previously unselected package cuda-cupti-dev-12-6.
+Preparing to unpack .../02-cuda-cupti-dev-12-6_12.6.80-1_amd64.deb ...
+Unpacking cuda-cupti-dev-12-6 (12.6.80-1) ...
+Selecting previously unselected package cuda-nvdisasm-12-6.
+Preparing to unpack .../03-cuda-nvdisasm-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-nvdisasm-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-cuobjdump-12-6.
+Preparing to unpack .../04-cuda-cuobjdump-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-cuobjdump-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-gdb-12-6.
+Preparing to unpack .../05-cuda-gdb-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-gdb-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-nvprof-12-6.
+Preparing to unpack .../06-cuda-nvprof-12-6_12.6.80-1_amd64.deb ...
+Unpacking cuda-nvprof-12-6 (12.6.80-1) ...
+Selecting previously unselected package cuda-nvtx-12-6.
+Preparing to unpack .../07-cuda-nvtx-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-nvtx-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-sanitizer-12-6.
+Preparing to unpack .../08-cuda-sanitizer-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-sanitizer-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-command-line-tools-12-6.
+Preparing to unpack .../09-cuda-command-line-tools-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-command-line-tools-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-cuxxfilt-12-6.
+Preparing to unpack .../10-cuda-cuxxfilt-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-cuxxfilt-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-toolkit-12-config-common.
+Preparing to unpack .../11-cuda-toolkit-12-config-common_12.9.79-1_all.deb ...
+Unpacking cuda-toolkit-12-config-common (12.9.79-1) ...
+Selecting previously unselected package cuda-toolkit-12-6-config-common.
+Preparing to unpack .../12-cuda-toolkit-12-6-config-common_12.6.77-1_all.deb ...
+Unpacking cuda-toolkit-12-6-config-common (12.6.77-1) ...
+Selecting previously unselected package cuda-cudart-12-6.
+Preparing to unpack .../13-cuda-cudart-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-cudart-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-driver-dev-12-6.
+Preparing to unpack .../14-cuda-driver-dev-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-driver-dev-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-cudart-dev-12-6.
+Preparing to unpack .../15-cuda-cudart-dev-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-cudart-dev-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-nvvm-12-6.
+Preparing to unpack .../16-cuda-nvvm-12-6_12.6.85-1_amd64.deb ...
+Unpacking cuda-nvvm-12-6 (12.6.85-1) ...
+Selecting previously unselected package cuda-crt-12-6.
+Preparing to unpack .../17-cuda-crt-12-6_12.6.85-1_amd64.deb ...
+Unpacking cuda-crt-12-6 (12.6.85-1) ...
+Selecting previously unselected package cuda-nvcc-12-6.
+Preparing to unpack .../18-cuda-nvcc-12-6_12.6.85-1_amd64.deb ...
+Unpacking cuda-nvcc-12-6 (12.6.85-1) ...
+Selecting previously unselected package cuda-nvprune-12-6.
+Preparing to unpack .../19-cuda-nvprune-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-nvprune-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-compiler-12-6.
+Preparing to unpack .../20-cuda-compiler-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-compiler-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-documentation-12-6.
+Preparing to unpack .../21-cuda-documentation-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-documentation-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-nvrtc-12-6.
+Preparing to unpack .../22-cuda-nvrtc-12-6_12.6.85-1_amd64.deb ...
+Unpacking cuda-nvrtc-12-6 (12.6.85-1) ...
+Selecting previously unselected package cuda-opencl-12-6.
+Preparing to unpack .../23-cuda-opencl-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-opencl-12-6 (12.6.77-1) ...
+Selecting previously unselected package libcublas-12-6.
+Preparing to unpack .../24-libcublas-12-6_12.6.4.1-1_amd64.deb ...
+Unpacking libcublas-12-6 (12.6.4.1-1) ...
+Selecting previously unselected package libcufft-12-6.
+Preparing to unpack .../25-libcufft-12-6_11.3.0.4-1_amd64.deb ...
+Unpacking libcufft-12-6 (11.3.0.4-1) ...
+Selecting previously unselected package libcufile-12-6.
+Preparing to unpack .../26-libcufile-12-6_1.11.1.6-1_amd64.deb ...
+Unpacking libcufile-12-6 (1.11.1.6-1) ...
+Selecting previously unselected package libcurand-12-6.
+Preparing to unpack .../27-libcurand-12-6_10.3.7.77-1_amd64.deb ...
+Unpacking libcurand-12-6 (10.3.7.77-1) ...
+Selecting previously unselected package libcusolver-12-6.
+Preparing to unpack .../28-libcusolver-12-6_11.7.1.2-1_amd64.deb ...
+Unpacking libcusolver-12-6 (11.7.1.2-1) ...
+Selecting previously unselected package libcusparse-12-6.
+Preparing to unpack .../29-libcusparse-12-6_12.5.4.2-1_amd64.deb ...
+Unpacking libcusparse-12-6 (12.5.4.2-1) ...
+Selecting previously unselected package libnpp-12-6.
+Preparing to unpack .../30-libnpp-12-6_12.3.1.54-1_amd64.deb ...
+Unpacking libnpp-12-6 (12.3.1.54-1) ...
+Selecting previously unselected package libnvjitlink-12-6.
+Preparing to unpack .../31-libnvjitlink-12-6_12.6.85-1_amd64.deb ...
+Unpacking libnvjitlink-12-6 (12.6.85-1) ...
+Selecting previously unselected package libnvfatbin-12-6.
+Preparing to unpack .../32-libnvfatbin-12-6_12.6.77-1_amd64.deb ...
+Unpacking libnvfatbin-12-6 (12.6.77-1) ...
+Selecting previously unselected package libnvjpeg-12-6.
+Preparing to unpack .../33-libnvjpeg-12-6_12.3.3.54-1_amd64.deb ...
+Unpacking libnvjpeg-12-6 (12.3.3.54-1) ...
+Selecting previously unselected package cuda-libraries-12-6.
+Preparing to unpack .../34-cuda-libraries-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-libraries-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-profiler-api-12-6.
+Preparing to unpack .../35-cuda-profiler-api-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-profiler-api-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-nvrtc-dev-12-6.
+Preparing to unpack .../36-cuda-nvrtc-dev-12-6_12.6.85-1_amd64.deb ...
+Unpacking cuda-nvrtc-dev-12-6 (12.6.85-1) ...
+Selecting previously unselected package cuda-opencl-dev-12-6.
+Preparing to unpack .../37-cuda-opencl-dev-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-opencl-dev-12-6 (12.6.77-1) ...
+Selecting previously unselected package libcublas-dev-12-6.
+Preparing to unpack .../38-libcublas-dev-12-6_12.6.4.1-1_amd64.deb ...
+Unpacking libcublas-dev-12-6 (12.6.4.1-1) ...
+Selecting previously unselected package libcufft-dev-12-6.
+Preparing to unpack .../39-libcufft-dev-12-6_11.3.0.4-1_amd64.deb ...
+Unpacking libcufft-dev-12-6 (11.3.0.4-1) ...
+Selecting previously unselected package libcufile-dev-12-6.
+Preparing to unpack .../40-libcufile-dev-12-6_1.11.1.6-1_amd64.deb ...
+Unpacking libcufile-dev-12-6 (1.11.1.6-1) ...
+Selecting previously unselected package libcurand-dev-12-6.
+Preparing to unpack .../41-libcurand-dev-12-6_10.3.7.77-1_amd64.deb ...
+Unpacking libcurand-dev-12-6 (10.3.7.77-1) ...
+Selecting previously unselected package libcusolver-dev-12-6.
+Preparing to unpack .../42-libcusolver-dev-12-6_11.7.1.2-1_amd64.deb ...
+Unpacking libcusolver-dev-12-6 (11.7.1.2-1) ...
+Selecting previously unselected package libcusparse-dev-12-6.
+Preparing to unpack .../43-libcusparse-dev-12-6_12.5.4.2-1_amd64.deb ...
+Unpacking libcusparse-dev-12-6 (12.5.4.2-1) ...
+Selecting previously unselected package libnpp-dev-12-6.
+Preparing to unpack .../44-libnpp-dev-12-6_12.3.1.54-1_amd64.deb ...
+Unpacking libnpp-dev-12-6 (12.3.1.54-1) ...
+Selecting previously unselected package libnvjitlink-dev-12-6.
+Preparing to unpack .../45-libnvjitlink-dev-12-6_12.6.85-1_amd64.deb ...
+Unpacking libnvjitlink-dev-12-6 (12.6.85-1) ...
+Selecting previously unselected package libnvfatbin-dev-12-6.
+Preparing to unpack .../46-libnvfatbin-dev-12-6_12.6.77-1_amd64.deb ...
+Unpacking libnvfatbin-dev-12-6 (12.6.77-1) ...
+Selecting previously unselected package libnvjpeg-dev-12-6.
+Preparing to unpack .../47-libnvjpeg-dev-12-6_12.3.3.54-1_amd64.deb ...
+Unpacking libnvjpeg-dev-12-6 (12.3.3.54-1) ...
+Selecting previously unselected package cuda-libraries-dev-12-6.
+Preparing to unpack .../48-cuda-libraries-dev-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-libraries-dev-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-nsight-12-6.
+Preparing to unpack .../49-cuda-nsight-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-nsight-12-6 (12.6.77-1) ...
+Selecting previously unselected package nsight-compute-2024.3.2.
+Preparing to unpack .../50-nsight-compute-2024.3.2_2024.3.2.3-1_amd64.deb ...
+Unpacking nsight-compute-2024.3.2 (2024.3.2.3-1) ...
+Selecting previously unselected package cuda-nsight-compute-12-6.
+Preparing to unpack .../51-cuda-nsight-compute-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-nsight-compute-12-6 (12.6.3-1) ...
+Selecting previously unselected package nsight-systems-2024.5.1.
+Preparing to unpack .../52-nsight-systems-2024.5.1_2024.5.1.113-245134619542v0_amd64.deb ...
+Unpacking nsight-systems-2024.5.1 (2024.5.1.113-245134619542v0) ...
+Selecting previously unselected package cuda-nsight-systems-12-6.
+Preparing to unpack .../53-cuda-nsight-systems-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-nsight-systems-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-nvml-dev-12-6.
+Preparing to unpack .../54-cuda-nvml-dev-12-6_12.6.77-1_amd64.deb ...
+Unpacking cuda-nvml-dev-12-6 (12.6.77-1) ...
+Selecting previously unselected package cuda-nvvp-12-6.
+Preparing to unpack .../55-cuda-nvvp-12-6_12.6.80-1_amd64.deb ...
+Unpacking cuda-nvvp-12-6 (12.6.80-1) ...
+Selecting previously unselected package cuda-visual-tools-12-6.
+Preparing to unpack .../56-cuda-visual-tools-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-visual-tools-12-6 (12.6.3-1) ...
+Selecting previously unselected package gds-tools-12-6.
+Preparing to unpack .../57-gds-tools-12-6_1.11.1.6-1_amd64.deb ...
+Unpacking gds-tools-12-6 (1.11.1.6-1) ...
+Selecting previously unselected package cuda-tools-12-6.
+Preparing to unpack .../58-cuda-tools-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-tools-12-6 (12.6.3-1) ...
+Selecting previously unselected package cuda-toolkit-12-6.
+Preparing to unpack .../59-cuda-toolkit-12-6_12.6.3-1_amd64.deb ...
+Unpacking cuda-toolkit-12-6 (12.6.3-1) ...
+Setting up cuda-cccl-12-6 (12.6.77-1) ...
+Setting up gds-tools-12-6 (1.11.1.6-1) ...
+Setting up cuda-documentation-12-6 (12.6.77-1) ...
+Setting up nsight-systems-2024.5.1 (2024.5.1.113-245134619542v0) ...
+update-alternatives: using /opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys to provide /usr/local/bin/nsys (nsys) in manual mode
+update-alternatives: using /opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/nsys-ui to provide /usr/local/bin/nsys-ui (nsys-ui) in manual mode
+Setting up cuda-nvml-dev-12-6 (12.6.77-1) ...
+Setting up cuda-profiler-api-12-6 (12.6.77-1) ...
+Setting up nsight-compute-2024.3.2 (2024.3.2.3-1) ...
+Setting up cuda-nvvm-12-6 (12.6.85-1) ...
+Setting up cuda-nvvp-12-6 (12.6.80-1) ...
+Setting up cuda-nvtx-12-6 (12.6.77-1) ...
+Setting up cuda-cuxxfilt-12-6 (12.6.77-1) ...
+Setting up cuda-nvdisasm-12-6 (12.6.77-1) ...
+Setting up cuda-nvprune-12-6 (12.6.77-1) ...
+Setting up cuda-driver-dev-12-6 (12.6.77-1) ...
+Setting up cuda-nsight-compute-12-6 (12.6.3-1) ...
+Setting up cuda-toolkit-12-6-config-common (12.6.77-1) ...
+Setting alternatives
+update-alternatives: using /usr/local/cuda-12.6 to provide /usr/local/cuda-12 (cuda-12) in auto mode
+Setting up cuda-cuobjdump-12-6 (12.6.77-1) ...
+Setting up cuda-nsight-systems-12-6 (12.6.3-1) ...
+Setting up cuda-nvrtc-12-6 (12.6.85-1) ...
+Setting up cuda-sanitizer-12-6 (12.6.77-1) ...
+Setting up cuda-nsight-12-6 (12.6.77-1) ...
+Setting up cuda-cupti-12-6 (12.6.80-1) ...
+Setting up cuda-nvprof-12-6 (12.6.80-1) ...
+Setting up cuda-toolkit-12-config-common (12.9.79-1) ...
+Setting up libcusolver-12-6 (11.7.1.2-1) ...
+Setting up libnvjitlink-12-6 (12.6.85-1) ...
+Setting up libcurand-12-6 (10.3.7.77-1) ...
+Setting up libcufft-12-6 (11.3.0.4-1) ...
+Setting up libcufft-dev-12-6 (11.3.0.4-1) ...
+Setting up libnpp-12-6 (12.3.1.54-1) ...
+Setting up libnvjitlink-dev-12-6 (12.6.85-1) ...
+Setting up libcusparse-12-6 (12.5.4.2-1) ...
+Setting up cuda-cupti-dev-12-6 (12.6.80-1) ...
+Setting up libnvfatbin-12-6 (12.6.77-1) ...
+Setting up libcurand-dev-12-6 (10.3.7.77-1) ...
+Setting up libnpp-dev-12-6 (12.3.1.54-1) ...
+Setting up libcublas-12-6 (12.6.4.1-1) ...
+Setting up libcublas-dev-12-6 (12.6.4.1-1) ...
+Setting up cuda-cudart-12-6 (12.6.77-1) ...
+Setting up cuda-gdb-12-6 (12.6.77-1) ...
+Setting up libnvjpeg-12-6 (12.3.3.54-1) ...
+Setting up libcufile-12-6 (1.11.1.6-1) ...
+Setting alternatives
+Setting up cuda-opencl-12-6 (12.6.77-1) ...
+Setting up libcusparse-dev-12-6 (12.5.4.2-1) ...
+Setting up cuda-libraries-12-6 (12.6.3-1) ...
+Setting up cuda-nvrtc-dev-12-6 (12.6.85-1) ...
+Setting up libcusolver-dev-12-6 (11.7.1.2-1) ...
+Setting up cuda-command-line-tools-12-6 (12.6.3-1) ...
+Setting up cuda-opencl-dev-12-6 (12.6.77-1) ...
+Setting up libnvfatbin-dev-12-6 (12.6.77-1) ...
+Setting up libnvjpeg-dev-12-6 (12.3.3.54-1) ...
+Setting up libcufile-dev-12-6 (1.11.1.6-1) ...
+Setting up cuda-cudart-dev-12-6 (12.6.77-1) ...
+Setting up cuda-libraries-dev-12-6 (12.6.3-1) ...
+Setting up cuda-crt-12-6 (12.6.85-1) ...
+Setting up cuda-visual-tools-12-6 (12.6.3-1) ...
+Setting up cuda-nvcc-12-6 (12.6.85-1) ...
+Setting up cuda-tools-12-6 (12.6.3-1) ...
+Setting up cuda-compiler-12-6 (12.6.3-1) ...
+Setting up cuda-toolkit-12-6 (12.6.3-1) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.8) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+
+Running kernel seems to be up-to-date.
+
+Restarting services...
+
+Service restarts being deferred:
+ /etc/needrestart/restart.d/dbus.service
+ systemctl restart docker.service
+ systemctl restart getty@tty1.service
+ systemctl restart systemd-logind.service
+ systemctl restart unattended-upgrades.service
+
+No containers need to be restarted.
+
+User sessions running outdated binaries:
+ root @ session #6: bash[1848], sh[1850]
+ root @ user manager service: systemd[1720]
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+== 8. build the prover (release + CUDA) — HAZYNC_BASE is exported above ==
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-08-20 for version 1.98.0 (88d9e12ae 2026-08-18)
+info: component rustfmt is up to date
+info: downloading component rust-src
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded ark-serialize v0.6.0
+  Downloaded borsh-derive v1.8.0
+  Downloaded ark-serialize v0.3.0
+  Downloaded ark-serialize v0.5.0
+  Downloaded bitcoin-internals v0.6.0
+  Downloaded bitcoin_hashes v0.14.101
+  Downloaded bitflags v2.13.1
+  Downloaded bitvec v1.1.1
+  Downloaded block-buffer v0.10.4
+  Downloaded bumpalo v3.20.3
+  Downloaded bytemuck v1.25.1
+  Downloaded blake2 v0.10.6
+  Downloaded blst v0.3.16
+  Downloaded dyn-clone v1.0.20
+  Downloaded borsh v1.8.0
+  Downloaded bytes v1.12.1
+  Downloaded bs58 v0.5.1
+  Downloaded der v0.7.10
+  Downloaded litemap v0.8.2
+  Downloaded log v0.4.33
+  Downloaded lock_api v0.4.14
+  Downloaded memmap2 v0.9.11
+  Downloaded num-derive v0.4.2
+  Downloaded multimap v0.10.1
+  Downloaded bytemuck_derive v1.11.0
+  Downloaded malachite v0.4.22
+  Downloaded matchers v0.2.0
+  Downloaded memchr v2.8.3
+  Downloaded miniz_oxide v0.8.9
+  Downloaded mio v1.2.2
+  Downloaded nom v7.1.3
+  Downloaded ark-serialize v0.4.2
+  Downloaded bitflags v1.3.2
+  Downloaded managed v0.8.0
+  Downloaded maybe-async v0.2.11
+  Downloaded merlin v3.0.0
+  Downloaded mint v0.5.9
+  Downloaded num-conv v0.2.2
+  Downloaded bitcoin-io v0.1.101
+  Downloaded bitcoin-units v0.1.101
+  Downloaded byte-slice-cast v1.2.3
+  Downloaded chrono v0.4.45
+  Downloaded const-oid v0.9.6
+  Downloaded deranged v0.5.8
+  Downloaded lru-slab v0.1.2
+  Downloaded base58ck v0.1.101
+  Downloaded cobs v0.3.0
+  Downloaded cpufeatures v0.3.0
+  Downloaded derive_builder_core v0.20.2
+  Downloaded camino v1.2.4
+  Downloaded crc32fast v1.5.0
+  Downloaded nu-ansi-term v0.50.3
+  Downloaded num-complex v0.4.6
+  Downloaded digest v0.9.0
+  Downloaded darling v0.20.11
+  Downloaded matrixmultiply v0.3.11
+  Downloaded num-bigint-dig v0.8.6
+  Downloaded cpp_demangle v0.4.5
+  Downloaded rand_core v0.10.1
+  Downloaded cargo-platform v0.1.9
+  Downloaded const_format_proc_macros v0.2.34
+  Downloaded cpufeatures v0.2.17
+  Downloaded crunchy v0.2.4
+  Downloaded crypto-common v0.1.7
+  Downloaded duplicate v2.0.1
+  Downloaded arraydeque v0.5.1
+  Downloaded bit-vec v0.8.0
+  Downloaded displaydoc v0.2.6
+  Downloaded libm v0.2.16
+  Downloaded atomic-waker v1.1.2
+  Downloaded cexpr v0.6.0
+  Downloaded darling_macro v0.23.0
+  Downloaded downloader v0.2.8
+  Downloaded minimal-lexical v0.2.1
+  Downloaded ndarray v0.16.1
+  Downloaded num-bigint v0.4.8
+  Downloaded cfg_aliases v0.2.2
+  Downloaded derive_builder_macro v0.20.2
+  Downloaded malachite-q v0.4.22
+  Downloaded num-bigint v0.3.3
+  Downloaded crossbeam-deque v0.8.7
+  Downloaded darling_macro v0.20.11
+  Downloaded dirs v6.0.0
+  Downloaded downcast-rs v1.2.1
+  Downloaded nvtx v1.3.0
+  Downloaded once_cell v1.21.4
+  Downloaded portable-atomic v1.14.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded prost-build v0.13.5
+  Downloaded radium v0.7.0
+  Downloaded ark-serialize-derive v0.6.0
+  Downloaded pem-rfc7468 v0.7.0
+  Downloaded pkg-config v0.3.33
+  Downloaded powerfmt v0.2.0
+  Downloaded num_enum v0.7.6
+  Downloaded darling v0.23.0
+  Downloaded ark-std v0.3.0
+  Downloaded byteorder v1.5.0
+  Downloaded cfg-if v1.0.4
+  Downloaded dirs-sys v0.5.0
+  Downloaded unarray v0.1.4
+  Downloaded ark-serialize-derive v0.5.0
+  Downloaded ref-cast-impl v1.0.25
+  Downloaded ark-std v0.6.0
+  Downloaded potential_utf v0.1.5
+  Downloaded proptest v1.11.0
+  Downloaded prost v0.13.5
+  Downloaded ark-std v0.5.0
+  Downloaded derivative v2.2.0
+  Downloaded digest v0.10.7
+  Downloaded directories v6.0.0
+  Downloaded num-integer v0.1.46
+  Downloaded option-ext v0.2.0
+  Downloaded ref-cast v1.0.25
+  Downloaded shlex v1.3.0
+  Downloaded typetag v0.2.22
+  Downloaded uint v0.9.5
+  Downloaded unicode-ident v1.0.24
+  Downloaded zeroize v1.9.0
+  Downloaded zerovec-derive v0.11.3
+  Downloaded allocator-api2 v0.2.21
+  Downloaded ark-std v0.4.0
+  Downloaded arrayvec v0.7.8
+  Downloaded auto_impl v1.3.0
+  Downloaded autocfg v1.5.1
+  Downloaded base64 v0.22.1
+  Downloaded base64ct v1.8.3
+  Downloaded bech32 v0.11.1
+  Downloaded bincode v1.3.3
+  Downloaded bitcoin-consensus-encoding v1.1.0
+  Downloaded cargo_metadata v0.19.2
+  Downloaded cc v1.2.67
+  Downloaded chacha20 v0.10.1
+  Downloaded clang-sys v1.8.1
+  Downloaded console v0.15.11
+  Downloaded const_format v0.2.36
+  Downloaded crossbeam-epoch v0.9.20
+  Downloaded crossbeam-utils v0.8.22
+  Downloaded darling_core v0.20.11
+  Downloaded darling_core v0.23.0
+  Downloaded derive_builder v0.20.2
+  Downloaded derive_more v2.1.1
+  Downloaded derive_more-impl v2.1.1
+  Downloaded fallible-iterator v0.3.0
+  Downloaded hex v0.4.3
+  Downloaded shlex v2.0.1
+  Downloaded tower v0.5.3
+  Downloaded typenum v1.20.1
+  Downloaded ark-bn254 v0.5.0
+  Downloaded ark-ff v0.3.0
+  Downloaded bindgen v0.72.1
+  Downloaded ipnet v2.12.0
+  Downloaded libloading v0.8.9
+  Downloaded number_prefix v0.4.0
+  Downloaded ucd-trie v0.1.7
+  Downloaded num-iter v0.1.46
+  Downloaded rand_chacha v0.3.1
+  Downloaded rand_pcg v0.10.2
+  Downloaded subtle v2.6.1
+  Downloaded tinyvec_macros v0.1.1
+  Downloaded tracing-subscriber v0.3.23
+  Downloaded futures-core v0.3.32
+  Downloaded num_cpus v1.17.0
+  Downloaded parity-scale-codec-derive v3.7.5
+  Downloaded primitive-types v0.12.2
+  Downloaded rand_xorshift v0.4.0
+  Downloaded rawpointer v0.2.1
+  Downloaded hex_lit v0.1.1
+  Downloaded sharded-slab v0.1.7
+  Downloaded embedded-io v0.4.0
+  Downloaded percent-encoding v2.3.2
+  Downloaded quote v1.0.46
+  Downloaded rand_core v0.6.4
+  Downloaded utf8_iter v1.0.4
+  Downloaded ark-ff-macros v0.3.0
+  Downloaded fixed-hash v0.8.0
+  Downloaded futures-io v0.3.32
+  Downloaded futures-macro v0.3.32
+  Downloaded futures-sink v0.3.32
+  Downloaded heck v0.5.0
+  Downloaded hex-literal v0.4.1
+  Downloaded parking_lot_core v0.9.12
+  Downloaded proc-macro-crate v3.5.0
+  Downloaded proc-macro2-diagnostics v0.10.1
+  Downloaded sync_wrapper v1.0.2
+  Downloaded version_check v0.9.5
+  Downloaded find_cuda_helper v0.2.0
+  Downloaded futures-task v0.3.32
+  Downloaded home v0.5.12
+  Downloaded num_enum_derive v0.7.6
+  Downloaded paste v1.0.15
+  Downloaded pastey v0.2.3
+  Downloaded pin-project-lite v0.2.17
+  Downloaded postcard v1.1.3
+  Downloaded prost-derive v0.13.5
+  Downloaded prost-types v0.13.5
+  Downloaded puffin v0.19.1
+  Downloaded quinn-udp v0.5.15
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.9.5
+  Downloaded rlp v0.5.2
+  Downloaded tokio-rustls v0.26.4
+  Downloaded toml_datetime v0.6.11
+  Downloaded valuable v0.1.1
+  Downloaded zeroize_derive v1.5.0
+  Downloaded zmij v1.0.23
+  Downloaded adler2 v2.0.1
+  Downloaded alloy-rlp v0.3.16
+  Downloaded ark-ff-asm v0.6.0
+  Downloaded educe v0.6.0
+  Downloaded either v1.16.0
+  Downloaded fastrand v2.4.1
+  Downloaded futures-channel v0.3.32
+  Downloaded futures-executor v0.3.32
+  Downloaded hashlink v0.10.0
+  Downloaded heapless v0.7.17
+  Downloaded hex-conservative v0.2.2
+  Downloaded hex-conservative v1.2.0
+  Downloaded hyper-rustls v0.27.9
+  Downloaded iana-time-zone v0.1.65
+  Downloaded idna_adapter v1.2.2
+  Downloaded itoa v1.0.18
+  Downloaded lazy_static v1.5.0
+  Downloaded liblzma v0.4.7
+  Downloaded num-traits v0.2.19
+  Downloaded parity-scale-codec v3.7.5
+  Downloaded parking_lot v0.12.5
+  Downloaded pkcs1 v0.7.5
+  Downloaded pkcs8 v0.10.2
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded rand v0.9.5
+  Downloaded ruint-macro v1.2.1
+  Downloaded rustc-hash v2.1.3
+  Downloaded rustversion v1.0.23
+  Downloaded semver v0.11.0
+  Downloaded semver v1.0.28
+  Downloaded serde_with_macros v3.21.0
+  Downloaded sha2 v0.10.9
+  Downloaded tokio-util v0.7.18
+  Downloaded toml v0.8.23
+  Downloaded toml_datetime v1.1.1+spec-1.1.0
+  Downloaded zerotrie v0.2.4
+  Downloaded zerovec v0.11.6
+  Downloaded zopfli v0.8.3
+  Downloaded addr2line v0.24.2
+  Downloaded ahash v0.8.12
+  Downloaded ark-ff v0.6.0
+  Downloaded futures v0.3.32
+  Downloaded http v1.4.2
+  Downloaded hyper v1.10.1
+  Downloaded hyper-util v0.1.20
+  Downloaded idna v1.1.0
+  Downloaded itertools v0.10.5
+  Downloaded jobserver v0.1.35
+  Downloaded prettyplease v0.2.37
+  Downloaded quinn v0.11.11
+  Downloaded rand v0.8.7
+  Downloaded rand v0.10.2
+  Downloaded rayon-core v1.13.0
+  Downloaded rsa v0.9.10
+  Downloaded ruint v1.20.0
+  Downloaded rustc-demangle v0.1.28
+  Downloaded rustls v0.23.42
+  Downloaded ruzstd v0.7.3
+  Downloaded ryu v1.0.23
+  Downloaded serde_derive v1.0.228
+  Downloaded serde_with v3.21.0
+  Downloaded spki v0.7.3
+  Downloaded stability v0.2.1
+  Downloaded static_assertions v1.1.0
+  Downloaded syn v1.0.109
+  Downloaded syn v2.0.119
+  Downloaded time v0.3.53
+  Downloaded tower-http v0.6.11
+  Downloaded tracing v0.1.44
+  Downloaded writeable v0.6.3
+  Downloaded zip v2.4.2
+  Downloaded ark-ff-macros v0.6.0
+  Downloaded elf v0.7.4
+  Downloaded equivalent v1.0.2
+  Downloaded foldhash v0.1.5
+  Downloaded form_urlencoded v1.2.2
+  Downloaded glob v0.3.3
+  Downloaded hashbrown v0.12.3
+  Downloaded http-body-util v0.1.4
+  Downloaded itertools v0.11.0
+  Downloaded libc v0.2.186
+  Downloaded pest v2.8.7
+  Downloaded rayon v1.12.0
+  Downloaded regex v1.13.1
+  Downloaded reqwest v0.12.28
+  Downloaded safe_arch v0.7.4
+  Downloaded schemars v0.9.0
+  Downloaded semver-parser v0.10.3
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded signature v2.2.0
+  Downloaded simd-adler32 v0.3.10
+  Downloaded smallvec v1.15.2
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded strsim v0.11.1
+  Downloaded strum v0.27.2
+  Downloaded tap v1.0.1
+  Downloaded thiserror v2.0.18
+  Downloaded thiserror-impl v2.0.18
+  Downloaded tokio v1.53.0
+  Downloaded typed-arena v2.0.2
+  Downloaded wide v0.7.33
+  Downloaded aho-corasick v1.1.4
+  Downloaded embedded-io v0.6.1
+  Downloaded enum-ordinalize-derive v4.4.1
+  Downloaded futures-util v0.3.32
+  Downloaded hash32 v0.2.1
+  Downloaded http-body v1.1.0
+  Downloaded konst_macro_rules v0.2.19
+  Downloaded lazy-regex v3.6.0
+  Downloaded lazy-regex-proc_macros v3.6.0
+  Downloaded quinn-proto v0.11.16
+  Downloaded rustc_version v0.4.1
+  Downloaded rustls-webpki v0.103.13
+  Downloaded serde v1.0.228
+  Downloaded serde_core v1.0.228
+  Downloaded slab v0.4.12
+  Downloaded socket2 v0.6.5
+  Downloaded strum_macros v0.27.2
+  Downloaded synstructure v0.13.2
+  Downloaded tempfile v3.27.0
+  Downloaded thiserror v1.0.69
+  Downloaded thiserror-impl v1.0.69
+  Downloaded thread_local v1.1.10
+  Downloaded threadpool v1.8.1
+  Downloaded try-lock v0.2.5
+  Downloaded twox-hash v1.6.3
+  Downloaded which v4.4.2
+  Downloaded anyhow v1.0.103
+  Downloaded ark-ff v0.4.2
+  Downloaded getrandom v0.4.3
+  Downloaded itertools v0.13.0
+  Downloaded rustc-hex v2.1.0
+  Downloaded spin v0.9.9
+  Downloaded winnow v1.0.4
+  Downloaded ark-ff-macros v0.5.0
+  Downloaded httparse v1.10.1
+  Downloaded keccak v0.1.6
+  Downloaded rustc_version v0.3.3
+  Downloaded rustls-pki-types v1.15.0
+  Downloaded serde_spanned v0.6.9
+  Downloaded toml_edit v0.22.27
+  Downloaded toml_write v0.1.2
+  Downloaded tower-layer v0.3.3
+  Downloaded tower-service v0.3.3
+  Downloaded winnow v0.7.15
+  Downloaded ark-ec v0.5.0
+  Downloaded ark-ff-macros v0.4.2
+  Downloaded enum-map v2.7.3
+  Downloaded fastrlp v0.3.1
+  Downloaded generic-array v0.14.7
+  Downloaded hashbrown v0.14.5
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded konst v0.2.20
+  Downloaded object v0.36.7
+  Downloaded scopeguard v1.2.0
+  Downloaded serde_json v1.0.150
+  Downloaded tinyvec v1.12.0
+  Downloaded toml_edit v0.25.13+spec-1.1.0
+  Downloaded tracing-log v0.2.0
+  Downloaded typeid v1.0.3
+  Downloaded unicode-width v0.2.2
+  Downloaded unicode-xid v0.2.6
+  Downloaded untrusted v0.9.0
+  Downloaded approx v0.5.1
+  Downloaded ark-ff-asm v0.5.0
+  Downloaded gdbstub_arch v0.3.3
+  Downloaded icu_collections v2.2.0
+  Downloaded icu_normalizer v2.2.0
+  Downloaded icu_properties v2.2.0
+  Downloaded ident_case v1.0.1
+  Downloaded impl-codec v0.6.0
+  Downloaded itertools v0.14.0
+  Downloaded malachite-base v0.4.22
+  Downloaded regex-syntax v0.8.11
+  Downloaded schemars v1.2.1
+  Downloaded secp256k1 v0.29.1
+  Downloaded time-core v0.1.9
+  Downloaded tinystr v0.8.3
+  Downloaded toml_parser v1.1.2+spec-1.1.0
+  Downloaded tracing-attributes v0.1.31
+  Downloaded tracing-core v0.1.36
+  Downloaded want v0.3.1
+  Downloaded yoke v0.8.3
+  Downloaded ark-ff-asm v0.3.0
+  Downloaded ark-ff-asm v0.4.2
+  Downloaded funty v2.0.0
+  Downloaded gimli v0.31.1
+  Downloaded icu_locale_core v2.2.0
+  Downloaded icu_provider v2.2.0
+  Downloaded time-macros v0.2.31
+  Downloaded wyz v0.5.1
+  Downloaded yoke-derive v0.8.2
+  Downloaded zerofrom v0.1.8
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded enum-map-derive v0.17.0
+  Downloaded enum-ordinalize v4.4.1
+  Downloaded erased-serde v0.4.10
+  Downloaded errno v0.3.14
+  Downloaded fnv v1.0.7
+  Downloaded getrandom v0.3.4
+  Downloaded glam v0.20.5
+  Downloaded icu_properties_data v2.2.0
+  Downloaded impl-trait-for-tuples v0.2.3
+  Downloaded regex-automata v0.4.16
+  Downloaded url v2.5.8
+  Downloaded ark-ff v0.5.0
+  Downloaded fixedbitset v0.5.7
+  Downloaded inventory v0.3.24
+  Downloaded petgraph v0.7.1
+  Downloaded ark-poly v0.5.0
+  Downloaded fastrlp v0.4.0
+  Downloaded ff v0.13.1
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded getrandom v0.2.17
+  Downloaded indexmap v1.9.3
+  Downloaded webpki-roots v1.0.8
+  Downloaded zerocopy v0.8.54
+  Downloaded flate2 v1.1.9
+  Downloaded hashbrown v0.15.5
+  Downloaded indexmap v2.14.0
+  Downloaded indicatif v0.17.11
+  Downloaded rustix v0.38.44
+  Downloaded rustix v1.1.4
+  Downloaded hashbrown v0.17.1
+  Downloaded encoding_rs v0.8.35
+  Downloaded secp256k1-sys v0.10.1
+  Downloaded ring v0.17.14
+  Downloaded liblzma-sys v0.4.7
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded linux-raw-sys v0.4.15
+  Downloaded malachite-nz v0.4.22
+  Downloaded addchain v0.2.1
+  Downloaded no_std_strings v0.1.3
+  Downloaded cust_core v0.1.1
+  Downloaded bonsai-sdk v1.4.3
+  Downloaded cust v0.3.2
+  Downloaded cust_raw v0.11.3
+  Downloaded ark-snark v0.5.1
+  Downloaded ark-relations v0.5.1
+  Downloaded cust_derive v0.2.0
+  Downloaded malachite-float v0.4.22
+  Downloaded docker-generate v0.1.3
+  Downloaded rrs-lib v0.1.0
+  Downloaded tracing-subscriber v0.2.25
+  Downloaded bitcoin v0.32.102
+  Downloaded typetag-impl v0.2.22
+  Downloaded circom-witnesscalc v0.2.1
+  Downloaded risc0-core v3.0.2
+  Downloaded risc0-sys v1.5.0
+  Downloaded risc0-zkvm-platform v2.2.3
+  Downloaded risc0-build-kernel v2.0.1
+  Downloaded vek v0.15.10
+  Downloaded risc0-build v3.0.5
+  Downloaded ark-crypto-primitives v0.5.0
+  Downloaded ringbuffer v0.15.0
+  Downloaded rzup v0.5.2
+  Downloaded sppark v0.1.15
+  Downloaded risc0-groth16-sys v0.1.0
+  Downloaded ark-r1cs-std v0.5.0
+  Downloaded risc0-groth16 v3.0.5
+  Downloaded risc0-circuit-recursion v4.0.5
+  Downloaded ff_derive v0.13.1
+  Downloaded risc0-zkvm v3.0.5
+  Downloaded wtns-file v0.1.5
+  Downloaded risc0-circuit-keccak-sys v4.0.3
+  Downloaded risc0-zkos-v1compat v2.2.3
+  Downloaded risc0-zkp v3.0.5
+  Downloaded ark-crypto-primitives-macros v0.5.0
+  Downloaded include_bytes_aligned v0.1.4
+  Downloaded risc0-circuit-rv32im v4.0.5
+  Downloaded gdbstub v0.7.10
+  Downloaded ark-groth16 v0.5.0
+  Downloaded risc0-circuit-rv32im-sys v4.0.3
+  Downloaded yaml-rust2 v0.10.4
+  Downloaded risc0-circuit-recursion-sys v4.0.3
+  Downloaded risc0-circuit-keccak v4.0.6
+  Downloaded risc0-binfmt v3.0.5
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling libc v0.2.186
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling once_cell v1.21.4
+   Compiling zerocopy v0.8.54
+   Compiling serde_core v1.0.228
+   Compiling bitflags v2.13.1
+   Compiling subtle v2.6.1
+   Compiling generic-array v0.14.7
+   Compiling const-oid v0.9.6
+   Compiling typenum v1.20.1
+   Compiling getrandom v0.4.3
+   Compiling num-traits v0.2.19
+   Compiling rustix v1.1.4
+   Compiling either v1.16.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling serde v1.0.228
+   Compiling crossbeam-epoch v0.9.20
+   Compiling linux-raw-sys v0.12.1
+   Compiling fastrand v2.4.1
+   Compiling cpufeatures v0.2.17
+   Compiling crossbeam-deque v0.8.7
+   Compiling glob v0.3.3
+   Compiling hex v0.4.3
+   Compiling syn v2.0.119
+   Compiling option-ext v0.2.0
+   Compiling rayon-core v1.13.0
+   Compiling jobserver v0.1.35
+   Compiling getrandom v0.2.17
+   Compiling dirs-sys v0.5.0
+   Compiling cc v1.2.67
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling memchr v2.8.3
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling num-integer v0.1.46
+   Compiling paste v1.0.15
+   Compiling equivalent v1.0.2
+   Compiling tempfile v3.27.0
+   Compiling smallvec v1.15.2
+   Compiling hashbrown v0.17.1
+   Compiling semver v1.0.28
+   Compiling rand_core v0.6.4
+   Compiling directories v6.0.0
+   Compiling rustix v0.38.44
+   Compiling thiserror v2.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling stable_deref_trait v1.2.1
+   Compiling linux-raw-sys v0.4.15
+   Compiling home v0.5.12
+   Compiling indexmap v2.14.0
+   Compiling scopeguard v1.2.0
+   Compiling zeroize v1.9.0
+   Compiling bytes v1.12.1
+   Compiling blst v0.3.16
+   Compiling lock_api v0.4.14
+   Compiling ring v0.17.14
+   Compiling rayon v1.12.0
+   Compiling log v0.4.33
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling winnow v1.0.4
+   Compiling syn v1.0.109
+   Compiling ident_case v1.0.1
+   Compiling byteorder v1.5.0
+   Compiling cfg_aliases v0.2.2
+   Compiling rustversion v1.0.23
+   Compiling strsim v0.11.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling borsh v1.8.0
+   Compiling rustc_version v0.4.1
+   Compiling itoa v1.0.18
+   Compiling tracing-core v0.1.36
+   Compiling getrandom v0.3.4
+   Compiling synstructure v0.13.2
+   Compiling httparse v1.10.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling find_cuda_helper v0.2.0
+   Compiling heck v0.5.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling futures-core v0.3.32
+   Compiling zmij v1.0.23
+   Compiling anyhow v1.0.103
+   Compiling which v4.4.2
+   Compiling rand_chacha v0.3.1
+   Compiling ahash v0.8.12
+   Compiling rustls v0.23.42
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling sppark v0.1.15
+   Compiling rand v0.8.7
+   Compiling arrayvec v0.7.8
+   Compiling rand_core v0.9.5
+   Compiling risc0-build-kernel v2.0.1
+   Compiling vek v0.15.10
+   Compiling serde_json v1.0.150
+   Compiling risc0-sys v1.5.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling unicode-xid v0.2.6
+   Compiling futures-sink v0.3.32
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.5.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling bytemuck_derive v1.11.0
+   Compiling num_enum_derive v0.7.6
+   Compiling borsh-derive v1.8.0
+   Compiling stability v0.2.1
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling tracing v0.1.44
+   Compiling zerovec v0.11.6
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-channel v0.3.32
+   Compiling derive_more-impl v2.1.1
+   Compiling bytemuck v1.25.1
+   Compiling cust_raw v0.11.3
+   Compiling tinystr v0.8.3
+   Compiling approx v0.5.1
+   Compiling num_cpus v1.17.0
+   Compiling litemap v0.8.2
+   Compiling num-bigint-dig v0.8.6
+   Compiling writeable v0.6.3
+   Compiling threadpool v1.8.1
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling zerotrie v0.2.4
+   Compiling futures-macro v0.3.32
+   Compiling cust v0.3.2
+   Compiling cust_derive v0.2.0
+   Compiling darling_core v0.23.0
+   Compiling spin v0.9.9
+   Compiling nvtx v1.3.0
+   Compiling glam v0.20.5
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling futures-task v0.3.32
+   Compiling utf8_iter v1.0.4
+   Compiling ruint-macro v1.2.1
+   Compiling futures-io v0.3.32
+   Compiling mint v0.5.9
+   Compiling slab v0.4.12
+   Compiling tokio v1.53.0
+   Compiling icu_collections v2.2.0
+   Compiling futures-util v0.3.32
+   Compiling icu_provider v2.2.0
+   Compiling parking_lot v0.12.5
+   Compiling enum-ordinalize-derive v4.4.1
+   Compiling http v1.4.2
+   Compiling aho-corasick v1.1.4
+   Compiling itertools v0.10.5
+   Compiling num-bigint v0.3.3
+   Compiling bitflags v1.3.2
+   Compiling fnv v1.0.7
+   Compiling regex-syntax v0.8.11
+   Compiling cust_core v0.1.1
+   Compiling foldhash v0.1.5
+   Compiling percent-encoding v2.3.2
+   Compiling allocator-api2 v0.2.21
+   Compiling darling_macro v0.23.0
+   Compiling http-body v1.1.0
+   Compiling darling v0.23.0
+   Compiling hashbrown v0.15.5
+   Compiling darling_core v0.20.11
+   Compiling enum-ordinalize v4.4.1
+   Compiling ark-serialize-derive v0.5.0
+   Compiling ark-std v0.5.0
+   Compiling puffin v0.19.1
+   Compiling rustls-pki-types v1.15.0
+   Compiling num-bigint v0.4.8
+   Compiling radium v0.7.0
+   Compiling camino v1.2.4
+   Compiling untrusted v0.9.0
+   Compiling regex-automata v0.4.16
+   Compiling icu_normalizer v2.2.0
+   Compiling risc0-core v3.0.2
+   Compiling icu_properties v2.2.0
+   Compiling educe v0.6.0
+   Compiling ark-ff-macros v0.5.0
+   Compiling ark-serialize v0.5.0
+   Compiling darling_macro v0.20.11
+   Compiling serde_with_macros v3.21.0
+   Compiling lazy_static v1.5.0
+   Compiling strum_macros v0.27.2
+   Compiling ark-ff-asm v0.5.0
+   Compiling rand_chacha v0.9.0
+   Compiling itertools v0.13.0
+   Compiling regex v1.13.1
+   Compiling matrixmultiply v0.3.11
+   Compiling pkg-config v0.3.33
+   Compiling tower-service v0.3.3
+   Compiling tap v1.0.1
+   Compiling base64ct v1.8.3
+   Compiling try-lock v0.2.5
+   Compiling want v0.3.1
+   Compiling wyz v0.5.1
+   Compiling pem-rfc7468 v0.7.0
+   Compiling rand v0.9.5
+   Compiling liblzma-sys v0.4.7
+   Compiling darling v0.20.11
+   Compiling addchain v0.2.1
+   Compiling idna_adapter v1.2.2
+   Compiling form_urlencoded v1.2.2
+   Compiling num_enum v0.7.6
+   Compiling ark-ff v0.5.0
+   Compiling blake2 v0.10.6
+   Compiling itertools v0.14.0
+   Compiling crc32fast v1.5.0
+   Compiling atomic-waker v1.1.2
+   Compiling rawpointer v0.2.1
+   Compiling funty v2.0.0
+   Compiling prettyplease v0.2.37
+   Compiling ryu v1.0.23
+   Compiling bitvec v1.1.1
+   Compiling hyper v1.10.1
+   Compiling risc0-zkvm-platform v2.2.3
+   Compiling idna v1.1.0
+   Compiling ff_derive v0.13.1
+   Compiling prost-derive v0.13.5
+   Compiling rustls-webpki v0.103.13
+   Compiling derive_builder_core v0.20.2
+   Compiling der v0.7.10
+   Compiling sync_wrapper v1.0.2
+   Compiling heapless v0.7.17
+   Compiling num-complex v0.4.6
+   Compiling clang-sys v1.8.1
+   Compiling tower-layer v0.3.3
+   Compiling risc0-zkp v3.0.5
+   Compiling simd-adler32 v0.3.10
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.0
+   Compiling ff v0.13.1
+   Compiling tower v0.5.3
+   Compiling spki v0.7.3
+   Compiling derive_builder_macro v0.20.2
+   Compiling hyper-util v0.1.20
+   Compiling ndarray v0.16.1
+   Compiling url v2.5.8
+   Compiling webpki-roots v1.0.8
+   Compiling derive_more v2.1.1
+   Compiling hash32 v0.2.1
+   Compiling minimal-lexical v0.2.1
+   Compiling thiserror v1.0.69
+   Compiling hex-literal v0.4.1
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+   Compiling tokio-rustls v0.26.4
+   Compiling ark-poly v0.5.0
+   Compiling nom v7.1.3
+   Compiling hyper-rustls v0.27.9
+   Compiling serde_urlencoded v0.7.1
+   Compiling tower-http v0.6.11
+   Compiling pkcs8 v0.10.2
+   Compiling prost v0.13.5
+   Compiling ruint v1.20.0
+   Compiling futures-executor v0.3.32
+   Compiling http-body-util v0.1.4
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling cobs v0.3.0
+   Compiling hashbrown v0.14.5
+   Compiling thiserror-impl v1.0.69
+   Compiling num-iter v0.1.46
+   Compiling itertools v0.11.0
+   Compiling libloading v0.8.9
+   Compiling toml_write v0.1.2
+   Compiling fixedbitset v0.5.7
+   Compiling winnow v0.7.15
+   Compiling bindgen v0.72.1
+   Compiling malachite-nz v0.4.22
+   Compiling petgraph v0.7.1
+   Compiling malachite-base v0.4.22
+   Compiling toml_edit v0.22.27
+   Compiling postcard v1.1.3
+   Compiling reqwest v0.12.28
+   Compiling futures v0.3.32
+   Compiling prost-types v0.13.5
+   Compiling pkcs1 v0.7.5
+   Compiling cexpr v0.6.0
+   Compiling ark-ec v0.5.0
+   Compiling hashlink v0.10.0
+   Compiling flate2 v1.1.9
+   Compiling risc0-circuit-recursion-sys v4.0.3
+   Compiling signature v2.2.0
+   Compiling tracing-subscriber v0.2.25
+   Compiling encoding_rs v0.8.35
+   Compiling bitcoin-io v0.1.101
+   Compiling arraydeque v0.5.1
+   Compiling multimap v0.10.1
+   Compiling keccak v0.1.6
+   Compiling rustc-hash v2.1.3
+   Compiling portable-atomic v1.14.0
+   Compiling shlex v1.3.0
+   Compiling elf v0.7.4
+   Compiling prost-build v0.13.5
+   Compiling yaml-rust2 v0.10.4
+   Compiling ark-relations v0.5.1
+   Compiling rsa v0.9.10
+   Compiling toml v0.8.23
+   Compiling downloader v0.2.8
+   Compiling strum v0.27.2
+   Compiling serde_with v3.21.0
+   Compiling cargo-platform v0.1.9
+   Compiling risc0-circuit-keccak-sys v4.0.3
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling include_bytes_aligned v0.1.4
+   Compiling no_std_strings v0.1.3
+   Compiling bumpalo v3.20.3
+   Compiling unicode-width v0.2.2
+   Compiling typeid v1.0.3
+   Compiling static_assertions v1.1.0
+   Compiling zip v2.4.2
+   Compiling twox-hash v1.6.3
+   Compiling rzup v0.5.2
+   Compiling risc0-binfmt v3.0.5
+   Compiling console v0.15.11
+   Compiling circom-witnesscalc v0.2.1
+   Compiling zopfli v0.8.3
+   Compiling risc0-zkos-v1compat v2.2.3
+   Compiling cargo_metadata v0.19.2
+   Compiling risc0-circuit-recursion v4.0.5
+   Compiling ark-snark v0.5.1
+   Compiling merlin v3.0.0
+   Compiling derive_builder v0.20.2
+   Compiling lazy-regex-proc_macros v3.6.0
+   Compiling derivative v2.2.0
+   Compiling ark-crypto-primitives-macros v0.5.0
+   Compiling risc0-circuit-rv32im-sys v4.0.3
+   Compiling risc0-groth16-sys v0.1.0
+   Compiling hex-conservative v0.2.2
+   Compiling secp256k1-sys v0.10.1
+   Compiling dirs v6.0.0
+   Compiling memmap2 v0.9.11
+   Compiling pastey v0.2.3
+   Compiling managed v0.8.0
+   Compiling docker-generate v0.1.3
+   Compiling number_prefix v0.4.0
+   Compiling object v0.36.7
+   Compiling erased-serde v0.4.10
+   Compiling cpp_demangle v0.4.5
+   Compiling indicatif v0.17.11
+   Compiling risc0-build v3.0.5
+   Compiling gdbstub v0.7.10
+   Compiling bitcoin_hashes v0.14.101
+   Compiling malachite-q v0.4.22
+   Compiling ark-crypto-primitives v0.5.0
+   Compiling malachite-float v0.4.22
+   Compiling lazy-regex v3.6.0
+   Compiling liblzma v0.4.7
+   Compiling risc0-circuit-keccak v4.0.6
+   Compiling ruzstd v0.7.3
+   Compiling ark-bn254 v0.5.0
+   Compiling tokio-util v0.7.18
+   Compiling safe_arch v0.7.4
+   Compiling enum-map-derive v0.17.0
+   Compiling wtns-file v0.1.5
+   Compiling typetag v0.2.22
+   Compiling hex_lit v0.1.1
+   Compiling fallible-iterator v0.3.0
+   Compiling enum-map v2.7.3
+   Compiling wide v0.7.33
+   Compiling gimli v0.31.1
+   Compiling duplicate v2.0.1
+   Compiling malachite v0.4.22
+   Compiling gdbstub_arch v0.3.3
+   Compiling ark-groth16 v0.5.0
+   Compiling methods v0.1.0 (/root/hazync/prover/methods)
+   Compiling typetag-impl v0.2.22
+   Compiling num-derive v0.4.2
+   Compiling maybe-async v0.2.11
+   Compiling rustc-demangle v0.1.28
+   Compiling inventory v0.3.24
+   Compiling bit-vec v0.8.0
+   Compiling downcast-rs v1.2.1
+   Compiling ringbuffer v0.15.0
+   Compiling typed-arena v2.0.2
+   Compiling bitcoin v0.32.102
+   Compiling addr2line v0.24.2
+   Compiling rrs-lib v0.1.0
+   Compiling bonsai-sdk v1.4.3
+   Compiling secp256k1 v0.29.1
+   Compiling base58ck v0.1.101
+   Compiling matchers v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling bincode v1.3.3
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.10
+   Compiling bitcoin-units v0.1.101
+   Compiling nu-ansi-term v0.50.3
+   Compiling bech32 v0.11.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling hazync-utreexo v0.1.0 (/root/hazync/accumulator)
+   Compiling hazync-coinbase-smt v0.1.0 (/root/hazync/coinbase-smt)
+warning: unused import: `Sha256`
+  --> /root/hazync/coinbase-smt/src/lib.rs:70:20
+   |
+70 | use sha2::{Digest, Sha256};
+   |                    ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Digest`
+  --> /root/hazync/coinbase-smt/src/lib.rs:70:12
+   |
+70 | use sha2::{Digest, Sha256};
+   |            ^^^^^^
+
+warning: `hazync-coinbase-smt` (lib) generated 2 warnings (run `cargo fix --lib -p hazync-coinbase-smt` to apply 1 suggestion)
+   Compiling risc0-groth16 v3.0.5
+   Compiling risc0-circuit-rv32im v4.0.5
+   Compiling risc0-zkvm v3.0.5
+   Compiling host v0.1.0 (/root/hazync/prover/host)
+warning: constant `KIND_CHUNK` is never used
+  --> host/src/main.rs:47:7
+   |
+47 | const KIND_CHUNK: u32 = 0xC4A1_0004;
+   |       ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ChunkOut` is never constructed
+  --> host/src/main.rs:90:8
+   |
+90 | struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
+   |        ^^^^^^^^
+
+warning: `host` (bin "host") generated 2 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 22m 01s
+
+DONE. Verify the build with the self-contained checks (no GPU, no files):
+  cd /root/hazync/prover && ./target/release/host regress        # block 170 consensus regression
+  cd /root/hazync/prover && ./target/release/host adversarial    # soundness suite (all holes must REJECT)
+Then prove:
+  ./target/release/host prove-block                           # single block 170 -> real STARK receipt
+  (CUDA env is set in this shell and persisted to ~/.bashrc for future logins)
+Or join the proof party — see CONTRIBUTING.md.
+REAL_EXIT=0

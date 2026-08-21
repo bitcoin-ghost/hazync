@@ -1,0 +1,33 @@
+diff --git a/prover/host/src/main.rs b/prover/host/src/main.rs
+index aad7367..f47dfb7 100644
+--- a/prover/host/src/main.rs
++++ b/prover/host/src/main.rs
+@@ -3593,4 +3593,28 @@ fn ec_bench() {
+     // What that is worth in context: EC is ~97% of a transaction-heavy chunk after #135.
+     let f = base.1 as f64 / cand.1.max(1) as f64;
+     println!("  >>> at 97% EC share, whole-chunk speedup would be {:.2}x", 1.0 / (0.03 + 0.97 / f));
++
++    if std::env::var("HAZYNC_EC_PROVE").is_ok() {
++        println!("=== EC BAKE-OFF: PROVING time, {n} verifications ===");
++        let mut walls = Vec::new();
++        for (which, label) in [(0u32, "libsecp256k1 (baseline)"), (1u32, "risc0-crypto / bigint2")] {
++            let mut b = ExecutorEnv::builder();
++            b.segment_limit_po2(seg_po2());
++            b.write(&10u32).unwrap();
++            b.write(&which).unwrap();
++            b.write(&n).unwrap();
++            for (sig, pk, msg) in &vectors { b.write_slice(sig); b.write_slice(pk); b.write_slice(msg); }
++            let t = std::time::Instant::now();
++            let receipt = default_prover()
++                .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
++                .expect("prove").receipt;
++            receipt.verify(METHOD_ID).expect("verify");
++            let w = t.elapsed().as_secs_f64();
++            println!("  {label:26}  PROVED in {w:>8.1}s");
++            walls.push(w);
++        }
++        println!("  >>> PROVING speedup {:.2}x   (execute mode said {:.2}x)",
++            walls[0] / walls[1].max(1e-9),
++            results[0].1 as f64 / results[1].1.max(1) as f64);
++    }
+ }

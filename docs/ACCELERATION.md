@@ -173,6 +173,63 @@
 > (linear, and chunks are independent so it is near-perfect scaling) and **a faster card**. The latter is
 > unmeasured and worth an hour of cloud rental: proving is NTT-bandwidth-heavy and the L40S has ~864 GB/s
 > against ~2,039 GB/s on an A100 and ~3,350 GB/s on an H100 SXM.
+>
+> ⛔ **The "faster card" half of this paragraph was MEASURED on 2026-08-21 and is WRONG — see the
+> update immediately below. The bandwidth reasoning does not survive.** The rest of the paragraph
+> (more cards, near-perfect scaling) stands.
+
+> **Update 2026-08-21 — THE BANDWIDTH MODEL IS DEAD. An H100 returned 0.95x, not 3.9x.**
+>
+> The hour of cloud rental above was spent: H100 80GB HBM3 (sm_90), UpCloud FI-HEL2, driver 595.58.03,
+> CUDA 12.6, 12 cores; branch `bench/135-on-main` @ `c6e95ff` (main + #136 + #137), guest METHOD_ID
+> `b62d2a60`; block 962,000, `HAZYNC_CHUNKS=16`, cost-packed, chunk 9 (451 inputs), po2 22.
+>
+> |                        | L40S (2026-08-18) | H100 (2026-08-21) |
+> |------------------------|-------------------|-------------------|
+> | HBM bandwidth          | ~864 GB/s         | ~3,350 GB/s (3.9x)|
+> | segments               | 415               | 216               |
+> | wall                   | 1,779 s           | 978 s             |
+> | **throughput**         | **978,435 cyc/s** | **926,349 cyc/s** |
+> | peak VRAM              | 41,089 MiB (89%)  | 42,185 MiB (53%)  |
+>
+> **3.9x the bandwidth bought 0.95x the throughput.** The receipt VERIFIED (hazync#119 did not
+> reproduce on this run).
+>
+> **Mechanism, measured rather than inferred.** `nvidia-smi` sampled every 2 s across the whole run:
+> 490 samples, mean utilisation **66.3%**, idle (<10%) **25.1%**, busy (>=90%) 55.7%. A quarter of the
+> run has the GPU doing nothing, waiting on host-side work between segments. **Extra bandwidth cannot
+> fill an idle gap** — which is why the NTT-bandwidth reasoning, though correct about the kernels, was
+> the wrong model for the run as a whole.
+>
+> **Concurrency was re-tested here and is STILL not the lever — third rejection.** 2 x po2 21, identical
+> workloads (chunk 9 both): 2,064 s and 2,062 s, both VERIFIED, against a 2 x 978 = 1,956 s sequential
+> baseline — 5.5% WORSE, or ~1.03x once adjusted for po2 (po2 21 is ~8.5% slower solo on the L40S data),
+> within noise of the 1.047x measured here on the L40S. This matters because both prior rejections were
+> MEMORY-bound and so untested where memory is not the constraint: 2 x po2 21 peaked at 47 GB of 80,
+> where the L40S OOMed at 42.9 GB of 46. Given real headroom, the answer came back the same.
+>
+> **And it refutes the obvious reading of the result above:**
+>
+> | | mean GPU util | idle | work / wall |
+> |---|---|---|---|
+> | solo po2 22      | 66.3% | 25.1% | 1 chunk / 978 s |
+> | 2 x po2 21 conc  | 83.9% | 10.2% | 2 chunks / 2,064 s |
+>
+> Utilisation rose by a third and throughput FELL. `nvidia-smi` "utilisation" counts whether a kernel is
+> resident, not whether useful work is flowing; filling the idle time bought nothing. ⚠ Note this before
+> reaching for concurrency a fourth time.
+>
+> **po2 23 is a SOFTWARE cap, not a VRAM one.** `DEFAULT_MAX_PO2 = 22` in risc0-zkvm; the H100's spare
+> 38 GB is irrelevant until that constant moves. This voids the part of #133 that argued a bigger card
+> makes po2 23 testable.
+>
+> **CAVEAT, stated because it is not controlled.** The L40S figure is a DIFFERENT chunk (11 of 64) on the
+> PREVIOUS guest (`4722cec8`). cycles/sec is the portable metric and both runs are po2 22 with fully
+> packed segments, but the cycle MIX differs. That could move the ratio by some percent. It cannot turn
+> 0.95x into 3.9x.
+>
+> Full logs, both vmstat runs and all four GPU sample logs: `~/hazync-h100-evidence/`. The GPU box was
+> deleted after the run, so these numbers are not reproducible without re-renting.
 
 > Remaining maximal-Core levers: host-side tree-fold (log-depth aggregation, the rest of the ~14% fold
 > overhead), and multi-GPU throughput (safe — every parallel proof is independently verified). The bigint2

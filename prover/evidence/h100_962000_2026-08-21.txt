@@ -1,0 +1,128 @@
+### hazync — H100 80GB HBM3 (sm_90), UpCloud FI-HEL2, driver 595.58.03, CUDA 12.6 toolkit, 12 cores
+### Branch bench/135-on-main @ c6e95ff (main + #136 + #137), guest METHOD_ID b62d2a60 (canonical)
+### Block 962,000, HAZYNC_CHUNKS=16, cost-packed, chunk 9 (451 inputs)
+### 2026-08-21
+
+=== 1. SINGLE PROVE, po2 22 ===
+
+  wall              978 s
+  segments          216          (905,969,664 total cycles = 216 x 2^22, 97.22% user)
+  peak VRAM         42,185 MiB   (53% of 80 GB; the L40S sat at 41,089 MiB = 89% of 46 GB)
+  receipt           VERIFIED     (hazync#119 did NOT reproduce on this run)
+  throughput        926,349 cycles/s
+
+  L40S reference (docs/ACCELERATION.md, 2026-08-18, block 962,000 chunk 11 of 64, po2 22):
+  415 segments, 1,779 s -> 1,740,636,160 cycles -> 978,435 cycles/s
+
+  >>> H100 / L40S = 0.95x THROUGHPUT, on a card with ~3.9x the HBM bandwidth (3.35 TB/s vs 864 GB/s).
+
+  THE BANDWIDTH MODEL DOES NOT HOLD. docs/ACCELERATION.md concludes that the only remaining levers are
+  "more cards" and "a faster card", the latter reasoned from proving being NTT-bandwidth-heavy. A card
+  with nearly four times the bandwidth returned nothing.
+
+  MECHANISM, measured rather than inferred — nvidia-smi sampled every 2 s for the whole run:
+      490 samples   mean utilisation 66.3%   idle (<10%) 25.1%   busy (>=90%) 55.7%
+  A quarter of the run has the GPU doing nothing, waiting on host-side work between segments. Extra
+  bandwidth cannot fill an idle gap.
+
+  CAVEAT, stated because it is not controlled: the L40S figure is a DIFFERENT chunk (11 of 64) on the
+  PREVIOUS guest (4722cec8). cycles/sec is the portable metric and both runs are po2 22 with fully
+  packed segments, but the cycle MIX differs. That could move the ratio by some percent. It cannot
+  turn 0.95x into 3.9x.
+
+=== 2. CONCURRENCY, 2 x po2 21, identical workloads (chunk 9 both) ===
+
+  c1 2064 s, c2 2062 s, both receipts VERIFIED.
+  Sequential baseline at po2 22: 2 x 978 = 1956 s -> concurrency is 5.5% WORSE.
+  Adjusted for po2 (po2 21 is ~8.5% slower solo on the L40S data), it is ~1.03x over sequential at the
+  same po2 — within noise of the 1.047x docs/ACCELERATION.md measured on the L40S.
+
+  >>> CONCURRENCY IS STILL NOT THE LEVER, and now that has been tested on a card with the headroom the
+      L40S never had (2 x po2 21 peaked at 47 GB of 80; the L40S OOMed at 42.9 GB of 46).
+
+  AND IT REFUTES THE OBVIOUS EXPLANATION OF RESULT 1:
+      solo po2 22        mean GPU util 66.3%   idle 25.1%   1 chunk / 978 s
+      2 x po2 21 conc    mean GPU util 83.9%   idle 10.2%   2 chunks / 2064 s
+  Utilisation rose by a third and throughput fell. nvidia-smi "utilisation" counts whether a kernel is
+  resident, not whether useful work is flowing. Filling the idle time bought nothing.
+
+  ⚠ docs/ACCELERATION.md explicitly warns that its concurrency answer is settled and was once
+  re-derived at a cost of several GPU-hours. This re-derived it again (~35 min). The justification was
+  that both prior rejections were MEMORY-bound and so untested where memory is not the constraint —
+  which is true, and the answer came back the same anyway. Note it before reaching for it a third time.
+
+=== 3. hazync#139 — DOES EXECUTE-MODE CYCLE COUNT PREDICT PROVING COST? YES, MOSTLY ===
+
+  n=16, execute (reproduces the issue exactly on this box):
+    libsecp256k1   30,558,620 cycles   1,909,913/verify   16/16 verified
+    bigint2         2,218,302 cycles     138,643/verify   16/16 verified   = 13.78x
+
+  n=256, execute AND prove (both sides well above the one-segment floor):
+    execute        485,723,139 -> 34,220,406 cycles                        = 14.19x
+    PROVE          614.4 s     -> 56.8 s                                   = 10.82x
+
+  >>> ~76% of the execute-mode ratio carries through to real proving. The precompile is real; the
+      cycle count was not lying about it. #139's central unknown is now measured.
+
+  CORROBORATION: chunk 9 has 451 inputs and 451 predicted EC ops. 451 x COST_PER_EC_OP (1,950,000)
+  = 879.5M against its 880.8M measured cycles. EC is ~100% of that chunk, which independently
+  confirms the ~97% EC share #139 assumed rather than taking it on trust.
+
+  ⚠ WHAT THIS DOES NOT SAY: that a chunk gets 10.82x. Result 1 measured 25% of a chunk prove with the
+  GPU idle. If bigint2 removes ~10x of the GPU work and that quarter stays, Amdahl caps the chunk gain
+  near 3x, not 10x. The ec-bench workload cannot see this — its vmstat shows the host 84.4% idle with
+  a run queue of 1.0, because a microbench does almost no witness generation. Measuring a real chunk
+  prove with vmstat is what separates the two, and is run 2.
+
+=== 4. THE GPU IDLE GAP IS A SINGLE-THREADED HOST SECTION (derived 2026-08-21 from the archived vmstat) ===
+
+  Section 3 left this open: "the ec-bench workload cannot see this — its vmstat shows the host 84.4%
+  idle ... measuring a real chunk prove with vmstat is what separates the two, and is run 2."
+
+  Run 2's vmstat was captured before the box was deleted. Both logs, averaged identically over every
+  18-field data row (us=$13, sy=$14, id=$15, wa=$16):
+
+    vmstat-run2.log  (real chunk prove, 483 samples ~2 s => ~966 s, matches the 978 s run)
+        run queue 1.02   us 7.2%   sy 1.1%   id 91.9%   wa 0.0%    host >=90% idle in 99.6% of samples
+    vmstat-139.log   (ec-bench microbench, 137 samples)
+        run queue 1.04   us 7.4%   sy 0.9%   id 91.8%   wa 0.0%    host >=90% idle in 99.3% of samples
+
+  >>> THEY ARE THE SAME. The real chunk prove does NOT saturate the host either, so the hypothesis
+      that section 3 offered for the 25.1% GPU idle — that a real prove does heavy host-side witness
+      generation the microbench does not — IS REFUTED BY THE RUN THAT WAS SUPPOSED TO CONFIRM IT.
+
+  WHAT IT IS INSTEAD. us 7.2% of 12 cores = 0.86 cores busy, at a run queue of 1.0, with wa = 0.0%.
+  That is ONE thread, and no I/O wait. The quarter of the run where the GPU is idle is a SERIAL
+  host-side section, not a parallel host workload starved of cores.
+
+  CONSEQUENCES:
+    - More host cores cannot close the gap. Neither can a faster card (result 1) nor concurrency
+      (result 2). All three now have the same explanation, which no single one of them established.
+    - It is not I/O. wa is 0.0% across all 483 samples, so it is not the archive node, not the disk
+      and not the offsite copy.
+    - It IS plausibly the "host-side tree-fold (log-depth aggregation, the rest of the ~14% fold
+      overhead)" already listed in docs/ACCELERATION.md as a remaining maximal-Core lever. That lever
+      was parked as a modest tidy-up; on this evidence it is the ONLY measured lever left, and it is
+      worth ~25% of chunk wall-clock before any accelerator work multiplies its share.
+
+  ⚠ NOT ESTABLISHED: WHICH serial section. vmstat proves one thread and no I/O; it does not name the
+  code. A profile of the host process across a chunk prove is the next measurement, and unlike
+  everything else in this file it needs no GPU rental — the serial section is host-side by definition.
+
+  ⚠ The 84.4% quoted in section 3 does not reproduce as 91.8% here; the averaging method behind it is
+  unrecorded. The load-bearing comparison is run2 vs 139 computed identically, and that is above.
+
+=== 5. BLOCK 962,000 SIGNATURE SPLIT (re-derived 2026-08-21; see evidence/sigsplit-962000.txt) ===
+
+  inputs 8,006 (taproot 145)   predicted EC verifies 8,108
+    ECDSA    7,917   97.64%
+    Schnorr    191    2.36%
+
+  Reproduces prover/evidence/chunk_packing_962000.txt ("8108 across 8006 inputs") exactly, which is
+  what establishes that the classification matches the prover's own predicted_ec_ops.
+
+  ⚠ CORRECTS the in-flight session's "ECDSA 6,824 (97.3%) / Schnorr 191 (2.7%)". Schnorr is right;
+  6,824 is not, and 6,824+191 = 7,015 does not reconcile with 8,108.
+
+  Block-level bound for a wholesale bigint2 swap (ECDSA only): 1/(0.0236 + 0.9764/10.82) = 8.78x,
+  using verify COUNT as a proxy for cycle SHARE.
