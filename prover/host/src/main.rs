@@ -3538,6 +3538,36 @@ mod chunk_packing_tests {
 // This is the number that decides whether the remaining ~97% of a chunk's cost is addressable.
 // ACCELERATION.md's field backend was built end to end and only then measured its primitive at 40%
 // cheaper rather than the projected 6-8x; the point of this command is to not repeat that.
+// ---- Block-level composition, for turning a primitive speedup into a block speedup ----
+//
+// MEASURED on block 962,000 (8,006 inputs, 6,303 txs) by classifying every input's script type and
+// applying #138's fitted coefficients. Reproduce with:
+//
+//     python3 prover/tools/classify_inputs.py prover/block_962000.json
+//     python3 prover/tools/model_acceleration.py
+//
+// Checked-in output: prover/evidence/acceleration_board_962000.txt
+//
+// These are shares of GUEST CYCLES after #136 and #137 land, which is the only state in which a
+// primitive speedup is worth quoting at block level — before them, marshalling is over half the
+// cycles and any EC win is diluted by work that is about to be deleted anyway.
+//
+//   ECDSA verification   7,015 verifies    95.42%   <- the only part bigint2 accelerates
+//   Schnorr verification   191 verifies     2.60%   <- risc0-crypto has no BIP340; a hard floor
+//   per-input base + payload bytes           1.98%
+//
+// The Schnorr share grows with taproot adoption, so any bound computed here ages DOWNWARD.
+const ECDSA_CYCLE_SHARE: f64 = 0.9542;
+const SCHNORR_CYCLE_SHARE: f64 = 0.0260;
+const EC_SHARE_PROVENANCE: &str = "block 962,000, ECDSA 95.4% of cycles, Schnorr 2.6% unaccelerated";
+
+/// Amdahl over the measured composition: only the ECDSA term is divided by `f`. Schnorr and the
+/// non-EC remainder are untouched, because nothing in risc0-crypto accelerates them.
+fn block_bound(f: f64) -> f64 {
+    let rest = 1.0 - ECDSA_CYCLE_SHARE;
+    1.0 / (ECDSA_CYCLE_SHARE / f.max(1e-9) + rest)
+}
+
 fn ec_bench() {
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     let n: u32 = std::env::var("HAZYNC_EC_N").ok().and_then(|s| s.parse().ok()).unwrap_or(16);
@@ -3591,9 +3621,18 @@ fn ec_bench() {
     }
     println!("  >>> SPEEDUP {:.2}x on the EC primitive", base.1 as f64 / cand.1.max(1) as f64);
 
-    // What that is worth in context: EC is ~97% of a transaction-heavy chunk after #135.
+    // What that is worth on a real block. This composition was previously wrong in a way worth
+    // naming, because the two numbers involved are both ~97% and are not the same quantity:
+    //
+    //   - 97.3% is the ECDSA share of VERIFICATIONS (7,015 ECDSA against 191 Schnorr in block
+    //     962,000). It is a count.
+    //   - the earlier print used it as EC's share of CHUNK CYCLES, which is a different thing.
+    //
+    // Using one for the other silently folds the Schnorr work into the accelerated term, and
+    // bigint2 cannot touch Schnorr at all — risc0-crypto exports no BIP340. So the old print
+    // overstated the block-level bound (9.96x where the answer is 8.69x, 5.67x where it is 5.20x).
     let f = base.1 as f64 / cand.1.max(1) as f64;
-    println!("  >>> at 97% EC share, whole-chunk speedup would be {:.2}x", 1.0 / (0.03 + 0.97 / f));
+    println!("  >>> on a real block that is {:.2}x  ({})", block_bound(f), EC_SHARE_PROVENANCE);
 
     // THE MIDDLE PATH (#139), BOUNDED WITHOUT BUILDING IT.
     //
@@ -3627,7 +3666,12 @@ fn ec_bench() {
         println!("  group arithmetic alone: {:.2}x faster", secp_group / r0_group.max(1.0));
         println!("  >>> MIDDLE PATH  {:>12.0} cycles  = {:.2}x   (wholesale is {:.2}x)",
             middle, secp_tot / middle.max(1.0), f);
-        println!("  >>> at 97.3% ECDSA share (block 962,000 measured), block-level bound {:.2}x",
-            1.0 / (0.027 + 0.973 / (secp_tot / middle.max(1.0))));
+        println!("  >>> on a real block that is {:.2}x  ({})",
+            block_bound(secp_tot / middle.max(1.0)), EC_SHARE_PROVENANCE);
+        println!("      Schnorr is the floor: {:.1}% of verifications are BIP340 and gain nothing;",
+            100.0 * SCHNORR_CYCLE_SHARE / (ECDSA_CYCLE_SHARE + SCHNORR_CYCLE_SHARE));
+        println!("      with Schnorr also accelerated the same primitive would give {:.2}x",
+            1.0 / ((ECDSA_CYCLE_SHARE + SCHNORR_CYCLE_SHARE) / (secp_tot / middle.max(1.0))
+                   + (1.0 - ECDSA_CYCLE_SHARE - SCHNORR_CYCLE_SHARE)));
     }
 }
