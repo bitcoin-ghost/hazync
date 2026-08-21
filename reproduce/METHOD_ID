@@ -330,5 +330,55 @@
 # cheaper — the same decision at 20% of the board would cost several times as much.
 #
 # Superseded the earlier id b161735a…
+#
+# 2026-08-21 (#135): the chunk payload is READ as raw bytes and GROUPED BY TRANSACTION.
+#
+# TWO GUEST CHANGES, batched into one re-baseline. The board reset costs the same whether one thing
+# changes or two, and here the batching also avoids a second regeneration of prover/testdata/snark/*:
+# those are proofs, they carry their guest id inside them, and landing #136 on its own would have
+# pinned an id that never shipped and re-made both fixtures under it for no gain.
+#
+# 1. prover/methods/guest/src/main.rs — mode 4's payload is read with `read_slice`, not serde
+#    `Vec<u8>`. `env::read` of the ChunkInput payload was 50.9% of a chunk's entire cycle count
+#    (112,863,363 of 221,538,730 on block 741000 chunk 1) before any Bitcoin logic ran: ~147 cycles
+#    per byte, because serde walks risc0's word stream one byte at a time, and risc0's own
+#    optimisation guide says to use `read_slice` for raw bytes. Each blob is now written with
+#    `write_slice` behind a u32 length, padded to a word so the u32 reads that follow stay aligned.
+#    Measured: that chunk 221,538,730 -> 109,113,751 cycles (2.03x), the read itself 112.9M -> ~0.4M,
+#    the whole block 2,923M -> 1,706M (1.71x).
+#
+# 2. prover/methods/guest/src/main.rs + verify_input.cpp — the payload is grouped by TRANSACTION.
+#    A chunk carried a full copy of the spending transaction and its prevouts once per INPUT, so block
+#    741000 shipped 6,995,621 bytes of a distinct 123,883 (56.5x) and the guest ran
+#    `PrecomputedTransactionData::Init` once per input — the precomputation BIP143 exists to do once
+#    per transaction. `verify_inputs_batch` now deserialises and Inits once per transaction, then
+#    loops `VerifyScript` over the inputs this chunk owns. Measured: chunk 1
+#    109,113,751 -> 86,495,630, i.e. 221,538,730 -> 86,495,630 = 2.56x across both halves of #135;
+#    the whole block 2,923M -> 1,458M = 2.00x.
+#
+# WHAT DID NOT CHANGE: what is proven. Both are WIRE FORMAT. All sixteen chunks commit the same
+# journal as before — chunk 1 is still 02a7463d…, `all_valid=1`, 42 binds — so the same bytes reached
+# `VerifyScript` and every `input_bind` digest is unchanged. No consensus rule, no line of Core, no
+# accumulator or BIP30 commitment moved. The ELF changed; what it attests did not.
+#
+# ONE NEW COUPLING, recorded because it is a genuine change and not a speedup: with the payload
+# grouped, a transaction split across a chunk boundary is shipped to BOTH chunks, so the packer can
+# now CREATE work rather than only redistribute it. Measured on two blocks, and THE SIGN DIFFERS:
+#
+#   741000    1,457,294,990 cost-packed  vs  1,457,977,757 count-packed  — cost-packed CHEAPER 0.05%
+#   962,000  14,050,319,529 cost-packed  vs 14,045,858,215 count-packed  — cost-packed DEARER  0.03%
+#
+# So cost-packing does not reliably pay for the duplication it introduces: on the near-tip block it
+# costs slightly MORE than count-packing. Both differences are tiny and neither justifies a change,
+# but the direction is not a constant and must not be quoted as though it were. Watch it on blocks
+# carrying very large transactions, where a straddling transaction is expensive to duplicate.
+#
+# COST: the board resets when this ships, as every re-baseline does. It is not yet shipped — this id
+# is pinned on main; the release, the coordinator swap, the wasm deploy and the board reset are one
+# cutover and happen together (RUNBOOK, "Things that MUST be updated when the id changes"). Until that
+# cutover the SCHEDULED `deployed-verifier` job is expected to fail, because the browser verifier the
+# site serves is pinned to the superseded id — that is the gate working, not drift.
+#
+# Superseded the earlier id 4722cec8…
 
-4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae
+b62d2a604f1d6504f9a70eb6a1acab2d64f1d6e356f4c9a6f28c271ac360318a

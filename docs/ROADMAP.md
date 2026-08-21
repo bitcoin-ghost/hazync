@@ -99,7 +99,7 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   → `b161735a…` (v0.16.0, #88: the id no longer varies with where the repo is checked out — the shared
   SMT source is `#[path]`-included rather than a Cargo path dependency, so the ELF records a relative
   path. It still depends on `CARGO_HOME`, which is what the container fixes)
-  → `4722cec8…` (audit #5 guest guards; see the current-id note above)
+  → `b62d2a60…` (audit #5 guest guards; see the current-id note above)
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

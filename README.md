@@ -59,7 +59,7 @@ taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** �
 scratch and checks it matches.
 
 What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
-when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `4722cec8` — the fourth
+when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `b62d2a60` — the fourth
 reset in three days, and the price of changing the guest at all. The board is open and anyone can join.
 Whatever figure it shows is not seventeen years of accumulated work — it is what has been re-proved
 since that re-baseline. [The live board](https://bitcoinghost.org/hazync.html) is the only place a
