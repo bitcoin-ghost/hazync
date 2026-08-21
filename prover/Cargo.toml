@@ -9,3 +9,13 @@ opt-level = 3
 [profile.release]
 debug = 1
 lto = true
+
+# risc0-zkvm is patched, not forked upstream: `prove_session` proved segments in a strictly
+# sequential loop, so the GPU idled through every host-side preflight. `vendor/risc0-zkvm` is the
+# 3.0.5 crate verbatim apart from that loop and one `Sync` bound, kept verbatim on purpose so the
+# diff stays re-appliable when risc0 moves.
+#
+# The change is HOST-side. It alters the order work is scheduled in, not what is proven, so
+# METHOD_ID does not move and no re-baseline follows.
+[patch.crates-io]
+risc0-zkvm = { path = "../vendor/risc0-zkvm" }
