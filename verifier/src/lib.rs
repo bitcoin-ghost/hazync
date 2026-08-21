@@ -28,7 +28,7 @@ use hazync_rangestate::{
 /// Canonical guest image id. Embedded rather than imported from the `methods` crate, which would drag
 /// in the guest build. `scripts/check-versions.sh` fails the build if this drifts from
 /// `reproduce/METHOD_ID`, which is the source of truth.
-pub const METHOD_ID_HEX: &str = "4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae";
+pub const METHOD_ID_HEX: &str = "b62d2a604f1d6504f9a70eb6a1acab2d64f1d6e356f4c9a6f28c271ac360318a";
 
 /// Everything the proof commits to — i.e. the state a node may ADOPT once verification passes.
 ///
