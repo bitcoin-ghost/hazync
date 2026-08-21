@@ -2011,14 +2011,30 @@ fn bench_pipeline() {
     };
     let wall = t.elapsed().as_secs_f64();
 
-    let mut bytes = Vec::new();
-    for r in &receipts { bytes.extend_from_slice(&r.get_seal_bytes()); }
-    let digest = bitcoin::hashes::sha256d::Hash::hash(&bytes);
-
+    // ⚠ A STARK seal is NOT deterministic. `preflight` draws `rand_z` from an RNG
+    // (risc0-circuit-rv32im-4.0.5 `prove/hal/mod.rs:136`: `ExtVal::random(&mut rand::rng())`),
+    // so two proofs of the SAME segment differ byte-for-byte even in the same mode. Comparing
+    // seal digests across the two arms therefore proves nothing whatsoever — an earlier version
+    // of this benchmark did exactly that and the "mismatch" was pure noise.
+    //
+    // Verify each receipt instead. That is the real gate, and it doubles as the hazync#119
+    // detector: a bad segment proof fails here rather than silently scoring a fast time.
+    let t_v = Instant::now();
+    let mut ok = 0usize;
+    let mut bad: Vec<u32> = Vec::new();
+    for r in &receipts {
+        match r.verify_integrity_with_context(&ctx) {
+            Ok(()) => ok += 1,
+            Err(e) => { bad.push(r.index); eprintln!("  segment {} FAILED verification: {e}", r.index); }
+        }
+    }
     println!("segments proved  {}", receipts.len());
     println!("WALL_SECONDS     {wall:.0}");
-    println!("seal digest      {digest}");
-    println!(">>> run both modes: the digests must MATCH, and the wall-clock ratio is the win.");
+    println!("verified         {}/{} in {:.1}s", ok, receipts.len(), t_v.elapsed().as_secs_f64());
+    if !bad.is_empty() {
+        println!("!!! hazync#119: {} segment(s) failed verification: {bad:?}", bad.len());
+    }
+    println!(">>> the win is the wall-clock ratio; the GATE is verified == segments proved.");
 }
 
 
