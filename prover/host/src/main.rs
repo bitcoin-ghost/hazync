@@ -2064,6 +2064,33 @@ fn agg_chunks() {
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
     b.write(&1u32).unwrap();
+    // HAZYNC_AGG_EXECUTE=1 — execute mode 5 WITHOUT proving, and report its cycles.
+    //
+    // This settles which half of the aggregate is expensive. In execute mode `env::verify` merely
+    // RECORDS an assumption; resolving it is recursion, and that cost lands in PROVING. So the cycle
+    // count here is the block-validation work alone, and the gap between it and the measured prove
+    // wall-clock is what the sixteen assumption resolutions cost.
+    //
+    // It matters because the two pull in opposite directions: more chunks parallelise proving better
+    // and, if resolution dominates, make the aggregate worse. We have been treating HAZYNC_CHUNKS as
+    // free. Needs no GPU.
+    if std::env::var("HAZYNC_AGG_EXECUTE").is_ok() {
+        let env = b.build().unwrap();
+        let t_x = Instant::now();
+        let session = default_executor().execute(env, METHOD_ELF).expect("execute mode 5");
+        let cycles = session.cycles();
+        println!("=== AGGREGATE, EXECUTE ONLY (no proving) ===");
+        println!("  block validation cycles  {cycles}");
+        println!("  segments at po2 {}        ~{}", seg_po2(), cycles.div_ceil(1u64 << seg_po2()));
+        println!("  executed in              {:.1}s", t_x.elapsed().as_secs_f64());
+        println!();
+        println!("  For scale: chunk 9 is 948,436,992 cycles and proves in ~915 s on a B200, so this");
+        println!("  much block-validation work is roughly {:.0} s of segment proving. Anything the",
+                 cycles as f64 / 948_436_992.0 * 915.0);
+        println!("  full aggregate costs BEYOND that is the sixteen assumption resolutions.");
+        return;
+    }
+
     // Prove the aggregate to SUCCINCT too: the assumptions are already succinct (cheap resolve), and a
     // succinct block proof is a single fixed-size STARK — directly composable in the chain range-fold.
     let agg = default_prover()
@@ -3764,7 +3791,7 @@ mod chunk_packing_tests {
 fn ecdsa_differential_cmd() {
     use bitcoin::consensus::deserialize;
     use bitcoin::sighash::{EcdsaSighashType, SighashCache};
-    use bitcoin::{Amount, Script, Transaction, TxOut};
+    use bitcoin::{Amount, Script, ScriptBuf, Transaction, TxOut};
 
     let (_anchor, w) = build_full();
     let mut triples: Vec<(Vec<u8>, Vec<u8>, [u8; 32])> = Vec::new();
@@ -3773,6 +3800,7 @@ fn ecdsa_differential_cmd() {
     // components can never disagree with them, so it cannot reveal a hole in the extractor.
     let mut inputs_seen = 0usize;
     let (mut e_deser, mut e_prevout, mut e_len, mut e_sighash, mut tx_skipped_inputs) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut p2sh_wpkh = 0usize;
 
     for (t_idx, tb) in w.txs.iter().enumerate() {
         let tx: Transaction = match deserialize(&tb.0) {
@@ -3829,6 +3857,40 @@ fn ecdsa_differential_cmd() {
                 continue;
             }
 
+            // P2SH-wrapped P2WPKH: scriptSig is a single push of the 22-byte witness program, and
+            // the witness is then exactly [sig||hashtype, pubkey] — the same shape as native P2WPKH.
+            // This is reachable WITHOUT running the interpreter because the redeemScript is a fixed
+            // pattern, not arbitrary script. Bare P2SH and P2WSH still are not: their redeem/witness
+            // script can be anything, so what is being signed depends on evaluating it.
+            if spk.is_p2sh() {
+                let rs: Vec<Vec<u8>> = input.script_sig.instructions()
+                    .filter_map(|r| r.ok().and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec())))
+                    .collect();
+                if rs.len() == 1 && rs[0].len() == 22 && rs[0][0] == 0x00 && rs[0][1] == 0x14 {
+                    let wit = &input.witness;
+                    if wit.len() == 2 {
+                        let (sig_ht, pk) = (wit.nth(0).unwrap(), wit.nth(1).unwrap());
+                        if !sig_ht.is_empty() {
+                            let ht = *sig_ht.last().unwrap();
+                            if let Ok(sighash_ty) = EcdsaSighashType::from_standard(ht as u32) {
+                                // BIP143 over the redeemScript, which IS the witness program here.
+                                let redeem = ScriptBuf::from_bytes(rs[0].clone());
+                                match cache.p2wpkh_signature_hash(i, &redeem, value, sighash_ty) {
+                                    Ok(h) => {
+                                        triples.push((pk.to_vec(), sig_ht[..sig_ht.len() - 1].to_vec(), h.to_byte_array()));
+                                        p2sh_wpkh += 1;
+                                        continue;
+                                    }
+                                    Err(_) => { e_sighash += 1; skipped_err += 1; continue }
+                                }
+                            }
+                        }
+                    }
+                }
+                skipped_type += 1;
+                continue;
+            }
+
             skipped_type += 1;
         }
     }
@@ -3837,7 +3899,7 @@ fn ecdsa_differential_cmd() {
     println!("  inputs seen        {inputs_seen}   (counted, not derived)");
     println!("  txs: deser-fail {e_deser}  prevout-decode-fail {e_prevout}  len-mismatch {e_len}  -> {tx_skipped_inputs} inputs lost");
     println!("  sighash errors     {e_sighash}");
-    println!("  triples extracted  {}   (P2WPKH + P2PKH)", triples.len());
+    println!("  triples extracted  {}   (P2WPKH + P2PKH + {p2sh_wpkh} P2SH-wrapped P2WPKH)", triples.len());
     println!("  skipped, type      {skipped_type}   (P2SH/P2WSH/multisig/taproot — need the interpreter)");
     println!("  skipped, error     {skipped_err}");
     if triples.is_empty() { println!("  nothing to compare"); return }
