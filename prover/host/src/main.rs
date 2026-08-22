@@ -3653,6 +3653,9 @@ fn vb_stages_cmd() {
         (24, "  [loop] + created_at lookup & in-block bookkeeping"),
         (3,  "  [loop] + utreexo proof build (NO delete)"),
         (4,  "  [loop] + utreexo delete"),
+        // Not a phase: asserts the batched leaves and locks equal the per-input ones for EVERY input.
+        // It costs more than the full run (it does both), which is the point — correctness, not speed.
+        (30, "DIFFERENTIAL: batch vs per-input, every input"),
     ];
     println!("=== validate_block phase costs — block {} ===", w.height);
     println!("{:<52} {:>16} {:>16}", "phase", "cumulative", "this phase");
