@@ -3126,6 +3126,10 @@ fn main() {
         segment_size_cmd();
         return;
     }
+    if args.iter().any(|a| a == "exec-time") {
+        exec_time_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "vb-stages") {
         vb_stages_cmd();
         return;
@@ -3724,4 +3728,64 @@ fn segment_size_cmd() {
         mean_mb * 8.0 / 4.2);
     println!("  So the constraint on distributing segments is not bandwidth. It is the prover's");
     println!("  working set per segment, which this does not measure.");
+}
+
+// How much of a chunk's wall clock is EXECUTION rather than PROVING?
+//
+// This decides whether distributing segment proving can work at all. Segments are proved
+// independently — that is the whole idea — but they are PRODUCED by one sequential executor pass.
+// That pass is a serial floor no number of workers can cross: with P proving seconds spread over N
+// cards, a chunk cannot finish faster than E + P/N.
+//
+// Measured here on the CPU that runs the harness, which is the conservative direction: this laptop is
+// slower than the prover box, so the execution share reported is an UPPER bound on the real one.
+fn exec_time_cmd() {
+    use risc0_zkvm::ExecutorImpl;
+    use std::time::Instant;
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+
+    let t0 = Instant::now();
+    let (_a, w) = build_full();
+    let t_build = t0.elapsed().as_secs_f64();
+
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+    let env = b.build().unwrap();
+
+    let t1 = Instant::now();
+    let session = ExecutorImpl::from_elf(env, METHOD_ELF).unwrap().run().unwrap();
+    let t_exec = t1.elapsed().as_secs_f64();
+
+    let n = session.segments.len();
+    let po2 = seg_po2();
+    let cyc_cap = (n as f64) * (1u64 << po2) as f64;
+
+    // The one calibration point we have: chunk 9 of this block proved in 915 s on a B200
+    // (948,436,992 cycles -> 1.036 M cycles/s). Anyone re-running on other hardware should
+    // override it rather than trust the default.
+    let prove_s: f64 = std::env::var("HAZYNC_PROVE_S").ok().and_then(|s| s.parse().ok()).unwrap_or(915.0);
+
+    println!("=== execute vs prove — block {} chunk {} at po2 {} ===", w.height, idx, po2);
+    println!("  witness build     {:.1} s", t_build);
+    println!("  EXECUTION         {:.1} s   ({} segments, <= {:.0} M cycles)", t_exec, n, cyc_cap / 1e6);
+    println!("  proving (B200)    {:.1} s   [override with HAZYNC_PROVE_S]", prove_s);
+    println!();
+    println!("  execution share of a 1-card chunk: {:.1}%", 100.0 * t_exec / (t_exec + prove_s));
+    println!();
+    println!("  Serial floor with segment proving spread over N cards (E + P/N):");
+    for n_cards in [1usize, 4, 16, 30, 64, 1000] {
+        let t = t_exec + prove_s / n_cards as f64;
+        println!("    N={:<5} {:7.1} s   (speedup {:.1}x, ceiling {:.1}x)",
+            n_cards, t, (t_exec + prove_s) / t, (t_exec + prove_s) / t_exec);
+    }
+    println!();
+    println!("  The ceiling column is what execution alone caps the chunk at. If that number is");
+    println!("  small, distributing segments cannot reach 10 minutes no matter how many cards join,");
+    println!("  and the executor has to be parallelised or split before anything else matters.");
 }
