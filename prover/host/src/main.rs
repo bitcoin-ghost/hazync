@@ -3126,6 +3126,10 @@ fn main() {
         segment_size_cmd();
         return;
     }
+    if args.iter().any(|a| a == "segment-mem") {
+        segment_mem_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "exec-time") {
         exec_time_cmd();
         return;
@@ -3788,4 +3792,86 @@ fn exec_time_cmd() {
     println!("  The ceiling column is what execution alone caps the chunk at. If that number is");
     println!("  small, distributing segments cannot reach 10 minutes no matter how many cards join,");
     println!("  and the executor has to be parallelised or split before anything else matters.");
+}
+
+// Peak memory to prove ONE segment — the number that decides who can be a worker.
+//
+// §29 settled bandwidth for distributing segment proving (0.28 MB mean, 0.53 Mbit/s keeps a worker
+// saturated) and §31 settled the serial floor (execution is 2.2%). The remaining unknown is the
+// prover's WORKING SET per segment. It decides two different things:
+//
+//   CPU  — whether an ordinary Bitcoin Ghost node can take a segment. Nodes run in 3.87 GB.
+//   CUDA — how many proves share one card, which is the #97 OOM in a different disguise.
+//
+// Reports VmHWM, the kernel's peak-RSS high-water mark. It is monotonic across the process, so the
+// FIRST prove's increment is the real per-segment cost and later ones mostly reuse allocations; both
+// are printed so that is visible rather than assumed. VRAM is not visible from inside the process —
+// sample `nvidia-smi` alongside it.
+fn segment_mem_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, get_prover_server};
+    use std::time::Instant;
+
+    fn kb(field: &str) -> f64 {
+        std::fs::read_to_string("/proc/self/status").ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with(field))
+                .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok())))
+            .unwrap_or(0.0) / 1e6  // kB -> GB
+    }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let nseg: usize = std::env::var("HAZYNC_NSEG").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    let backend = std::env::var("RISC0_PROVER").unwrap_or_else(|_| "local".into());
+    println!("=== per-segment prover working set — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  backend {backend}   segments {total}   execution {exec_s:.1} s");
+    println!("  after execute, before any prove:  VmHWM {:.2} GB   VmRSS {:.2} GB", kb("VmHWM:"), kb("VmRSS:"));
+    println!();
+
+    let opts = ProverOpts::default();
+    let server = get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    // Sample across the chunk rather than the first N: segment cost is not uniform, and the first
+    // segment of a session is the least representative one.
+    println!("  {:>4}  {:>8}  {:>10}  {:>10}  {:>10}", "seg", "prove s", "VmHWM GB", "VmRSS GB", "wire MB");
+    let mut peak_delta = 0.0f64;
+    let before_all = kb("VmHWM:");
+    for k in 0..nseg.min(total) {
+        let si = if nseg <= 1 { total / 2 } else { k * (total - 1) / (nseg - 1) };
+        let seg = session.segments[si].resolve().expect("resolve");
+        let wire = bincode::serialize(&seg).map(|v| v.len()).unwrap_or(0) as f64 / 1e6;
+        let before = kb("VmHWM:");
+        let t = Instant::now();
+        let receipt = server.prove_segment(&ctx, &seg).expect("prove segment");
+        let s = t.elapsed().as_secs_f64();
+        receipt.verify_integrity_with_context(&ctx).expect("segment receipt integrity");
+        let hwm = kb("VmHWM:");
+        peak_delta = peak_delta.max(hwm - before);
+        println!("  {:>4}  {:>8.1}  {:>10.2}  {:>10.2}  {:>10.2}", si, s, hwm, kb("VmRSS:"), wire);
+    }
+
+    println!();
+    println!("  peak RSS overall         {:.2} GB", kb("VmHWM:"));
+    println!("  largest single-prove rise {:.2} GB  (first prove pays setup; later ones reuse)", peak_delta);
+    println!("  rise across all proves    {:.2} GB", kb("VmHWM:") - before_all);
+    println!();
+    println!("  A Bitcoin Ghost node runs in 3.87 GB. The figure that has to fit under that is the");
+    println!("  peak RSS of a worker that ONLY proves segments — it never executes, so it never holds");
+    println!("  the witness. Subtract the pre-prove VmHWM above to get that.");
+    println!("  VRAM is invisible from inside the process: sample nvidia-smi alongside for CUDA.");
 }
