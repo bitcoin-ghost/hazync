@@ -66,9 +66,9 @@ struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
 struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // F3: superseded coinbase deletes
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
-    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>, wtxids: Vec<[u8; 32]>,
+    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>,
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
-    inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
+    inputs: Vec<BlockInput>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
     // #54 — the coinbase-SMT root this block starts from, and the sequenced proofs that advance it.
     // Serialised LAST so the field order matches the guest's, which must stay in step for every wire
@@ -302,7 +302,7 @@ fn build_block(
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -630,7 +630,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     let root_next = wire_stump(&forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -753,12 +753,13 @@ fn check_full() {
         let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
         let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
         println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
-        let idlists = (w.txids.len() + w.wtxids.len()) * 32;
-        let outs = w.new_outputs.len() * 32;
+        // `wtxids` and `new_outputs` were removed from the wire format — the guest recomputes both
+        // and never read either, so they were pure transmission cost.
+        let idlists = w.txids.len() * 32;
         let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
         println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
         println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
-        println!("  txids+wtxids = {}B ({:.1}%)   new_outputs = {}B ({:.1}%)", idlists, pct(idlists), outs, pct(outs));
+        println!("  txids = {}B ({:.1}%)", idlists, pct(idlists));
         return;
     }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
@@ -1013,7 +1014,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     let root_next = wire_stump(forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -2090,7 +2091,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
         &cb_spends_from(&inputs, &wtxs));
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -2174,9 +2175,8 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
         cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
-        wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
-        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None,
+        inputs: vec![in0, in1], root_next: wire_stump(&forest), bip30: None,
         in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
 }
 
@@ -2302,8 +2302,8 @@ fn check_bip30() {
         (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
-        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
-        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid],
+        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], root_next: root_next.clone(), bip30,
         in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
     let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
@@ -2498,10 +2498,10 @@ fn bundle_roundtrip_test() {
     let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
     let w = BlockWitness {
         header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
-        txids: vec![[7u8; 32], [8u8; 32]], wtxids: vec![[0u8; 32], [0u8; 32]],
+        txids: vec![[7u8; 32], [8u8; 32]],
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
-        inputs: vec![], new_outputs: vec![[5u8; 32]],
+        inputs: vec![],
         root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None,
         // Round-trip test only — never executed, so a bare standalone transition is enough.
         in_smt_root: [0u8; 32], smt: smt_witness_standalone([1u8; 32], 1, &[]).1,

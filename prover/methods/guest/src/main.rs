@@ -332,17 +332,24 @@ struct SmtWitnessW {
     smt_overwrite: Option<u32>,
 }
 #[derive(Deserialize)]
+// ⚠ `wtxids` and `new_outputs` USED TO BE HERE and were removed. The guest never read either: it
+// recomputes both from the real transaction bytes on purpose, because trusting a host-supplied wtxid
+// would let a prover claim "no witness" to skip the BIP141 commitment, and trusting host-supplied
+// output leaves would let it mint coins the block does not create. Both were still being SENT and
+// deserialised — ~400 KB per block through serde at ~147 cycles/byte, for fields nothing consumed.
+//
+// Removing them is a soundness change as much as a speed one: a field present in the wire format but
+// never read is a field a later change can start honouring by accident. Same reasoning as the `flags`
+// field removed from BlockInput — "do not re-add a host flags input".
 struct BlockWitness {
     header: Vec<u8>,            // 80-byte block header
     height: u32,               // block height (for the subsidy schedule)
     coinbase_tx: Vec<u8>,      // the coinbase tx (its outputs = subsidy + fees)
     txids: Vec<[u8; 32]>,      // all txids in order (internal), for the merkle root
-    wtxids: Vec<[u8; 32]>,     // all wtxids (coinbase = zeros), for the BIP141 witness commitment
     root_prev: WireStump,
     txs: Vec<PackedBytes>,     // the block's non-coinbase txs, ONE shared blob each (raw bytes)
     tx_prevouts: Vec<PackedBytes>, // parallel to `txs`: each tx's concatenated input prevouts blob
     inputs: Vec<BlockInput>,   // non-coinbase input verifications (each refers to its tx by tx_idx)
-    new_outputs: Vec<[u8; 32]>, // leaves of the coins the block creates
     root_next: WireStump,
     bip30: Option<Bip30Overwrite>, // Some ONLY at the two grandfathered BIP30 blocks (F3)
     // #54: coinbase-SMT root entering this block, and the sequenced proofs that advance it. REQUIRED,
