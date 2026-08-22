@@ -3865,6 +3865,25 @@ fn segment_mem_cmd() {
         println!("  {:>4}  {:>8.1}  {:>10.2}  {:>10.2}  {:>10.2}", si, s, hwm, kb("VmRSS:"), wire);
     }
 
+    // Lift and join are the price of a SMALL po2. Segment proving throughput turns out to be flat
+    // across po2 (147.6 / 145.9 / 147.8 us per cycle at 18 / 19 / 20), so shrinking segments to fit a
+    // node's RAM looks free -- until you count recursion. Every segment must be lifted to a succinct
+    // receipt and then joined pairwise, and if lift cost is per-SEGMENT rather than per-CYCLE then
+    // halving po2 doubles the recursion bill. That is the number that decides whether po2 18 holds up.
+    if std::env::var("HAZYNC_LIFT").ok().as_deref() == Some("1") {
+        let seg = session.segments[total / 2].resolve().expect("resolve");
+        let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
+        let t = Instant::now();
+        let a = server.lift(&sr).expect("lift");
+        let lift_s = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let _ = server.join(&a, &a).expect("join");
+        let join_s = t.elapsed().as_secs_f64();
+        println!();
+        println!("  lift  {:.1} s   join  {:.1} s   (per SEGMENT, so they scale with segment COUNT)", lift_s, join_s);
+        println!("  recursion for {} segments in this chunk: {:.0} s", total, total as f64 * (lift_s + join_s));
+    }
+
     println!();
     println!("  peak RSS overall         {:.2} GB", kb("VmHWM:"));
     println!("  largest single-prove rise {:.2} GB  (first prove pays setup; later ones reuse)", peak_delta);
