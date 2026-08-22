@@ -3635,7 +3635,7 @@ mod chunk_packing_tests {
 /// Execute mode: no GPU, no chunk receipts.
 fn vb_stages_cmd() {
     let (_anchor, w) = build_full();
-    let stages: [(u32, &str); 8] = [
+    let stages: &[(u32, &str)] = &[
         (0, "read witness + header/version"),
         (1, "+ per-tx output leaves (tx_out_leaves)"),
         (2, "+ created_at in-block-coin map"),
@@ -3644,6 +3644,15 @@ fn vb_stages_cmd() {
         (5, "+ utreexo adds + root compare"),
         (6, "+ merkle root"),
         (u32::MAX, "+ wtxids & witness commitment (FULL)"),
+        // Inside the input loop, which is 73% of the total. Each `continue`s after one more call, so
+        // the deltas isolate the per-input work that the phase ladder above could only report in bulk.
+        (20, "  [loop] bare iteration (resolve tx/prevouts only)"),
+        (21, "  [loop] + coin_leaf_only + bind digest"),
+        (22, "  [loop] + per-TX check_tx & is_final_tx"),
+        (23, "  [loop] + check_input_locks"),
+        (24, "  [loop] + created_at lookup & in-block bookkeeping"),
+        (3,  "  [loop] + utreexo proof build (NO delete)"),
+        (4,  "  [loop] + utreexo delete"),
     ];
     println!("=== validate_block phase costs — block {} ===", w.height);
     println!("{:<52} {:>16} {:>16}", "phase", "cumulative", "this phase");

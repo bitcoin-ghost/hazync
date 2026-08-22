@@ -95,6 +95,58 @@ static bool coin_leaf(const CTransaction& tx, const std::vector<CTxOut>& spent, 
 
 // Compute ONLY the coin leaf for an input (no VerifyScript) — cheap, used by the aggregation proof
 // to bind each chunk's committed leaf to the right input without re-verifying the (expensive) script.
+// Batch form of `coin_leaf_only`: deserialise the transaction and its prevouts ONCE, then emit a
+// leaf for every input of that transaction the caller owns.
+//
+// WHY. `coin_leaf_only` deserialises the whole transaction and all its prevouts to compute the leaf
+// for ONE input, so a 500-input transaction was deserialised 500 times. Measured on block 962,000 it
+// was 1,794,484,972 cycles — 77% of the aggregate's input loop and 55% of the entire aggregate.
+//
+// This is hazync#135's shape for the third time. #136/#137 removed it from the chunk payload by
+// adding `verify_inputs_batch`; the two-level `tx_bind` removed it from the binding digest; the
+// aggregate's leaf recomputation still had it. This mirrors `verify_inputs_batch` exactly, minus
+// VerifyScript — the aggregate takes script validity from the chunks and only needs the leaf.
+//
+// SEC-3 is preserved: prevouts must match inputs, and an out-of-range index is rejected per input.
+// On any failure the leaf is ZEROED rather than left as whatever was in the caller's buffer — a
+// deterministic function must not return uninitialised memory, and zero is a value no real coin
+// hashes to, so it fails the accumulator delete rather than passing silently.
+extern "C" int coin_leaves_batch(const uint8_t* tx_bytes, unsigned tx_len,
+                                 const uint8_t* prevouts, unsigned prevouts_len,
+                                 unsigned n,
+                                 const uint32_t* input_idx,
+                                 const uint32_t* coin_height,
+                                 const uint32_t* coin_is_coinbase,
+                                 const uint32_t* coin_mtp,
+                                 uint8_t* out_leaves /* 32*n bytes */) {
+    auto zero = [&](unsigned k) { for (int i = 0; i < 32; ++i) out_leaves[32 * k + i] = 0; };
+
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    CTransaction tx{mtx};
+
+    MiniReader pr{reinterpret_cast<const std::byte*>(prevouts),
+                  reinterpret_cast<const std::byte*>(prevouts) + prevouts_len};
+    std::vector<CTxOut> spent;
+    pr >> spent;
+    if (spent.size() != tx.vin.size()) {           // SEC-3
+        for (unsigned k = 0; k < n; k++) zero(k);
+        return -60;
+    }
+
+    for (unsigned k = 0; k < n; k++) {
+        const unsigned i = input_idx[k];
+        if (i >= spent.size()) { zero(k); continue; }   // SEC-3, per input
+        if (!coin_leaf(tx, spent, i, coin_height[k], coin_is_coinbase[k], coin_mtp[k],
+                       out_leaves + 32 * k)) {
+            zero(k);
+        }
+    }
+    return 1;
+}
+
 extern "C" void coin_leaf_only(const uint8_t* tx_bytes, unsigned tx_len, unsigned input_idx,
                                const uint8_t* prevouts, unsigned prevouts_len,
                                uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp,
@@ -181,6 +233,51 @@ extern "C" int is_final_tx(const uint8_t* tx_bytes, unsigned tx_len, int64_t hei
 // Coinbase maturity (100 blocks) + BIP68 relative locktime (height AND time based) for one input.
 // The coin's height/coinbase/creation-MTP are leaf-committed (unforgeable); `spend_mtp` is the
 // current block's median-time-past.
+// Batch form of `check_input_locks`: deserialise the transaction ONCE, check every input the caller
+// owns.
+//
+// WHY. The per-input form decodes the WHOLE transaction with witness data and then reads exactly two
+// things from it — `vin.size()` and `vin[i].nSequence`. Every output, every witness stack and every
+// script is decoded and discarded, once per input. Measured on block 962,000 it was 406,105,202
+// cycles: 61% of the aggregate's input loop after the leaf batching, and 25% of the whole aggregate.
+//
+// The consensus logic below is copied unchanged from `check_input_locks` — same constants, same
+// gating on spend_height/version/disable-bit, same return codes — so a divergence here would be a
+// transcription error, not a design difference. The only change is where the deserialise happens.
+extern "C" int check_input_locks_batch(const uint8_t* tx_bytes, unsigned tx_len,
+                                       unsigned n,
+                                       const uint32_t* input_idx,
+                                       const uint32_t* coin_height,
+                                       const uint32_t* coin_is_coinbase,
+                                       const uint32_t* coin_mtp,
+                                       uint32_t spend_height, uint32_t spend_mtp,
+                                       int32_t* out_results) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+
+    const uint32_t DISABLE = 1u << 31, TYPE = 1u << 22, MASK = 0x0000ffff, GRANULARITY = 9;
+    for (unsigned k = 0; k < n; k++) {
+        const unsigned i = input_idx[k];
+        if (i >= mtx.vin.size()) { out_results[k] = -43; continue; }
+        if (coin_is_coinbase[k] && spend_height < coin_height[k] + 100) { out_results[k] = -40; continue; }
+        uint32_t seq = mtx.vin[i].nSequence;
+        int32_t res = 1;
+        if (spend_height >= 419328 && mtx.version >= 2 && !(seq & DISABLE)) {
+            if (seq & TYPE) {
+                uint64_t required = (uint64_t)coin_mtp[k] + (((uint64_t)(seq & MASK)) << GRANULARITY);
+                if ((uint64_t)spend_mtp < required) res = -42;
+            } else {
+                uint32_t required = coin_height[k] + (seq & MASK);
+                if (spend_height < required) res = -41;
+            }
+        }
+        out_results[k] = res;
+    }
+    return 1;
+}
+
 extern "C" int check_input_locks(const uint8_t* tx_bytes, unsigned tx_len, unsigned input_idx,
                                  uint32_t coin_height, uint32_t coin_is_coinbase, uint32_t coin_mtp,
                                  uint32_t spend_height, uint32_t spend_mtp) {

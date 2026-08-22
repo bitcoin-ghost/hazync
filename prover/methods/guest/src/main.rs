@@ -80,6 +80,22 @@ extern "C" {
         out_leaf: *mut u8,
     ) -> i32;
     /// #135: one call per TRANSACTION — deserialise and Init once, then VerifyScript each owned input.
+    /// Batch leaf recomputation: deserialise a transaction ONCE, emit leaves for the inputs it owns.
+    fn coin_leaves_batch(tx_bytes: *const u8, tx_len: u32,
+                         prevouts: *const u8, prevouts_len: u32,
+                         n: u32,
+                         input_idx: *const u32, coin_height: *const u32,
+                         coin_is_coinbase: *const u32, coin_mtp: *const u32,
+                         out_leaves: *mut u8) -> i32;
+
+    /// Batch relative-locktime/maturity checks: deserialise a transaction ONCE, check its inputs.
+    fn check_input_locks_batch(tx_bytes: *const u8, tx_len: u32,
+                               n: u32,
+                               input_idx: *const u32, coin_height: *const u32,
+                               coin_is_coinbase: *const u32, coin_mtp: *const u32,
+                               spend_height: u32, spend_mtp: u32,
+                               out_results: *mut i32) -> i32;
+
     fn verify_inputs_batch(
         tx: *const u8, tx_len: u32,
         prevouts: *const u8, prevouts_len: u32,
@@ -585,6 +601,58 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // Cache for the per-transaction half of the binding digest (see `tx_bind`).
     let mut bind_cache = [0u8; 32];
     let mut bind_cache_ti: Option<usize> = None;
+
+    // PRE-PASS: recompute every coin leaf with ONE deserialise per transaction.
+    //
+    // `coin_leaf_only` deserialised the whole transaction and all its prevouts to produce the leaf
+    // for a SINGLE input, so a 500-input transaction was deserialised 500 times. Measured on block
+    // 962,000: 1,794,484,972 cycles — 77% of this loop and 55% of the entire aggregate. Only the
+    // aggregation path is affected; `chunk == None` still verifies each input in full and gets its
+    // leaf from `verify_input`, unchanged.
+    //
+    // Inputs of a transaction are contiguous (the host emits them in block order, tx by tx), so a
+    // run-length walk is enough. It is keyed on the RESOLVED tx index rather than on `tx_first`, so
+    // a witness that lies about a transaction boundary still batches by the tx it actually names —
+    // and if a run is broken, this simply makes more batches, never a wrong leaf.
+    let mut pre_leaves: Vec<[u8; 32]> = Vec::new();
+    let mut pre_locks: Vec<i32> = Vec::new();
+    if chunk.is_some() {
+        pre_leaves = vec![[0u8; 32]; w.inputs.len()];
+        pre_locks  = vec![1i32; w.inputs.len()];
+        let mut i = 0usize;
+        while i < w.inputs.len() {
+            let ti = (w.inputs[i].tx_idx as usize).min(w.txs.len() - 1);
+            let mut j = i;
+            while j < w.inputs.len()
+                && (w.inputs[j].tx_idx as usize).min(w.txs.len() - 1) == ti { j += 1; }
+            let n = j - i;
+            let run = &w.inputs[i..j];
+            let idxs: Vec<u32> = run.iter().map(|x| x.input_idx).collect();
+            let chs:  Vec<u32> = run.iter().map(|x| x.coin_height).collect();
+            let cbs:  Vec<u32> = run.iter().map(|x| x.coin_is_coinbase).collect();
+            let mtps: Vec<u32> = run.iter().map(|x| x.coin_mtp).collect();
+            let mut buf = vec![0u8; 32 * n];
+            let mut lockbuf = vec![0i32; n];
+            let rtx = &w.txs[ti].0;
+            let pv  = &w.tx_prevouts[ti].0;
+            unsafe {
+                coin_leaves_batch(rtx.as_ptr(), rtx.len() as u32, pv.as_ptr(), pv.len() as u32,
+                                  n as u32, idxs.as_ptr(), chs.as_ptr(), cbs.as_ptr(), mtps.as_ptr(),
+                                  buf.as_mut_ptr());
+                // Same run, same deserialise-once argument: `check_input_locks` decoded the whole
+                // transaction WITH witness data and then read only `vin.size()` and `nSequence`.
+                check_input_locks_batch(rtx.as_ptr(), rtx.len() as u32,
+                                        n as u32, idxs.as_ptr(), chs.as_ptr(), cbs.as_ptr(),
+                                        mtps.as_ptr(), w.height, mtp, lockbuf.as_mut_ptr());
+            }
+            for k in 0..n {
+                pre_leaves[i + k].copy_from_slice(&buf[32 * k..32 * k + 32]);
+                pre_locks[i + k] = lockbuf[k];
+            }
+            i = j;
+        }
+    }
+
     for (idx, inp) in w.inputs.iter().enumerate() {
         if inp.tx_first == 1 { cur_tx += 1; } // this input begins a new tx (1 = first non-coinbase tx)
         // Resolve this input's shared (de-duplicated) tx + prevouts blob. w.inputs is non-empty here ⇒
@@ -593,6 +661,9 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
         if ti != inp.tx_idx as usize { all_ok = false; }
         let raw_tx = &w.txs[ti].0;
         let prevouts = &w.tx_prevouts[ti].0;
+        // stage 20: bare iteration — resolve ti/raw_tx/prevouts and nothing else. The baseline the
+        // rest of the loop's per-input work is measured against.
+        if stage == 20 { continue; }
         let mut leaf = [0u8; 32];
         let r = match chunk {
             None => unsafe {
@@ -611,13 +682,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
                 // prevouts, coin metadata, and the block's own flags) and require it matches. This binds
                 // both the spending witness and the flags, so a chunk cannot substitute a different
                 // valid spend of the coin or validate it under attacker-chosen weaker flags.
-                unsafe {
-                    coin_leaf_only(
-                        raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
-                        prevouts.as_ptr(), prevouts.len() as u32,
-                        inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, leaf.as_mut_ptr(),
-                    )
-                };
+                leaf = pre_leaves[idx];   // computed once per TRANSACTION in the pre-pass above
                 // The transaction digest is computed ONCE per transaction, not once per input.
                 // `w.inputs` is flat, but a transaction's inputs are contiguous (the host emits them
                 // in block order, tx by tx) so caching on the resolved tx index is sufficient — and
@@ -632,6 +697,8 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
                 if idx < chunk_binds.len() && chunk_binds[idx] == d && all_valid { 1 } else { -1 }
             }
         };
+        // stage 21: + coin_leaf_only and the (now two-level) bind digest.
+        if stage == 21 { continue; }
         script_results.push(r);
         coin_leaves.push(leaf);
 
@@ -653,17 +720,24 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             if !final_ok { all_ok = false; }
         }
 
+        // stage 22: + the per-TX checks (check_tx, is_final_tx) — these run once per transaction,
+        // not once per input, so this delta is per-tx work amortised across 8,006 inputs.
+        if stage == 22 { continue; }
         // Per-INPUT: coinbase maturity + BIP68 relative locktime (height + time).
-        let locks = unsafe {
+        // Aggregation takes the batched result (one deserialise per transaction); the standalone
+        // path still calls per input, so mode 1 / chain_step / prove_range are unchanged.
+        let locks = if chunk.is_some() { pre_locks[idx] } else { unsafe {
             check_input_locks(
                 raw_tx.as_ptr(), raw_tx.len() as u32, inp.input_idx,
                 inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, w.height, mtp,
             )
-        };
+        } };
         if locks != 1 {
             all_ok = false;
         }
 
+        // stage 23: + check_input_locks (C++, per input).
+        if stage == 23 { continue; }
         if r != 1 {
             all_ok = false;
         }
@@ -680,6 +754,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             if inp.proof_i.leaf != leaf {
                 all_ok = false;
             }
+            // stage 24: + the created_at lookup and in-block bookkeeping, WITHOUT building the
+            // utreexo proofs. The deletion itself measured 1.7%, but that says nothing about the cost
+            // of PREPARING its proof: these two lines clone ~28x32 B of siblings per input.
+            if stage == 24 { continue; }
             let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.clone() };
             let pl = to_proof(&inp.proof_last);
             // stage 3 runs this loop WITHOUT the accumulator delete, so (stage 4 - stage 3)
