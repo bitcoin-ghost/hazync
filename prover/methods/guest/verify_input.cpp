@@ -244,6 +244,30 @@ extern "C" int is_final_tx(const uint8_t* tx_bytes, unsigned tx_len, int64_t hei
 // The consensus logic below is copied unchanged from `check_input_locks` — same constants, same
 // gating on spend_height/version/disable-bit, same return codes — so a divergence here would be a
 // transcription error, not a design difference. The only change is where the deserialise happens.
+// Pull `nSequence` for the requested inputs plus the transaction version, from ONE deserialise.
+//
+// The aggregate needs exactly these two things to do the BIP68 relative-locktime and coinbase
+// maturity arithmetic. It used to obtain them by deserialising the whole transaction per input
+// (`check_input_locks`), then per transaction (`check_input_locks_batch`). Handing the raw fields
+// back from the chunk removes the deserialise from the serial phase entirely — and unlike handing
+// back the lock RESULT, it introduces no dependency on the block's median-time-past, which chunk and
+// aggregate derive separately and could disagree about.
+extern "C" int tx_seqs_batch(const uint8_t* tx_bytes, unsigned tx_len, unsigned n,
+                             const uint32_t* input_idx, uint32_t* out_seqs, int32_t* out_version) {
+    MiniReader r{reinterpret_cast<const std::byte*>(tx_bytes),
+                 reinterpret_cast<const std::byte*>(tx_bytes) + tx_len};
+    CMutableTransaction mtx;
+    r >> TX_WITH_WITNESS(mtx);
+    *out_version = mtx.version;
+    for (unsigned k = 0; k < n; k++) {
+        const unsigned i = input_idx[k];
+        // Out of range: report a sequence that disables BIP68 so the caller's arithmetic cannot
+        // silently pass. The input is already rejected by verify_inputs_batch's own -60 guard.
+        out_seqs[k] = (i < mtx.vin.size()) ? mtx.vin[i].nSequence : 0xFFFFFFFFu;
+    }
+    return 1;
+}
+
 extern "C" int check_input_locks_batch(const uint8_t* tx_bytes, unsigned tx_len,
                                        unsigned n,
                                        const uint32_t* input_idx,

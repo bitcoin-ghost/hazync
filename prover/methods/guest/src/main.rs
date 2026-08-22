@@ -178,6 +178,12 @@ extern "C" {
     ) -> u32;
     // Recompute a tx's BIP141 wtxid (into out_wtxid) + return whether it carries witness data (SEC-1).
     fn tx_wtxid_info(tx: *const u8, tx_len: u32, out_wtxid: *mut u8) -> u32;
+
+    /// Pull `nSequence` for the requested inputs and the transaction version, from ONE deserialise.
+    /// Lets the aggregate do the BIP68 / maturity arithmetic itself without decoding the transaction,
+    /// and without depending on an MTP the chunk would have to agree with.
+    fn tx_seqs_batch(tx_bytes: *const u8, tx_len: u32, n: u32,
+                     input_idx: *const u32, out_seqs: *mut u32, out_version: *mut i32) -> i32;
 }
 
 const MAX_BLOCK_WEIGHT: i64 = 4_000_000;
@@ -480,22 +486,24 @@ fn input_bind_from(txb: &[u8; 32], input_idx: u32,
 // `chunk` = aggregation mode: (per-input leaves already script-verified by chunk proofs, all_valid).
 // When Some, scripts are NOT re-verified here — the leaf is recomputed (coin_leaf_only) and matched.
 fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, bool)>) -> BlockResult {
-    validate_block_staged(w, mtp, chunk, u32::MAX, &[])
+    validate_block_staged(w, mtp, chunk, u32::MAX, &[], &[], &[], &[])
 }
 
 /// As `validate_block`, but takes the per-transaction wtxids the CHUNKS computed. Supplying them
 /// skips recomputing every wtxid in the serial aggregate; an empty slice means "recompute", which is
 /// what every non-aggregation caller passes.
 fn validate_block_wtx(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, bool)>,
-                      chunk_wtxids: &[(u32, [u8; 32], u32)]) -> BlockResult {
-    validate_block_staged(w, mtp, chunk, u32::MAX, chunk_wtxids)
+                      chunk_wtxids: &[(u32, [u8; 32], u32)],
+                      chunk_leaves: &[[u8; 32]], chunk_seqs: &[u32], chunk_vers: &[i32]) -> BlockResult {
+    validate_block_staged(w, mtp, chunk, u32::MAX, chunk_wtxids, chunk_leaves, chunk_seqs, chunk_vers)
 }
 
 /// `stage` truncates the work so each phase can be costed by subtraction (mode 12). `u32::MAX` runs
 /// everything, which is what every real caller passes — there is ONE implementation, so the measured
 /// path and the production path cannot drift apart.
 fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, bool)>, stage: u32,
-                         chunk_wtxids: &[(u32, [u8; 32], u32)]) -> BlockResult {
+                         chunk_wtxids: &[(u32, [u8; 32], u32)],
+                         chunk_leaves: &[[u8; 32]], chunk_seqs: &[u32], chunk_vers: &[i32]) -> BlockResult {
     macro_rules! cut { ($n:expr) => { if stage == $n { return BlockResult::default(); } } }
     cut!(0);
     let mut stump = utreexo::Stump::new(w.root_prev.roots.clone(), w.root_prev.num_leaves);
@@ -632,7 +640,33 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // and if a run is broken, this simply makes more batches, never a wrong leaf.
     let mut pre_leaves: Vec<[u8; 32]> = Vec::new();
     let mut pre_locks: Vec<i32> = Vec::new();
-    if chunk.is_some() {
+    // Chunks now commit leaves and locks (they computed the leaves anyway and discarded them), so
+    // this whole pre-pass — a deserialise per transaction in the SERIAL phase — only runs when they
+    // did not supply them.
+    let have_chunk_data = chunk_leaves.len() == w.inputs.len()
+        && chunk_seqs.len() == w.inputs.len() && chunk_vers.len() == w.inputs.len();
+    if have_chunk_data {
+        pre_leaves = chunk_leaves.to_vec();
+        // The BIP68 / maturity arithmetic, done here in Rust from the two raw fields the chunk
+        // returned. Transcribed from `check_input_locks` — same constants, same gating, same codes —
+        // with the deserialise gone. `mtp` is the AGGREGATE's own value, so no coupling is created.
+        const DISABLE: u32 = 1 << 31; const TYPE: u32 = 1 << 22;
+        const MASK: u32 = 0x0000_ffff; const GRAN: u32 = 9;
+        pre_locks = w.inputs.iter().enumerate().map(|(gi, inp)| {
+            if inp.coin_is_coinbase == 1 && w.height < inp.coin_height + 100 { return -40; }
+            let seq = chunk_seqs[gi];
+            if w.height >= 419_328 && chunk_vers[gi] >= 2 && (seq & DISABLE) == 0 {
+                if seq & TYPE != 0 {
+                    let required = inp.coin_mtp as u64 + (((seq & MASK) as u64) << GRAN);
+                    if (mtp as u64) < required { return -42; }
+                } else {
+                    let required = inp.coin_height + (seq & MASK);
+                    if w.height < required { return -41; }
+                }
+            }
+            1
+        }).collect();
+    } else if chunk.is_some() {
         pre_leaves = vec![[0u8; 32]; w.inputs.len()];
         pre_locks  = vec![1i32; w.inputs.len()];
         let mut i = 0usize;
@@ -1460,6 +1494,21 @@ struct ChunkOut {
     /// supply a wtxid for different bytes than the block contains — which is what the old comment
     /// ("recompute from the REAL tx bytes, NOT host-supplied") was protecting against.
     tx_wtxids: Vec<(u32, [u8; 32], u32)>,
+    /// Per-INPUT coin leaves and lock results, parallel to `binds`.
+    ///
+    /// `verify_inputs_batch` already computed the leaves and the chunk threw them away, while the
+    /// aggregate recomputed the identical values — a whole deserialise per transaction in the serial
+    /// phase to reproduce work the parallel phase had already done and discarded.
+    ///
+    /// ⚠ SOUNDNESS: these are trusted because the chunk's JOURNAL IS PROVEN. The chunk proof attests
+    /// that these values came from running the real code over the bytes its bind commits to, and the
+    /// aggregate recomputes that bind from its own copy and requires equality. That is the same
+    /// argument the wtxids rely on — it is recursion doing its job, not a trust assumption.
+    leaves_out: Vec<[u8; 32]>,
+    /// `nSequence` and the transaction version for each input, parallel to `binds`. Enough for the
+    /// aggregate to do the BIP68 / maturity arithmetic itself without deserialising the transaction.
+    seqs_out: Vec<u32>,
+    vers_out: Vec<i32>,
 }
 
 // Mode 4: prove a BATCH of inputs' scripts (the expensive VerifyScript). Parallelisable across a
@@ -1471,6 +1520,9 @@ fn chunk_prove() {
     let n_txs: u32 = env::read();
     let mut binds: Vec<[u8; 32]> = Vec::new();
     let mut tx_wtxids: Vec<(u32, [u8; 32], u32)> = Vec::new();
+    let mut leaves_out: Vec<[u8; 32]> = Vec::new();
+    let mut seqs_out: Vec<u32> = Vec::new();
+    let mut vers_out: Vec<i32> = Vec::new();
     let mut all_valid = true;
     // #135: the payload is grouped by TRANSACTION, and byte blobs arrive raw via read_slice rather
     // than as serde `Vec<u8>`.
@@ -1526,6 +1578,21 @@ fn chunk_prove() {
         let txb = tx_bind(&raw_tx, &prevouts, flags);
         // Per-transaction, in the PARALLEL phase. `binds.len()` is this transaction's first owned
         // input in this chunk's local numbering, which is what the aggregate offsets into.
+        // The leaves `verify_inputs_batch` already filled were being DISCARDED here while the
+        // aggregate recomputed the identical values. Keep them, and also hand back the two fields the
+        // BIP68 lock check needs from the transaction — nSequence and the version.
+        //
+        // Deliberately NOT the lock RESULT: that needs the block's median-time-past, and making the
+        // chunk compute it would require the chunk and the aggregate to agree on an MTP they derive
+        // separately. A disagreement there is a silent consensus divergence. Handing back the two raw
+        // fields lets the aggregate keep doing the arithmetic with its OWN mtp, in Rust, with no
+        // deserialise — the cost being removed — and no new coupling.
+        let mut seqbuf = vec![0u32; k];
+        let mut verbuf = 0i32;
+        unsafe {
+            tx_seqs_batch(raw_tx.as_ptr(), raw_tx.len() as u32, n_owned,
+                          idx.as_ptr(), seqbuf.as_mut_ptr(), &mut verbuf as *mut i32);
+        }
         let first_local = binds.len() as u32;
         let mut wt = [0u8; 32];
         let hw = unsafe { tx_wtxid_info(raw_tx.as_ptr(), raw_tx.len() as u32, wt.as_mut_ptr()) };
@@ -1536,9 +1603,14 @@ fn chunk_prove() {
             // the aggregation can prove the block's input is the one this chunk validated — input_bind
             // (#2). Same commitment, computed in two levels instead of one.
             binds.push(input_bind_from(&txb, idx[j], ch[j], cb[j], mtp[j]));
+            let mut lf = [0u8; 32];
+            lf.copy_from_slice(&leaves[32 * j..32 * j + 32]);
+            leaves_out.push(lf);
+            seqs_out.push(seqbuf[j]);
+            vers_out.push(verbuf);
         }
     }
-    env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds, tx_wtxids });
+    env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds, tx_wtxids, leaves_out, seqs_out, vers_out });
 }
 
 // Mode 5: aggregate K chunk proofs into a block/chain proof. env::verify each chunk (composition),
@@ -1549,6 +1621,9 @@ fn aggregate() {
     let k: u32 = env::read();
     let mut all_binds: Vec<[u8; 32]> = Vec::new();
     let mut chunk_wtxids: Vec<(u32, [u8; 32], u32)> = Vec::new();
+    let mut chunk_leaves: Vec<[u8; 32]> = Vec::new();
+    let mut chunk_seqs: Vec<u32> = Vec::new();
+    let mut chunk_vers: Vec<i32> = Vec::new();
     let mut chunks_ok = true;
     for _ in 0..k {
         let cj: Vec<u8> = env::read();
@@ -1561,6 +1636,9 @@ fn aggregate() {
         // the running offset — the same offset that makes `all_binds` indexable by global input index.
         let base = all_binds.len() as u32;
         for (local_first, wt, hw) in out.tx_wtxids { chunk_wtxids.push((base + local_first, wt, hw)); }
+        chunk_leaves.extend(out.leaves_out);
+        chunk_seqs.extend(out.seqs_out);
+        chunk_vers.extend(out.vers_out);
         all_binds.extend(out.binds);
     }
     let prev_journal: Vec<u8> = env::read();
@@ -1585,7 +1663,8 @@ fn aggregate() {
     let anchor_id = if is_base == 1 { dsha256(&prev_journal) } else { prev.anchor_id };
     let prev_mtp = median_time_past(&prev.recent_times);
 
-    let r = validate_block_wtx(&w, prev_mtp, Some((&all_binds, chunks_ok)), &chunk_wtxids);
+    let r = validate_block_wtx(&w, prev_mtp, Some((&all_binds, chunks_ok)), &chunk_wtxids,
+                               &chunk_leaves, &chunk_seqs, &chunk_vers);
     let block_valid = r.all_ok && r.root_matches && r.pow_ok && r.merkle_ok && r.subsidy_ok && r.weight_ok && r.sigops_ok && r.witness_ok && r.bip34_ok && r.bip30_ok;
     let prevhash_ok = w.header[4..36] == prev.tip_hash[..];
     let carry_ok = normalize(w.root_prev.roots.clone()) == normalize(prev.utxo_roots.clone()) && w.root_prev.num_leaves == prev.utxo_leaves;
@@ -1693,7 +1772,13 @@ fn validate_block_stages() {
         .filter(|(_, inp)| inp.tx_first == 1)
         .map(|(gi, _)| (gi as u32, [0u8; 32], 0u32))
         .collect();
-    let r = validate_block_staged(&w, block_time, Some((&dummy, true)), stage, &dummy_wtx);
+    // Mode 12 also supplies chunk-style leaves and locks, or it measures the recompute fallback
+    // instead of the path the aggregate takes — the mistake the wtxid measurement already made once.
+    let dummy_leaves: Vec<[u8; 32]> = vec![[0u8; 32]; w.inputs.len()];
+    let dummy_seqs: Vec<u32> = vec![0xFFFF_FFFFu32; w.inputs.len()];
+    let dummy_vers: Vec<i32> = vec![2i32; w.inputs.len()];
+    let r = validate_block_staged(&w, block_time, Some((&dummy, true)), stage, &dummy_wtx,
+                                  &dummy_leaves, &dummy_seqs, &dummy_vers);
     // Commit SCALARS drawn from across the result, not the result itself (BlockResult is not
     // Serialize). Consuming them matters: a discarded result invites the optimiser to delete the work
     // being measured, which is the DCE hazard that already bit the #139 parse-only arms. Touching
