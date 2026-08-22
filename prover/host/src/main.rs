@@ -3871,17 +3871,29 @@ fn segment_mem_cmd() {
     // receipt and then joined pairwise, and if lift cost is per-SEGMENT rather than per-CYCLE then
     // halving po2 doubles the recursion bill. That is the number that decides whether po2 18 holds up.
     if std::env::var("HAZYNC_LIFT").ok().as_deref() == Some("1") {
-        let seg = session.segments[total / 2].resolve().expect("resolve");
-        let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
-        let t = Instant::now();
-        let a = server.lift(&sr).expect("lift");
-        let lift_s = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        let _ = server.join(&a, &a).expect("join");
-        let join_s = t.elapsed().as_secs_f64();
+        // CONSECUTIVE segments, not one segment twice. join() checks continuity -- segment a's post
+        // state must be segment b's pre state -- so join(x, x) fails an equality check on the state
+        // digest rather than timing anything. A segment does not follow itself.
+        let i = total / 2;
+        let mut lifted = Vec::new();
+        let mut lift_s = 0.0f64;
+        for k in [i, i + 1] {
+            let seg = session.segments[k].resolve().expect("resolve");
+            let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
+            let t = Instant::now();
+            lifted.push(server.lift(&sr).expect("lift"));
+            lift_s = lift_s.max(t.elapsed().as_secs_f64());
+        }
         println!();
-        println!("  lift  {:.1} s   join  {:.1} s   (per SEGMENT, so they scale with segment COUNT)", lift_s, join_s);
-        println!("  recursion for {} segments in this chunk: {:.0} s", total, total as f64 * (lift_s + join_s));
+        println!("  lift  {:.1} s  (per segment)", lift_s);
+        let t = Instant::now();
+        server.join(&lifted[0], &lifted[1]).expect("join");
+        let join_s = t.elapsed().as_secs_f64();
+        println!("  join  {:.1} s  (per PAIR, so ~1 per segment over a whole tree)", join_s);
+        println!("  recursion for {} segments in this chunk: {:.0} s   ({:.0} s lift + {:.0} s join)",
+            total, total as f64 * lift_s + (total - 1) as f64 * join_s,
+            total as f64 * lift_s, (total - 1) as f64 * join_s);
+        println!("  peak RSS after recursion: {:.2} GB", kb("VmHWM:"));
     }
 
     println!();
