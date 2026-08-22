@@ -16,3 +16,9 @@ build = "build.rs"
 [dev-dependencies]
 sha2 = "0.10"
 hazync-utreexo = { path = "../accumulator" }
+# The AUTHORITY for the lax DER differential (hazync#139). `from_der_lax` in this crate is a port
+# of the very function the guest parser transcribes, so it is the right thing to be checked against
+# — not a reimplementation of our own, which would only prove we made the same mistake twice.
+secp256k1 = { version = "0.29", features = ["rand-std"] }
+rand = "0.8"
+

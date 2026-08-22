@@ -10,6 +10,9 @@ edition = "2021"
 # its ABSOLUTE path into the guest ELF, making the image id depend on the checkout location. The same
 # source is #[path]-included instead, so there is still exactly one copy and no drift.
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ['std', 'unstable'] }
+# hazync#139 EXPERIMENT — bigint2-backed secp256k1, the precompile path. Present to be MEASURED
+# against libsecp on real chain data; nothing routes through it by default.
+risc0-crypto = "0.1.0-rc.1"
 sha2 = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 

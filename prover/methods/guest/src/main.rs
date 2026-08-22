@@ -33,6 +33,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
 mod script_flags;
+// hazync#139 EXPERIMENT — wholesale bigint2 ECDSA. `ecdsa_der` is pure and host-tested;
+// `ecdsa_bigint2` needs the zkVM precompiles and is exercised by mode 11 below.
+mod ecdsa_der;
+mod ecdsa_bigint2;
 use script_flags::block_script_flags;
 
 // A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)
@@ -80,6 +84,11 @@ extern "C" {
         out_leaf: *mut u8,
     ) -> i32;
     /// #135: one call per TRANSACTION — deserialise and Init once, then VerifyScript each owned input.
+    /// hazync#139 differential: Core's real `CPubKey::Verify`. The authority.
+    fn hz_cpubkey_verify(pk: *const u8, pk_len: u32,
+                         sig_der: *const u8, sig_len: u32,
+                         msg32: *const u8) -> i32;
+
     fn verify_inputs_batch(
         tx: *const u8, tx_len: u32,
         prevouts: *const u8, prevouts_len: u32,
@@ -1393,6 +1402,7 @@ fn main() {
         7 => fold_range(),
         8 => test_locks(),
         9 => test_merkle(),
+        11 => ecdsa_differential(),
         _ => panic!("unknown guest mode {mode}"),
     }
 }
@@ -1425,4 +1435,57 @@ fn test_merkle() {
     let mut mutated = 0u8;
     unsafe { merkle_root(flat.as_ptr(), n, root.as_mut_ptr(), &mut mutated) };
     env::commit(&(root, mutated));
+}
+
+/// Mode 11 — hazync#139: does the wholesale bigint2 path agree with Bitcoin?
+///
+/// Runs BOTH implementations over the same triples and counts disagreement. The authority is Core's
+/// real `CPubKey::Verify` via `hz_cpubkey_verify`, not a reconstruction of it — comparing against a
+/// second implementation of our own would only prove we made the same mistake twice.
+///
+/// ⛔ THIS IS THE DELIVERABLE OF #139's EXPERIMENT, not the speed. A disagreement here is a block
+/// the prover would judge differently from the network. The count is what makes "what do we lose"
+/// a measured number instead of an argument.
+///
+/// Runs in EXECUTE mode — no GPU, no proving. Agreement is a correctness question.
+///
+/// Wire format: n:u32, then n records of
+///     pk_len:u32, pk bytes, sig_len:u32, sig DER bytes, msg 32 bytes
+/// Commits: (n, agreed, disagreed, index_of_first_disagreement_or_u32::MAX)
+fn ecdsa_differential() {
+    let n: u32 = env::read();
+    let mut agreed = 0u32;
+    let mut disagreed = 0u32;
+    let mut first_bad = u32::MAX;
+
+    for i in 0..n {
+        let pk_len: u32 = env::read();
+        let mut pk = vec![0u8; pk_len as usize];
+        env::read_slice(&mut pk);
+        let sig_len: u32 = env::read();
+        let mut sig = vec![0u8; sig_len as usize];
+        env::read_slice(&mut sig);
+        let mut msg = [0u8; 32];
+        env::read_slice(&mut msg);
+
+        let authority = unsafe {
+            hz_cpubkey_verify(pk.as_ptr(), pk_len, sig.as_ptr(), sig_len, msg.as_ptr()) == 1
+        };
+        let ours = ecdsa_bigint2::verify_wholesale(&pk, &sig, &msg);
+
+        if authority == ours {
+            agreed += 1;
+        } else {
+            disagreed += 1;
+            if first_bad == u32::MAX { first_bad = i; }
+            // Printed rather than only counted: a bare count tells you something is wrong but not
+            // which case, and these are the inputs someone has to reproduce to fix it.
+            println!(
+                "DISAGREE #{i}: libsecp={authority} bigint2={ours} pk_len={pk_len} sig_len={sig_len}"
+            );
+        }
+    }
+
+    println!("#139 differential: {agreed} agreed, {disagreed} DISAGREED, of {n}");
+    env::commit(&(n, agreed, disagreed, first_bad));
 }

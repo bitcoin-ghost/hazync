@@ -167,3 +167,10 @@ mod tests {
         }
     }
 }
+
+// hazync#139 — the guest's wholesale ECDSA parser, INCLUDED BY PATH, never copied. Same zero-drift
+// rule as the utreexo module above: a test that passes against a stale copy is worse than no test.
+// Only the PARSER is included here. The bigint2 verify path calls zkVM precompiles that do not
+// link on a host target, so its differential runs in-guest — see ecdsa_bigint2.rs.
+#[path = "../../prover/methods/guest/src/ecdsa_der.rs"]
+pub mod ecdsa_der;

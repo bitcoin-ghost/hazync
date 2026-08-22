@@ -3242,6 +3242,10 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "ecdsa-differential") {
+        ecdsa_differential_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "bench-pipeline") {
         bench_pipeline();
         return;
@@ -3742,5 +3746,128 @@ mod chunk_packing_tests {
         assert_eq!(pack_chunks(&[1_950_000], 8), vec![(0, 1)]);
         assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
         assert!(pack_chunks(&[], 8).is_empty());
+    }
+}
+
+/// `ecdsa-differential` — hazync#139: run the wholesale bigint2 path against Core's real
+/// `CPubKey::Verify` over REAL signatures from a real block, in the guest, in execute mode.
+///
+/// Why real signatures rather than generated ones: generated vectors exercise the parser's happy
+/// path and nothing else. The chain contains the format violations the lax parser exists for, plus
+/// uncompressed and (in principle) hybrid pubkeys. Those are the cases a wholesale swap gets wrong.
+///
+/// ⚠ COVERAGE IS PARTIAL AND THE NUMBER SAYS SO. Only P2WPKH and P2PKH inputs are extracted here —
+/// their signature, pubkey and sighash are recoverable without running the interpreter. P2SH,
+/// P2WSH and bare multisig need the redeem/witness script evaluated to know what is being signed,
+/// so they are COUNTED AS SKIPPED rather than quietly omitted. A clean run over 6,000 P2WPKH inputs
+/// is not a clean run over the block.
+fn ecdsa_differential_cmd() {
+    use bitcoin::consensus::deserialize;
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+    use bitcoin::{Amount, Script, Transaction, TxOut};
+
+    let (_anchor, w) = build_full();
+    let mut triples: Vec<(Vec<u8>, Vec<u8>, [u8; 32])> = Vec::new();
+    let (mut skipped_type, mut skipped_err) = (0usize, 0usize);
+    // Counted INDEPENDENTLY, not derived from the parts. A total computed as the sum of its
+    // components can never disagree with them, so it cannot reveal a hole in the extractor.
+    let mut inputs_seen = 0usize;
+    let (mut e_deser, mut e_prevout, mut e_len, mut e_sighash, mut tx_skipped_inputs) = (0usize, 0usize, 0usize, 0usize, 0usize);
+
+    for (t_idx, tb) in w.txs.iter().enumerate() {
+        let tx: Transaction = match deserialize(&tb.0) {
+            Ok(t) => t,
+            Err(_) => { e_deser += 1; skipped_err += 1; continue }
+        };
+        inputs_seen += tx.input.len();
+        // tx_prevouts is a consensus-serialised Vec<TxOut>, one blob per tx, parallel to txs.
+        let prevouts: Vec<TxOut> = match w.tx_prevouts.get(t_idx).and_then(|b| deserialize(&b.0).ok()) {
+            Some(p) => p,
+            None => { e_prevout += 1; tx_skipped_inputs += tx.input.len(); skipped_err += 1; continue }
+        };
+        if prevouts.len() != tx.input.len() {
+            e_len += 1; tx_skipped_inputs += tx.input.len(); skipped_err += 1; continue
+        }
+        let mut cache = SighashCache::new(&tx);
+
+        for (i, input) in tx.input.iter().enumerate() {
+            let spk: &Script = prevouts[i].script_pubkey.as_script();
+            let value: Amount = prevouts[i].value;
+
+            // P2WPKH: witness is exactly [sig||hashtype, pubkey].
+            if spk.is_p2wpkh() {
+                let wit = &input.witness;
+                if wit.len() != 2 { skipped_type += 1; continue }
+                let (sig_ht, pk) = (wit.nth(0).unwrap(), wit.nth(1).unwrap());
+                if sig_ht.is_empty() { skipped_type += 1; continue }
+                let ht = *sig_ht.last().unwrap();
+                let Ok(sighash_ty) = EcdsaSighashType::from_standard(ht as u32) else { skipped_type += 1; continue };
+                // ⚠ Takes the scriptPubKey, NOT the derived script_code — it builds the BIP143
+                // script_code internally. Passing the derived P2PKH form made 6,212 of 6,686
+                // extractable inputs fail, and the failure was invisible until the error counters
+                // were split by cause.
+                match cache.p2wpkh_signature_hash(i, spk, value, sighash_ty) {
+                    Ok(h) => triples.push((pk.to_vec(), sig_ht[..sig_ht.len() - 1].to_vec(), h.to_byte_array())),
+                    Err(_) => { e_sighash += 1; skipped_err += 1 }
+                }
+                continue;
+            }
+
+            // P2PKH: scriptSig is exactly two pushes, [sig||hashtype, pubkey].
+            if spk.is_p2pkh() {
+                // Collect owned copies: the instruction borrows the iterator's temporary.
+                let pushes: Vec<Vec<u8>> = input.script_sig.instructions()
+                    .filter_map(|r| r.ok().and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec())))
+                    .collect();
+                if pushes.len() != 2 || pushes[0].is_empty() { skipped_type += 1; continue }
+                let ht = *pushes[0].last().unwrap();
+                let Ok(sighash_ty) = EcdsaSighashType::from_standard(ht as u32) else { skipped_type += 1; continue };
+                match cache.legacy_signature_hash(i, spk, sighash_ty.to_u32()) {
+                    Ok(h) => triples.push((pushes[1].to_vec(), pushes[0][..pushes[0].len() - 1].to_vec(), h.to_byte_array())),
+                    Err(_) => { e_sighash += 1; skipped_err += 1 }
+                }
+                continue;
+            }
+
+            skipped_type += 1;
+        }
+    }
+
+    println!("=== hazync#139 ECDSA differential — block {} ===", w.height);
+    println!("  inputs seen        {inputs_seen}   (counted, not derived)");
+    println!("  txs: deser-fail {e_deser}  prevout-decode-fail {e_prevout}  len-mismatch {e_len}  -> {tx_skipped_inputs} inputs lost");
+    println!("  sighash errors     {e_sighash}");
+    println!("  triples extracted  {}   (P2WPKH + P2PKH)", triples.len());
+    println!("  skipped, type      {skipped_type}   (P2SH/P2WSH/multisig/taproot — need the interpreter)");
+    println!("  skipped, error     {skipped_err}");
+    if triples.is_empty() { println!("  nothing to compare"); return }
+
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&11u32).unwrap();
+    b.write(&(triples.len() as u32)).unwrap();
+    for (pk, sig, msg) in &triples {
+        b.write(&(pk.len() as u32)).unwrap();
+        b.write_slice(pk);
+        b.write(&(sig.len() as u32)).unwrap();
+        b.write_slice(sig);
+        b.write_slice(msg);
+    }
+    let session = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("execute");
+    let (n, agreed, disagreed, first_bad): (u32, u32, u32, u32) = session.journal.decode().unwrap();
+    println!();
+    println!("  compared           {n}");
+    println!("  AGREED             {agreed}");
+    println!("  DISAGREED          {disagreed}");
+    if disagreed > 0 { println!("  first disagreement at index {first_bad}"); }
+    println!("  guest cycles       {}", session.cycles());
+    println!();
+    if disagreed == 0 {
+        println!("  >>> no disagreement over {n} REAL signatures. That bounds the risk on THIS block's");
+        println!("      extractable types; it does not clear P2SH/P2WSH, and it does not clear the");
+        println!("      pre-BIP66 history the lax parser exists for. Both need their own runs.");
+    } else {
+        println!("  >>> WHOLESALE IS NOT SAFE TO SHIP. {disagreed} of {n} real signatures judged");
+        println!("      differently from Bitcoin. Fix before any timing number is quoted.");
     }
 }

@@ -18,6 +18,7 @@
 #include <arith_uint256.h>
 #include <hash.h>
 #include <uint256.h>
+#include <pubkey.h>   // hazync#139 differential: CPubKey::Verify is the authority side
 #include <chain.h>              // real CBlockIndex (feeds the retarget)
 #include <pow.h>                // real CalculateNextWorkRequired
 #include <consensus/params.h>   // Consensus::Params (mainnet PoW parameters)
@@ -639,3 +640,19 @@ extern "C" int verify_input(const uint8_t* tx_bytes, unsigned tx_len,
                            checker, &err);
     return ok ? 1 : -(int)err - 1; // negative encodes the ScriptError code
 }
+
+// hazync#139 differential — the AUTHORITY side. Calls Core's real `CPubKey::Verify`, not a
+// reconstruction of it, so the comparison is against the code that actually decides validity:
+// pubkey parse, lax DER parse, low-S normalise, libsecp verify, in that order.
+extern "C" int hz_cpubkey_verify(const uint8_t* pk, unsigned pk_len,
+                                 const uint8_t* sig_der, unsigned sig_len,
+                                 const uint8_t* msg32) {
+    CPubKey pubkey(pk, pk + pk_len);
+    // NOTE: IsValid() is checked INSIDE CPubKey::Verify, so it is deliberately not pre-checked here —
+    // doing so would test a different function from the one the interpreter calls.
+    std::vector<unsigned char> sig(sig_der, sig_der + sig_len);
+    uint256 hash;
+    memcpy(hash.begin(), msg32, 32);
+    return pubkey.Verify(hash, sig) ? 1 : 0;
+}
+
