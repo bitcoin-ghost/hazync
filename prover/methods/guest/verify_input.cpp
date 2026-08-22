@@ -203,6 +203,23 @@ extern "C" uint32_t tx_out_leaves(const uint8_t* tx_bytes, unsigned tx_len,
     return n;
 }
 
+// Batch form: txid and output leaves for a transaction, from the deserialise the chunk already did.
+//
+// Identical output to `tx_out_leaves` — it simply reuses an already-decoded transaction instead of
+// decoding it again in the serial aggregate. The aggregate's `gather()` cost 143 M cycles on block
+// 962,000 doing exactly this work over bytes the chunks were already holding.
+//
+// ⚠ THE LEAF COMMITS TO `block_time` (the block's median-time-past), so a caller computing these in a
+// chunk must use the SAME value the aggregate will. Unlike the lock check, getting that wrong is
+// FAIL-CLOSED: a mismatched leaf will not match `root_next`, so the block is rejected rather than
+// wrongly accepted. A systematic mismatch breaks every block loudly instead of accepting bad ones.
+extern "C" uint32_t tx_out_leaves_from(const uint8_t* tx_bytes, unsigned tx_len,
+                                       uint32_t height, uint32_t is_coinbase, uint32_t block_time,
+                                       uint8_t* out, uint8_t* out_txid) {
+    return tx_out_leaves(tx_bytes, tx_len, height, is_coinbase, block_time, out, out_txid);
+}
+
+
 // Recompute a tx's BIP141 wtxid and whether it carries witness data, from the REAL tx bytes — so the
 // guest derives has_witness + the witness merkle leaves itself instead of trusting a host-supplied
 // wtxid list (SEC-1). Uses Core's own GetWitnessHash()/HasWitness(). Non-witness tx: wtxid == txid.

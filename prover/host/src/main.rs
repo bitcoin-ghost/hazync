@@ -3122,6 +3122,10 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "segment-size") {
+        segment_size_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "vb-stages") {
         vb_stages_cmd();
         return;
@@ -3656,6 +3660,7 @@ fn vb_stages_cmd() {
         // Not a phase: asserts the batched leaves and locks equal the per-input ones for EVERY input.
         // It costs more than the full run (it does both), which is the point — correctness, not speed.
         (30, "DIFFERENTIAL: batch vs per-input, every input"),
+        (31, "DIFFERENTIAL: chunk-supplied leaves/seqs/wtxids vs recomputed"),
     ];
     println!("=== validate_block phase costs — block {} ===", w.height);
     println!("{:<52} {:>16} {:>16}", "phase", "cumulative", "this phase");
@@ -3675,4 +3680,48 @@ fn vb_stages_cmd() {
     println!();
     println!("The largest 'this phase' is where the aggregate's time goes. Anything that is per-TX");
     println!("and pure is a parallelisation candidate; utreexo is sequential accumulator state.");
+}
+
+/// `segment-size` — how big is one segment on the wire?
+///
+/// Decides whether segment-level distribution is a LAN-only architecture or something ordinary nodes
+/// could join. A worker proving a segment needs that segment; if it is hundreds of MB the network is
+/// the bottleneck rather than the GPU, and the idea is a rack, not a network.
+fn segment_size_cmd() {
+    use risc0_zkvm::ExecutorImpl;
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let n = session.segments.len();
+    let mut sizes: Vec<usize> = Vec::new();
+    for r in session.segments.iter() {
+        let seg = r.resolve().expect("resolve");
+        sizes.push(bincode::serialize(&seg).expect("serialize").len());
+    }
+    sizes.sort_unstable();
+    let tot: usize = sizes.iter().sum();
+    println!("=== segment wire size — block {} chunk {} at po2 {} ===", w.height, idx, seg_po2());
+    println!("  segments          {n}");
+    println!("  total             {:.1} MB", tot as f64 / 1e6);
+    println!("  mean              {:.2} MB", tot as f64 / n as f64 / 1e6);
+    println!("  min / median / max  {:.2} / {:.2} / {:.2} MB",
+        sizes[0] as f64 / 1e6, sizes[n / 2] as f64 / 1e6, sizes[n - 1] as f64 / 1e6);
+    println!();
+    println!("  A whole block is ~16x this. To distribute segment proving, each worker must receive");
+    println!("  its segment: that is the mean above per segment proved, against ~4.2 s of GPU work.");
+    let mean_mb = tot as f64 / n as f64 / 1e6;
+    // MB -> Mbit is x8, then divide by the seconds of work it buys. (An earlier version of this line
+    // multiplied by a further 1000 and printed a figure 1000x too large.)
+    println!("  Break-even at 4.2 s/segment: {:.2} Mbit/s keeps one worker saturated.",
+        mean_mb * 8.0 / 4.2);
+    println!("  So the constraint on distributing segments is not bandwidth. It is the prover's");
+    println!("  working set per segment, which this does not measure.");
 }

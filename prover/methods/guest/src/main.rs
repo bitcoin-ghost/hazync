@@ -645,6 +645,70 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // did not supply them.
     let have_chunk_data = chunk_leaves.len() == w.inputs.len()
         && chunk_seqs.len() == w.inputs.len() && chunk_vers.len() == w.inputs.len();
+
+    // stage 31: DIFFERENTIAL for the values that now ARRIVE FROM THE CHUNKS rather than being
+    // computed here. Stage 30 checks batch-vs-per-input WITHIN this function; it says nothing about
+    // whether a chunk-supplied leaf, sequence or version equals what this code would have produced.
+    //
+    // That distinction matters because these are a different KIND of change. Removing a quadratic
+    // re-hash cannot alter what is proven — the same value comes out. Taking the coin leaf from the
+    // chunk's journal changes WHO COMPUTES a consensus-relevant value. It is sound because the
+    // journal is proven and the bind is checked against this side's own bytes, but that is an
+    // argument, and an argument about consensus code deserves a test.
+    // ⚠ WHAT THIS CAN AND CANNOT PROVE. The LOCK check is genuine: it compares arithmetic
+    // reimplemented in Rust against the original C++ `check_input_locks`, two independent
+    // implementations. The leaf and wtxid checks are weaker HERE, because mode 12 derives its inputs
+    // with the same functions it then compares against — that tests determinism, not agreement with a
+    // real chunk. Proving the end-to-end property needs mode 5 with genuine receipts on a matching
+    // guest. Stated rather than left for someone to assume.
+    if stage == 31 && have_chunk_data {
+        for (gi, inp) in w.inputs.iter().enumerate() {
+            let ti = (inp.tx_idx as usize).min(w.txs.len() - 1);
+            let rtx = &w.txs[ti].0;
+            let pv = &w.tx_prevouts[ti].0;
+            let mut want = [0u8; 32];
+            unsafe {
+                coin_leaf_only(rtx.as_ptr(), rtx.len() as u32, inp.input_idx,
+                               pv.as_ptr(), pv.len() as u32,
+                               inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp,
+                               want.as_mut_ptr());
+            }
+            assert!(chunk_leaves[gi] == want,
+                "CHUNK LEAF MISMATCH at input {gi} (tx {ti}, vin {})", inp.input_idx);
+
+            // The lock arithmetic done here from chunk-supplied seq/version must equal what the
+            // original per-input C++ path produces from the transaction itself.
+            let want_lock = unsafe {
+                check_input_locks(rtx.as_ptr(), rtx.len() as u32, inp.input_idx,
+                                  inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, w.height, mtp)
+            };
+            const DISABLE: u32 = 1 << 31; const TYPE: u32 = 1 << 22;
+            const MASK: u32 = 0x0000_ffff; const GRAN: u32 = 9;
+            let seq = chunk_seqs[gi];
+            let got_lock = if inp.coin_is_coinbase == 1 && w.height < inp.coin_height + 100 { -40 }
+                else if w.height >= 419_328 && chunk_vers[gi] >= 2 && (seq & DISABLE) == 0 {
+                    if seq & TYPE != 0 {
+                        let req = inp.coin_mtp as u64 + (((seq & MASK) as u64) << GRAN);
+                        if (mtp as u64) < req { -42 } else { 1 }
+                    } else {
+                        let req = inp.coin_height + (seq & MASK);
+                        if w.height < req { -41 } else { 1 }
+                    }
+                } else { 1 };
+            assert!(got_lock == want_lock,
+                "CHUNK LOCK MISMATCH at input {gi}: from-chunk={got_lock} per-input={want_lock}");
+        }
+        // And the wtxids the chunks supplied, against recomputing them here.
+        for (gi, wt, hw) in chunk_wtxids.iter() {
+            let inp = &w.inputs[*gi as usize];
+            let rtx = &w.txs[(inp.tx_idx as usize).min(w.txs.len() - 1)].0;
+            let mut want = [0u8; 32];
+            let want_hw = unsafe { tx_wtxid_info(rtx.as_ptr(), rtx.len() as u32, want.as_mut_ptr()) };
+            assert!(*wt == want && *hw == want_hw,
+                "CHUNK WTXID MISMATCH at input {gi}");
+        }
+    }
+
     if have_chunk_data {
         pre_leaves = chunk_leaves.to_vec();
         // The BIP68 / maturity arithmetic, done here in Rust from the two raw fields the chunk
@@ -1768,15 +1832,56 @@ fn validate_block_stages() {
     // transaction boundary, keyed by global input index. Without this mode 12 passes an empty slice,
     // takes the recompute fallback, and cannot see the very change it is measuring. The values are
     // dummies: the map path costs the same whether the digest is right, and this measures cycles.
+    // REAL wtxids, for the same reason the leaves are real: they are an INPUT now, and feeding
+    // zeros measures (and mis-asserts on) a path the aggregate never takes.
     let dummy_wtx: Vec<(u32, [u8; 32], u32)> = w.inputs.iter().enumerate()
         .filter(|(_, inp)| inp.tx_first == 1)
-        .map(|(gi, _)| (gi as u32, [0u8; 32], 0u32))
+        .map(|(gi, inp)| {
+            let ti = (inp.tx_idx as usize).min(w.txs.len().saturating_sub(1));
+            let rtx = &w.txs[ti].0;
+            let mut wt = [0u8; 32];
+            let hw = unsafe { tx_wtxid_info(rtx.as_ptr(), rtx.len() as u32, wt.as_mut_ptr()) };
+            (gi as u32, wt, hw)
+        })
         .collect();
     // Mode 12 also supplies chunk-style leaves and locks, or it measures the recompute fallback
     // instead of the path the aggregate takes — the mistake the wtxid measurement already made once.
-    let dummy_leaves: Vec<[u8; 32]> = vec![[0u8; 32]; w.inputs.len()];
-    let dummy_seqs: Vec<u32> = vec![0xFFFF_FFFFu32; w.inputs.len()];
-    let dummy_vers: Vec<i32> = vec![2i32; w.inputs.len()];
+    // REAL leaves, not zeros. Dummy binds are fine — a mismatch takes the same branch and does the
+    // same work — but leaves are no longer computed here, they are an INPUT, and all-zero leaves fail
+    // the accumulator delete fast. That made the utreexo phase read 16.6 M against a true ~57 M. A
+    // harness feeding values the real caller never supplies measures a path the real code never takes.
+    let dummy_leaves: Vec<[u8; 32]> = {
+        let mut v = vec![[0u8; 32]; w.inputs.len()];
+        for (gi, inp) in w.inputs.iter().enumerate() {
+            let ti = (inp.tx_idx as usize).min(w.txs.len().saturating_sub(1));
+            if ti < w.txs.len() {
+                let rtx = &w.txs[ti].0;
+                let pv = &w.tx_prevouts[ti].0;
+                unsafe {
+                    coin_leaf_only(rtx.as_ptr(), rtx.len() as u32, inp.input_idx,
+                                   pv.as_ptr(), pv.len() as u32,
+                                   inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp,
+                                   v[gi].as_mut_ptr());
+                }
+            }
+        }
+        v
+    };
+    // REAL sequence numbers and versions, pulled the way a chunk would pull them.
+    let (mut dummy_seqs, mut dummy_vers) = (vec![0u32; w.inputs.len()], vec![0i32; w.inputs.len()]);
+    for (gi, inp) in w.inputs.iter().enumerate() {
+        let ti = (inp.tx_idx as usize).min(w.txs.len().saturating_sub(1));
+        let rtx = &w.txs[ti].0;
+        let one = [inp.input_idx];
+        let mut sq = [0u32; 1];
+        let mut vr = 0i32;
+        unsafe {
+            tx_seqs_batch(rtx.as_ptr(), rtx.len() as u32, 1, one.as_ptr(),
+                          sq.as_mut_ptr(), &mut vr as *mut i32);
+        }
+        dummy_seqs[gi] = sq[0];
+        dummy_vers[gi] = vr;
+    }
     let r = validate_block_staged(&w, block_time, Some((&dummy, true)), stage, &dummy_wtx,
                                   &dummy_leaves, &dummy_seqs, &dummy_vers);
     // Commit SCALARS drawn from across the result, not the result itself (BlockResult is not
