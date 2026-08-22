@@ -363,6 +363,7 @@ fn normalize(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
 
 // Full result of validating one block — the block-level flags plus the derived facts the chain
 // step needs (this block's hash, its nBits, and the resulting UTXO root).
+#[derive(Default)]
 struct BlockResult {
     script_results: Vec<i32>,
     tx_checks: Vec<i32>,
@@ -400,18 +401,51 @@ fn dsha256(data: &[u8]) -> [u8; 32] {
 // it from the block's own input and requires equality. Without it a chunk could prove "some valid spend
 // of this coin under attacker-chosen (weaker) flags" and the aggregation would accept a DIFFERENT
 // spending witness / lower-flag verification for the block's input. Length-prefixed to be unambiguous.
+/// The two halves composed. Kept as the single-call reference form — no hot path uses it, because
+/// every caller now hoists `tx_bind` out of its per-input loop, which is the entire point.
+#[allow(dead_code)]
 fn input_bind(raw_tx: &[u8], input_idx: u32, prevouts: &[u8],
               coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32, flags: u32) -> [u8; 32] {
-    let mut m = Vec::with_capacity(raw_tx.len() + prevouts.len() + 24);
+    input_bind_from(&tx_bind(raw_tx, prevouts, flags), input_idx, coin_height, coin_is_coinbase, coin_mtp)
+}
+
+/// The per-TRANSACTION half of the binding digest — everything every input of a transaction shares.
+///
+/// Split out because the single-level version hashed the WHOLE transaction and ALL its prevouts once
+/// per INPUT. A transaction with 500 inputs was hashed 500 times, and block 962,000's chunk 2 carries
+/// 29.7 MB across 501 inputs. Measured on that block, the aggregate's input loop was 2,514,900,000
+/// cycles — 73% of the entire aggregate — against utreexo deletion at 1.7%.
+///
+/// This is the same quadratic shape hazync#135 was filed about. #136/#137 removed it from the chunk
+/// PAYLOAD (ship and `Init` each transaction once); it survived here because the digest is computed
+/// per input on both sides.
+///
+/// ⚠ BOTH SIDES MUST CHANGE TOGETHER. The chunk commits these digests and the aggregate recomputes
+/// them and requires equality; a one-sided change makes every input mismatch.
+fn tx_bind(raw_tx: &[u8], prevouts: &[u8], flags: u32) -> [u8; 32] {
+    let mut m = Vec::with_capacity(raw_tx.len() + prevouts.len() + 12);
     m.extend_from_slice(&(raw_tx.len() as u32).to_le_bytes());
     m.extend_from_slice(raw_tx);
-    m.extend_from_slice(&input_idx.to_le_bytes());
     m.extend_from_slice(&(prevouts.len() as u32).to_le_bytes());
     m.extend_from_slice(prevouts);
-    m.extend_from_slice(&coin_height.to_le_bytes());
-    m.extend_from_slice(&coin_is_coinbase.to_le_bytes());
-    m.extend_from_slice(&coin_mtp.to_le_bytes());
     m.extend_from_slice(&flags.to_le_bytes());
+    dsha256(&m)
+}
+
+/// The per-INPUT half: the transaction's digest plus the fields that differ between its inputs.
+///
+/// Binding is preserved rather than weakened. `tx_bind` commits to the transaction bytes, its
+/// prevouts and the block's flags; this commits to that digest plus the input index and coin
+/// metadata. So the result still commits transitively to every field the single-level version did,
+/// and the fixed-width layout keeps it unambiguous without length prefixes.
+fn input_bind_from(txb: &[u8; 32], input_idx: u32,
+                   coin_height: u32, coin_is_coinbase: u32, coin_mtp: u32) -> [u8; 32] {
+    let mut m = [0u8; 48];
+    m[..32].copy_from_slice(txb);
+    m[32..36].copy_from_slice(&input_idx.to_le_bytes());
+    m[36..40].copy_from_slice(&coin_height.to_le_bytes());
+    m[40..44].copy_from_slice(&coin_is_coinbase.to_le_bytes());
+    m[44..48].copy_from_slice(&coin_mtp.to_le_bytes());
     dsha256(&m)
 }
 
@@ -423,6 +457,15 @@ fn input_bind(raw_tx: &[u8], input_idx: u32, prevouts: &[u8],
 // `chunk` = aggregation mode: (per-input leaves already script-verified by chunk proofs, all_valid).
 // When Some, scripts are NOT re-verified here — the leaf is recomputed (coin_leaf_only) and matched.
 fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, bool)>) -> BlockResult {
+    validate_block_staged(w, mtp, chunk, u32::MAX)
+}
+
+/// `stage` truncates the work so each phase can be costed by subtraction (mode 12). `u32::MAX` runs
+/// everything, which is what every real caller passes — there is ONE implementation, so the measured
+/// path and the production path cannot drift apart.
+fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, bool)>, stage: u32) -> BlockResult {
+    macro_rules! cut { ($n:expr) => { if stage == $n { return BlockResult::default(); } } }
+    cut!(0);
     let mut stump = utreexo::Stump::new(w.root_prev.roots.clone(), w.root_prev.num_leaves);
     let mut script_results = Vec::with_capacity(w.inputs.len());
     let mut tx_checks = Vec::with_capacity(w.inputs.len());
@@ -484,6 +527,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // on to accumulate every other tx's leaves, so the same subtraction further down the function
     // silently yields the whole block's output count. It did, and the fixture blocks caught it.
     let cb_outputs = (output_leaves.len() - cb_start) as u32;
+    cut!(1);   // <- stage 1 boundary: per-tx tx_out_leaves done
     for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
     if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
     // The de-duplicated per-tx blobs: one raw_tx + one prevouts blob per non-coinbase tx. Bind their
@@ -537,6 +581,10 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         if !group_ok { all_ok = false; }
     }
 
+    cut!(2);   // <- stage 2 boundary: created_at map built
+    // Cache for the per-transaction half of the binding digest (see `tx_bind`).
+    let mut bind_cache = [0u8; 32];
+    let mut bind_cache_ti: Option<usize> = None;
     for (idx, inp) in w.inputs.iter().enumerate() {
         if inp.tx_first == 1 { cur_tx += 1; } // this input begins a new tx (1 = first non-coinbase tx)
         // Resolve this input's shared (de-duplicated) tx + prevouts blob. w.inputs is non-empty here ⇒
@@ -570,8 +618,17 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
                         inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, leaf.as_mut_ptr(),
                     )
                 };
-                let d = input_bind(raw_tx, inp.input_idx, prevouts,
-                    inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp, flags);
+                // The transaction digest is computed ONCE per transaction, not once per input.
+                // `w.inputs` is flat, but a transaction's inputs are contiguous (the host emits them
+                // in block order, tx by tx) so caching on the resolved tx index is sufficient — and
+                // it is keyed on `ti`, not on `tx_first`, so a malformed witness that lies about the
+                // boundary still gets the digest for the transaction it actually names.
+                if bind_cache_ti != Some(ti) {
+                    bind_cache = tx_bind(raw_tx, prevouts, flags);
+                    bind_cache_ti = Some(ti);
+                }
+                let d = input_bind_from(&bind_cache, inp.input_idx,
+                    inp.coin_height, inp.coin_is_coinbase, inp.coin_mtp);
                 if idx < chunk_binds.len() && chunk_binds[idx] == d && all_valid { 1 } else { -1 }
             }
         };
@@ -625,7 +682,9 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
             }
             let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.clone() };
             let pl = to_proof(&inp.proof_last);
-            if !stump.delete(inp.global_pos, &pi, &pl) {
+            // stage 3 runs this loop WITHOUT the accumulator delete, so (stage 4 - stage 3)
+            // isolates utreexo deletion from the per-input `input_bind` hashing that shares it.
+            if stage != 3 && !stump.delete(inp.global_pos, &pi, &pl) {
                 all_ok = false;
             }
         }
@@ -659,6 +718,10 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         (None, false) => {}
     }
 
+    // stages 3 and 4 both stop here: 3 ran the loop WITHOUT utreexo deletes, 4 with them, so the
+    // difference isolates deletion. (The first version had no cut for 3, so it ran the whole
+    // function and its cumulative exceeded stage 4's — the 'this phase' column read as nonsense.)
+    if stage == 3 || stage == 4 { return BlockResult::default(); }
     // Add the SURVIVING created outputs — recomputed from the txs (unspendable skipped, in-block-spent
     // cancelled), in canonical order (coinbase then each tx, vout order). NOT host-supplied new_outputs.
     for leaf in &output_leaves {
@@ -671,6 +734,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
         stump.normalized() == normalize(w.root_next.roots.clone()) && stump.num_leaves == w.root_next.num_leaves;
 
     // ---- Block-level checks: PoW, merkle root, coinbase subsidy (no over-issuance). ----
+    cut!(5);   // <- stage 5 boundary: utreexo adds + root compare done
     let pow_ok = unsafe { check_pow(w.header.as_ptr()) } == 1;
 
     let mut mroot = [0u8; 32];
@@ -680,6 +744,7 @@ fn validate_block(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32]>, boo
     // root matches header AND the tree is not malleated (CVE-2012-2459 duplicate-txid mutation).
     let merkle_ok = mroot[..] == w.header[36..68] && mutated == 0; // header 36..68 = hashMerkleRoot
 
+    cut!(6);   // <- stage 6 boundary: merkle root done
     // BIP141 witness commitment (SEC-1): recompute the wtxids + has_witness from the REAL tx bytes —
     // NOT the host-supplied w.wtxids — so a prover cannot claim "no witness" to skip the commitment.
     // Coinbase wtxid is committed as all-zeros in the witness merkle (BIP141), but its OWN witness data
@@ -1304,12 +1369,16 @@ fn chunk_prove() {
             )
         };
         if structural != 1 { all_valid = false; }
+        // ONE digest for the transaction, reused by every input it owns. The payload was already
+        // grouped by transaction (#137); this removes the last place the whole transaction was still
+        // being hashed per input.
+        let txb = tx_bind(&raw_tx, &prevouts, flags);
         for j in 0..k {
             if results[j] != 1 { all_valid = false; }
             // Bind exactly what was verified (tx bytes, input idx, prevouts, coin metadata, flags) so
             // the aggregation can prove the block's input is the one this chunk validated — input_bind
-            // (#2). Unchanged: the same digest over the same bytes.
-            binds.push(input_bind(&raw_tx, idx[j], &prevouts, ch[j], cb[j], mtp[j], flags));
+            // (#2). Same commitment, computed in two levels instead of one.
+            binds.push(input_bind_from(&txb, idx[j], ch[j], cb[j], mtp[j]));
         }
     }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds });
@@ -1393,6 +1462,7 @@ fn main() {
         7 => fold_range(),
         8 => test_locks(),
         9 => test_merkle(),
+        12 => validate_block_stages(),
         _ => panic!("unknown guest mode {mode}"),
     }
 }
@@ -1425,4 +1495,55 @@ fn test_merkle() {
     let mut mutated = 0u8;
     unsafe { merkle_root(flat.as_ptr(), n, root.as_mut_ptr(), &mut mutated) };
     env::commit(&(root, mutated));
+}
+
+
+/// Mode 12 — hazync: WHERE do the aggregate's cycles go?
+///
+/// The aggregate measured 3,636,355,430 cycles on block 962,000 — 3.8x a single chunk, and 21% of the
+/// whole block's work — while being SERIAL where chunks are parallel. Before optimising any part of
+/// it, find out which part it is. This session has already been wrong twice about what dominates.
+///
+/// Runs `validate_block` down the AGGREGATION path (`chunk = Some`), so scripts are NOT re-verified —
+/// the same path mode 5 takes. Dummy binds are enough: a bind MISMATCH takes the same branch and does
+/// the same hashing, it only flips the result, and we are measuring cycles not validity.
+///
+/// `stage` truncates the work, so each phase costs (stage N) - (stage N-1):
+///   0 = read + header/version only          4 = + utreexo deletes
+///   1 = + per-tx output leaves (tx_out_leaves)   5 = + utreexo adds + root compare
+///   2 = + created_at map                    6 = + merkle root
+///   3 = + per-input binds & tx checks        7 = full (wtxid + witness commitment)
+///
+/// Execute mode, no GPU, no receipts.
+fn validate_block_stages() {
+    let stage: u32 = env::read();
+    let w: BlockWitness = env::read();
+    let block_time = u32::from_le_bytes(w.header[68..72].try_into().unwrap());
+    // Binds that cannot match. The aggregation branch still recomputes `input_bind` over the whole tx
+    // for every input — which is the cost under investigation — and then compares. Comparing to the
+    // wrong value costs the same as comparing to the right one.
+    let dummy: Vec<[u8; 32]> = vec![[0u8; 32]; w.inputs.len()];
+    let r = validate_block_staged(&w, block_time, Some((&dummy, true)), stage);
+    // Commit SCALARS drawn from across the result, not the result itself (BlockResult is not
+    // Serialize). Consuming them matters: a discarded result invites the optimiser to delete the work
+    // being measured, which is the DCE hazard that already bit the #139 parse-only arms. Touching
+    // fields from every phase keeps the whole path live.
+    // Fold every phase's output into ONE value and commit that. serde only implements Serialize for
+    // tuples up to 16 elements, and BlockResult is not Serialize at all — but the reason for touching
+    // all of these is DCE, not reporting: a discarded result invites the optimiser to delete the work
+    // being measured, which is what understated the #139 parse-only arms. A checksum consumes them.
+    let mut fold: u64 = stage as u64;
+    for b in [r.all_ok, r.root_matches, r.merkle_ok, r.witness_ok, r.pow_ok,
+              r.subsidy_ok, r.weight_ok, r.sigops_ok, r.bip30_ok, r.bip34_ok] {
+        fold = fold.rotate_left(1) ^ (b as u64);
+    }
+    for v in [r.total_fee as u64, r.coinbase_val as u64, r.subsidy as u64,
+              r.script_results.len() as u64, r.tx_checks.len() as u64, r.coin_leaves.len() as u64,
+              r.nbits as u64] {
+        fold = fold.rotate_left(7) ^ v;
+    }
+    for byte in r.tip_hash.iter().chain(r.out_smt_root.iter()) {
+        fold = fold.rotate_left(3) ^ (*byte as u64);
+    }
+    env::commit(&(stage, fold));
 }

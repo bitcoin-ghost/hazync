@@ -3122,6 +3122,10 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "vb-stages") {
+        vb_stages_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "chunk-profile") {
         chunk_profile();
         return;
@@ -3619,4 +3623,44 @@ mod chunk_packing_tests {
         assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
         assert!(pack_chunks(&[], 8).is_empty());
     }
+}
+
+/// `vb-stages` — hazync: cost each phase of the aggregate's `validate_block` by subtraction.
+///
+/// The aggregate is 3,636,355,430 cycles on block 962,000 — 3.8x a single chunk, 21% of the block's
+/// total work, and SERIAL where chunks are parallel. Optimising it without knowing which phase it is
+/// would be guessing, and this codebase has a habit of punishing that.
+///
+/// Runs the AGGREGATION path (scripts not re-verified), so the numbers describe mode 5 and not mode 1.
+/// Execute mode: no GPU, no chunk receipts.
+fn vb_stages_cmd() {
+    let (_anchor, w) = build_full();
+    let stages: [(u32, &str); 8] = [
+        (0, "read witness + header/version"),
+        (1, "+ per-tx output leaves (tx_out_leaves)"),
+        (2, "+ created_at in-block-coin map"),
+        (3, "+ input loop: binds & per-tx checks (NO utreexo delete)"),
+        (4, "+ utreexo deletes"),
+        (5, "+ utreexo adds + root compare"),
+        (6, "+ merkle root"),
+        (u32::MAX, "+ wtxids & witness commitment (FULL)"),
+    ];
+    println!("=== validate_block phase costs — block {} ===", w.height);
+    println!("{:<52} {:>16} {:>16}", "phase", "cumulative", "this phase");
+    let mut prev = 0u64;
+    for (stage, label) in stages {
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&12u32).unwrap();
+        b.write(&stage).unwrap();
+        b.write(&w).unwrap();
+        let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("execute mode 12");
+        let c = s.cycles();
+        let delta = c.saturating_sub(prev);
+        println!("{label:<52} {c:>16} {delta:>16}");
+        prev = c;
+    }
+    println!();
+    println!("The largest 'this phase' is where the aggregate's time goes. Anything that is per-TX");
+    println!("and pure is a parallelisation candidate; utreexo is sequential accumulator state.");
 }
