@@ -129,3 +129,44 @@ reassigns the segment, and proving the same segment twice is harmless.
   A heterogeneous fleet cannot share one segment size, and a session's segments are fixed
   at execution time — so the coordinator must partition by worker class, or run separate
   sessions per class. **This is unresolved and is the biggest design risk.**
+
+## Measured: a second machine added nothing, because of the transport
+
+Two matched L40S, same datacentre, block 741000 chunk 0, po2 18, 1,684 segments:
+
+| config | workers | segment prove | join tree |
+|---|---|---|---|
+| A | box1 x1 | 792.8 s | 399.3 s |
+| B | box1 x2 | **743.9 s** | 397.8 s |
+| C | box1 x1 + box2 x1 | 785.7 s | 401.7 s |
+
+Digest correct in all three. **C is indistinguishable from A and worse than B.**
+
+The work was genuinely shared — box 2 proved 1,059 of 1,684 segments (63%) — so claiming,
+transport and assembly all work across machines. It just did not go faster:
+
+```
+box 1, local worker    0.47 s per segment
+box 2, remote worker   ~1.0 s per segment    identical hardware
+```
+
+Every remote segment costs **three separate SSH connections** — `ssh mkdir` to claim, `scp`
+down, `scp` up plus `ssh mv` — at roughly 150 ms setup each, against a segment that proves in
+470 ms. The transport costs as much as the work.
+
+**This is a property of fast segments, not of this network.** Any per-segment transport costing
+~0.5 s erases the entire gain at po2 18.
+
+### The fix: the coordinator should push
+
+Pull was the wrong choice. The coordinator already holds the work list, so:
+
+- **no claim round trip** — it assigns rather than waiting to be asked
+- **transfer overlaps proving** — send segment N+1 while the worker proves N
+- **one persistent connection** instead of three new ones per segment
+
+At queue depth 2 the worker never waits on the network. Bandwidth was never the constraint
+(0.06 MB per segment); it is connection setup and latency, and pushing removes both.
+
+**This is P3 and it is not built.** Until it is, cross-machine segment distribution is correct
+and gains nothing.
