@@ -11,12 +11,12 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
 - [x] B4. P0 gate — distributed receipt journal must equal monolithic `prove()` journal
 - [x] B5. P1 — file-based stages: `seg-export`, `seg-prove <dir> <i>`, `seg-assemble <dir>`
 - [x] B6. P2 — local orchestrator, N worker processes over a work dir
-- [~] B7. P2 — measure distributed overhead vs monolithic
+- [x] B7. P2 — measure distributed overhead vs monolithic
 
 ## Test (needs the GPU; near-tip e2e holds it until ~02:30)
 - [x] T1. P0 correctness on a small block (170 / 130000)
 - [ ] T2. P0 correctness on block 741000 chunk
-- [ ] T3. P2 multi-worker run, overhead measured
+- [~] T3. P2 multi-worker run, overhead measured
 - [ ] T4. Near-tip e2e result collected + aggregate time recorded
 
 ## Cleanup
@@ -100,3 +100,16 @@ segment out, every receipt back, and a verify per receipt. Pays for itself at tw
 
 The gate script itself said FAILED -- it was comparing the "ab" it scraped from prose. Wrong
 in the safe direction, but a gate that needs a human to re-read its inputs is not a gate.
+
+## 2-WORKER RESULT (02:20Z)
+
+    worker wall 1569.9 s | assembly 1300.5 s | TOTAL 2872.6 s | split 22/22
+    digest ce5e1050...39406 -- IDENTICAL to 1-worker and to monolithic
+
+    monolithic 3094 s | 1 worker 3361 s (+8.6%) | 2 workers 2873 s (-7.1%)
+
+**Two workers beat monolithic.** But worker wall is 1.22x for 2x workers, not 2x -- the two
+processes share 16 cores. **CORRECTION: a single machine cannot demonstrate distribution
+speedup at any po2, CPU or GPU.** Fitting in VRAM is not independent compute. My earlier
+claim that one L40S could show real speedup was wrong. Expect the GPU sweep to be sub-linear.
+Do NOT quote 1.22x as a scaling factor for separate machines.
