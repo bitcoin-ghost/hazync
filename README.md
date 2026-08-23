@@ -58,9 +58,27 @@ rounds of adversarial **self**-audit ([`SECURITY.md`](SECURITY.md)) and validate
 taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible** — CI rebuilds it from
 scratch and checks it matches.
 
-What remains is scale, and we are honest about it: the board **restarted from genesis on 2026-08-04**,
-when the audit #5 re-baseline (shipped in v0.17.0) pinned the current guest `1d6c3792` — the fourth
-reset in three days, and the price of changing the guest at all. The board is open and anyone can join.
+What remains is scale, and there is now a real answer to it. **Proving a block divides across
+machines**: segments are proved independently, the recursion that folds them is a tree rather than a
+chain, and both halves scale. Measured on two GPUs, **2.03x — essentially perfect** — with a
+verifying receipt each run:
+
+| | 1 card | 2 cards |
+|---|---|---|
+| segment proving | 862.6 s | 410.9 s |
+| assembly | 409.7 s | 211.5 s |
+
+A near-tip block is **15,633 card-seconds** of measured work. One card takes 4.3 hours because
+nothing about it divided; on 45 it is **under ten minutes**. Workers need no session, no ELF and no
+image id — only the segment in front of them — so a worker cannot forge a receipt, only fail to
+return one, and an ordinary machine can join a fleet it does not trust. See
+[`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+
+The board **resets with this release**, as it does at every re-baseline: guest `1d6c3792` (2026-08-23)
+supersedes `b62d2a60` (2026-08-04, audit #5), because `validate_block` was restructured to do
+per-transaction work once per transaction rather than once per input — 3,455 M cycles down to 955 M,
+with Core's consensus code untouched. Changing the guest at all is what costs a reset: the id is what
+makes a proof checkable, so a proof made under the old guest cannot verify under the new one. The board is open and anyone can join.
 Whatever figure it shows is not seventeen years of accumulated work — it is what has been re-proved
 since that re-baseline. [The live board](https://bitcoinghost.org/hazync.html) is the only place a
 current figure belongs, and this file will not try to duplicate one; a genesis-anchored proof is

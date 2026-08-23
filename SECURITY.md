@@ -300,8 +300,9 @@ delete/proof handling and `num_leaves`/root recomputation, all primitive math (`
 and interior hashes are domain-separated as of canonical id `85dc0b56…` (since superseded by
 `be5e0528…` for RUSTSEC-2026-0220, by `71790584…` in v0.14.0, by `dfc9eeda…` for the #54 BIP30
 SMT plus audit #3, by `b161735a…` in v0.16.0 when #88 removed the repo checkout path from the id, and
-by `4722cec8…` for audit #5's guest guards, and by `1d6c3792…` for the #135 chunk-payload
-re-baseline (#136 read_slice + #137 per-transaction grouping) — see `reproduce/METHOD_ID` for the full chain). A leaf preimage is
+by `4722cec8…` for audit #5's guest guards, by `b62d2a60…` for the #135 chunk-payload
+re-baseline (#136 read_slice + #137 per-transaction grouping), and by `1d6c3792…` for parallel block
+validation — see `reproduce/METHOD_ID` for the full chain). A leaf preimage is
 `57 + |scriptPubKey|` bytes, so a 7-byte scriptPubKey gives a 64-byte preimage — the width an interior
 node hashes — and the stated barrier (leaf preimages open with an uncontrollable txid) is a grinding
 cost rather than a separation, since a txid is the hash of a transaction an attacker composes. See
