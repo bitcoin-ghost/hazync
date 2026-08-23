@@ -17,7 +17,7 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
 - [x] T1. P0 correctness on a small block (170 / 130000)
 - [ ] T2. P0 correctness on block 741000 chunk
 - [~] T3. P2 multi-worker run, overhead measured
-- [ ] T4. Near-tip e2e result collected + aggregate time recorded
+- [x] T4. Near-tip e2e result collected + aggregate time recorded
 
 ## Cleanup
 - [x] C1. Delete 10 local branches whose upstream is gone
@@ -129,3 +129,21 @@ All three steps of join-tree distribution are now BUILT:
 
 Step 3 did not need step 2: the coordinator lifts locally and distributes only the joins,
 which is the half with the log-depth structure.
+
+## NEAR-TIP 16-CHUNK E2E PASSED (08:01Z)
+
+    BLOCK 962000 AGGREGATED in 1466.2s -- succinct receipt VERIFIED
+    tip_hash 4403cf83...  cum_work 547530165750508549308877  UTXO leaves 1788
+
+Full production partition on a near-tip block (8,006 inputs). The scale gap is closed.
+
+Per-chunk: 871 877 783 776 835 928 908 894 896 892 893 [1029 po2-21] 896 898 897 894
+           = 14,167 card-seconds, mean 885 s
+
+**The aggregate estimate was 37% low** -- ~1,070 s projected, 1,466 s measured.
+
+    block = 14,167/N + 1,466   =>   floor 24.4 min at infinite cards (was estimated ~18)
+
+Worse than every previous estimate, and measured rather than modelled. Ten minutes is
+unreachable with cards alone, so segment distribution matters more than before, not less.
+With segments distributed: ~30 workers -> 9.5 min.
