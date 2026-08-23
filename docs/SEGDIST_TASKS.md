@@ -147,3 +147,30 @@ Per-chunk: 871 877 783 776 835 928 908 894 896 892 893 [1029 po2-21] 896 898 897
 Worse than every previous estimate, and measured rather than modelled. Ten minutes is
 unreachable with cards alone, so segment distribution matters more than before, not less.
 With segments distributed: ~30 workers -> 9.5 min.
+
+## STEP 3 GATE PASSED (08:45Z)
+
+    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406  IDENTICAL
+
+Four paths now agree: monolithic, 1-process distributed, 2-process distributed, and
+segments+joins distributed across four processes.
+
+    execution 2.1 | segment prove 1561.0 (2w) | lift 886.7 (coordinator)
+    join tree 631.6 (6 levels, 2w) | resolve 0.0 | TOTAL 3081.4
+
+Tree: 44 -> 22 -> 11 -> 6 -> 3 -> 2 -> 1, six levels, 43 joins, split j1=20/j2=23.
+
+**Correction made while reading this.** First reading called the join tree ~50% overhead and
+nearly concluded distributing joins was unviable. Wrong -- it compared against an ideal
+assuming full-speed workers. Splitting worker time from wall time:
+
+    43 joins = 1185.3 s worker CPU / 2 workers = 592.7 s   vs 631.6 s wall
+    => coordination overhead 38.9 s = **6.2%**, in line with 8.6% for segments
+
+Distributing the join tree IS viable. The slowness is core contention: 27.6 s per join with
+two workers sharing 16 cores vs 14.0 s single-process.
+
+Step 3 is 7% slower than not distributing joins (3081 vs 2873 s) -- correct behaviour on one
+machine, where coordination costs and returns nothing.
+
+**Lift is now the largest term at 886.7 s**, sequential on the coordinator. Step 2 moves it.
