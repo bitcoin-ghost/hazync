@@ -3126,6 +3126,11 @@ fn main() {
         segment_size_cmd();
         return;
     }
+    if let Some(p) = args.iter().position(|a| a == "receipt-digest") {
+        let f = args.get(p + 1).expect("receipt-digest <file>");
+        receipt_digest_cmd(f);
+        return;
+    }
     if args.iter().any(|a| a == "seg-work") {
         seg_work_cmd();
         return;
@@ -4007,6 +4012,10 @@ fn seg_distribute_cmd() {
     println!("  wire out    {:8.2} MB   ({:.3} MB/segment)", wire_out as f64/1e6, wire_out as f64/total as f64/1e6);
     println!("  wire back   {:8.2} MB   ({:.3} MB/segment)", wire_back as f64/1e6, wire_back as f64/total as f64/1e6);
     println!();
+    if let Ok(out) = std::env::var("HAZYNC_SEG_OUT") {
+        std::fs::write(&out, bincode::serialize(&info.receipt).expect("serialize")).expect("write receipt");
+        println!("  saved {out}");
+    }
     println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID.");
     println!("    journal {} bytes, digest {}", info.receipt.journal.bytes.len(), hex(info.receipt.journal.digest().as_bytes()));
     println!();
@@ -4152,4 +4161,21 @@ fn seg_coordinate_cmd() {
     println!();
     println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID");
     println!("    journal digest {}", hex(info.receipt.journal.digest().as_bytes()));
+}
+
+// Print a saved receipt's journal digest and verify it. The gate for segment distribution is that a
+// distributed prove and a monolithic prove of the SAME chunk agree on this value -- proving that
+// routing every segment across a wire changed nothing about what was proved.
+//
+// Printing the digest from `seg-distribute` alone proves nothing: it would agree with itself.
+fn receipt_digest_cmd(path: &str) {
+    use risc0_zkvm::sha::Digestible;
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&bytes).expect("deserialize receipt");
+    match r.verify(METHOD_ID) {
+        Ok(()) => println!("VERIFIED against METHOD_ID"),
+        Err(e) => { println!("VERIFY FAILED: {e}"); std::process::exit(1); }
+    }
+    println!("journal_bytes {}", r.journal.bytes.len());
+    println!("journal_digest {}", hex(r.journal.digest().as_bytes()));
 }
