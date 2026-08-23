@@ -3135,6 +3135,10 @@ fn main() {
         seg_coordinate_tree_cmd();
         return;
     }
+    if args.iter().any(|a| a == "seg-prove-one") {
+        seg_prove_one_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "seg-join") {
         seg_join_cmd();
         return;
@@ -4402,4 +4406,27 @@ fn seg_coordinate_tree_cmd() {
     println!();
     println!(">>> DISTRIBUTED-TREE RECEIPT VERIFIED against METHOD_ID");
     println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
+}
+
+// Prove exactly one segment, from a file, to a file. The whole job of a remote worker.
+//
+// It takes no session, no ELF, no METHOD_ID and no block -- a Segment carries everything the
+// prover needs. That is why a worker on another machine, built by a different toolchain against a
+// guest with a different image id, can prove segments for a session it knows nothing about and
+// return receipts that verify there. It is also why workers can be untrusted: the receipt is
+// self-verifying and the coordinator checks it on arrival.
+fn seg_prove_one_cmd() {
+    use risc0_zkvm::{VerifierContext, Segment};
+    use std::time::Instant;
+    let inp = std::env::var("HAZYNC_SEGFILE").expect("HAZYNC_SEGFILE");
+    let out = std::env::var("HAZYNC_RCPTFILE").expect("HAZYNC_RCPTFILE");
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let seg: Segment = bincode::deserialize(&std::fs::read(&inp).expect("read segment")).expect("deserialize segment");
+    let t = Instant::now();
+    let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
+    sr.verify_integrity_with_context(&ctx).expect("own receipt failed verify");
+    std::fs::write(&out, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
+    println!("proved one segment in {:.1}s -> {out}", t.elapsed().as_secs_f64());
 }
