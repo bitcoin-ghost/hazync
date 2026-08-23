@@ -190,3 +190,37 @@ do at all. The transport was costing something even with the network removed.
 
 **The cross-machine win it was built for is still unmeasured** and needs two machines: one box,
 ~20 minutes, coordinator on the box and worker on the laptop.
+
+## MEASURED: the work divides — 1.96x on two cards
+
+Two matched L40S, push transport, block 741000 chunk 0, po2 18, 1,684 segments:
+
+| | worker wall | assembly | total |
+|---|---|---|---|
+| 1 card | 804.6 s | 373.1 s | 1184.8 s |
+| **2 cards** | **410.8 s** | 370.4 s | **788.2 s** |
+
+**804.6 -> 410.8 s is 1.96x — 98% parallel efficiency.** Box 2 took 832 of 1,683 segments (49.4%)
+with no balancing logic beyond taking work as it freed up. Both receipts verify.
+
+**The same two boxes gained nothing under the pull transport.** That is the whole difference
+between three SSH connections per segment and one held open with the next segment already in
+flight.
+
+### What it means for a block
+
+Near-tip 962000, measured: chunk work 14,167 card-seconds, aggregate 1,466 s, total 15,633.
+At 98% efficiency:
+
+| cards | block |
+|---|---|
+| 16 | 17.1 min |
+| **30** | **9.6 min** |
+| 64 | 4.8 min |
+
+### The remaining gap
+
+Assembly did not divide here (373.1 vs 370.4 s) because `seg-serve` runs the join tree in-process.
+That term *does* distribute — `seg-join` is built and gated — but **push and distributed joins are
+not yet the same code path**. Wiring them together is the last step between this projection and a
+measured sub-10-minute block.
