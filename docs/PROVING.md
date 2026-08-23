@@ -137,7 +137,7 @@ at a hardcoded rung (which on CPU would waste a duplicate attempt at the size th
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
 either way.
 
-**Releases.** The current release ships `METHOD_ID 4722cec8`, pinned on 2026-08-04 by the **audit #5**
+**Releases.** The current release ships `METHOD_ID b62d2a60`, pinned on 2026-08-04 by the **audit #5**
 re-baseline: guest index guards on `coin_leaf`, a 32-bit-safe overflow check in `coinbase_value`, and a
 missing `return true` whose absence was undefined behaviour on a leaf-commitment path. Only a proof
 made against `4722cec8` verifies today.
@@ -151,7 +151,7 @@ is easy to attribute the current id to the wrong change:
 | `71790584` | 2026-08-02 | `cshims.c` `_sbrk` bounds + `strtoul` base handling (#55), `multi_check` docs (#59) |
 | `dfc9eeda` | 2026-08-03 | BIP30 closed by a coinbase-only SMT (#54), audit #3's 91842/91880 grandfather |
 | `b161735a` | 2026-08-04 | the id stopped depending on where the repo is checked out (#88) |
-| **`4722cec8`** | **2026-08-04** | **audit #5 — current** |
+| **`b62d2a60`** | **2026-08-04** | **audit #5 — current** |
 
 `reproduce/METHOD_ID` carries the full reasoning for each. v0.13.0 added the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
@@ -238,7 +238,7 @@ proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
 the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id
-(`4722cec8…`, the current guest) for **both** the CPU and CUDA release binaries.
+(`b62d2a60…`, the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 
@@ -319,7 +319,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`4722cec8…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`b62d2a60…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

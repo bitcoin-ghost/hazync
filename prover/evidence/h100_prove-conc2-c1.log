@@ -1,0 +1,23 @@
+[2m2026-08-21T07:06:02.695460Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::exec::executor[0m[2m:[0m execution time: 14.745109462s
+[2m2026-08-21T07:06:02.695635Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m number of segments: 443
+[2m2026-08-21T07:06:02.695638Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 927203328 total cycles
+[2m2026-08-21T07:06:02.695640Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 880780859 user cycles (94.99%)
+[2m2026-08-21T07:06:02.695643Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 33464903 paging cycles (3.61%)
+[2m2026-08-21T07:06:02.695645Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 12957566 reserved cycles (1.40%)
+[2m2026-08-21T07:06:02.695646Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m ecalls
+[2m2026-08-21T07:06:02.695648Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	13099 Sha2 calls, 1061330 cycles, (0.11%)
+[2m2026-08-21T07:06:02.695650Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	22628 Read calls, 59761 cycles, (0.01%)
+[2m2026-08-21T07:06:02.695652Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	1 Terminate calls, 2 cycles, (0.00%)
+[2m2026-08-21T07:06:02.695653Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Write calls, 0 cycles, (0.00%)
+[2m2026-08-21T07:06:02.695654Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 User calls, 0 cycles, (0.00%)
+[2m2026-08-21T07:06:02.695655Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Poseidon2 calls, 0 cycles, (0.00%)
+[2m2026-08-21T07:06:02.695658Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 BigInt calls, 0 cycles, (0.00%)
+[2m2026-08-21T07:06:02.695659Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m syscalls
+[2m2026-08-21T07:06:02.695660Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	14435 Write calls
+[2m2026-08-21T07:06:02.695662Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	4094 Read calls
+[2m2026-08-21T07:06:02.695663Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 VerifyIntegrity2 calls
+[2m2026-08-21T07:06:02.695664Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 VerifyIntegrity calls
+[2m2026-08-21T07:06:02.695665Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 ProveKeccak calls
+[2m2026-08-21T07:06:02.695666Z[0m [32m INFO[0m [2mrisc0_zkvm::host::server::session[0m[2m:[0m 	0 Keccak calls
+chunk 9 (451 inputs) proved in 2064s -> chunk_9.bin
+REAL_EXIT=0 c1 WALL=2064s

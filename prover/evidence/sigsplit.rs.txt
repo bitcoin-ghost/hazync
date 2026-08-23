@@ -1,0 +1,76 @@
+// Re-derives block 962,000's ECDSA/Schnorr verification split using the SAME rules as
+// prover/host/src/main.rs::predicted_ec_ops, with one addition: each predicted verify is
+// attributed to a scheme. Taproot spends (key path and tapscript) verify with Schnorr;
+// every other script type verifies with ECDSA.
+use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_CHECKSIGVERIFY};
+use bitcoin::blockdata::script::{Instruction, Script};
+use bitcoin::consensus::deserialize;
+use bitcoin::{ScriptBuf, Transaction, TxOut, Amount};
+
+fn hx(s: &str) -> Vec<u8> { (0..s.len()/2).map(|i| u8::from_str_radix(&s[2*i..2*i+2], 16).unwrap()).collect() }
+
+/// Mirrors predicted_ec_ops, returning (count, is_schnorr).
+fn predicted_ec_ops(tx: &Transaction, input_idx: usize, prevouts: &[TxOut]) -> (u64, bool) {
+    let (Some(txin), Some(prevout)) = (tx.input.get(input_idx), prevouts.get(input_idx)) else { return (1, false) };
+    let spk = &prevout.script_pubkey;
+    let wit = &txin.witness;
+
+    let tapscript_ops = |leaf: &[u8]| -> u64 {
+        Script::from_bytes(leaf).instructions()
+            .filter(|ins| matches!(ins, Ok(Instruction::Op(op))
+                if *op == OP_CHECKSIG || *op == OP_CHECKSIGVERIFY || *op == OP_CHECKSIGADD))
+            .count() as u64
+    };
+
+    if spk.is_p2tr() {
+        let mut n = wit.len();
+        if n >= 2 && wit.last().is_some_and(|e| e.first() == Some(&0x50)) { n -= 1; }
+        let c = match n {
+            0 | 1 => 1,
+            _ => wit.iter().nth(n - 2).map_or(1, |leaf| tapscript_ops(leaf).max(1)),
+        };
+        return (c, true); // taproot => Schnorr
+    }
+    if spk.is_p2wpkh() { return (1, false); }
+    if spk.is_p2wsh() {
+        return (wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64), false);
+    }
+    if spk.is_p2sh() {
+        let redeem: Vec<u8> = txin.script_sig.instructions().last()
+            .and_then(|r| r.ok())
+            .and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec()))
+            .unwrap_or_default();
+        let rs = Script::from_bytes(&redeem);
+        if rs.is_p2wpkh() { return (1, false); }
+        if rs.is_p2wsh() {
+            return (wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64), false);
+        }
+        return (rs.count_sigops().max(1) as u64, false);
+    }
+    (spk.count_sigops().max(1) as u64, false)
+}
+
+fn main() {
+    let path = std::env::args().nth(1).expect("usage: sigsplit <block.json>");
+    let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    println!("block {} — {}", j["height"], path);
+
+    let (mut ecdsa, mut schnorr, mut inputs, mut tapinputs) = (0u64, 0u64, 0u64, 0u64);
+    for t in j["txs"].as_array().unwrap() {
+        let tx: Transaction = deserialize(&hx(t["raw"].as_str().unwrap())).unwrap();
+        let prevouts: Vec<TxOut> = t["prevouts"].as_array().unwrap().iter().map(|p| TxOut {
+            value: Amount::from_sat(p["value"].as_u64().unwrap()),
+            script_pubkey: ScriptBuf::from_bytes(hx(p["spk"].as_str().unwrap())),
+        }).collect();
+        for i in 0..tx.input.len() {
+            inputs += 1;
+            let (n, is_schnorr) = predicted_ec_ops(&tx, i, &prevouts);
+            if is_schnorr { schnorr += n; tapinputs += 1; } else { ecdsa += n; }
+        }
+    }
+    let total = ecdsa + schnorr;
+    println!("inputs                {inputs}   (taproot inputs {tapinputs})");
+    println!("predicted EC verifies {total}");
+    println!("  ECDSA   {:>7}  ({:.2}%)", ecdsa, 100.0 * ecdsa as f64 / total as f64);
+    println!("  Schnorr {:>7}  ({:.2}%)", schnorr, 100.0 * schnorr as f64 / total as f64);
+}
