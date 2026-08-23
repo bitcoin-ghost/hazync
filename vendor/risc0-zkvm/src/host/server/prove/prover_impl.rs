@@ -50,94 +50,21 @@ impl ProverImpl {
 }
 
 impl ProverServer for ProverImpl {
-    fn prove(&self, env: ExecutorEnv<'_>, elf: &[u8]) -> Result<ProveInfo> {
-        let ctx = VerifierContext::default().with_dev_mode(self.opts.dev_mode());
-        self.prove_with_ctx(env, &ctx, elf)
-    }
-
-    fn prove_with_ctx(
+    /// Turn finished segment receipts into a `Receipt`, exactly as `prove_session` does.
+    ///
+    /// `prove_session` calls this immediately after proving its segments, so the monolithic and the
+    /// distributed paths share this code rather than having two copies that can diverge. A caller
+    /// that proved the segments elsewhere -- on other machines, in any order -- passes them here in
+    /// SESSION ORDER and gets the same receipt.
+    ///
+    /// The receipts must be in session order: the journal and assumptions are merged into the last
+    /// one's claim, and the composite verify checks the chain of segment claims.
+    fn assemble_from_segment_receipts(
         &self,
-        env: ExecutorEnv<'_>,
         ctx: &VerifierContext,
-        elf: &[u8],
+        session: &Session,
+        mut segments: Vec<SegmentReceipt>,
     ) -> Result<ProveInfo> {
-        let session = ExecutorImpl::from_elf(env, elf)?.run()?;
-        self.prove_session(ctx, &session)
-    }
-
-    fn prove_session(&self, ctx: &VerifierContext, session: &Session) -> Result<ProveInfo> {
-        tracing::debug!(
-            "prove_session: exit_code = {:?}, journal = {:?}, segments: {}",
-            session.exit_code,
-            session.journal.as_ref().map(hex::encode),
-            session.segments.len()
-        );
-
-        ensure!(
-            self.opts.hashfn == "poseidon2",
-            "provided `ProverOpts` has unsupported `hashfn` value of \"{}\"; \
-            supported `hashfn` values are: \"poseidon2\".",
-            &self.opts.hashfn
-        );
-
-        // PIPELINING (hazync patch). `prove_segment` is `segment_preflight` then `prove_segment_core`
-        // in sequence, and this loop ran them back to back, so the GPU sat idle for every preflight.
-        // Profiling a chunk prove on a B200 put ~35% of on-CPU time in preflight with the GPU waiting
-        // on `cuStreamSynchronize`, and the share was the same at po2 20 and po2 22 despite 4.2x the
-        // segment count — so the cost tracks cycles, not per-segment overhead. Overlapping the two
-        // measured 1.39x on segment proving, replicated across two runs.
-        //
-        // Only the SCHEDULE changes. Segment n+1's witness does not depend on segment n's proof, the
-        // seals are collected in the original order, and everything after this loop is untouched.
-        //
-        // Hooks force the sequential path: `on_pre_prove_segment` takes a `&Segment`, and a `Segment`
-        // carries no `Send` bound, so it cannot cross the channel. Rather than resolve twice or fire
-        // hooks out of order, a session with hooks keeps exactly its old behaviour.
-        let mut segments = Vec::new();
-        if session.hooks.is_empty() {
-            // Borrow ONLY the segment list. Capturing `session` whole would drag in
-            // `hooks: Vec<Box<dyn SessionEvents>>`, which is not Sync, and the worker has no use
-            // for it — this branch is the one where there are no hooks.
-            let segment_refs = &session.segments;
-            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<PreflightResults>>(1);
-            std::thread::scope(|scope| -> Result<()> {
-                // Depth 1 => at most two witnesses alive: one being proved, one buffered. Deeper buys
-                // nothing (the GPU consumer is serial) and each one holds a full segment witness, so
-                // the depth is a memory knob rather than a speed one.
-                scope.spawn(move || {
-                    for segment_ref in segment_refs.iter() {
-                        let result = segment_ref
-                            .resolve()
-                            .and_then(|segment| self.segment_preflight(&segment));
-                        let failed = result.is_err();
-                        // A send error means the consumer stopped; so does a preflight failure, which
-                        // the consumer surfaces. Either way there is nothing further to produce.
-                        if tx.send(result).is_err() || failed {
-                            break;
-                        }
-                    }
-                });
-                for index in 0..segment_refs.len() {
-                    let preflight_results = rx.recv().map_err(|_| {
-                        anyhow!("preflight worker stopped after {index}/{} segments", segment_refs.len())
-                    })??;
-                    segments.push(self.prove_segment_core(ctx, preflight_results)?);
-                }
-                Ok(())
-            })?;
-        } else {
-            for segment_ref in session.segments.iter() {
-                let segment = segment_ref.resolve()?;
-                for hook in &session.hooks {
-                    hook.on_pre_prove_segment(&segment);
-                }
-                segments.push(self.prove_segment(ctx, &segment)?);
-                for hook in &session.hooks {
-                    hook.on_post_prove_segment(&segment);
-                }
-            }
-        }
-
         let (assumptions, session_assumption_receipts): (Vec<_>, Vec<_>) =
             session.assumptions.iter().cloned().unzip();
 
@@ -268,6 +195,103 @@ impl ProverServer for ProverImpl {
             "proving not implemented for receipt kind {:?}",
             self.opts.receipt_kind
         );
+    }
+
+    fn prove(&self, env: ExecutorEnv<'_>, elf: &[u8]) -> Result<ProveInfo> {
+        let ctx = VerifierContext::default().with_dev_mode(self.opts.dev_mode());
+        self.prove_with_ctx(env, &ctx, elf)
+    }
+
+    fn prove_with_ctx(
+        &self,
+        env: ExecutorEnv<'_>,
+        ctx: &VerifierContext,
+        elf: &[u8],
+    ) -> Result<ProveInfo> {
+        let session = ExecutorImpl::from_elf(env, elf)?.run()?;
+        self.prove_session(ctx, &session)
+    }
+
+    fn prove_session(&self, ctx: &VerifierContext, session: &Session) -> Result<ProveInfo> {
+        tracing::debug!(
+            "prove_session: exit_code = {:?}, journal = {:?}, segments: {}",
+            session.exit_code,
+            session.journal.as_ref().map(hex::encode),
+            session.segments.len()
+        );
+
+        ensure!(
+            self.opts.hashfn == "poseidon2",
+            "provided `ProverOpts` has unsupported `hashfn` value of \"{}\"; \
+            supported `hashfn` values are: \"poseidon2\".",
+            &self.opts.hashfn
+        );
+
+        // PIPELINING (hazync patch). `prove_segment` is `segment_preflight` then `prove_segment_core`
+        // in sequence, and this loop ran them back to back, so the GPU sat idle for every preflight.
+        // Profiling a chunk prove on a B200 put ~35% of on-CPU time in preflight with the GPU waiting
+        // on `cuStreamSynchronize`, and the share was the same at po2 20 and po2 22 despite 4.2x the
+        // segment count — so the cost tracks cycles, not per-segment overhead. Overlapping the two
+        // measured 1.39x on segment proving, replicated across two runs.
+        //
+        // Only the SCHEDULE changes. Segment n+1's witness does not depend on segment n's proof, the
+        // seals are collected in the original order, and everything after this loop is untouched.
+        //
+        // Hooks force the sequential path: `on_pre_prove_segment` takes a `&Segment`, and a `Segment`
+        // carries no `Send` bound, so it cannot cross the channel. Rather than resolve twice or fire
+        // hooks out of order, a session with hooks keeps exactly its old behaviour.
+        let mut segments = Vec::new();
+        if session.hooks.is_empty() {
+            // Borrow ONLY the segment list. Capturing `session` whole would drag in
+            // `hooks: Vec<Box<dyn SessionEvents>>`, which is not Sync, and the worker has no use
+            // for it — this branch is the one where there are no hooks.
+            let segment_refs = &session.segments;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<PreflightResults>>(1);
+            std::thread::scope(|scope| -> Result<()> {
+                // Depth 1 => at most two witnesses alive: one being proved, one buffered. Deeper buys
+                // nothing (the GPU consumer is serial) and each one holds a full segment witness, so
+                // the depth is a memory knob rather than a speed one.
+                scope.spawn(move || {
+                    for segment_ref in segment_refs.iter() {
+                        let result = segment_ref
+                            .resolve()
+                            .and_then(|segment| self.segment_preflight(&segment));
+                        let failed = result.is_err();
+                        // A send error means the consumer stopped; so does a preflight failure, which
+                        // the consumer surfaces. Either way there is nothing further to produce.
+                        if tx.send(result).is_err() || failed {
+                            break;
+                        }
+                    }
+                });
+                for index in 0..segment_refs.len() {
+                    let preflight_results = rx.recv().map_err(|_| {
+                        anyhow!("preflight worker stopped after {index}/{} segments", segment_refs.len())
+                    })??;
+                    segments.push(self.prove_segment_core(ctx, preflight_results)?);
+                }
+                Ok(())
+            })?;
+        } else {
+            for segment_ref in session.segments.iter() {
+                let segment = segment_ref.resolve()?;
+                for hook in &session.hooks {
+                    hook.on_pre_prove_segment(&segment);
+                }
+                segments.push(self.prove_segment(ctx, &segment)?);
+                for hook in &session.hooks {
+                    hook.on_post_prove_segment(&segment);
+                }
+            }
+        }
+
+        // SEGMENT DISTRIBUTION (hazync patch). Everything from here on is ASSEMBLY: it takes the
+        // finished segment receipts and turns them into a Receipt. None of it touches the prover.
+        // Split out so a distributed prover -- which obtains those receipts from other machines
+        // rather than from the loop above -- runs byte-identical assembly instead of a reimplementation
+        // that could drift from this one. The subtle step is the journal/assumption merge into the
+        // LAST segment's claim, which is easy to miss and produces a receipt that fails its own check.
+        self.assemble_from_segment_receipts(ctx, session, segments)
     }
 
     fn segment_preflight(&self, segment: &Segment) -> Result<PreflightResults> {

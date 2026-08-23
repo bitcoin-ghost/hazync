@@ -3126,6 +3126,10 @@ fn main() {
         segment_size_cmd();
         return;
     }
+    if args.iter().any(|a| a == "seg-distribute") {
+        seg_distribute_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "segment-mem") {
         segment_mem_cmd();
         return;
@@ -3905,4 +3909,101 @@ fn segment_mem_cmd() {
     println!("  peak RSS of a worker that ONLY proves segments — it never executes, so it never holds");
     println!("  the witness. Subtract the pre-prove VmHWM above to get that.");
     println!("  VRAM is invisible from inside the process: sample nvidia-smi alongside for CUDA.");
+}
+
+// SEGMENT DISTRIBUTION, phase 0: prove a chunk with every segment routed through a wire.
+//
+// Block latency is chunk_work/N + aggregate and the aggregate does not divide, so measured near-tip
+// numbers put the floor near 18 minutes at ANY card count. Distributing SEGMENTS is the only route
+// under ten, because it moves parallelism below the level recursion charges for.
+//
+// This proves the decomposition is sound before any network exists. Each segment is serialised,
+// deserialised, and proved from the deserialised copy; each receipt is serialised and deserialised
+// again. If a segment or a receipt cannot survive that round trip, nothing distributed can work, and
+// this is where it shows -- cheaply, on one machine, with no protocol to debug.
+//
+// Assembly is NOT reimplemented here. `assemble_from_segment_receipts` is the same code
+// `prove_session` runs after its own loop, so the two paths cannot drift. The step that made this
+// worth doing carefully is the journal/assumption merge into the LAST segment's claim: miss it and
+// you get a receipt that fails its own verify with nothing pointing at why.
+fn seg_distribute_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, Segment, SegmentReceipt};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    println!("=== segment-distributed chunk prove — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   segments {total}");
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
+    let (mut wire_out, mut wire_back) = (0usize, 0usize);
+    let t_prove = Instant::now();
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+
+        // OUT: coordinator -> worker.
+        let bytes = bincode::serialize(&seg).expect("serialize segment");
+        wire_out += bytes.len();
+        let seg_wire: Segment = bincode::deserialize(&bytes).expect("deserialize segment");
+
+        // The worker's entire job. Nothing here needs the session, the ELF, or the witness.
+        let sr = server.prove_segment(&ctx, &seg_wire).expect("prove segment");
+
+        // BACK: worker -> coordinator. Verified on arrival, because a worker is untrusted: a receipt
+        // is self-verifying, so a bad worker can only fail to produce one, never forge one.
+        let rb = bincode::serialize(&sr).expect("serialize receipt");
+        wire_back += rb.len();
+        let sr_wire: SegmentReceipt = bincode::deserialize(&rb).expect("deserialize receipt");
+        sr_wire.verify_integrity_with_context(&ctx).expect("returned receipt failed verify");
+
+        receipts.push(sr_wire);
+        if i % 50 == 0 || i + 1 == total {
+            println!("    segment {}/{}  {:.0}s elapsed", i + 1, total, t_prove.elapsed().as_secs_f64());
+        }
+    }
+    let prove_s = t_prove.elapsed().as_secs_f64();
+
+    let t_asm = Instant::now();
+    let info = server.assemble_from_segment_receipts(&ctx, &session, receipts)
+        .expect("assemble from distributed receipts");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED RECEIPT FAILED verify against METHOD_ID");
+
+    println!();
+    println!("  execution   {exec_s:8.1} s");
+    println!("  proving     {prove_s:8.1} s   ({total} segments, each through a bincode round trip)");
+    println!("  assembly    {asm_s:8.1} s   (lift + join + succinct, coordinator-side)");
+    println!("  TOTAL       {:8.1} s", exec_s + prove_s + asm_s);
+    println!();
+    println!("  wire out    {:8.2} MB   ({:.3} MB/segment)", wire_out as f64/1e6, wire_out as f64/total as f64/1e6);
+    println!("  wire back   {:8.2} MB   ({:.3} MB/segment)", wire_back as f64/1e6, wire_back as f64/total as f64/1e6);
+    println!();
+    println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID.");
+    println!("    journal {} bytes, digest {}", info.receipt.journal.bytes.len(), hex(info.receipt.journal.digest().as_bytes()));
+    println!();
+    println!("  Every segment crossed a wire and every receipt was verified on arrival. What is NOT");
+    println!("  proved here: that this is FASTER. One machine proved them in sequence. The point is");
+    println!("  that the work is now in units a worker can take, and the journal digest above is what");
+    println!("  a monolithic prove of the same chunk must produce.");
 }

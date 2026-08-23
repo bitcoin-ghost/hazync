@@ -181,6 +181,25 @@ pub trait ProverServer: private::Sealed {
         <Self as Compress<_>>::composite_to_succinct(self, receipt)
     }
 
+    /// SEGMENT DISTRIBUTION (hazync patch). Assemble a `Receipt` from segment receipts that were
+    /// proved somewhere else.
+    ///
+    /// `prove_session` proves its segments and then assembles; this is that second half on its own,
+    /// so a caller that obtained the receipts from other machines runs the SAME assembly rather than
+    /// a copy of it. Receipts must be in session order -- the journal and assumptions are merged into
+    /// the last one's claim and the composite verify walks the chain.
+    ///
+    /// Defaults to refusing: only the local prover can assemble, and a prover that cannot should say
+    /// so rather than silently return something that is not a proof of this session.
+    fn assemble_from_segment_receipts(
+        &self,
+        _ctx: &VerifierContext,
+        _session: &Session,
+        _segments: Vec<SegmentReceipt>,
+    ) -> Result<ProveInfo> {
+        anyhow::bail!("this prover does not support assembling externally proved segments")
+    }
+
     /// Convert a composite receipt to a succinct work claim receipt.
     fn composite_to_succinct_povw(
         &self,
