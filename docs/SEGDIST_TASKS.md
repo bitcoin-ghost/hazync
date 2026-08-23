@@ -8,7 +8,7 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
       `prove_session` refactored to call it so both paths share assembly and cannot drift
 - [x] B3. P0 — host command `seg-distribute`: execute, prove each segment through a
       bincode round-trip (proving it survives a wire), assemble, verify vs METHOD_ID
-- [~] B4. P0 gate — distributed receipt journal must equal monolithic `prove()` journal
+- [x] B4. P0 gate — distributed receipt journal must equal monolithic `prove()` journal
 - [x] B5. P1 — file-based stages: `seg-export`, `seg-prove <dir> <i>`, `seg-assemble <dir>`
 - [x] B6. P2 — local orchestrator, N worker processes over a work dir
 - [~] B7. P2 — measure distributed overhead vs monolithic
@@ -89,3 +89,14 @@ Two corrections that fall out of it:
 B4 still open: the monolithic prove for the digest comparison is running (~55 min on CPU).
 The first gate script extracted "ab" from the word "above" in seg-distribute's own
 explanatory output, because `[0-9a-f]+` matches English. Re-run anchored to `{64}`.
+
+## B4 GATE PASSED (01:05Z)
+
+    distributed  ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
+    monolithic   ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406   IDENTICAL
+
+Overhead: monolithic 3094 s vs distributed 3361 s = **8.6%**, covering serialisation of every
+segment out, every receipt back, and a verify per receipt. Pays for itself at two workers.
+
+The gate script itself said FAILED -- it was comparing the "ab" it scraped from prose. Wrong
+in the safe direction, but a gate that needs a human to re-read its inputs is not a gate.
