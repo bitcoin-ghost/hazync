@@ -11,10 +11,10 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
 - [~] B4. P0 gate — distributed receipt journal must equal monolithic `prove()` journal
 - [x] B5. P1 — file-based stages: `seg-export`, `seg-prove <dir> <i>`, `seg-assemble <dir>`
 - [x] B6. P2 — local orchestrator, N worker processes over a work dir
-- [ ] B7. P2 — measure distributed overhead vs monolithic
+- [~] B7. P2 — measure distributed overhead vs monolithic
 
 ## Test (needs the GPU; near-tip e2e holds it until ~02:30)
-- [~] T1. P0 correctness on a small block (170 / 130000)
+- [x] T1. P0 correctness on a small block (170 / 130000)
 - [ ] T2. P0 correctness on block 741000 chunk
 - [ ] T3. P2 multi-worker run, overhead measured
 - [ ] T4. Near-tip e2e result collected + aggregate time recorded
@@ -68,3 +68,24 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
   `hazync-agg` had 26 lines of uncommitted `HAZYNC_AGG_EXECUTE` instrumentation that a
   `worktree remove` would have destroyed — committed and pushed as `89129a7` instead.
   Pruning a worktree without reading its `git status` first would have lost that.
+
+## P0 RESULT (00:55Z) — PASSED
+
+Block 130000 chunk 0, po2 18, 44 segments, laptop CPU:
+
+    execution 2.2 s | proving 1913.3 s | assembly 1445.6 s | TOTAL 3361.1 s
+    wire out 3.02 MB (0.069/seg) | wire back 11.22 MB (0.255/seg)
+    DISTRIBUTED RECEIPT VERIFIED against METHOD_ID
+    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
+
+Two corrections that fall out of it:
+
+- **Return traffic is 3.7x outbound.** Every bandwidth figure quoted this session counted
+  only the outbound segment, so they are ~4.7x too low. Conclusion survives, numbers did not.
+- **Assembly is 43% of total on CPU**, against ~24% on GPU. The join tree has to distribute
+  too if CPU nodes are ever workers -- coordinator-side joins are fine at 0.15 s/segment on a
+  card and not at 14 s on a node.
+
+B4 still open: the monolithic prove for the digest comparison is running (~55 min on CPU).
+The first gate script extracted "ab" from the word "above" in seg-distribute's own
+explanatory output, because `[0-9a-f]+` matches English. Re-run anchored to `{64}`.
