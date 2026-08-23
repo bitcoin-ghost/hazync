@@ -35,7 +35,7 @@ accepted once already, at 3.4%. What follows asks for it at 85%.
 
 ### Built and measured, not merged
 
-Both live on `bench/135-on-main` (guest `b62d2a60`), the build the H100 run below was taken on.
+Both live on `bench/135-on-main` (guest `1d6c3792`), the build the H100 run below was taken on.
 
 | Improvement | Gain | New `METHOD_ID`? | Core code no longer proven |
 |---|---|---|---|
@@ -381,7 +381,7 @@ because the H100 run has already demonstrated the whole harness working on rente
 >
 > The hour of cloud rental above was spent: H100 80GB HBM3 (sm_90), UpCloud FI-HEL2, driver 595.58.03,
 > CUDA 12.6, 12 cores; branch `bench/135-on-main` @ `c6e95ff` (main + #136 + #137), guest METHOD_ID
-> `b62d2a60`; block 962,000, `HAZYNC_CHUNKS=16`, cost-packed, chunk 9 (451 inputs), po2 22.
+> `1d6c3792`; block 962,000, `HAZYNC_CHUNKS=16`, cost-packed, chunk 9 (451 inputs), po2 22.
 >
 > |                        | L40S (2026-08-18) | H100 (2026-08-21) |
 > |------------------------|-------------------|-------------------|

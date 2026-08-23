@@ -24,7 +24,7 @@ and checked with the released v0.16.0 binaries (2026-08-04):
 $ hazync-verify neg500.snark
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest b62d2a60.
+  The SNARK is VALID and was produced by guest 1d6c3792.
   It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
 $ host verify-any range_500.bin
 RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
@@ -67,7 +67,7 @@ goals document reads as a claim rather than as a snapshot. The
 same numbers as JSON.
 
 > **Re-baselines reset the board to genesis**, because receipts made against a superseded guest do not
-> verify under the new one. The current guest `b62d2a60` was pinned on **2026-08-04** (audit #5,
+> verify under the new one. The current guest `1d6c3792` was pinned on **2026-08-04** (audit #5,
 > shipped in v0.17.0). It followed `b161735a` (v0.16.0, #88 — the id no longer depends on where the
 > repo is checked out) and `dfc9eeda` (2026-08-03, BIP30 closed by a coinbase-only SMT, #54, with
 > audit #3's 91842/91880 grandfather), which in turn followed `71790584`.
@@ -214,7 +214,7 @@ developer-chosen hash anywhere in the trust chain** — which is what separates 
 
 ```
 $ ghostd -hazyncproof=fold_8.snark -hazyncutxo=dump_h8.bin
-[hazync] proof VERIFIED against guest b62d2a60…
+[hazync] proof VERIFIED against guest 1d6c3792…
 [hazync]   genesis-anchored through height 8
 [hazync]   UTXO dump … MATCHES the proven set (8 coins)
 ```

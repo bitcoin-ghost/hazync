@@ -3,7 +3,7 @@
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
 push (#23).
 
-Regenerated 2026-08-04 under canonical guest `b62d2a60…` (audit #5 guest guards — see
+Regenerated 2026-08-04 under canonical guest `1d6c3792…` (audit #5 guest guards — see
 `reproduce/METHOD_ID`), which superseded `b161735a…`. A proof carries its guest id inside it, so a
 re-baseline cannot be absorbed by editing anything: the pair has to be re-proved and re-wrapped, and
 until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and `verifier-wasm/test-parity.sh` fail — as
