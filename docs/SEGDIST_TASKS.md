@@ -113,3 +113,19 @@ processes share 16 cores. **CORRECTION: a single machine cannot demonstrate dist
 speedup at any po2, CPU or GPU.** Fitting in VRAM is not independent compute. My earlier
 claim that one L40S could show real speedup was wrong. Expect the GPU sweep to be sub-linear.
 Do NOT quote 1.22x as a scaling factor for separate machines.
+
+## JOIN TREE GATE PASSED (07:46Z)
+
+    tree    ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
+    linear  ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406   IDENTICAL
+
+Cost unchanged: 3106 s tree vs 3094 s linear, 0.4% apart -- a pure restructuring, exactly as
+intended. `join` is associative over the ordered sequence, which is what the change rested on.
+
+All three steps of join-tree distribution are now BUILT:
+  1. balanced tree replacing the linear fold      70b63cf  GATE PASSED
+  2. worker-side lifts                            7f7fbd0  designed only
+  3. distributed join levels                      10fc1a9  gate running now
+
+Step 3 did not need step 2: the coordinator lifts locally and distributes only the joins,
+which is the half with the log-depth structure.
