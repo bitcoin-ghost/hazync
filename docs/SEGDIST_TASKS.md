@@ -212,3 +212,23 @@ level 0, and joins are lighter on the SMs.
 
 NOT the distribution scaling number -- this is one shared card. Separate machines are still
 unmeasured.
+
+## CROSS-MACHINE VERIFIED (13:00Z) — seven paths, one receipt
+
+    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
+
+Coordinator on the L40S, every segment proved on the **laptop** over ssh -- no shared
+filesystem, no GPU, non-CUDA binary, **different guest image id**. Same digest as the
+monolithic prove and every other distributed path.
+
+    execution 1.8 (box) | segment prove 1651.1 (laptop, network) | lift 8.2 (box)
+    join tree 108.8 (box, 6 levels) | TOTAL 1769.9
+
+**Real cross-machine speedup: 1.75x** (laptop alone 3094 s -> 1769.9 s). NOT from parallelism --
+the laptop proved all 44 serially. From **assembly moving to the faster machine**: lift+join
+117 s on the card vs 1445 s on the laptop.
+
+**Corrects an earlier claim of mine.** "One machine cannot show speedup" was right; "speedup
+needs matched hardware" was wrong. Mismatched hardware gives a real gain because segment proving
+and assembly have different profiles and can be placed separately -- which is exactly the
+Ghost-node fleet shape: nodes at po2 18 on segments, a card on lift/join/resolve.
