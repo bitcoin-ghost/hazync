@@ -170,3 +170,23 @@ At queue depth 2 the worker never waits on the network. Bandwidth was never the 
 
 **This is P3 and it is not built.** Until it is, cross-machine segment distribution is correct
 and gains nothing.
+
+## Push transport: built, gated, and faster even on localhost
+
+`seg-serve` / `seg-connect` replace the pull worker. Correctness gate, 2 workers over localhost:
+
+    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406  IDENTICAL
+    execution 2.1 | worker wall 1991.0 | assembly 606.1 | TOTAL 2599.3
+
+| path | total |
+|---|---|
+| monolithic | 3094 s |
+| pull, file-based, 2 workers | 2873 s |
+| **push, TCP, 2 workers** | **2599 s** |
+
+**16% faster than monolithic, 10% faster than pull — on localhost, with no latency to save.**
+That gap is the per-segment *file* work pull did (write, poll, read, rename) which push does not
+do at all. The transport was costing something even with the network removed.
+
+**The cross-machine win it was built for is still unmeasured** and needs two machines: one box,
+~20 minutes, coordinator on the box and worker on the laptop.
