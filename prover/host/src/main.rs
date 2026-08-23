@@ -1944,6 +1944,32 @@ fn agg_chunks() {
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
     b.write(&1u32).unwrap();
+    // HAZYNC_AGG_EXECUTE=1 — execute mode 5 WITHOUT proving, and report its cycles.
+    //
+    // Settles which half of the aggregate is expensive. In execute mode `env::verify` merely RECORDS
+    // an assumption; RESOLVING it is recursion, and that cost lands in PROVING. So this cycle count
+    // is the block-validation work alone, and the gap between it and the measured prove wall-clock
+    // is what the sixteen assumption resolutions cost.
+    //
+    // It matters because the two pull in opposite directions: more chunks parallelise proving better
+    // and, if resolution dominates, make the aggregate worse. HAZYNC_CHUNKS has been treated as free.
+    // Host-side only; needs no GPU and does not move METHOD_ID.
+    if std::env::var("HAZYNC_AGG_EXECUTE").is_ok() {
+        let t_x = Instant::now();
+        let session = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("execute mode 5");
+        let cycles = session.cycles();
+        println!("=== AGGREGATE, EXECUTE ONLY (no proving) ===");
+        println!("  block validation cycles  {cycles}");
+        println!("  segments at po2 {}        ~{}", seg_po2(), cycles.div_ceil(1u64 << seg_po2()));
+        println!("  executed in              {:.1}s", t_x.elapsed().as_secs_f64());
+        println!();
+        println!("  Scale: chunk 9 is 948,436,992 cycles and proved in ~915 s on a B200, so this much");
+        println!("  block-validation work is roughly {:.0} s of segment proving. Whatever the FULL",
+                 cycles as f64 / 948_436_992.0 * 915.0);
+        println!("  aggregate cost beyond that (measured: >3,300 s) is the assumption resolutions.");
+        return;
+    }
+
     // Prove the aggregate to SUCCINCT too: the assumptions are already succinct (cheap resolve), and a
     // succinct block proof is a single fixed-size STARK — directly composable in the chain range-fold.
     let agg = default_prover()
