@@ -3135,6 +3135,15 @@ fn main() {
         seg_coordinate_tree_cmd();
         return;
     }
+    if args.iter().any(|a| a == "seg-serve") {
+        seg_serve_cmd();
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "seg-connect") {
+        let addr = args.get(p + 1).expect("seg-connect <host:port>");
+        seg_connect_cmd(addr);
+        return;
+    }
     if args.iter().any(|a| a == "seg-prove-one") {
         seg_prove_one_cmd();
         return;
@@ -4429,4 +4438,248 @@ fn seg_prove_one_cmd() {
     sr.verify_integrity_with_context(&ctx).expect("own receipt failed verify");
     std::fs::write(&out, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
     println!("proved one segment in {:.1}s -> {out}", t.elapsed().as_secs_f64());
+}
+
+// PUSH TRANSPORT (hazync#151). The coordinator sends work; it does not wait to be asked.
+//
+// The pull worker cost three SSH connections per segment -- claim, fetch, return -- at roughly
+// 150 ms of setup each, against a segment that proves in 470 ms on an L40S at po2 18. A second
+// matched GPU therefore added NOTHING: box 2 took 63% of the segments and the run got no faster,
+// because it spent more time on round trips than on proving. Bandwidth was never the constraint;
+// a segment is 0.06 MB. Connection setup and latency were.
+//
+// Pushing removes all three. The coordinator already holds the work list, so there is nothing to
+// claim; one connection stays open for the whole session; and the pipelining comes free from TCP
+// rather than from threads in the worker. The coordinator writes segment N+1 into the socket while
+// the worker is still proving N, so the worker's next read returns from a buffer that already
+// filled. At depth 4 that is 240 KB in flight, which no socket notices.
+//
+// Frame: [u32 index][u32 len][bytes]. Index 0xFFFF_FFFF means no more work.
+const SEG_EOF: u32 = 0xFFFF_FFFF;
+
+fn write_frame(s: &mut std::net::TcpStream, idx: u32, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    s.write_all(&idx.to_le_bytes())?;
+    s.write_all(&(body.len() as u32).to_le_bytes())?;
+    s.write_all(body)?;
+    s.flush()
+}
+
+fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
+    use std::io::Read;
+    let mut i = [0u8; 4];
+    s.read_exact(&mut i)?;
+    let idx = u32::from_le_bytes(i);
+    if idx == SEG_EOF { return Ok((idx, Vec::new())); }
+    let mut l = [0u8; 4];
+    s.read_exact(&mut l)?;
+    let mut body = vec![0u8; u32::from_le_bytes(l) as usize];
+    s.read_exact(&mut body)?;
+    Ok((idx, body))
+}
+
+// Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
+// makes no decisions -- the coordinator drives. That also makes it simpler than the pull worker.
+fn seg_connect_cmd(addr: &str) {
+    use risc0_zkvm::{VerifierContext, Segment};
+    use std::time::Instant;
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "push1".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let mut s = std::net::TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
+    s.set_nodelay(true).ok();   // these are small frames; Nagle would add 40 ms for nothing
+    println!("[{id}] connected to {addr}");
+
+    let (mut done, t0) = (0usize, Instant::now());
+    loop {
+        let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { println!("[{id}] link closed: {e}"); break; } };
+        if idx == SEG_EOF { println!("[{id}] no more work"); break; }
+        let t = Instant::now();
+        let seg: Segment = bincode::deserialize(&body).expect("deserialize segment");
+        let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
+        let lifted = server.lift(&sr).expect("lift");
+        let out = bincode::serialize(&lifted).expect("serialize lift");
+        if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+        done += 1;
+        if done % 25 == 0 || done < 3 {
+            println!("[{id}] segment {idx} in {:.2}s ({done} done, {:.1}s elapsed)", t.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64());
+        }
+    }
+    println!("[{id}] PUSH DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator with a push transport. Executes, then serves segments to whoever connects, keeping
+// several in flight per worker so the network never becomes the worker's critical path.
+//
+// One thread per connection, sharing a work queue behind a mutex. Each thread writes up to
+// PUSH_DEPTH segments before reading the first receipt back; because the worker proves serially,
+// receipts return in the order they were sent, so a VecDeque is enough to match them up.
+//
+// If a worker dies its in-flight segments go back on the queue and another worker takes them. That
+// is the same reassignment the pull design got from expiring a stale claim, without needing claims.
+fn seg_serve_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::sha::Digestible;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let port: u16 = std::env::var("HAZYNC_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9110);
+    let depth: usize = std::env::var("HAZYNC_PUSH_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    // Serialise every segment once, up front. The alternative -- resolving on demand -- would put
+    // disk work on the critical path of a worker that is waiting.
+    let mut wire: Vec<Vec<u8>> = Vec::with_capacity(total);
+    for sref in session.segments.iter() {
+        wire.push(bincode::serialize(&sref.resolve().expect("resolve")).expect("serialize"));
+    }
+    let wire = Arc::new(wire);
+    let bytes: usize = wire.iter().map(|v| v.len()).sum();
+
+    println!("=== push coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
+    println!("  listening on 0.0.0.0:{port}");
+
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
+    let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).expect("bind");
+    listener.set_nonblocking(true).ok();
+
+    let t_work = Instant::now();
+    let ctx = VerifierContext::default();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        loop {
+            {
+                let q = queue.lock().unwrap();
+                let o = out.lock().unwrap();
+                let have = o.iter().filter(|r| r.is_some()).count();
+                if have == total { break; }
+                if q.is_empty() && handles.is_empty() && have < total {
+                    // Nothing queued, nobody working, and work outstanding: only possible if every
+                    // worker died holding segments. Their in-flight went back on the queue below.
+                }
+            }
+            match listener.accept() {
+                Ok((mut s, peer)) => {
+                    println!("  worker connected from {peer}");
+                    let (queue, out, wire) = (queue.clone(), out.clone(), wire.clone());
+                    handles.push(scope.spawn(move || {
+                        // Each thread builds its own VerifierContext: it holds Rc, so it is not
+                        // Sync and cannot be shared. It is cheap and the threads need nothing
+                        // from each other's.
+                        let ctx = &VerifierContext::default();
+                        s.set_nodelay(true).ok();
+                        let mut inflight: VecDeque<usize> = VecDeque::new();
+                        loop {
+                            // Push ahead: the worker should always find its next segment already
+                            // in the socket rather than waiting for a round trip.
+                            while inflight.len() < depth {
+                                let next = { queue.lock().unwrap().pop_front() };
+                                match next {
+                                    Some(i) => {
+                                        if write_frame(&mut s, i as u32, &wire[i]).is_err() {
+                                            queue.lock().unwrap().push_front(i);
+                                            break;
+                                        }
+                                        inflight.push_back(i);
+                                    }
+                                    None => break,
+                                }
+                            }
+                            if inflight.is_empty() {
+                                let _ = write_frame(&mut s, SEG_EOF, &[]);
+                                break;
+                            }
+                            match read_frame(&mut s) {
+                                Ok((i, body)) => {
+                                    let r: SuccinctReceipt<ReceiptClaim> = match bincode::deserialize(&body) {
+                                        Ok(r) => r, Err(e) => { println!("  bad receipt for {i}: {e}"); break; }
+                                    };
+                                    // Untrusted worker: verify on arrival, exactly as before.
+                                    if r.verify_integrity_with_context(ctx).is_err() {
+                                        println!("  worker returned an invalid receipt for {i}");
+                                        queue.lock().unwrap().push_back(i as usize);
+                                    } else {
+                                        out.lock().unwrap()[i as usize] = Some(r);
+                                    }
+                                    inflight.retain(|&x| x != i as usize);
+                                }
+                                Err(_) => {
+                                    // Worker gone. Its in-flight work returns to the queue.
+                                    let mut q = queue.lock().unwrap();
+                                    for i in inflight.drain(..) { q.push_front(i); }
+                                    break;
+                                }
+                            }
+                        }
+                    }));
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => { println!("  accept failed: {e}"); break; }
+            }
+        }
+    });
+    let work_s = t_work.elapsed().as_secs_f64();
+
+    // Every segment but the last arrives lifted. The last cannot -- the session journal and
+    // assumptions merge into its claim before lifting and a worker has no session -- so it is
+    // proved here. In this mode the coordinator keeps that one segment for itself.
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let t_asm = Instant::now();
+    let mut lifted: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(total);
+    {
+        let o = out.lock().unwrap();
+        for i in 0..total - 1 { lifted.push(o[i].clone().expect("missing lift")); }
+    }
+    let last_seg = session.segments[total - 1].resolve().expect("resolve last");
+    let last_rcpt: SegmentReceipt = server.prove_segment(&ctx, &last_seg).expect("prove last");
+    let mut tail = server.prepare_lifts(&ctx, &session, vec![last_rcpt]).expect("merge+lift last");
+    lifted.append(&mut tail);
+
+    let mut level = lifted;
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut it = level.into_iter();
+        loop {
+            match (it.next(), it.next()) {
+                (Some(a), Some(b)) => next.push(server.join(&a, &b).expect("join")),
+                (Some(a), None) => next.push(a),
+                _ => break,
+            }
+        }
+        level = next;
+    }
+    let info = server.assemble_from_joined(&ctx, &session, level.pop().expect("one left")).expect("assemble");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("PUSH RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution      {exec_s:8.1} s");
+    println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
+    println!("  assembly       {asm_s:8.1} s   <- last segment + join tree, coordinator-side");
+    println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
+    println!();
+    println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
+    println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
 }
