@@ -3131,6 +3131,14 @@ fn main() {
         receipt_digest_cmd(f);
         return;
     }
+    if args.iter().any(|a| a == "seg-coordinate-tree") {
+        seg_coordinate_tree_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-join") {
+        seg_join_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "seg-work") {
         seg_work_cmd();
         return;
@@ -4178,4 +4186,179 @@ fn receipt_digest_cmd(path: &str) {
     }
     println!("journal_bytes {}", r.journal.bytes.len());
     println!("journal_digest {}", hex(r.journal.digest().as_bytes()));
+}
+
+// SEGMENT DISTRIBUTION step 3: run the join tree as distributed work items.
+//
+// The join tree is what caps a distributed prover. Segment proving divides across workers; assembly
+// did not, because risc0's fold was strictly linear -- lift, join into an accumulator, lift, join --
+// so every join depended on the one before it. With the fold rebalanced into a tree (see the
+// vendored crate), the joins at a given level are independent of each other, and independent work
+// is work a worker can take.
+//
+// Level l holds ceil(n_l / 2) joins over n_l receipts. Each is published, claimed with the same
+// O_EXCL create the segment workers use, and collected before the next level starts. The barrier
+// per level is unavoidable -- level l+1 consumes level l's output -- but the DEPTH is log2(N), so
+// at 44 segments that is 6 barriers rather than 43 sequential steps.
+//
+// An odd receipt at the end of a level carries forward untouched. It keeps its position, so
+// adjacency is preserved and the final claim is unchanged.
+fn seg_join_cmd() {
+    use risc0_zkvm::{VerifierContext, SuccinctReceipt, ReceiptClaim};
+    use std::time::Instant;
+    let dir = seg_workdir();
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "j0".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let mut done = 0usize;
+    let t0 = Instant::now();
+
+    // Follow the coordinator level by level. JOINLEVEL names the level currently open for claiming;
+    // JOINDONE appearing ends the run.
+    let mut level = 0usize;
+    loop {
+        if dir.join("JOINDONE").exists() { break; }
+        let lv = match std::fs::read_to_string(dir.join("JOINLEVEL")) {
+            Ok(s) => s.trim().split(',').map(|x| x.to_string()).collect::<Vec<_>>(),
+            Err(_) => { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        };
+        if lv.len() != 2 { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        let (cur, npairs): (usize, usize) = (lv[0].parse().unwrap_or(0), lv[1].parse().unwrap_or(0));
+        if cur < level { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        level = cur;
+
+        for p in 0..npairs {
+            let claim = dir.join(format!("jclaim_{level}_{p:04}"));
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(&claim).is_err() { continue; }
+            let a_path = dir.join(format!("jin_{level}_{:04}.bin", p * 2));
+            let b_path = dir.join(format!("jin_{level}_{:04}.bin", p * 2 + 1));
+            let (ab, bb) = match (std::fs::read(&a_path), std::fs::read(&b_path)) {
+                (Ok(a), Ok(b)) => (a, b),
+                _ => { eprintln!("[{id}] level {level} pair {p}: inputs missing"); continue; }
+            };
+            let a: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&ab).expect("deserialize a");
+            let b: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&bb).expect("deserialize b");
+            let t = Instant::now();
+            // join asserts a.post == b.pre. A worker that returns a join of the wrong two receipts
+            // cannot produce something that survives this, which is why untrusted joins are safe.
+            let j = server.join(&a, &b).expect("join");
+            let tmp = dir.join(format!("jout_{level}_{p:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&j).expect("serialize join")).expect("write join");
+            std::fs::rename(&tmp, dir.join(format!("jout_{level}_{p:04}.bin"))).expect("rename join");
+            done += 1;
+            println!("[{id}] level {level} pair {p} joined in {:.1}s", t.elapsed().as_secs_f64());
+        }
+        level += 1;
+    }
+    println!("[{id}] JOIN DONE {done} joins in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator for step 3: prove segments (workers), lift them, then drive the join tree as
+// distributed levels, then assemble. HAZYNC_JOIN_DISTRIBUTED=1 selects this over the in-process
+// assembly, so both paths stay reachable and comparable.
+fn seg_coordinate_tree_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let dir = seg_workdir();
+    std::fs::create_dir_all(&dir).expect("create workdir");
+    for e in std::fs::read_dir(&dir).unwrap().flatten() { let _ = std::fs::remove_file(e.path()); }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+        std::fs::write(dir.join(format!("seg_{i:04}.bin")), bincode::serialize(&seg).expect("ser")).expect("write");
+    }
+    std::fs::write(dir.join("MANIFEST"), format!("{total}\n")).expect("manifest");
+    println!("=== coordinator (distributed join tree) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   {total} segments published");
+
+    let t_wait = Instant::now();
+    loop {
+        let have = (0..total).filter(|i| dir.join(format!("rcpt_{i:04}.bin")).exists()).count();
+        if have == total { break; }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let prove_s = t_wait.elapsed().as_secs_f64();
+
+    let ctx = VerifierContext::default();
+    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
+    for i in 0..total {
+        let sr: SegmentReceipt = bincode::deserialize(&std::fs::read(dir.join(format!("rcpt_{i:04}.bin"))).expect("read")).expect("de");
+        sr.verify_integrity_with_context(&ctx).expect("worker receipt failed verify");
+        receipts.push(sr);
+    }
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+
+    // Lifts stay here for now (step 2 moves them to workers). The merge into the last segment's
+    // claim has to happen before any lifting and needs the session, which a worker does not have.
+    let t_lift = Instant::now();
+    let lifted = server.prepare_lifts(&ctx, &session, receipts).expect("prepare lifts");
+    let lift_s = t_lift.elapsed().as_secs_f64();
+    println!("  lifted {} receipts in {:.1} s", lifted.len(), lift_s);
+
+    // Drive the tree. Publish a level, wait for its joins, feed the outputs in as the next level.
+    let t_join = Instant::now();
+    let mut level_recs: Vec<SuccinctReceipt<ReceiptClaim>> = lifted;
+    let mut level = 0usize;
+    while level_recs.len() > 1 {
+        for (i, r) in level_recs.iter().enumerate() {
+            std::fs::write(dir.join(format!("jin_{level}_{i:04}.bin")), bincode::serialize(r).expect("ser")).expect("write");
+        }
+        let npairs = level_recs.len() / 2;                 // odd tail carries, not joined
+        let odd = level_recs.len() % 2 == 1;
+        std::fs::write(dir.join("JOINLEVEL"), format!("{level},{npairs}\n")).expect("level");
+        println!("    level {level}: {} receipts -> {npairs} joins{}", level_recs.len(), if odd {" (+1 carried)"} else {""});
+        loop {
+            let have = (0..npairs).filter(|p| dir.join(format!("jout_{level}_{p:04}.bin")).exists()).count();
+            if have == npairs { break; }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        let mut next: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(npairs + 1);
+        for p in 0..npairs {
+            let r: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&std::fs::read(dir.join(format!("jout_{level}_{p:04}.bin"))).expect("read")).expect("de");
+            r.verify_integrity_with_context(&ctx).expect("joined receipt failed verify");
+            next.push(r);
+        }
+        if odd { next.push(level_recs.pop().expect("odd tail")); }
+        level_recs = next;
+        level += 1;
+    }
+    std::fs::write(dir.join("JOINDONE"), b"1").expect("done");
+    let join_s = t_join.elapsed().as_secs_f64();
+
+    let joined = level_recs.pop().expect("one receipt remains");
+    let t_asm = Instant::now();
+    let info = server.assemble_from_joined(&ctx, &session, joined).expect("assemble from joined");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED-TREE RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution      {exec_s:8.1} s");
+    println!("  segment prove  {prove_s:8.1} s   (workers)");
+    println!("  lift           {lift_s:8.1} s   (coordinator; step 2 moves this to workers)");
+    println!("  join tree      {join_s:8.1} s   ({level} levels, distributed)");
+    println!("  resolve+build  {asm_s:8.1} s");
+    println!();
+    println!(">>> DISTRIBUTED-TREE RECEIPT VERIFIED against METHOD_ID");
+    println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
 }
