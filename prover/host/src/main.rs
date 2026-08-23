@@ -4517,6 +4517,28 @@ fn seg_prove_one_cmd() {
 //
 // Frame: [u32 index][u32 len][bytes]. Index 0xFFFF_FFFF means no more work.
 const SEG_EOF: u32 = 0xFFFF_FFFF;
+// A join job rather than a segment. The index space is otherwise segment indices, so the top bit is
+// free and one connection can carry both kinds of work without a second protocol or a second socket.
+// Body is [u32 len_a][a][u32 len_b][b] -- the two lifted receipts to join.
+const JOIN_TAG: u32 = 0x8000_0000;
+
+fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + a.len() + b.len());
+    v.extend_from_slice(&(a.len() as u32).to_le_bytes());
+    v.extend_from_slice(a);
+    v.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    v.extend_from_slice(b);
+    v
+}
+
+fn unpack_pair(body: &[u8]) -> Option<(&[u8], &[u8])> {
+    if body.len() < 8 { return None; }
+    let la = u32::from_le_bytes(body[0..4].try_into().ok()?) as usize;
+    if body.len() < 4 + la + 4 { return None; }
+    let lb = u32::from_le_bytes(body[4 + la..8 + la].try_into().ok()?) as usize;
+    if body.len() < 8 + la + lb { return None; }
+    Some((&body[4..4 + la], &body[8 + la..8 + la + lb]))
+}
 
 fn write_frame(s: &mut std::net::TcpStream, idx: u32, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -4542,7 +4564,7 @@ fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
 // Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
 // makes no decisions -- the coordinator drives. That also makes it simpler than the pull worker.
 fn seg_connect_cmd(addr: &str) {
-    use risc0_zkvm::{VerifierContext, Segment};
+    use risc0_zkvm::{VerifierContext, Segment, SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
     let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "push1".into());
     let opts = ProverOpts::succinct();
@@ -4557,6 +4579,23 @@ fn seg_connect_cmd(addr: &str) {
         let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { println!("[{id}] link closed: {e}"); break; } };
         if idx == SEG_EOF { println!("[{id}] no more work"); break; }
         let t = Instant::now();
+
+        // A join job carries two lifted receipts instead of a segment. Same connection, same loop.
+        // join() asserts a.post == b.pre, so a worker cannot return a join of the wrong two receipts
+        // and have it survive the next level -- untrusted joins are safe for the same reason
+        // untrusted proving is.
+        if idx & JOIN_TAG != 0 {
+            let (ab, bb) = unpack_pair(&body).expect("malformed join pair");
+            let a: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(ab).expect("deserialize a");
+            let b: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(bb).expect("deserialize b");
+            let j = server.join(&a, &b).expect("join");
+            let out = bincode::serialize(&j).expect("serialize join");
+            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            done += 1;
+            if done % 25 == 0 { println!("[{id}] join {} in {:.2}s ({done} done)", idx & !JOIN_TAG, t.elapsed().as_secs_f64()); }
+            continue;
+        }
+
         let seg: Segment = bincode::deserialize(&body).expect("deserialize segment");
         let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {idx}"));
         let lifted = server.lift(&sr).expect("lift");
@@ -4620,6 +4659,14 @@ fn seg_serve_cmd() {
 
     let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
     let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
+    // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
+    // connection stays open across both phases instead of the fleet disbanding after proving and
+    // leaving the coordinator to fold alone -- which is what left assembly flat at 373 s while
+    // segment proving scaled 1.96x.
+    let jobs: Arc<Mutex<VecDeque<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let jout: Arc<Mutex<std::collections::HashMap<u32, SuccinctReceipt<ReceiptClaim>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let alldone = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let listener = std::net::TcpListener::bind(("0.0.0.0", port)).expect("bind");
     listener.set_nonblocking(true).ok();
 
@@ -4642,6 +4689,7 @@ fn seg_serve_cmd() {
                 Ok((mut s, peer)) => {
                     println!("  worker connected from {peer}");
                     let (queue, out, wire) = (queue.clone(), out.clone(), wire.clone());
+                    let (jobs, jout, alldone) = (jobs.clone(), jout.clone(), alldone.clone());
                     handles.push(scope.spawn(move || {
                         // Each thread builds its own VerifierContext: it holds Rc, so it is not
                         // Sync and cannot be shared. It is cheap and the threads need nothing
@@ -4666,8 +4714,36 @@ fn seg_serve_cmd() {
                                 }
                             }
                             if inflight.is_empty() {
-                                let _ = write_frame(&mut s, SEG_EOF, &[]);
-                                break;
+                                // Segments are gone. Take join work as the coordinator publishes each
+                                // level; idle briefly between levels rather than disconnecting.
+                                let job = { jobs.lock().unwrap().pop_front() };
+                                if let Some((tag, body)) = job {
+                                    if write_frame(&mut s, tag, &body).is_err() {
+                                        jobs.lock().unwrap().push_front((tag, body));
+                                        break;
+                                    }
+                                    match read_frame(&mut s) {
+                                        Ok((rt, rb)) => {
+                                            match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&rb) {
+                                                Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
+                                                    jout.lock().unwrap().insert(rt, r);
+                                                }
+                                                _ => {
+                                                    println!("  worker returned a bad join for {}", rt & !JOIN_TAG);
+                                                    jobs.lock().unwrap().push_back((tag, body));
+                                                }
+                                            }
+                                        }
+                                        Err(_) => { jobs.lock().unwrap().push_front((tag, body)); break; }
+                                    }
+                                    continue;
+                                }
+                                if alldone.load(std::sync::atomic::Ordering::Relaxed) {
+                                    let _ = write_frame(&mut s, SEG_EOF, &[]);
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                continue;
                             }
                             match read_frame(&mut s) {
                                 Ok((i, body)) => {
@@ -4718,19 +4794,45 @@ fn seg_serve_cmd() {
     let mut tail = server.prepare_lifts(&ctx, &session, vec![last_rcpt]).expect("merge+lift last");
     lifted.append(&mut tail);
 
+    // DISTRIBUTE THE JOIN TREE. Publish a level as jobs, wait for the workers to return them, feed
+    // the results in as the next level. The barrier between levels is unavoidable -- level l+1
+    // consumes level l's output -- but the depth is log2(N), so 1,684 segments is eleven barriers
+    // rather than 1,683 sequential joins.
+    //
+    // In-process joining is what left assembly flat at 373 s while segment proving scaled 1.96x on
+    // two cards. Everything else divided; this was the part that did not.
     let mut level = lifted;
+    let mut lv = 0u32;
     while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut it = level.into_iter();
-        loop {
-            match (it.next(), it.next()) {
-                (Some(a), Some(b)) => next.push(server.join(&a, &b).expect("join")),
-                (Some(a), None) => next.push(a),
-                _ => break,
+        let npairs = level.len() / 2;
+        let odd = level.len() % 2 == 1;
+        {
+            let mut q = jobs.lock().unwrap();
+            for p in 0..npairs {
+                let a = bincode::serialize(&level[p * 2]).expect("ser a");
+                let b = bincode::serialize(&level[p * 2 + 1]).expect("ser b");
+                q.push_back((JOIN_TAG | (lv << 16) | p as u32, pack_pair(&a, &b)));
             }
         }
+        println!("    level {lv}: {} receipts -> {npairs} joins{}", level.len(), if odd { " (+1 carried)" } else { "" });
+        loop {
+            let have = { jout.lock().unwrap().len() };
+            if have >= npairs { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut next = Vec::with_capacity(npairs + 1);
+        {
+            let mut m = jout.lock().unwrap();
+            for p in 0..npairs {
+                next.push(m.remove(&(JOIN_TAG | (lv << 16) | p as u32)).expect("missing join result"));
+            }
+        }
+        // An odd receipt carries forward untouched, keeping its position so adjacency holds.
+        if odd { next.push(level.pop().expect("odd tail")); }
         level = next;
+        lv += 1;
     }
+    alldone.store(true, std::sync::atomic::Ordering::Relaxed);
     let info = server.assemble_from_joined(&ctx, &session, level.pop().expect("one left")).expect("assemble");
     let asm_s = t_asm.elapsed().as_secs_f64();
     info.receipt.verify(METHOD_ID).expect("PUSH RECEIPT FAILED verify");
