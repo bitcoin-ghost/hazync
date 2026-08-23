@@ -382,3 +382,28 @@
 # Superseded the earlier id 4722cec8…
 
 1d6c3792e5aefec398bfb03e176934f6876f423ec6f54c3d3d8f0c79ce5000c5
+
+# ── 1d6c3792e5aefec398bfb03e176934f6876f423ec6f54c3d3d8f0c79ce5000c5 ─ 2026-08-23 ────────────────
+#
+# PARALLEL BLOCK VALIDATION. validate_block did per-transaction work once per INPUT. Seven places,
+# all the same mistake: the input was the unit of work and the transaction was the unit of data.
+# Fixing them took it from 3,454.7 M to 955.2 M cycles (3.62x), and the aggregate from 3,636.4 M to
+# ~1,137 M (3.20x).
+#
+# CORE'S CONSENSUS CODE IS UNCHANGED. The saving is entirely in what surrounds it -- how often the
+# same transaction is hashed, how many times a coin leaf is recomputed, and what the aggregate has
+# to derive versus what the chunks already knew. Three values now arrive FROM the chunks rather than
+# being recomputed: wtxids, coin leaves, and sequence numbers with versions.
+#
+# THE RELOCATION IS THE PART THAT NEEDED PROVING, not the cycle count. A value that arrives from a
+# chunk is a value the aggregate no longer checks for itself, so it was gated three ways: two
+# same-run differentials (stages 30 and 31, zero mismatches over 8,006 inputs), and then a real
+# 16-chunk end-to-end on near-tip block 962000 where those values are carried by sixteen genuine
+# receipts and resolved as assumptions -- which is the only test that makes them load-bearing.
+#
+# ONE THING DELIBERATELY NOT MOVED: the lock check. Chunks supply raw nSequence and version, not the
+# lock RESULT, because the result needs the block MTP and chunk and aggregate derive that separately.
+# A mismatch there would be fail-OPEN. Output leaves were acceptable to move because their MTP
+# coupling is fail-CLOSED -- a wrong leaf misses root_next and the proof does not verify.
+#
+# Superseded the earlier id b62d2a60… (2026-08-04, audit #5).

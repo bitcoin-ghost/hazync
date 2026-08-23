@@ -3,8 +3,14 @@
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
 push (#23).
 
-Regenerated 2026-08-04 under canonical guest `1d6c3792…` (audit #5 guest guards — see
-`reproduce/METHOD_ID`), which superseded `b161735a…`. A proof carries its guest id inside it, so a
+⚠ **STALE — proved under the superseded `b62d2a60…`; the guest is now `1d6c3792…`**
+(the 2026-08-23 parallel-block-validation re-baseline). They must be re-proved and re-wrapped
+before a release, and until then `ci_snark_verify.sh`, `ci_verify_any.sh` and
+`verifier-wasm/test-parity.sh` fail — correctly, because a verifier pinned to the new id genuinely
+cannot accept a proof made by the old one.
+
+Last regenerated 2026-08-04 under `b62d2a60…` (audit #5 guest guards — see `reproduce/METHOD_ID`),
+which superseded `b161735a…`. A proof carries its guest id inside it, so a
 re-baseline cannot be absorbed by editing anything: the pair has to be re-proved and re-wrapped, and
 until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and `verifier-wasm/test-parity.sh` fail — as
 they should, since a verifier pinned to the new id genuinely cannot accept a proof made by the old one.

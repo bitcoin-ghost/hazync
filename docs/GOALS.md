@@ -67,7 +67,8 @@ goals document reads as a claim rather than as a snapshot. The
 same numbers as JSON.
 
 > **Re-baselines reset the board to genesis**, because receipts made against a superseded guest do not
-> verify under the new one. The current guest `1d6c3792` was pinned on **2026-08-04** (audit #5,
+> verify under the new one. The current guest `1d6c3792` was pinned on **2026-08-23** (parallel block validation), superseding
+> `b62d2a60` of **2026-08-04** (audit #5,
 > shipped in v0.17.0). It followed `b161735a` (v0.16.0, #88 — the id no longer depends on where the
 > repo is checked out) and `dfc9eeda` (2026-08-03, BIP30 closed by a coinbase-only SMT, #54, with
 > audit #3's 91842/91880 grandfather), which in turn followed `71790584`.
