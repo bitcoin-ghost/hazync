@@ -325,68 +325,26 @@ impl ProverServer for ProverImpl {
             &self.opts.hashfn
         );
 
-        // PIPELINING (hazync patch). `prove_segment` is `segment_preflight` then `prove_segment_core`
-        // in sequence, and this loop ran them back to back, so the GPU sat idle for every preflight.
-        // Profiling a chunk prove on a B200 put ~35% of on-CPU time in preflight with the GPU waiting
-        // on `cuStreamSynchronize`, and the share was the same at po2 20 and po2 22 despite 4.2x the
-        // segment count — so the cost tracks cycles, not per-segment overhead. Overlapping the two
-        // measured 1.39x on segment proving, replicated across two runs.
+        // Preflight pipelining was here and is REMOVED. It overlapped segment_preflight with
+        // prove_segment_core by running preflight on a thread spawned inside thread::scope, and it
+        // deadlocked CUDA: hazync#147, chunk 11 of block 962000 at po2 22, hung twice for 76 min
+        // and 3h38m with the GPU at 0% and the consumer parked in rx.recv(). Confirmed by running
+        // the same chunk, same po2, same binary with the schedule as the only variable.
         //
-        // Only the SCHEDULE changes. Segment n+1's witness does not depend on segment n's proof, the
-        // seals are collected in the original order, and everything after this loop is untouched.
-        //
-        // Hooks force the sequential path: `on_pre_prove_segment` takes a `&Segment`, and a `Segment`
-        // carries no `Send` bound, so it cannot cross the channel. Rather than resolve twice or fire
-        // hooks out of order, a session with hooks keeps exactly its old behaviour.
+        // It is not worth fixing. A fix means either keeping CUDA work off the second thread, which
+        // defeats the point, or managing CUDA contexts per thread inside risc0's HAL. And the same
+        // overlap is available safely by running more worker PROCESSES, which do not share a CUDA
+        // context: measured at 1.20x on one card, against the ~6% this bought. Removing it also
+        // unblocks po2 22, worth 1.15x on chunks and 1.42x on the aggregate.
         let mut segments = Vec::new();
-        // HAZYNC_NO_PIPELINE=1 forces the original sequential loop, so one binary can run both
-        // schedules. Added to isolate hazync#147: chunk 11 of block 962000 at po2 22 deadlocks
-        // through prove_session but proves fine segment by segment, which puts the suspicion on
-        // this patch -- a producer blocking inside segment_preflight against the CUDA context from
-        // a spawned thread would hang exactly as observed. Dropping the whole vendored crate was
-        // not a usable control: the host depends on additions that live only here.
-        let pipeline = session.hooks.is_empty() && std::env::var("HAZYNC_NO_PIPELINE").is_err();
-        if pipeline {
-            // Borrow ONLY the segment list. Capturing `session` whole would drag in
-            // `hooks: Vec<Box<dyn SessionEvents>>`, which is not Sync, and the worker has no use
-            // for it — this branch is the one where there are no hooks.
-            let segment_refs = &session.segments;
-            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<PreflightResults>>(1);
-            std::thread::scope(|scope| -> Result<()> {
-                // Depth 1 => at most two witnesses alive: one being proved, one buffered. Deeper buys
-                // nothing (the GPU consumer is serial) and each one holds a full segment witness, so
-                // the depth is a memory knob rather than a speed one.
-                scope.spawn(move || {
-                    for segment_ref in segment_refs.iter() {
-                        let result = segment_ref
-                            .resolve()
-                            .and_then(|segment| self.segment_preflight(&segment));
-                        let failed = result.is_err();
-                        // A send error means the consumer stopped; so does a preflight failure, which
-                        // the consumer surfaces. Either way there is nothing further to produce.
-                        if tx.send(result).is_err() || failed {
-                            break;
-                        }
-                    }
-                });
-                for index in 0..segment_refs.len() {
-                    let preflight_results = rx.recv().map_err(|_| {
-                        anyhow!("preflight worker stopped after {index}/{} segments", segment_refs.len())
-                    })??;
-                    segments.push(self.prove_segment_core(ctx, preflight_results)?);
-                }
-                Ok(())
-            })?;
-        } else {
-            for segment_ref in session.segments.iter() {
-                let segment = segment_ref.resolve()?;
-                for hook in &session.hooks {
-                    hook.on_pre_prove_segment(&segment);
-                }
-                segments.push(self.prove_segment(ctx, &segment)?);
-                for hook in &session.hooks {
-                    hook.on_post_prove_segment(&segment);
-                }
+        for segment_ref in session.segments.iter() {
+            let segment = segment_ref.resolve()?;
+            for hook in &session.hooks {
+                hook.on_pre_prove_segment(&segment);
+            }
+            segments.push(self.prove_segment(ctx, &segment)?);
+            for hook in &session.hooks {
+                hook.on_post_prove_segment(&segment);
             }
         }
 

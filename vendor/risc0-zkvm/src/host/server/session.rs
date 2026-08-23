@@ -156,11 +156,7 @@ impl PreflightResults {
 /// This allows implementers to determine the best way to represent this in an
 /// pluggable manner. See the [SimpleSegmentRef] for a very basic
 /// implementation.
-// PIPELINING (hazync patch): `Sync` is required so `prove_session` can hand the segment list to a
-// preflight worker while the prove loop keeps reading it. Every impl in this crate is plain data,
-// so the bound costs nothing here; it is a breaking change only for an external impl that is Send
-// but not Sync, which would be an odd shape for a handle whose only method takes &self.
-pub trait SegmentRef: Send + Sync {
+pub trait SegmentRef: Send {
     /// Resolve this reference into an actual [Segment].
     fn resolve(&self) -> Result<Segment>;
 }
