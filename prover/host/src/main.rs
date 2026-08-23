@@ -3126,6 +3126,14 @@ fn main() {
         segment_size_cmd();
         return;
     }
+    if args.iter().any(|a| a == "seg-work") {
+        seg_work_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-coordinate") {
+        seg_coordinate_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "seg-distribute") {
         seg_distribute_cmd();
         return;
@@ -4006,4 +4014,142 @@ fn seg_distribute_cmd() {
     println!("  proved here: that this is FASTER. One machine proved them in sequence. The point is");
     println!("  that the work is now in units a worker can take, and the journal digest above is what");
     println!("  a monolithic prove of the same chunk must produce.");
+}
+
+// SEGMENT DISTRIBUTION, phase 1/2: a work directory that separate processes can share.
+//
+// The coordinator cannot hand off its Session -- it holds `Box<dyn SegmentRef>` and does not
+// serialise -- and it does not need to. Assembly needs the session (journal, assumptions, claim), so
+// the coordinator executes, publishes segments, and assembles. ONLY segment proving leaves the
+// process, which is the 76% worth moving.
+//
+// Claiming is an O_EXCL create of claim_NNNN. That is atomic on a local filesystem and on NFS, needs
+// no lock server, and a worker that dies simply leaves a claim that a sweeper can expire. Receipts
+// are written to a .tmp and renamed, so the coordinator never sees a half-written file -- it polls
+// for existence and a rename is atomic.
+fn seg_workdir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HAZYNC_WORKDIR").unwrap_or_else(|_| "/tmp/hazync-segwork".into()))
+}
+
+// Worker: claim segments from the directory, prove them, write receipts. Knows nothing about the
+// block, the guest, or the session -- it needs only the segment in front of it.
+fn seg_work_cmd() {
+    use risc0_zkvm::{VerifierContext, Segment};
+    use std::time::Instant;
+    let dir = seg_workdir();
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "w0".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    let count: usize = loop {
+        if let Ok(s) = std::fs::read_to_string(dir.join("MANIFEST")) {
+            if let Ok(n) = s.trim().parse() { break n; }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    };
+
+    let mut done = 0usize;
+    let t0 = Instant::now();
+    for i in 0..count {
+        let claim = dir.join(format!("claim_{i:04}"));
+        // create_new is the whole mutual exclusion: exactly one worker wins each segment.
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(&claim).is_err() { continue; }
+        let seg_path = dir.join(format!("seg_{i:04}.bin"));
+        let bytes = match std::fs::read(&seg_path) { Ok(b) => b, Err(e) => { eprintln!("[{id}] seg {i} unreadable: {e}"); continue; } };
+        let seg: Segment = bincode::deserialize(&bytes).expect("deserialize segment");
+        let t = Instant::now();
+        let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
+        let tmp = dir.join(format!("rcpt_{i:04}.tmp"));
+        std::fs::write(&tmp, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
+        std::fs::rename(&tmp, dir.join(format!("rcpt_{i:04}.bin"))).expect("rename receipt");
+        done += 1;
+        println!("[{id}] segment {i} proved in {:.1}s", t.elapsed().as_secs_f64());
+    }
+    println!("[{id}] DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator: execute, publish, wait, assemble, verify.
+fn seg_coordinate_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let dir = seg_workdir();
+    std::fs::create_dir_all(&dir).expect("create workdir");
+    for e in std::fs::read_dir(&dir).unwrap().flatten() { let _ = std::fs::remove_file(e.path()); }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    let t_pub = Instant::now();
+    let mut wire_out = 0usize;
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+        let bytes = bincode::serialize(&seg).expect("serialize segment");
+        wire_out += bytes.len();
+        std::fs::write(dir.join(format!("seg_{i:04}.bin")), &bytes).expect("write segment");
+    }
+    // MANIFEST last: it is the signal that every segment is on disk, so a worker that sees it can
+    // trust any index below the count.
+    std::fs::write(dir.join("MANIFEST"), format!("{total}\n")).expect("write manifest");
+    let pub_s = t_pub.elapsed().as_secs_f64();
+
+    println!("=== coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   published {total} segments in {pub_s:.1} s ({:.2} MB)", wire_out as f64/1e6);
+    println!("  workdir {}", dir.display());
+    println!("  waiting for {total} receipts...");
+
+    let t_wait = Instant::now();
+    let mut last = 0usize;
+    loop {
+        let have = (0..total).filter(|i| dir.join(format!("rcpt_{i:04}.bin")).exists()).count();
+        if have != last { println!("    {have}/{total} receipts  {:.0}s", t_wait.elapsed().as_secs_f64()); last = have; }
+        if have == total { break; }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let wait_s = t_wait.elapsed().as_secs_f64();
+
+    let ctx = VerifierContext::default();
+    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
+    let mut wire_back = 0usize;
+    for i in 0..total {
+        let bytes = std::fs::read(dir.join(format!("rcpt_{i:04}.bin"))).expect("read receipt");
+        wire_back += bytes.len();
+        let sr: SegmentReceipt = bincode::deserialize(&bytes).expect("deserialize receipt");
+        // Workers are untrusted. A receipt is self-verifying, so this is the entire defence.
+        sr.verify_integrity_with_context(&ctx).expect("worker receipt failed verify");
+        receipts.push(sr);
+    }
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let t_asm = Instant::now();
+    let info = server.assemble_from_segment_receipts(&ctx, &session, receipts).expect("assemble");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution        {exec_s:8.1} s");
+    println!("  publish          {pub_s:8.1} s");
+    println!("  worker wall      {wait_s:8.1} s   <- this is what more workers shrink");
+    println!("  assembly         {asm_s:8.1} s   <- coordinator-side, does not distribute yet");
+    println!("  TOTAL            {:8.1} s", exec_s + pub_s + wait_s + asm_s);
+    println!("  wire out/back    {:.2} / {:.2} MB", wire_out as f64/1e6, wire_back as f64/1e6);
+    println!();
+    println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID");
+    println!("    journal digest {}", hex(info.receipt.journal.digest().as_bytes()));
 }
