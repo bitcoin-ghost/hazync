@@ -193,3 +193,22 @@ for distribution, exactly as expected. The shape is what changed.
 
 ALL FOUR PIECES BUILT AND GATED. Six execution paths agree on their digests.
 Still unmeasured: actual speedup. Needs more than one machine.
+
+## MULTI-WORKER SWEEP, ONE CARD (09:50Z)
+
+| workers | segment prove | join tree | total | vs monolithic 1132.0 s |
+|---|---|---|---|---|
+| 1 | 780.2 | 395.3 | 1200.3 | 6.0% worse |
+| 2 | 744.5 | 324.2 | 1093.7 | 3.4% better |
+| 4 | 702.3 | 275.2 | **1003.2** | **11.4% better** |
+
+digest OK every time. **1.20x from 1->4 workers, 1.13x over monolithic, on ONE GPU** --
+recovering the idle time that leaves a single worker at 56% card utilisation.
+
+Joins parallelise better than segment proving (1.44x vs 1.11x): 842 independent joins at
+level 0, and joins are lighter on the SMs.
+
+**Four concurrent CUDA workers: correct receipts, no hangs.** Useful given #147 and #97.
+
+NOT the distribution scaling number -- this is one shared card. Separate machines are still
+unmeasured.
