@@ -224,3 +224,33 @@ Assembly did not divide here (373.1 vs 370.4 s) because `seg-serve` runs the joi
 That term *does* distribute — `seg-join` is built and gated — but **push and distributed joins are
 not yet the same code path**. Wiring them together is the last step between this projection and a
 measured sub-10-minute block.
+
+## MEASURED: both phases scale — 2.03x on two cards
+
+Two matched L40S, push transport, segments **and** joins distributed. Block 741000 chunk 0,
+po2 18, 1,684 segments:
+
+| term | 1 card | 2 cards | speedup |
+|---|---|---|---|
+| segment proving | 862.6 s | 410.9 s | 2.10x |
+| **assembly** | **409.7 s** | **211.5 s** | **1.94x** |
+| **total** | 1279.1 s | 629.3 s | **2.03x** |
+
+Digest correct in both. **Assembly was flat at ~373 s in every previous run** — it was the last
+undivided term, and with the join tree published as work over the same connections it now scales.
+
+The tree behaves as designed: 11 levels for 1,684 segments, 1,683 joins, odd receipts carried in
+position, `log2(N)` depth rather than `N`.
+
+### The block
+
+Near-tip 962000, measured: 14,167 card-seconds of chunk work plus a 1,466 s aggregate = **15,633
+card-seconds**, against a ~46 s execution floor:
+
+| cards | block |
+|---|---|
+| 16 | 17.0 min |
+| **30** | **9.5 min** |
+| 64 | 4.8 min |
+
+**Every term is now measured to scale**, rather than one phase measured and the other assumed.
