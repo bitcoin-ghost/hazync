@@ -181,6 +181,34 @@ pub trait ProverServer: private::Sealed {
         <Self as Compress<_>>::composite_to_succinct(self, receipt)
     }
 
+    /// SEGMENT DISTRIBUTION step 3 (hazync patch). Merge the session output into the last segment
+    /// receipt and lift every segment, in session order, so the JOIN TREE over the result can be run
+    /// elsewhere -- across threads or across machines, one join per work item.
+    ///
+    /// The merge cannot move to a worker: it folds the session journal digest and assumption set
+    /// into the last segment's claim, and a worker has neither. Everything after this needs only
+    /// receipts.
+    fn prepare_lifts(
+        &self,
+        _ctx: &VerifierContext,
+        _session: &Session,
+        _segments: Vec<SegmentReceipt>,
+    ) -> Result<Vec<SuccinctReceipt<ReceiptClaim>>> {
+        anyhow::bail!("this prover does not support preparing lifts for external joining")
+    }
+
+    /// SEGMENT DISTRIBUTION step 3 (hazync patch). Finish assembly from a continuation receipt whose
+    /// join tree was run elsewhere: resolve the session's assumptions against it and build the
+    /// `Receipt`. Pairs with `prepare_lifts`.
+    fn assemble_from_joined(
+        &self,
+        _ctx: &VerifierContext,
+        _session: &Session,
+        _joined: SuccinctReceipt<ReceiptClaim>,
+    ) -> Result<ProveInfo> {
+        anyhow::bail!("this prover does not support assembling from an externally joined receipt")
+    }
+
     /// SEGMENT DISTRIBUTION (hazync patch). Assemble a `Receipt` from segment receipts that were
     /// proved somewhere else.
     ///

@@ -59,6 +59,104 @@ impl ProverServer for ProverImpl {
     ///
     /// The receipts must be in session order: the journal and assumptions are merged into the last
     /// one's claim, and the composite verify checks the chain of segment claims.
+    /// SEGMENT DISTRIBUTION step 3 (hazync patch). Merge the session output into the last segment
+    /// receipt and lift every segment, returning the lifted receipts in session order.
+    ///
+    /// This is the front half of assembly, split out so the JOIN TREE over the result can be run
+    /// somewhere else -- across threads, or across machines, one join per work item. The joins at a
+    /// given level are independent of each other, which is what the balanced tree in
+    /// `composite_to_succinct` exists to make true.
+    ///
+    /// The merge has to happen here rather than in a worker: it folds the session journal digest and
+    /// the assumption set into the LAST segment's claim, and a worker has neither. Everything after
+    /// this point needs only the receipts.
+    fn prepare_lifts(
+        &self,
+        _ctx: &VerifierContext,
+        session: &Session,
+        mut segments: Vec<SegmentReceipt>,
+    ) -> Result<Vec<SuccinctReceipt<ReceiptClaim>>> {
+        let (assumptions, _): (Vec<_>, Vec<_>) = session.assumptions.iter().cloned().unzip();
+        segments
+            .last_mut()
+            .ok_or_else(|| anyhow!("session is empty"))?
+            .claim
+            .output
+            .merge_with(
+                &session
+                    .journal
+                    .as_ref()
+                    .map(|journal| Output {
+                        journal: MaybePruned::Pruned(journal.digest()),
+                        assumptions: assumptions.into(),
+                    })
+                    .into(),
+            )
+            .context("failed to merge output into final segment claim")?;
+
+        let mut lifted = Vec::with_capacity(segments.len());
+        for seg in segments.iter() {
+            lifted.push(self.lift(seg)?);
+        }
+        Ok(lifted)
+    }
+
+    /// SEGMENT DISTRIBUTION step 3 (hazync patch). Finish assembly from a continuation receipt whose
+    /// join tree was run elsewhere.
+    ///
+    /// Takes the single receipt left after joining, resolves the session's assumptions against it,
+    /// and builds the `Receipt`. Pairs with `prepare_lifts`: together they are
+    /// `assemble_from_segment_receipts` with the join tree lifted out of the middle.
+    ///
+    /// NOTE what is given up. `assemble_from_segment_receipts` builds a `CompositeReceipt` and runs
+    /// `verify_integrity_with_context` and `check_claims` over it. There is no composite here, so
+    /// those two checks are gone. What still holds: every receipt is verified as it arrives, `join`
+    /// asserts `a.post == b.pre` at every level so a misplaced segment cannot survive the tree, and
+    /// the returned `Receipt` is verified against the image id. That is weaker against a BUGGY
+    /// PROVER, not against a dishonest worker.
+    fn assemble_from_joined(
+        &self,
+        _ctx: &VerifierContext,
+        session: &Session,
+        joined: SuccinctReceipt<ReceiptClaim>,
+    ) -> Result<ProveInfo> {
+        let (_, session_assumption_receipts): (Vec<_>, Vec<_>) =
+            session.assumptions.iter().cloned().unzip();
+
+        let mut conditional = joined;
+        for assumption_receipt in session_assumption_receipts {
+            let inner = match assumption_receipt {
+                AssumptionReceipt::Proven(receipt) => receipt,
+                AssumptionReceipt::Unresolved(a) => bail!(
+                    "assemble_from_joined cannot discharge an unresolved assumption: {a:#?}"
+                ),
+            };
+            conditional = match inner {
+                InnerAssumptionReceipt::Succinct(a) => self.resolve(&conditional, &a)?,
+                InnerAssumptionReceipt::Composite(a) => {
+                    let s = self.composite_to_succinct(&a)?;
+                    self.resolve(&conditional, &SuccinctReceipt::<ReceiptClaim>::into_unknown(s))?
+                }
+                InnerAssumptionReceipt::Fake(_) => {
+                    bail!("fake receipt assumptions are not supported here")
+                }
+                InnerAssumptionReceipt::Groth16(_) => {
+                    bail!("Groth16 receipt assumptions are not supported here")
+                }
+            };
+        }
+
+        let receipt = Receipt::new(
+            InnerReceipt::Succinct(conditional),
+            session.journal.clone().unwrap_or_default().bytes,
+        );
+        Ok(ProveInfo {
+            receipt,
+            work_receipt: None,
+            stats: session.stats(),
+        })
+    }
+
     fn assemble_from_segment_receipts(
         &self,
         ctx: &VerifierContext,
