@@ -4780,8 +4780,20 @@ fn seg_serve_cmd() {
 
     // Wait for every segment to come back before lifting. The threads stay alive throughout and
     // pick up join work as the tree below publishes it.
+    // Report progress while segments come in. Without this the coordinator prints its header and
+    // then nothing for the whole segment phase, which is both the #145 complaint again and, more
+    // immediately, a run that any no-output watchdog will kill for looking wedged while it is
+    // working perfectly well. It already killed one.
+    let mut nextmark = 0usize;
+    let step = (total / 20).max(1);
     loop {
         let have = { out.lock().unwrap().iter().filter(|r| r.is_some()).count() };
+        if have >= nextmark {
+            let el = t_work.elapsed().as_secs_f64();
+            let eta = if have > 0 { el / have as f64 * (total - 1 - have) as f64 } else { 0.0 };
+            println!("    {have}/{} segments  {el:.0}s elapsed, ~{eta:.0}s left", total - 1);
+            nextmark = have + step;
+        }
         if have >= total - 1 { break; }       // >= not ==: a strict equality here spins forever if
                                               // the count ever overshoots, which is exactly what
                                               // happened when the last segment was still queued.
