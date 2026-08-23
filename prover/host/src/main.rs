@@ -4657,7 +4657,11 @@ fn seg_serve_cmd() {
     println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
     println!("  listening on 0.0.0.0:{port}");
 
-    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
+    // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
+    // and assumption set are merged into its claim before it is lifted, and a worker has no session,
+    // so the coordinator proves that one itself. Handing it out anyway is what made the wait below
+    // spin -- workers returned all `total` segments while the loop tested for exactly `total - 1`.
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total - 1).collect()));
     let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
     // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
     // connection stays open across both phases instead of the fleet disbanding after proving and
@@ -4778,7 +4782,9 @@ fn seg_serve_cmd() {
     // pick up join work as the tree below publishes it.
     loop {
         let have = { out.lock().unwrap().iter().filter(|r| r.is_some()).count() };
-        if have == total - 1 { break; }        // the last segment is proved here, not by a worker
+        if have >= total - 1 { break; }       // >= not ==: a strict equality here spins forever if
+                                              // the count ever overshoots, which is exactly what
+                                              // happened when the last segment was still queued.
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let work_s = t_work.elapsed().as_secs_f64();
