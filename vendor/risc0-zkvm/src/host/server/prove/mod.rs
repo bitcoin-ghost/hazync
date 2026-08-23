@@ -373,22 +373,56 @@ where
         &self,
         composite_receipt: &CompositeReceipt,
     ) -> anyhow::Result<SuccinctReceipt<Claim>> {
-        // Compress all receipts in the top-level session into one succinct receipt for the session.
-        let continuation_receipt = composite_receipt
-            .segments
-            .iter()
-            .try_fold(
-                None,
-                |left: Option<SuccinctReceipt<Claim>>, right: &SegmentReceipt| -> Result<_> {
-                    Ok(Some(match left {
-                        Some(left) => self.join(&left, &self.lift(right)?)?,
-                        None => self.lift(right)?,
-                    }))
-                },
-            )?
-            .ok_or_else(|| {
-                anyhow!("malformed composite receipt has no continuation segment receipts")
-            })?;
+        // JOIN TREE (hazync patch). The fold this replaces was strictly LINEAR:
+        //
+        //     try_fold(None, |left, right| match left {
+        //         Some(left) => self.join(&left, &self.lift(right)?)?,
+        //         None       => self.lift(right)?,
+        //     })
+        //
+        // lift segment 1, join into the accumulator, lift segment 2, join, and so on. Every join
+        // depends on the one before it, so the depth is N and there is no parallelism available in
+        // it at all -- not across threads, not across machines. That is what caps a distributed
+        // prover: segment proving divides, and then assembly does not. Measured on a 44-segment
+        // chunk, assembly was 43% of the total (44 lifts x 13.8 s + 43 joins x 14.0 s = 1209 s
+        // predicted against 1300 s observed), which put a ~2.4x ceiling on the whole thing.
+        //
+        // A balanced tree does the SAME N-1 joins and produces the SAME claim -- join(a, b) asserts
+        // a.post == b.pre, and joining adjacent pairs, then adjacent pairs of pairs, preserves that
+        // adjacency, so the operation is associative over the ordered sequence. What changes is the
+        // DEPTH: log2(N) instead of N. At 44 segments that is 6 levels rather than 43 steps.
+        //
+        // THIS CHANGE COSTS AND SAVES NOTHING ON ITS OWN. It is still sequential: the same N lifts
+        // and N-1 joins in the same process. What it changes is that the work becomes
+        // PARALLELISABLE AT ALL -- every join at a given level is now independent of its siblings,
+        // where before each one depended on the accumulator. The win comes from threading these
+        // loops or handing levels to workers; this is the enabling step, not the winning one.
+        //
+        // Deliberately NOT threaded here. The CUDA prover's thread-safety through lift/join is
+        // unestablished, and a deadlock in exactly this area (hazync#147) cost five hours of card
+        // time to find. Concurrency goes in behind a measurement, not ahead of one.
+        let mut level: Vec<SuccinctReceipt<Claim>> = Vec::with_capacity(composite_receipt.segments.len());
+        for seg in composite_receipt.segments.iter() {
+            level.push(self.lift(seg)?);
+        }
+        if level.is_empty() {
+            return Err(anyhow!("malformed composite receipt has no continuation segment receipts"));
+        }
+        while level.len() > 1 {
+            let mut next: Vec<SuccinctReceipt<Claim>> = Vec::with_capacity(level.len().div_ceil(2));
+            let mut it = level.into_iter();
+            loop {
+                match (it.next(), it.next()) {
+                    (Some(a), Some(b)) => next.push(self.join(&a, &b)?),
+                    // Odd one out carries to the next level unchanged. It stays in position, so
+                    // adjacency is preserved and the final claim is unaffected.
+                    (Some(a), None) => next.push(a),
+                    _ => break,
+                }
+            }
+            level = next;
+        }
+        let continuation_receipt = level.pop().expect("checked non-empty above");
 
         // Compress assumptions and resolve them to get the final succinct receipt.
         composite_receipt.assumption_receipts.iter().try_fold(
