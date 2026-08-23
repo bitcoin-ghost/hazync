@@ -190,6 +190,28 @@ Two external reviews ran in August 2026 — findings, fixes and what each could 
 - What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
 - How it's built: [`docs/`](docs/)
 
+## Prior art and credit
+
+**Hazync did not invent proving Bitcoin.** [**ZeroSync**](https://zerosync.org), by Robin Linus and
+collaborators, is the project that made it a live idea rather than a thought experiment, and the
+reason anyone takes a proof-of-chain-state seriously today. If this is interesting to you, that is
+the work to read first.
+
+The difference is narrow and worth stating plainly. ZeroSync proves Bitcoin consensus in a
+purpose-built circuit. Hazync takes the other trade: it compiles **Bitcoin Core's own consensus
+sources** — `interpreter.cpp`, `pubkey.cpp`, sighash, serialization, and libsecp256k1 — into a
+general-purpose zkVM and runs them unmodified. That is far slower, and it is the whole point: there
+is no second implementation of consensus to disagree with the first. Which trade is right depends on
+what you are afraid of.
+
+**[RISC Zero](https://risczero.com)** is the zkVM this runs in, and the reason compiling Core at all
+is possible. `prover/` was scaffolded from their template, and `vendor/risc0-zkvm` carries their
+crate with two local changes. Apache-2.0.
+
+**Bitcoin Core** and **libsecp256k1** are compiled in, unmodified but for two portability patches
+that change no consensus logic. Everything is attributed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 ## Licence
 
 MIT (see [`LICENSE`](LICENSE)). The guest compiles in Bitcoin Core and libsecp256k1 (both MIT); the
