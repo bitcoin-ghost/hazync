@@ -339,7 +339,14 @@ impl ProverServer for ProverImpl {
         // carries no `Send` bound, so it cannot cross the channel. Rather than resolve twice or fire
         // hooks out of order, a session with hooks keeps exactly its old behaviour.
         let mut segments = Vec::new();
-        if session.hooks.is_empty() {
+        // HAZYNC_NO_PIPELINE=1 forces the original sequential loop, so one binary can run both
+        // schedules. Added to isolate hazync#147: chunk 11 of block 962000 at po2 22 deadlocks
+        // through prove_session but proves fine segment by segment, which puts the suspicion on
+        // this patch -- a producer blocking inside segment_preflight against the CUDA context from
+        // a spawned thread would hang exactly as observed. Dropping the whole vendored crate was
+        // not a usable control: the host depends on additions that live only here.
+        let pipeline = session.hooks.is_empty() && std::env::var("HAZYNC_NO_PIPELINE").is_err();
+        if pipeline {
             // Borrow ONLY the segment list. Capturing `session` whole would drag in
             // `hooks: Vec<Box<dyn SessionEvents>>`, which is not Sync, and the worker has no use
             // for it — this branch is the one where there are no hooks.
