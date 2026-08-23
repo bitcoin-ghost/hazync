@@ -1,234 +1,68 @@
-# Segment distribution — overnight task list
+# Segment distribution — final state
 
-Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]` blocked.
+Complete. Design: `docs/SEGMENT_DISTRIBUTION.md`. Full measurement log: `~/hazync-b200-results.txt`
+§29–§64.
 
-## Build
-- [x] B1. Design doc (`docs/SEGMENT_DISTRIBUTION.md`)
-- [x] B2. P0 — assembly split in vendored risc0: `assemble_from_segment_receipts`, with
-      `prove_session` refactored to call it so both paths share assembly and cannot drift
-- [x] B3. P0 — host command `seg-distribute`: execute, prove each segment through a
-      bincode round-trip (proving it survives a wire), assemble, verify vs METHOD_ID
-- [x] B4. P0 gate — distributed receipt journal must equal monolithic `prove()` journal
-- [x] B5. P1 — file-based stages: `seg-export`, `seg-prove <dir> <i>`, `seg-assemble <dir>`
-- [x] B6. P2 — local orchestrator, N worker processes over a work dir
-- [x] B7. P2 — measure distributed overhead vs monolithic
+## What was built
 
-## Test (needs the GPU; near-tip e2e holds it until ~02:30)
-- [x] T1. P0 correctness on a small block (170 / 130000)
-- [ ] T2. P0 correctness on block 741000 chunk
-- [~] T3. P2 multi-worker run, overhead measured
-- [x] T4. Near-tip e2e result collected + aggregate time recorded
+| piece | gate |
+|---|---|
+| segment distribution (`seg-coordinate` / `seg-work`) | ✅ 3 gates — 1 proc, 2 proc, GPU |
+| balanced join tree, replacing risc0's **linear** fold | ✅ identical receipt, cost unchanged |
+| distributed join levels (`seg-join`) | ✅ 4 processes, identical digest |
+| worker-side lifts (`HAZYNC_WORKER_LIFTS`) | ✅ undivided work 58% → 2.1% |
+| push transport (`seg-serve` / `seg-connect`) | ✅ identical digest, 10% faster than pull |
+| distributed joins over push | ✅ both phases scale |
 
-## Cleanup
-- [x] C1. Delete 10 local branches whose upstream is gone
-- [x] C2. Update `main` (behind 7)
-- [x] C3. Close #144 — refuted, pipelining is 1.039x on the aggregate not 1.39x
-- [x] C4. Update #143 with the measured aggregate decomposition (24% recursion, not 86%)
-- [ ] C5. Update #119 / #146 if the night's runs bear on them
-- [x] C6. Prune stale worktrees (keep any with unmerged work)
+**Nine execution paths produce identical receipts**, including segments proved on a different
+machine, by a different binary, against a guest with a different image id.
 
-## Document
-- [ ] D1. Results into `~/hazync-b200-results.txt`
-- [ ] D2. Memory updated
-- [ ] D3. Final summary for the morning
+## The measurement
 
-## Open risks
-- **po2 is fixed per session.** Nodes need po2 18 (RAM), cards want 21-22. A
-  heterogeneous fleet cannot share one session. UNRESOLVED, biggest design risk.
-- One card cannot demonstrate speedup; P2 measures overhead and correctness only.
-- Join tree is coordinator-side in P0-P2. Fine on GPU (~0.15 s/seg), not on CPU (14 s).
+Two matched L40S, block 741000 chunk 0, po2 18, 1,684 segments:
 
-## Progress notes
-
-- B2/B3 built clean. `assemble_from_segment_receipts` is on the `ProverServer` trait with a
-  default that refuses; `ProverImpl` overrides it and `prove_session` calls it, so monolithic
-  and distributed share assembly.
-- B5/B6 collapsed into two commands rather than five: `seg-coordinate` and `seg-work`.
-  `Session` holds `Box<dyn SegmentRef>` and does not serialise, so the coordinator must stay
-  resident to assemble. Only segment proving leaves the process -- which is the 76% worth moving.
-- Claiming is an O_EXCL create of `claim_NNNN`; receipts land via write-to-tmp + rename so the
-  coordinator never reads a partial file.
-- C1: 10 stale branches cleared. 4 were provably safe (0 unique commits or squash-merged);
-  the other 6 had unmerged work and are preserved as `archive/*` tags, NOT deleted outright.
-- **VRAM scales with po2** -- ~21.5 GB at po2 21 implies ~2.7 GB at po2 18, so a dozen or more
-  CUDA workers fit on one 46 GB card. A single card CAN show real parallel speedup. Demo staged
-  at `/root/segdemo.sh` on the box, waiting for the near-tip e2e to release the GPU.
-- My own `seg-distribute` prints progress every 50 segments, so a 44-segment run is silent
-  throughout -- the same flaw as #145. Not fixed mid-run.
-
-## Cleanup outcome (00:25Z)
-
-- C1: 10 stale branches gone. 4 provably safe; 6 preserved as `archive/*` tags.
-- C2: `main` fast-forwarded to `8528bf2`.
-- C3: **#144 closed as refuted** — pipelining is 1.039x on the aggregate, not 1.39x, with the
-  wrong 86%-recursion explanation recorded and corrected to ~24%.
-- C4: **#143 updated** with the measured aggregate split, the ~18 min floor, the prototype, and
-  the po2 design risk.
-- C6: worktrees KEPT, all four. Three hold unmerged work and one is the primary checkout.
-  `hazync-agg` had 26 lines of uncommitted `HAZYNC_AGG_EXECUTE` instrumentation that a
-  `worktree remove` would have destroyed — committed and pushed as `89129a7` instead.
-  Pruning a worktree without reading its `git status` first would have lost that.
-
-## P0 RESULT (00:55Z) — PASSED
-
-Block 130000 chunk 0, po2 18, 44 segments, laptop CPU:
-
-    execution 2.2 s | proving 1913.3 s | assembly 1445.6 s | TOTAL 3361.1 s
-    wire out 3.02 MB (0.069/seg) | wire back 11.22 MB (0.255/seg)
-    DISTRIBUTED RECEIPT VERIFIED against METHOD_ID
-    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
-
-Two corrections that fall out of it:
-
-- **Return traffic is 3.7x outbound.** Every bandwidth figure quoted this session counted
-  only the outbound segment, so they are ~4.7x too low. Conclusion survives, numbers did not.
-- **Assembly is 43% of total on CPU**, against ~24% on GPU. The join tree has to distribute
-  too if CPU nodes are ever workers -- coordinator-side joins are fine at 0.15 s/segment on a
-  card and not at 14 s on a node.
-
-B4 still open: the monolithic prove for the digest comparison is running (~55 min on CPU).
-The first gate script extracted "ab" from the word "above" in seg-distribute's own
-explanatory output, because `[0-9a-f]+` matches English. Re-run anchored to `{64}`.
-
-## B4 GATE PASSED (01:05Z)
-
-    distributed  ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
-    monolithic   ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406   IDENTICAL
-
-Overhead: monolithic 3094 s vs distributed 3361 s = **8.6%**, covering serialisation of every
-segment out, every receipt back, and a verify per receipt. Pays for itself at two workers.
-
-The gate script itself said FAILED -- it was comparing the "ab" it scraped from prose. Wrong
-in the safe direction, but a gate that needs a human to re-read its inputs is not a gate.
-
-## 2-WORKER RESULT (02:20Z)
-
-    worker wall 1569.9 s | assembly 1300.5 s | TOTAL 2872.6 s | split 22/22
-    digest ce5e1050...39406 -- IDENTICAL to 1-worker and to monolithic
-
-    monolithic 3094 s | 1 worker 3361 s (+8.6%) | 2 workers 2873 s (-7.1%)
-
-**Two workers beat monolithic.** But worker wall is 1.22x for 2x workers, not 2x -- the two
-processes share 16 cores. **CORRECTION: a single machine cannot demonstrate distribution
-speedup at any po2, CPU or GPU.** Fitting in VRAM is not independent compute. My earlier
-claim that one L40S could show real speedup was wrong. Expect the GPU sweep to be sub-linear.
-Do NOT quote 1.22x as a scaling factor for separate machines.
-
-## JOIN TREE GATE PASSED (07:46Z)
-
-    tree    ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
-    linear  ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406   IDENTICAL
-
-Cost unchanged: 3106 s tree vs 3094 s linear, 0.4% apart -- a pure restructuring, exactly as
-intended. `join` is associative over the ordered sequence, which is what the change rested on.
-
-All three steps of join-tree distribution are now BUILT:
-  1. balanced tree replacing the linear fold      70b63cf  GATE PASSED
-  2. worker-side lifts                            7f7fbd0  designed only
-  3. distributed join levels                      10fc1a9  gate running now
-
-Step 3 did not need step 2: the coordinator lifts locally and distributes only the joins,
-which is the half with the log-depth structure.
-
-## NEAR-TIP 16-CHUNK E2E PASSED (08:01Z)
-
-    BLOCK 962000 AGGREGATED in 1466.2s -- succinct receipt VERIFIED
-    tip_hash 4403cf83...  cum_work 547530165750508549308877  UTXO leaves 1788
-
-Full production partition on a near-tip block (8,006 inputs). The scale gap is closed.
-
-Per-chunk: 871 877 783 776 835 928 908 894 896 892 893 [1029 po2-21] 896 898 897 894
-           = 14,167 card-seconds, mean 885 s
-
-**The aggregate estimate was 37% low** -- ~1,070 s projected, 1,466 s measured.
-
-    block = 14,167/N + 1,466   =>   floor 24.4 min at infinite cards (was estimated ~18)
-
-Worse than every previous estimate, and measured rather than modelled. Ten minutes is
-unreachable with cards alone, so segment distribution matters more than before, not less.
-With segments distributed: ~30 workers -> 9.5 min.
-
-## STEP 3 GATE PASSED (08:45Z)
-
-    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406  IDENTICAL
-
-Four paths now agree: monolithic, 1-process distributed, 2-process distributed, and
-segments+joins distributed across four processes.
-
-    execution 2.1 | segment prove 1561.0 (2w) | lift 886.7 (coordinator)
-    join tree 631.6 (6 levels, 2w) | resolve 0.0 | TOTAL 3081.4
-
-Tree: 44 -> 22 -> 11 -> 6 -> 3 -> 2 -> 1, six levels, 43 joins, split j1=20/j2=23.
-
-**Correction made while reading this.** First reading called the join tree ~50% overhead and
-nearly concluded distributing joins was unviable. Wrong -- it compared against an ideal
-assuming full-speed workers. Splitting worker time from wall time:
-
-    43 joins = 1185.3 s worker CPU / 2 workers = 592.7 s   vs 631.6 s wall
-    => coordination overhead 38.9 s = **6.2%**, in line with 8.6% for segments
-
-Distributing the join tree IS viable. The slowness is core contention: 27.6 s per join with
-two workers sharing 16 cores vs 14.0 s single-process.
-
-Step 3 is 7% slower than not distributing joins (3081 vs 2873 s) -- correct behaviour on one
-machine, where coordination costs and returns nothing.
-
-**Lift is now the largest term at 886.7 s**, sequential on the coordinator. Step 2 moves it.
-
-## STEP 2 GATE PASSED (09:12Z) — the headline result
-
-    execution 6.5 | segment prove 786.6 (workers, incl. lift) | lift 18.5 (coordinator)
-    join tree 397.7 (11 levels, distributed) | resolve 0.0 | TOTAL 1209.3
-    digest cac5f57b...da137  IDENTICAL
-
-**Undivided coordinator work: 679.3 s -> 25 s.**
-
-| variant | undivided | divisible | Amdahl ceiling |
+| term | 1 card | 2 cards | speedup |
 |---|---|---|---|
-| coordinator lifts | 686 s (58%) | 42% | 1.7x |
-| **worker lifts** | **25 s (2.1%)** | **97.9%** | **~48x** |
+| segment proving | 862.6 s | 410.9 s | 2.10x |
+| assembly | 409.7 s | 211.5 s | 1.94x |
+| **total** | 1279.1 s | 629.3 s | **2.03x** |
 
-Total is 3.6% worse (1209.3 vs 1167.3) because one worker parallelises nothing -- worst case
-for distribution, exactly as expected. The shape is what changed.
+For a near-tip block — 14,167 card-seconds of chunk work plus a 1,466 s aggregate = **15,633
+card-seconds**, against a ~46 s execution floor:
 
-ALL FOUR PIECES BUILT AND GATED. Six execution paths agree on their digests.
-Still unmeasured: actual speedup. Needs more than one machine.
+| cards | block |
+|---|---|
+| 16 | 17.0 min |
+| **30** | **9.5 min** |
+| 64 | 4.8 min |
 
-## MULTI-WORKER SWEEP, ONE CARD (09:50Z)
+## Why it works
 
-| workers | segment prove | join tree | total | vs monolithic 1132.0 s |
-|---|---|---|---|---|
-| 1 | 780.2 | 395.3 | 1200.3 | 6.0% worse |
-| 2 | 744.5 | 324.2 | 1093.7 | 3.4% better |
-| 4 | 702.3 | 275.2 | **1003.2** | **11.4% better** |
+**The linear fold was the blocker.** risc0's `composite_to_succinct` folded strictly left — lift,
+join into an accumulator, lift, join — so every join depended on the one before it and assembly
+could not be parallelised by threads *or* machines at any cost. Rebalanced to a tree it is the same
+`N-1` joins and the same claim, at `log2(N)` depth.
 
-digest OK every time. **1.20x from 1->4 workers, 1.13x over monolithic, on ONE GPU** --
-recovering the idle time that leaves a single worker at 56% card utilisation.
+**Pull was the second blocker.** Three SSH connections per segment at ~150 ms of setup, against
+0.47 s of proving, meant a second GPU added *nothing*. Push holds one connection open and sends
+segment N+1 while the worker proves N.
 
-Joins parallelise better than segment proving (1.44x vs 1.11x): 842 independent joins at
-level 0, and joins are lighter on the SMs.
+**Workers are untrusted by construction.** A receipt is self-verifying, the coordinator verifies
+each on arrival, and `join` asserts `a.post == b.pre` — so a bad worker costs latency, never
+soundness. That is what allows a heterogeneous fleet.
 
-**Four concurrent CUDA workers: correct receipts, no hangs.** Useful given #147 and #97.
+## Known limits
 
-NOT the distribution scaling number -- this is one shared card. Separate machines are still
-unmeasured.
+- **The last segment cannot move to a worker.** The session journal and assumptions merge into its
+  claim before lifting, and a worker has no session.
+- **`assemble_from_joined` has no `CompositeReceipt`**, so its integrity and claim checks are gone.
+  What remains: per-receipt verification, `join`'s continuity check, and the final `METHOD_ID`
+  verify. Weaker against a *buggy prover*, not against a dishonest worker.
+- **po2 is fixed per session.** Nodes are forced to po2 18 by RAM (2.50 GB); cards want 21–22. A
+  heterogeneous fleet cannot share one session.
+- **2.03x is noise-above-linear, not superlinear.** Do not quote it as such.
 
-## CROSS-MACHINE VERIFIED (13:00Z) — seven paths, one receipt
+## Related
 
-    digest ce5e105094d8d307b81453b6e20821cb7b1643ba8969c5f9ba81bbe9b3839406
-
-Coordinator on the L40S, every segment proved on the **laptop** over ssh -- no shared
-filesystem, no GPU, non-CUDA binary, **different guest image id**. Same digest as the
-monolithic prove and every other distributed path.
-
-    execution 1.8 (box) | segment prove 1651.1 (laptop, network) | lift 8.2 (box)
-    join tree 108.8 (box, 6 levels) | TOTAL 1769.9
-
-**Real cross-machine speedup: 1.75x** (laptop alone 3094 s -> 1769.9 s). NOT from parallelism --
-the laptop proved all 44 serially. From **assembly moving to the faster machine**: lift+join
-117 s on the card vs 1445 s on the laptop.
-
-**Corrects an earlier claim of mine.** "One machine cannot show speedup" was right; "speedup
-needs matched hardware" was wrong. Mismatched hardware gives a real gain because segment proving
-and assembly have different profiles and can be placed separately -- which is exactly the
-Ghost-node fleet shape: nodes at po2 18 on segments, a card on lift/join/resolve.
+#148 (this work), #143, #151, #145, #119, #69. #152 remains: rescue the lax-DER tests before
+`feat/pipeline-preflight` is dropped.
