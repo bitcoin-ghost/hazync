@@ -4672,34 +4672,32 @@ fn seg_serve_cmd() {
 
     let t_work = Instant::now();
     let ctx = VerifierContext::default();
-    std::thread::scope(|scope| {
+
+    // NO thread::scope HERE, and that is the fix for a deadlock I introduced. The scope's implicit
+    // join waited for the connection threads; the connection threads waited for join work; and the
+    // join work was only published after the scope returned. A circular wait, and it hung a run for
+    // 35 minutes with the GPU idle.
+    //
+    // The connection threads touch only Arc state -- the queues, the outputs, the serialised
+    // segments -- and never the prover or the session, so they do not need to borrow anything and
+    // can be plain detached threads. The main thread then stays free to drive the tree WHILE they
+    // are still alive, which is the whole point.
+    let acc_alldone = alldone.clone();
+    let (aq, ao, aw, aj, ajo) = (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone());
+    let acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
-        loop {
-            {
-                let q = queue.lock().unwrap();
-                let o = out.lock().unwrap();
-                let have = o.iter().filter(|r| r.is_some()).count();
-                if have == total { break; }
-                if q.is_empty() && handles.is_empty() && have < total {
-                    // Nothing queued, nobody working, and work outstanding: only possible if every
-                    // worker died holding segments. Their in-flight went back on the queue below.
-                }
-            }
+        while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut s, peer)) => {
                     println!("  worker connected from {peer}");
-                    let (queue, out, wire) = (queue.clone(), out.clone(), wire.clone());
-                    let (jobs, jout, alldone) = (jobs.clone(), jout.clone(), alldone.clone());
-                    handles.push(scope.spawn(move || {
-                        // Each thread builds its own VerifierContext: it holds Rc, so it is not
-                        // Sync and cannot be shared. It is cheap and the threads need nothing
-                        // from each other's.
+                    let (queue, out, wire, jobs, jout, alldone) =
+                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone());
+                    handles.push(std::thread::spawn(move || {
+                        // Each thread builds its own VerifierContext: it holds Rc, so it is not Sync.
                         let ctx = &VerifierContext::default();
                         s.set_nodelay(true).ok();
                         let mut inflight: VecDeque<usize> = VecDeque::new();
                         loop {
-                            // Push ahead: the worker should always find its next segment already
-                            // in the socket rather than waiting for a round trip.
                             while inflight.len() < depth {
                                 let next = { queue.lock().unwrap().pop_front() };
                                 match next {
@@ -4714,8 +4712,8 @@ fn seg_serve_cmd() {
                                 }
                             }
                             if inflight.is_empty() {
-                                // Segments are gone. Take join work as the coordinator publishes each
-                                // level; idle briefly between levels rather than disconnecting.
+                                // Segments are gone: take join work as each level is published, and
+                                // idle between levels rather than disconnecting.
                                 let job = { jobs.lock().unwrap().pop_front() };
                                 if let Some((tag, body)) = job {
                                     if write_frame(&mut s, tag, &body).is_err() {
@@ -4750,7 +4748,6 @@ fn seg_serve_cmd() {
                                     let r: SuccinctReceipt<ReceiptClaim> = match bincode::deserialize(&body) {
                                         Ok(r) => r, Err(e) => { println!("  bad receipt for {i}: {e}"); break; }
                                     };
-                                    // Untrusted worker: verify on arrival, exactly as before.
                                     if r.verify_integrity_with_context(ctx).is_err() {
                                         println!("  worker returned an invalid receipt for {i}");
                                         queue.lock().unwrap().push_back(i as usize);
@@ -4760,7 +4757,6 @@ fn seg_serve_cmd() {
                                     inflight.retain(|&x| x != i as usize);
                                 }
                                 Err(_) => {
-                                    // Worker gone. Its in-flight work returns to the queue.
                                     let mut q = queue.lock().unwrap();
                                     for i in inflight.drain(..) { q.push_front(i); }
                                     break;
@@ -4775,7 +4771,16 @@ fn seg_serve_cmd() {
                 Err(e) => { println!("  accept failed: {e}"); break; }
             }
         }
+        for h in handles { let _ = h.join(); }
     });
+
+    // Wait for every segment to come back before lifting. The threads stay alive throughout and
+    // pick up join work as the tree below publishes it.
+    loop {
+        let have = { out.lock().unwrap().iter().filter(|r| r.is_some()).count() };
+        if have == total - 1 { break; }        // the last segment is proved here, not by a worker
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
     let work_s = t_work.elapsed().as_secs_f64();
 
     // Every segment but the last arrives lifted. The last cannot -- the session journal and
