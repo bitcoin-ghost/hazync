@@ -174,3 +174,22 @@ Step 3 is 7% slower than not distributing joins (3081 vs 2873 s) -- correct beha
 machine, where coordination costs and returns nothing.
 
 **Lift is now the largest term at 886.7 s**, sequential on the coordinator. Step 2 moves it.
+
+## STEP 2 GATE PASSED (09:12Z) — the headline result
+
+    execution 6.5 | segment prove 786.6 (workers, incl. lift) | lift 18.5 (coordinator)
+    join tree 397.7 (11 levels, distributed) | resolve 0.0 | TOTAL 1209.3
+    digest cac5f57b...da137  IDENTICAL
+
+**Undivided coordinator work: 679.3 s -> 25 s.**
+
+| variant | undivided | divisible | Amdahl ceiling |
+|---|---|---|---|
+| coordinator lifts | 686 s (58%) | 42% | 1.7x |
+| **worker lifts** | **25 s (2.1%)** | **97.9%** | **~48x** |
+
+Total is 3.6% worse (1209.3 vs 1167.3) because one worker parallelises nothing -- worst case
+for distribution, exactly as expected. The shape is what changed.
+
+ALL FOUR PIECES BUILT AND GATED. Six execution paths agree on their digests.
+Still unmeasured: actual speedup. Needs more than one machine.
