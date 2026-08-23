@@ -4077,11 +4077,28 @@ fn seg_work_cmd() {
         let seg: Segment = bincode::deserialize(&bytes).expect("deserialize segment");
         let t = Instant::now();
         let sr = server.prove_segment(&ctx, &seg).expect("prove segment");
-        let tmp = dir.join(format!("rcpt_{i:04}.tmp"));
-        std::fs::write(&tmp, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
-        std::fs::rename(&tmp, dir.join(format!("rcpt_{i:04}.bin"))).expect("rename receipt");
+
+        // STEP 2. Lift here rather than on the coordinator. Lifts are per-segment and wholly
+        // independent, and they are the largest term that does not divide: 886.7 s of 3081 s on
+        // CPU, 679.3 s of 1167 s on GPU. Every worker doing its own removes all of it at once.
+        //
+        // The LAST segment is the exception and has to stay behind. The session journal digest and
+        // assumption set are merged into its claim before it is lifted, and a worker has neither the
+        // session nor any way to get it. So the last worker returns an unlifted SegmentReceipt and
+        // the coordinator finishes that one itself.
+        let lift_here = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1") && i + 1 < count;
+        if lift_here {
+            let lifted = server.lift(&sr).expect("lift");
+            let tmp = dir.join(format!("lift_{i:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&lifted).expect("serialize lift")).expect("write lift");
+            std::fs::rename(&tmp, dir.join(format!("lift_{i:04}.bin"))).expect("rename lift");
+        } else {
+            let tmp = dir.join(format!("rcpt_{i:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
+            std::fs::rename(&tmp, dir.join(format!("rcpt_{i:04}.bin"))).expect("rename receipt");
+        }
         done += 1;
-        println!("[{id}] segment {i} proved in {:.1}s", t.elapsed().as_secs_f64());
+        println!("[{id}] segment {i} {} in {:.1}s", if lift_here {"proved+lifted"} else {"proved"}, t.elapsed().as_secs_f64());
     }
     println!("[{id}] DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
 }
@@ -4290,17 +4307,24 @@ fn seg_coordinate_tree_cmd() {
     println!("=== coordinator (distributed join tree) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
     println!("  execution {exec_s:.1} s   {total} segments published");
 
+    let worker_lifts = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1");
+
     let t_wait = Instant::now();
     loop {
-        let have = (0..total).filter(|i| dir.join(format!("rcpt_{i:04}.bin")).exists()).count();
+        // With worker lifts, segments 0..N-2 arrive as lift_ files and only the last as rcpt_.
+        let have = (0..total).filter(|i| {
+            if worker_lifts && i + 1 < total { dir.join(format!("lift_{i:04}.bin")).exists() }
+            else { dir.join(format!("rcpt_{i:04}.bin")).exists() }
+        }).count();
         if have == total { break; }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     let prove_s = t_wait.elapsed().as_secs_f64();
 
     let ctx = VerifierContext::default();
-    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
-    for i in 0..total {
+    let mut receipts: Vec<SegmentReceipt> = Vec::new();
+    let first_rcpt = if worker_lifts { total - 1 } else { 0 };
+    for i in first_rcpt..total {
         let sr: SegmentReceipt = bincode::deserialize(&std::fs::read(dir.join(format!("rcpt_{i:04}.bin"))).expect("read")).expect("de");
         sr.verify_integrity_with_context(&ctx).expect("worker receipt failed verify");
         receipts.push(sr);
@@ -4309,12 +4333,29 @@ fn seg_coordinate_tree_cmd() {
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
 
-    // Lifts stay here for now (step 2 moves them to workers). The merge into the last segment's
-    // claim has to happen before any lifting and needs the session, which a worker does not have.
+    // With HAZYNC_WORKER_LIFTS the workers have already lifted every segment but the last, so all
+    // that remains here is the last one -- merge the session output into its claim, then lift it.
+    // prepare_lifts merges into the LAST element of what it is given, so handing it a one-element
+    // vector does exactly that and nothing else.
     let t_lift = Instant::now();
-    let lifted = server.prepare_lifts(&ctx, &session, receipts).expect("prepare lifts");
+    let lifted = if worker_lifts {
+        let mut v: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(total);
+        for i in 0..total - 1 {
+            let r: SuccinctReceipt<ReceiptClaim> =
+                bincode::deserialize(&std::fs::read(dir.join(format!("lift_{i:04}.bin"))).expect("read lift")).expect("de lift");
+            r.verify_integrity_with_context(&ctx).expect("worker lift failed verify");
+            v.push(r);
+        }
+        let last = receipts.pop().expect("last segment receipt");
+        let mut tail = server.prepare_lifts(&ctx, &session, vec![last]).expect("merge+lift last");
+        v.append(&mut tail);
+        v
+    } else {
+        server.prepare_lifts(&ctx, &session, receipts).expect("prepare lifts")
+    };
     let lift_s = t_lift.elapsed().as_secs_f64();
-    println!("  lifted {} receipts in {:.1} s", lifted.len(), lift_s);
+    println!("  lifted {} receipts in {:.1} s{}", lifted.len(), lift_s,
+        if worker_lifts { "  (all but the last done by workers)" } else { "" });
 
     // Drive the tree. Publish a level, wait for its joins, feed the outputs in as the next level.
     let t_join = Instant::now();
