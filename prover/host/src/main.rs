@@ -1907,12 +1907,28 @@ fn prove_chunk(idx: usize) {
     b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
     write_chunk_inputs(&mut b, &w, lo, hi);
     let t = Instant::now();
+    // EXECUTE FIRST, then prove (#145). This printed nothing until it finished, so while a chunk was
+    // running its log was EMPTY and "wedged" was indistinguishable from "working". That is what hid
+    // hazync#147 for 76 minutes and then 3h38m: the only thing that gave it away was nvidia-smi
+    // showing 0% with the process alive, which is a thing you have to already suspect to go and look
+    // at. A start line and periodic progress make a hang visible in the place anyone would look first.
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = risc0_zkvm::VerifierContext::default();
+    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+        .unwrap().run().unwrap();
+    let nseg = session.segments.len();
+    println!("chunk {idx}: {} inputs, {nseg} segments at po2 {} — proving", hi - lo, seg_po2());
+    session.add_hook(FoldProgress {
+        total: nseg,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        t0: Instant::now(),
+        every: (nseg / 20).max(1),
+    });
     // SCALING: prove the chunk to a SUCCINCT receipt (not the default composite). This runs the
     // STARK-to-STARK "lift" NOW, in parallel across the chunk fleet — so agg-chunks resolves each
-    // assumption cheaply instead of lifting all N composite receipts sequentially (the dominant cost
-    // of the 741000 aggregate: ~1645s → expected to collapse to a cheap fold). See HAZYNC_ARCHITECTURE.md.
-    let receipt = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
+    // assumption cheaply instead of lifting all N composite receipts sequentially.
+    let receipt = server.prove_session(&ctx, &session).unwrap().receipt;
     receipt.verify(METHOD_ID).unwrap();
     let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("chunk_{idx}.bin"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
@@ -1920,6 +1936,34 @@ fn prove_chunk(idx: usize) {
 }
 
 // `agg-chunks`: read all chunk receipt files, aggregate into the block/chain proof.
+// Progress for a long prove (hazync#145). `agg-chunks` printed its header and then nothing at all
+// for 35+ minutes, so a working fold and a hung one looked identical from the outside. That is not a
+// cosmetic complaint: hazync#147 wedged twice, for 76 minutes and 3h38m, and what eventually gave it
+// away was `nvidia-smi` showing 0% with the process alive -- not any output from the prover.
+//
+// risc0 fires this per segment. It costs nothing now: hooks used to force the sequential path away
+// from the preflight pipelining, and that patch has been removed, so the sequential loop is the only
+// path and a hook changes no behaviour at all.
+struct FoldProgress {
+    total: usize,
+    done: std::sync::atomic::AtomicUsize,
+    t0: std::time::Instant,
+    every: usize,
+}
+
+impl risc0_zkvm::SessionEvents for FoldProgress {
+    fn on_post_prove_segment(&self, _seg: &risc0_zkvm::Segment) {
+        use std::sync::atomic::Ordering;
+        let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % self.every != 0 && n != self.total { return; }
+        let el = self.t0.elapsed().as_secs_f64();
+        // Rate from work actually done, not from a guess. Early estimates are poor and say so by
+        // being obviously early rather than by being hidden.
+        let eta = if n > 0 { el / n as f64 * (self.total.saturating_sub(n)) as f64 } else { 0.0 };
+        println!("    segment {n}/{}  {:.0}s elapsed, ~{:.0}s left", self.total, el, eta);
+    }
+}
+
 fn agg_chunks() {
     use std::time::Instant;
     let (anchor, w) = build_full();
@@ -1947,8 +1991,25 @@ fn agg_chunks() {
     b.write(&1u32).unwrap();
     // Prove the aggregate to SUCCINCT too: the assumptions are already succinct (cheap resolve), and a
     // succinct block proof is a single fixed-size STARK — directly composable in the chain range-fold.
-    let agg = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
+    //
+    // EXECUTE FIRST, then prove, rather than one opaque prove_with_opts (#145). Execution is a
+    // couple of percent of the work and it yields the segment count, so the fold can say how much
+    // there is to do BEFORE it starts doing it. Without that the only honest thing anyone could say
+    // about a running fold was "it has not finished".
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = risc0_zkvm::VerifierContext::default();
+    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+        .unwrap().run().unwrap();
+    let nseg = session.segments.len();
+    println!("  {nseg} segments to prove at po2 {}", seg_po2());
+    session.add_hook(FoldProgress {
+        total: nseg,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        t0: Instant::now(),
+        every: (nseg / 20).max(1),      // ~20 lines whatever the size, so it scales with the fold
+    });
+    let agg = server.prove_session(&ctx, &session).unwrap().receipt;
     agg.verify(METHOD_ID).unwrap();
     let tip: ChainState = agg.journal.decode().unwrap();
     assert!(tip.self_id == METHOD_ID, "S1: proof recursed against wrong image id");
