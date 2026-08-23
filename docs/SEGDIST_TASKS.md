@@ -21,11 +21,11 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
 
 ## Cleanup
 - [x] C1. Delete 10 local branches whose upstream is gone
-- [ ] C2. Update `main` (behind 7)
-- [ ] C3. Close #144 — refuted, pipelining is 1.039x on the aggregate not 1.39x
-- [ ] C4. Update #143 with the measured aggregate decomposition (24% recursion, not 86%)
+- [x] C2. Update `main` (behind 7)
+- [x] C3. Close #144 — refuted, pipelining is 1.039x on the aggregate not 1.39x
+- [x] C4. Update #143 with the measured aggregate decomposition (24% recursion, not 86%)
 - [ ] C5. Update #119 / #146 if the night's runs bear on them
-- [ ] C6. Prune stale worktrees (keep any with unmerged work)
+- [x] C6. Prune stale worktrees (keep any with unmerged work)
 
 ## Document
 - [ ] D1. Results into `~/hazync-b200-results.txt`
@@ -55,3 +55,16 @@ Updated as work proceeds. `[x]` done, `[~]` in progress, `[ ]` not started, `[!]
   at `/root/segdemo.sh` on the box, waiting for the near-tip e2e to release the GPU.
 - My own `seg-distribute` prints progress every 50 segments, so a 44-segment run is silent
   throughout -- the same flaw as #145. Not fixed mid-run.
+
+## Cleanup outcome (00:25Z)
+
+- C1: 10 stale branches gone. 4 provably safe; 6 preserved as `archive/*` tags.
+- C2: `main` fast-forwarded to `8528bf2`.
+- C3: **#144 closed as refuted** — pipelining is 1.039x on the aggregate, not 1.39x, with the
+  wrong 86%-recursion explanation recorded and corrected to ~24%.
+- C4: **#143 updated** with the measured aggregate split, the ~18 min floor, the prototype, and
+  the po2 design risk.
+- C6: worktrees KEPT, all four. Three hold unmerged work and one is the primary checkout.
+  `hazync-agg` had 26 lines of uncommitted `HAZYNC_AGG_EXECUTE` instrumentation that a
+  `worktree remove` would have destroyed — committed and pushed as `89129a7` instead.
+  Pruning a worktree without reading its `git status` first would have lost that.
