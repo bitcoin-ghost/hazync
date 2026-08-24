@@ -13,16 +13,33 @@ Complete. Design: `docs/SEGMENT_DISTRIBUTION.md`. Full measurement log: `~/hazyn
 | worker-side lifts (`HAZYNC_WORKER_LIFTS`) | ✅ undivided work 58% → 2.1% |
 | push transport (`seg-serve` / `seg-connect`) | ✅ identical digest, 10% faster than pull |
 | distributed joins over push | ✅ both phases scale |
+| **mode-5 aggregate over push** (`HAZYNC_AGG=1`) | ✅ identical digest, 2- and 4-chunk partitions |
+| **distributed resolves** (`RESOLVE_TAG`) | ✅ 2/2 and 4/4 discharged on the worker |
 
 **Every path in that table produces an identical receipt**, and so does the monolithic prove they
-are all checked against — nine in total, counting the baseline. The gates are listed row by row above
+are all checked against — eleven in total, counting the baseline. The gates are listed row by row above
 rather than summarised as a number, because a bare count is not checkable: an earlier tally in the
-run log says "six execution paths", which was correct when it was written and predates the last three
+run log says "six execution paths", which was correct when it was written and predates the last five
 rows.
 
-The strongest of the nine is the cross-machine one: segments proved on a different machine, by a
+The strongest of the eleven is the cross-machine one: segments proved on a different machine, by a
 different binary, against a guest with a different image id, still fold into the same journal
 digest.
+
+The last two rows close #153's buildable half (2026-08-24). Until then the aggregate could not be
+distributed at all — `seg-serve` wrote mode 4 unconditionally and never added the chunk receipts as
+assumptions, and `resolve` ran wherever `assemble_from_joined` was called. Both gates ran on CPU
+against block 130000, and the worker counts come from the WORKER's own log rather than the
+coordinator's, asserted as exactly N rather than non-zero so they cannot pass by resolving some
+locally.
+
+Both partitions produced the same digest, which also shows a block's proof does not depend on how
+the block was chunked.
+
+⚠ **What those two rows do NOT establish is speed.** Resolves are a chain, each consuming the
+previous conditional, so distributing them moves work off the coordinator rather than parallelising
+it. Item 3 of #153 — measuring the aggregate on real cards — is open, and the card count below stands
+at ~45 until it is done.
 
 ## The measurement
 
