@@ -37,7 +37,7 @@ Both partitions produced the same digest, which also shows a block's proof does 
 the block was chunked.
 
 ⚠ **What those two rows do NOT establish is speed.** Resolves are a chain, each consuming the
-previous conditional, so distributing them moves work off the coordinator rather than parallelising
+previous conditional, so distributing them moves work off the segment coordinator rather than parallelising
 it. Item 3 of #153 — measuring the aggregate on real cards — is open, and the card count below stands
 at ~45 until it is done.
 
@@ -71,7 +71,7 @@ could not be parallelised by threads *or* machines at any cost. Rebalanced to a 
 0.47 s of proving, meant a second GPU added *nothing*. Push holds one connection open and sends
 segment N+1 while the worker proves N.
 
-**Workers are untrusted by construction.** A receipt is self-verifying, the coordinator verifies
+**Workers are untrusted by construction.** A receipt is self-verifying, the segment coordinator verifies
 each on arrival, and `join` asserts `a.post == b.pre` — so a bad worker costs latency, never
 soundness. That is what allows a heterogeneous fleet.
 

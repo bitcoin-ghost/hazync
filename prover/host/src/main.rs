@@ -4173,14 +4173,14 @@ fn seg_distribute_cmd() {
 
 // SEGMENT DISTRIBUTION, phase 1/2: a work directory that separate processes can share.
 //
-// The coordinator cannot hand off its Session -- it holds `Box<dyn SegmentRef>` and does not
+// The segment coordinator cannot hand off its Session -- it holds `Box<dyn SegmentRef>` and does not
 // serialise -- and it does not need to. Assembly needs the session (journal, assumptions, claim), so
-// the coordinator executes, publishes segments, and assembles. ONLY segment proving leaves the
+// the segment coordinator executes, publishes segments, and assembles. ONLY segment proving leaves the
 // process, which is the 76% worth moving.
 //
 // Claiming is an O_EXCL create of claim_NNNN. That is atomic on a local filesystem and on NFS, needs
 // no lock server, and a worker that dies simply leaves a claim that a sweeper can expire. Receipts
-// are written to a .tmp and renamed, so the coordinator never sees a half-written file -- it polls
+// are written to a .tmp and renamed, so the segment coordinator never sees a half-written file -- it polls
 // for existence and a rename is atomic.
 fn seg_workdir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HAZYNC_WORKDIR").unwrap_or_else(|_| "/tmp/hazync-segwork".into()))
@@ -4216,14 +4216,14 @@ fn seg_work_cmd() {
         let t = Instant::now();
         let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {i}"));
 
-        // STEP 2. Lift here rather than on the coordinator. Lifts are per-segment and wholly
+        // STEP 2. Lift here rather than on the segment coordinator. Lifts are per-segment and wholly
         // independent, and they are the largest term that does not divide: 886.7 s of 3081 s on
         // CPU, 679.3 s of 1167 s on GPU. Every worker doing its own removes all of it at once.
         //
         // The LAST segment is the exception and has to stay behind. The session journal digest and
         // assumption set are merged into its claim before it is lifted, and a worker has neither the
         // session nor any way to get it. So the last worker returns an unlifted SegmentReceipt and
-        // the coordinator finishes that one itself.
+        // the segment coordinator finishes that one itself.
         let lift_here = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1") && i + 1 < count;
         if lift_here {
             let lifted = server.lift(&sr).expect("lift");
@@ -4369,7 +4369,7 @@ fn seg_join_cmd() {
     let mut done = 0usize;
     let t0 = Instant::now();
 
-    // Follow the coordinator level by level. JOINLEVEL names the level currently open for claiming;
+    // Follow the segment coordinator level by level. JOINLEVEL names the level currently open for claiming;
     // JOINDONE appearing ends the run.
     let mut level = 0usize;
     loop {
@@ -4409,7 +4409,7 @@ fn seg_join_cmd() {
     println!("[{id}] JOIN DONE {done} joins in {:.1}s", t0.elapsed().as_secs_f64());
 }
 
-// Coordinator for step 3: prove segments (workers), lift them, then drive the join tree as
+// Segment coordinator for step 3: prove segments (workers), lift them, then drive the join tree as
 // distributed levels, then assemble. HAZYNC_JOIN_DISTRIBUTED=1 selects this over the in-process
 // assembly, so both paths stay reachable and comparable.
 fn seg_coordinate_tree_cmd() {
@@ -4442,7 +4442,7 @@ fn seg_coordinate_tree_cmd() {
         std::fs::write(dir.join(format!("seg_{i:04}.bin")), bincode::serialize(&seg).expect("ser")).expect("write");
     }
     std::fs::write(dir.join("MANIFEST"), format!("{total}\n")).expect("manifest");
-    println!("=== coordinator (distributed join tree) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("=== segment coordinator (distributed join tree) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
     println!("  execution {exec_s:.1} s   {total} segments published");
 
     let worker_lifts = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1");
@@ -4534,7 +4534,7 @@ fn seg_coordinate_tree_cmd() {
     println!();
     println!("  execution      {exec_s:8.1} s");
     println!("  segment prove  {prove_s:8.1} s   (workers)");
-    println!("  lift           {lift_s:8.1} s   (coordinator; step 2 moves this to workers)");
+    println!("  lift           {lift_s:8.1} s   (segment coordinator; step 2 moves this to workers)");
     println!("  join tree      {join_s:8.1} s   ({level} levels, distributed)");
     println!("  resolve+build  {asm_s:8.1} s");
     println!();
@@ -4548,7 +4548,7 @@ fn seg_coordinate_tree_cmd() {
 // prover needs. That is why a worker on another machine, built by a different toolchain against a
 // guest with a different image id, can prove segments for a session it knows nothing about and
 // return receipts that verify there. It is also why workers can be untrusted: the receipt is
-// self-verifying and the coordinator checks it on arrival.
+// self-verifying and the segment coordinator checks it on arrival.
 fn seg_prove_one_cmd() {
     use risc0_zkvm::{VerifierContext, Segment};
     use std::time::Instant;
@@ -4565,7 +4565,7 @@ fn seg_prove_one_cmd() {
     println!("proved one segment in {:.1}s -> {out}", t.elapsed().as_secs_f64());
 }
 
-// PUSH TRANSPORT (hazync#151). The coordinator sends work; it does not wait to be asked.
+// PUSH TRANSPORT (hazync#151). The segment coordinator sends work; it does not wait to be asked.
 //
 // The pull worker cost three SSH connections per segment -- claim, fetch, return -- at roughly
 // 150 ms of setup each, against a segment that proves in 470 ms on an L40S at po2 18. A second
@@ -4573,9 +4573,9 @@ fn seg_prove_one_cmd() {
 // because it spent more time on round trips than on proving. Bandwidth was never the constraint;
 // a segment is 0.06 MB. Connection setup and latency were.
 //
-// Pushing removes all three. The coordinator already holds the work list, so there is nothing to
+// Pushing removes all three. The segment coordinator already holds the work list, so there is nothing to
 // claim; one connection stays open for the whole session; and the pipelining comes free from TCP
-// rather than from threads in the worker. The coordinator writes segment N+1 into the socket while
+// rather than from threads in the worker. The segment coordinator writes segment N+1 into the socket while
 // the worker is still proving N, so the worker's next read returns from a buffer that already
 // filled. At depth 4 that is 240 KB in flight, which no socket notices.
 //
@@ -4590,7 +4590,7 @@ const JOIN_TAG: u32 = 0x8000_0000;
 // Body is the same [len][a][len][b] pair as a join: the conditional receipt, then the assumption.
 //
 // Resolves are a CHAIN, not a tree: each consumes the previous conditional, so there is exactly one
-// outstanding at a time and this wins by moving the work off the coordinator rather than by
+// outstanding at a time and this wins by moving the work off the segment coordinator rather than by
 // parallelising it. That is a smaller prize than the join tree and it is the whole of the remaining
 // undivided term, which is why it is worth having anyway.
 const RESOLVE_TAG: u32 = 0x4000_0000;
@@ -4598,12 +4598,12 @@ const RESOLVE_TAG: u32 = 0x4000_0000;
 //
 // The last segment cannot be lifted by a worker: the session journal digest and the assumption set
 // are merged into its CLAIM first, and a worker has neither. The push design therefore withheld it
-// and proved it on the coordinator -- but the merge is the only step that needs the session.
+// and proved it on the segment coordinator -- but the merge is the only step that needs the session.
 // PROVING never did. The pull design already had this right: the worker proved it and returned the
 // unlifted receipt.
 //
 // So the last segment goes out like any other, tagged, and the worker returns a SegmentReceipt
-// instead of a SuccinctReceipt. The coordinator merges and lifts, which is ~3.4x less work than
+// instead of a SuccinctReceipt. The segment coordinator merges and lifts, which is ~3.4x less work than
 // proving and lifting -- and it lands in the undivided term every card in the fleet waits on.
 const NOLIFT_TAG: u32 = 0x2000_0000;
 
@@ -4647,7 +4647,7 @@ fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
 }
 
 // Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
-// makes no decisions -- the coordinator drives. That also makes it simpler than the pull worker.
+// makes no decisions -- the segment coordinator drives. That also makes it simpler than the pull worker.
 fn seg_connect_cmd(addr: &str) {
     use risc0_zkvm::{VerifierContext, Segment, SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
@@ -4704,7 +4704,7 @@ fn seg_connect_cmd(addr: &str) {
         let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {}", idx & !NOLIFT_TAG));
 
         // NOLIFT: prove and stop. This is the LAST segment, and lifting it needs the session journal
-        // digest and assumption set merged into its claim first -- which the coordinator has and a
+        // digest and assumption set merged into its claim first -- which the segment coordinator has and a
         // worker does not. Proving never needed the session, so it is done here like any other
         // segment and only the merge stays central (hazync#157).
         let out = if idx & NOLIFT_TAG != 0 {
@@ -4756,7 +4756,7 @@ fn seg_serve_cmd() {
     if agg {
         let nchunks = chunk_bounds(&w, nchunks_env()).len();
         let receipts = read_chunk_receipts(nchunks);
-        println!("=== push coordinator: AGGREGATE of {} chunk receipts, block {} po2 {} ===",
+        println!("=== segment coordinator (push): AGGREGATE of {} chunk receipts, block {} po2 {} ===",
                  receipts.len(), w.height, seg_po2());
         write_aggregate_env(&mut b, &receipts, &anchor, &w);
     } else {
@@ -4783,13 +4783,13 @@ fn seg_serve_cmd() {
     let wire = Arc::new(wire);
     let bytes: usize = wire.iter().map(|v| v.len()).sum();
 
-    if !agg { println!("=== push coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
+    if !agg { println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
     println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
     println!("  listening on 0.0.0.0:{port}");
 
     // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
     // and assumption set are merged into its claim before it is lifted, and a worker has no session,
-    // so the coordinator proves that one itself. Handing it out anyway is what made the wait below
+    // so the segment coordinator proves that one itself. Handing it out anyway is what made the wait below
     // spin -- workers returned all `total` segments while the loop tested for exactly `total - 1`.
     // ALL segments, including the last (hazync#157). It is tagged NOLIFT at write time rather than
     // being stored tagged, so `wire[i]` stays a plain index.
@@ -4800,7 +4800,7 @@ fn seg_serve_cmd() {
     let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
     // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
     // connection stays open across both phases instead of the fleet disbanding after proving and
-    // leaving the coordinator to fold alone -- which is what left assembly flat at 373 s while
+    // leaving the segment coordinator to fold alone -- which is what left assembly flat at 373 s while
     // segment proving scaled 1.96x.
     let jobs: Arc<Mutex<VecDeque<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
     let jout: Arc<Mutex<std::collections::HashMap<u32, SuccinctReceipt<ReceiptClaim>>>> =
@@ -4945,7 +4945,7 @@ fn seg_serve_cmd() {
 
     // Wait for every segment to come back before lifting. The threads stay alive throughout and
     // pick up join work as the tree below publishes it.
-    // Report progress while segments come in. Without this the coordinator prints its header and
+    // Report progress while segments come in. Without this the segment coordinator prints its header and
     // then nothing for the whole segment phase, which is both the #145 complaint again and, more
     // immediately, a run that any no-output watchdog will kill for looking wedged while it is
     // working perfectly well. It already killed one.
@@ -4970,7 +4970,7 @@ fn seg_serve_cmd() {
 
     // Every segment but the last arrives lifted. The last cannot -- the session journal and
     // assumptions merge into its claim before lifting and a worker has no session -- so it is
-    // proved here. In this mode the coordinator keeps that one segment for itself.
+    // proved here. In this mode the segment coordinator keeps that one segment for itself.
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
     let t_asm = Instant::now();
@@ -5025,7 +5025,7 @@ fn seg_serve_cmd() {
         level = next;
         lv += 1;
     }
-    // DISTRIBUTE THE RESOLVES (hazync#153). This is the last term that stayed on the coordinator.
+    // DISTRIBUTE THE RESOLVES (hazync#153). This is the last term that stayed on the segment coordinator.
     //
     // A mode-4 chunk has no assumptions, so this loop does nothing and costs nothing. A mode-5
     // aggregate has one per chunk receipt, at roughly 11.35 M cycles each -- about 175 s for
@@ -5033,7 +5033,7 @@ fn seg_serve_cmd() {
     //
     // They are a CHAIN: each resolve consumes the conditional the last one produced, so exactly one
     // is outstanding at a time and this does not parallelise. It wins by moving the work off the
-    // coordinator, which is the whole point when the coordinator is the machine everything else is
+    // coordinator, which is the whole point when the segment coordinator is the machine everything else is
     // waiting on. Honest about the size of the prize: sixteen sequential steps, not log2(16).
     let mut conditional = level.pop().expect("one left");
     let assumptions = server.session_assumptions_succinct(&session).expect("session assumptions");

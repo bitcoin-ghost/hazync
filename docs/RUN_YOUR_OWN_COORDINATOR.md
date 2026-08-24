@@ -1,5 +1,14 @@
 # Run your own coordinator
 
+> **Two different things are called "coordinator" in this project.** This document is about the
+> **board coordinator** — the long-lived service that hands out ranges, verifies submissions and runs
+> the scoreboard. It never proves and needs no GPU.
+>
+> The **segment coordinator** ([`SEGMENT_DISTRIBUTION.md`](SEGMENT_DISTRIBUTION.md)) is a different
+> thing entirely: an ephemeral `seg-serve` process that splits ONE block's proof across machines. It
+> lives for one prove and does need a GPU. The two share no code.
+
+
 A coordinator hands out proving work and keeps the board. It is **not** a trust anchor: a receipt
 verifies against `METHOD_ID` regardless of who coordinated it, so losing a coordinator loses the
 work queue and the scoreboard, never the validity of anything already proved.

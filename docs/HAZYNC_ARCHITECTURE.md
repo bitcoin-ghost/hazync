@@ -676,7 +676,7 @@ Both partitions produce the same digest, so **a block's proof does not depend on
 chunked**. That had not been shown before.
 
 ⚠ **The card count is still ~45, not ~30.** Resolves are a CHAIN, not a tree: each consumes the
-conditional the previous one produced, so distributing them moves work off the coordinator rather
+conditional the previous one produced, so distributing them moves work off the segment coordinator rather
 than parallelising it. That should take the undivided term from ~221 s to ~46 s and the fleet from
 ~45 cards to ~30, but that is a PROJECTION off a resolve cost measured on a different block. Item 3
 of #153 — measuring the aggregate on real cards — is still open. Quote ~45 until it is done.
