@@ -80,7 +80,7 @@ echo "stall = the build's own processes burn no CPU and receive nothing for ${ST
 docker build --progress=plain -f reproduce/Dockerfile -t "$IMAGE" . >> "$LOG" 2>&1 &
 BUILD_PID=$!
 
-last_cpu=$(step_cpu); last_rx=$(step_rx); flat=0
+last_cpu=$(step_cpu); last_rx=$(step_rx); last_npids=$(step_pids | wc -l); flat=0
 limit=$(( STALL_MINUTES * 60 / POLL_SECONDS ))
 [ "$limit" -lt 1 ] && limit=1
 
@@ -93,12 +93,17 @@ while kill -0 "$BUILD_PID" 2>/dev/null; do
   d_cpu=$(( cpu - last_cpu )); d_rx=$(( rx - last_rx ))
   step=$(grep -oE '^#[0-9]+ \[[^]]+\]' "$LOG" | tail -1)
 
+  # A NEGATIVE cpu delta means processes EXITED between polls -- their utime+stime left the sum. That
+  # is evidence of progress, not of a stall, and the earlier `-le 0` test counted it as flat. Observed
+  # live: "FLAT (cpu +-99s, rx +0B, 37 pids)" on a build that was compiling hard. Enough staggered
+  # exits in a row could have killed a healthy build, which is the exact failure this script exists to
+  # prevent. Only an EXACTLY zero delta over an UNCHANGED process set counts as flat now.
   if [ "$npids" -eq 0 ]; then
     # Between steps: buildkit is exporting layers or resolving cache inside dockerd, where there is
     # no step process to measure. Not a stall, and counting it as one would kill healthy builds.
     echo "  [$(date +%H:%M:%S)] ${step:-starting} — between steps"
     flat=0
-  elif [ "$d_cpu" -le 0 ] && [ "$d_rx" -lt 65536 ]; then
+  elif [ "$d_cpu" -eq 0 ] && [ "$npids" -eq "$last_npids" ] && [ "$d_rx" -lt 65536 ]; then
     flat=$(( flat + 1 ))
     echo "  [$(date +%H:%M:%S)] ${step:-?} — FLAT (cpu +${d_cpu}s, rx +${d_rx}B, ${npids} pids) ${flat}/${limit}"
     if [ "$flat" -ge "$limit" ]; then
@@ -114,7 +119,7 @@ while kill -0 "$BUILD_PID" 2>/dev/null; do
     [ "$flat" -gt 0 ] && echo "  [$(date +%H:%M:%S)] moving again (cpu +${d_cpu}s, rx +${d_rx}B)"
     flat=0
   fi
-  last_cpu=$cpu; last_rx=$rx
+  last_cpu=$cpu; last_rx=$rx; last_npids=$npids
 done
 
 wait "$BUILD_PID"; rc=$?
