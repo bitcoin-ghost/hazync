@@ -84,6 +84,67 @@ derive `Serialize + Deserialize`, and `prove_segment`, `lift`, `join` and `resol
 all on the public `ProverServer` trait via `get_prover_server(&opts)`. The existing
 vendored risc0 (the preflight pipelining patch) is orthogonal and stays.
 
+## Running it
+
+Everything below is one binary. The coordinator executes and hands out work; workers connect and
+prove. Workers hold no work list and make no decisions.
+
+### A chunk
+
+```sh
+# coordinator: executes, serves segments, drives the join tree
+HAZYNC_BLOCK=block_962000.json HAZYNC_CHUNKS=16 HAZYNC_CHUNK=0 \
+  HAZYNC_SEG_PO2=22 HAZYNC_PORT=9110 ./host seg-serve
+
+# each worker, on any machine that can reach the coordinator
+HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+```
+
+### The aggregate (#153)
+
+Same commands, plus `HAZYNC_AGG=1`, and the chunk receipts must already exist as `chunk_0.bin` …
+`chunk_N.bin` in the coordinator's working directory. They are verified against `METHOD_ID` on the
+way in, so a receipt from a different guest is refused by name rather than failing later inside the
+prover.
+
+```sh
+HAZYNC_BLOCK=block_962000.json HAZYNC_CHUNKS=16 \
+  HAZYNC_AGG=1 HAZYNC_SEG_PO2=22 HAZYNC_PORT=9110 ./host seg-serve
+```
+
+Workers are identical — they take segments, joins and resolves off the same connection and do not
+need to know which phase is running.
+
+### Knobs that matter
+
+| variable | what it does |
+|---|---|
+| `HAZYNC_SEG_PO2` | segment size. **22 is the default on CUDA and peaks at ~40.6 GB of VRAM** |
+| `HAZYNC_PORT` | coordinator listen port (default 9110) |
+| `HAZYNC_PUSH_DEPTH` | segments in flight per worker (default 4) |
+| `HAZYNC_AGG` | serve the mode-5 aggregate instead of a mode-4 chunk. **Presence is what counts** |
+| `HAZYNC_WORKER_ID` | worker name in logs; `seg-connect` defaults to `push1`, so set it per worker |
+
+⚠ **`HAZYNC_AGG=0` still turns the aggregate ON.** It is tested with `env::var(...).is_ok()`, so any
+value enables it and only *unsetting* it disables it. That is the house style here — twelve flags in
+`main.rs` work the same way — but it reads like a boolean and is not one.
+
+⚠ **One prove per card at po2 22.** A full chunk peaks at 40,609 MiB of a 46 GB card — 88%, about
+5.5 GB spare. Two concurrent proves will OOM it. This is not a loss: concurrency was measured twice
+and buys ~3%, inside noise.
+
+⚠ **The coordinator needs a card too**, but only briefly. It proves the last segment itself, because
+the session journal and assumption set merge into that segment's claim and a worker has no session.
+That happens *after* the distributed segments come back, so the coordinator can share a card with a
+worker without colliding.
+
+### If a worker dies
+
+Its in-flight segments go back on the queue and another worker takes them. That is the same
+reassignment the pull design got from expiring a claim, without needing claims. A worker returning a
+bad receipt is caught by `verify_integrity_with_context` before the receipt is stored, and the
+segment is requeued.
+
 ## Trust model — why untrusted workers are safe
 
 This is the property that makes Ghost-node participation possible at all.
@@ -174,8 +235,8 @@ Pull was the wrong choice. The coordinator already holds the work list, so:
 At queue depth 2 the worker never waits on the network. Bandwidth was never the constraint
 (0.06 MB per segment); it is connection setup and latency, and pushing removes both.
 
-**This is P3 and it is not built.** Until it is, cross-machine segment distribution is correct
-and gains nothing.
+**This was P3.** It is built — see the next section — and it is what turned "correct but gains
+nothing" into a measured 2.03x.
 
 ## Push transport: built, gated, and faster even on localhost
 
