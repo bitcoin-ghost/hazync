@@ -124,7 +124,7 @@ Prebuilt binaries need Linux x86-64, glibc 2.34+. An `aarch64` build is publishe
 can check this" is a file you can download rather than a claim. On an older distro, run the same
 binary in a container rather than rebuilding.
 
-**The 184 MB host** does everything else: proving, and `verify-any`, which accepts any single proof
+**The ~187 MB host** does everything else: proving, and `verify-any`, which accepts any single proof
 rather than only genesis-anchored ones.
 
 ```bash
