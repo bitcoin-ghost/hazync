@@ -21,7 +21,12 @@
 #
 # To move it deliberately, change the digest and rebuild -- CI's reproducible-image-id job asserts
 # the resulting METHOD_ID against reproduce/METHOD_ID, so an unintended change cannot pass silently.
-FROM ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+# Declared BEFORE any FROM on purpose: docker only substitutes an ARG into a FROM line if it was
+# declared in the global scope. Put it next to stage 2 where it is used and the build fails with
+# "base name (${DEPS_IMAGE}) should not be blank".
+ARG DEPS_IMAGE=deps
+
+FROM ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
@@ -66,6 +71,26 @@ RUN --mount=type=secret,id=gh_token,required=false \
 # Paths are IDENTICAL to the single-stage build that preceded this split — HOME=/root,
 # HAZYNC_BASE=/root/hazync-build — because the id depends on them. A split that moved a path would
 # produce a different id and silently invalidate the artifact this container exists to produce.
+#
+# DEPS_IMAGE lets stage 1 be SKIPPED ENTIRELY (hazync#146). Stage 1 fetches apt packages, the Rust
+# toolchain, the RISC0 toolchain, Core v28.0 and secp256k1 v0.5.1 from five different hosts, and when
+# any of them stalls the build hangs at ZERO CPU with no output -- the failure this issue was filed
+# for. Docker's layer cache already covers a warm rebuild, but a COLD machine (every CI runner, every
+# new box) fetches the lot every time, and a cache cannot help a machine that has never built.
+#
+#   # build the dependency layer once, and pin what you got:
+#   docker build --target deps -t hazync-deps -f reproduce/Dockerfile .
+#   docker image inspect hazync-deps --format '{{index .Id}}'
+#
+#   # thereafter, no network fetch at all:
+#   docker build --build-arg DEPS_IMAGE=sha256:<that id> -f reproduce/Dockerfile .
+#
+# ⚠ THIS MUST NOT BECOME THE ONLY PATH. The default is still `deps`, so a from-scratch build works
+# with no arguments and anyone can reproduce the id without trusting an image we handed them. That is
+# the whole trust story: `reproducible-image-id` in CI builds from scratch, and a pinned DEPS_IMAGE is
+# a convenience that must produce the SAME id or it is wrong.
+FROM ${DEPS_IMAGE} AS build
+
 COPY . /hazync-zkvm
 
 RUN SKIP_GROTH16=1 HAZYNC_PROVISION=build ./provision-vps.sh
