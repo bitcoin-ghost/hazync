@@ -1995,31 +1995,61 @@ fn report_agg_execute_only(mut b: risc0_zkvm::ExecutorEnvBuilder) {
     println!("  aggregate cost beyond that (measured: >3,300 s) is the assumption resolutions.");
 }
 
+/// The mode-5 aggregate environment, in ONE place (hazync#153).
+///
+/// Both the in-process aggregate and the push coordinator need this exact sequence, and it is not
+/// self-describing: the trailing `1u32` in particular is easy to leave out when copying, and the
+/// guest would then read the witness that follows as that flag. A second copy of a protocol
+/// sequence is a second thing to keep in step, and this one is read by the guest -- so it is written
+/// once and called twice rather than written twice and hopefully kept identical.
+///
+/// The assumptions must be added BEFORE the writes: `add_assumption` records what the guest may
+/// `env::verify`, and the writes are the journals it verifies against.
+fn write_aggregate_env(
+    b: &mut risc0_zkvm::ExecutorEnvBuilder<'_>,
+    receipts: &[risc0_zkvm::Receipt],
+    anchor: &ChainState,
+    w: &BlockWitness,
+) {
+    b.segment_limit_po2(seg_po2());
+    for r in receipts { b.add_assumption(r.clone()); }
+    b.write(&5u32).unwrap();
+    b.write(&METHOD_ID).unwrap();
+    b.write(&(receipts.len() as u32)).unwrap();
+    for r in receipts { b.write(&r.journal.bytes).unwrap(); }
+    b.write(&state_journal_bytes(anchor)).unwrap();
+    b.write(w).unwrap();
+    b.write(&1u32).unwrap();
+}
+
+/// Read and verify the chunk receipts an aggregate consumes (hazync#153).
+///
+/// Verified on the way in, not trusted: a chunk receipt that does not verify against METHOD_ID
+/// cannot become a valid assumption, and finding that out here names the file instead of failing
+/// somewhere inside the prover.
+fn read_chunk_receipts(nchunks: usize) -> Vec<risc0_zkvm::Receipt> {
+    let mut receipts: Vec<risc0_zkvm::Receipt> = Vec::with_capacity(nchunks);
+    for i in 0..nchunks {
+        let f = format!("chunk_{i}.bin");
+        let r: risc0_zkvm::Receipt =
+            bincode::deserialize(&std::fs::read(&f).unwrap_or_else(|e| panic!("chunk receipt {f}: {e}"))).unwrap();
+        r.verify(METHOD_ID).unwrap_or_else(|e| panic!("chunk receipt {f} does not verify: {e}"));
+        receipts.push(r);
+    }
+    receipts
+}
+
 fn agg_chunks() {
     use std::time::Instant;
     let (anchor, w) = build_full();
     // The partition decides how many chunk files exist — an uneven pack can yield fewer runs than
     // HAZYNC_CHUNKS asked for, and reading a fixed count would look for a file that was never written.
     let nchunks = chunk_bounds(&w, nchunks_env()).len();
-    let mut receipts: Vec<risc0_zkvm::Receipt> = Vec::new();
-    for i in 0..nchunks {
-        let f = format!("chunk_{i}.bin");
-        let r: risc0_zkvm::Receipt = bincode::deserialize(&std::fs::read(&f).expect("chunk receipt file")).unwrap();
-        r.verify(METHOD_ID).expect("chunk receipt verify");
-        receipts.push(r);
-    }
+    let receipts = read_chunk_receipts(nchunks);
     println!("=== AGGREGATING {} chunk receipts for block {} ===", receipts.len(), w.height);
     let t = Instant::now();
     let mut b = ExecutorEnv::builder();
-    b.segment_limit_po2(seg_po2());
-    for r in &receipts { b.add_assumption(r.clone()); }
-    b.write(&5u32).unwrap();
-    b.write(&METHOD_ID).unwrap();
-    b.write(&(receipts.len() as u32)).unwrap();
-    for r in &receipts { b.write(&r.journal.bytes).unwrap(); }
-    b.write(&state_journal_bytes(&anchor)).unwrap();
-    b.write(&w).unwrap();
-    b.write(&1u32).unwrap();
+    write_aggregate_env(&mut b, &receipts, &anchor, &w);
     // Execute-only mode returns before proving; see report_agg_execute_only.
     if std::env::var("HAZYNC_AGG_EXECUTE").is_ok() { report_agg_execute_only(b); return; }
 
@@ -4555,6 +4585,15 @@ const SEG_EOF: u32 = 0xFFFF_FFFF;
 // free and one connection can carry both kinds of work without a second protocol or a second socket.
 // Body is [u32 len_a][a][u32 len_b][b] -- the two lifted receipts to join.
 const JOIN_TAG: u32 = 0x8000_0000;
+// A resolve job (hazync#153). Bit 30, so it cannot collide with JOIN_TAG's bit 31 or with a segment
+// index -- a chunk of 4,207 segments uses fourteen bits, and the aggregate is smaller still.
+// Body is the same [len][a][len][b] pair as a join: the conditional receipt, then the assumption.
+//
+// Resolves are a CHAIN, not a tree: each consumes the previous conditional, so there is exactly one
+// outstanding at a time and this wins by moving the work off the coordinator rather than by
+// parallelising it. That is a smaller prize than the join tree and it is the whole of the remaining
+// undivided term, which is why it is worth having anyway.
+const RESOLVE_TAG: u32 = 0x4000_0000;
 
 fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + a.len() + b.len());
@@ -4614,6 +4653,25 @@ fn seg_connect_cmd(addr: &str) {
         if idx == SEG_EOF { println!("[{id}] no more work"); break; }
         let t = Instant::now();
 
+        // A resolve job carries a conditional receipt and one assumption to discharge against it.
+        // Tested BEFORE the join branch: both bodies are pairs, and the only thing telling them
+        // apart is which tag bit is set, so the order of these two tests is the discriminator.
+        //
+        // Like join, this is safe to hand to an untrusted worker. resolve() checks the assumption
+        // against the conditional receipt's own assumption list, so a worker that returns a resolve
+        // of something else produces a receipt that fails at the next step or at the final verify.
+        if idx & RESOLVE_TAG != 0 {
+            let (cb, ab) = unpack_pair(&body).expect("malformed resolve pair");
+            let cond: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(cb).expect("deserialize conditional");
+            let assum: SuccinctReceipt<risc0_zkvm::Unknown> = bincode::deserialize(ab).expect("deserialize assumption");
+            let r = server.resolve(&cond, &assum).expect("resolve");
+            let out = bincode::serialize(&r).expect("serialize resolve");
+            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            done += 1;
+            println!("[{id}] resolve {} in {:.2}s ({done} done)", idx & !RESOLVE_TAG, t.elapsed().as_secs_f64());
+            continue;
+        }
+
         // A join job carries two lifted receipts instead of a segment. Same connection, same loop.
         // join() asserts a.post == b.pre, so a worker cannot return a join of the wrong two receipts
         // and have it survive the next level -- untrusted joins are safe for the same reason
@@ -4663,15 +4721,31 @@ fn seg_serve_cmd() {
     let depth: usize = std::env::var("HAZYNC_PUSH_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
     let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    let (_a, w) = build_full();
-    let bounds = chunk_bounds(&w, nchunks_env());
-    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    // HAZYNC_AGG=1 serves the mode-5 AGGREGATE instead of a mode-4 chunk (hazync#153).
+    //
+    // This was the gap that stopped a whole BLOCK from distributing. Segments and joins already
+    // divided, but only for a chunk: seg-serve wrote `4u32` unconditionally and never called
+    // add_assumption, so the aggregate -- the thing that folds the chunk receipts into the block
+    // proof -- could not be served at all. Everything downstream is unchanged, because an aggregate
+    // session produces ordinary segments like any other.
+    let agg = std::env::var("HAZYNC_AGG").is_ok();
+    let (anchor, w) = build_full();
     let mut b = ExecutorEnv::builder();
-    b.segment_limit_po2(seg_po2());
-    b.write(&4u32).unwrap();
-    b.write(&w.height).unwrap();
-    b.write(&header_hash(&w.header)).unwrap();
-    write_chunk_inputs(&mut b, &w, lo, hi);
+    if agg {
+        let nchunks = chunk_bounds(&w, nchunks_env()).len();
+        let receipts = read_chunk_receipts(nchunks);
+        println!("=== push coordinator: AGGREGATE of {} chunk receipts, block {} po2 {} ===",
+                 receipts.len(), w.height, seg_po2());
+        write_aggregate_env(&mut b, &receipts, &anchor, &w);
+    } else {
+        let bounds = chunk_bounds(&w, nchunks_env());
+        let (lo, hi) = *bounds.get(idx).expect("chunk index");
+        b.segment_limit_po2(seg_po2());
+        b.write(&4u32).unwrap();
+        b.write(&w.height).unwrap();
+        b.write(&header_hash(&w.header)).unwrap();
+        write_chunk_inputs(&mut b, &w, lo, hi);
+    }
 
     let t_exec = Instant::now();
     let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
@@ -4687,7 +4761,7 @@ fn seg_serve_cmd() {
     let wire = Arc::new(wire);
     let bytes: usize = wire.iter().map(|v| v.len()).sum();
 
-    println!("=== push coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    if !agg { println!("=== push coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
     println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
     println!("  listening on 0.0.0.0:{port}");
 
@@ -4765,7 +4839,15 @@ fn seg_serve_cmd() {
                                                     jout.lock().unwrap().insert(rt, r);
                                                 }
                                                 _ => {
-                                                    println!("  worker returned a bad join for {}", rt & !JOIN_TAG);
+                                                    // Tag-aware: this path now carries resolves as
+                                                    // well as joins, and printing a resolve's index
+                                                    // masked with !JOIN_TAG would name the wrong job.
+                                                    let (kind, n) = if rt & RESOLVE_TAG != 0 {
+                                                        ("resolve", rt & !RESOLVE_TAG)
+                                                    } else {
+                                                        ("join", rt & !JOIN_TAG)
+                                                    };
+                                                    println!("  worker returned a bad {kind} for {n}");
                                                     jobs.lock().unwrap().push_back((tag, body));
                                                 }
                                             }
@@ -4889,15 +4971,47 @@ fn seg_serve_cmd() {
         level = next;
         lv += 1;
     }
+    // DISTRIBUTE THE RESOLVES (hazync#153). This is the last term that stayed on the coordinator.
+    //
+    // A mode-4 chunk has no assumptions, so this loop does nothing and costs nothing. A mode-5
+    // aggregate has one per chunk receipt, at roughly 11.35 M cycles each -- about 175 s for
+    // sixteen, all of it previously undivided while every card but one sat idle.
+    //
+    // They are a CHAIN: each resolve consumes the conditional the last one produced, so exactly one
+    // is outstanding at a time and this does not parallelise. It wins by moving the work off the
+    // coordinator, which is the whole point when the coordinator is the machine everything else is
+    // waiting on. Honest about the size of the prize: sixteen sequential steps, not log2(16).
+    let mut conditional = level.pop().expect("one left");
+    let assumptions = server.session_assumptions_succinct(&session).expect("session assumptions");
+    let nres = assumptions.len();
+    let t_res = Instant::now();
+    for (k, a) in assumptions.iter().enumerate() {
+        let tag = RESOLVE_TAG | k as u32;
+        let cb = bincode::serialize(&conditional).expect("ser conditional");
+        let ab = bincode::serialize(a).expect("ser assumption");
+        jobs.lock().unwrap().push_back((tag, pack_pair(&cb, &ab)));
+        // Wait for this one before publishing the next: the next job's INPUT is this job's output,
+        // so queueing them together would hand out work built on a conditional that does not exist
+        // yet. The barrier is inherent to a chain, not an implementation shortcut.
+        loop {
+            let got = { jout.lock().unwrap().remove(&tag) };
+            if let Some(r) = got { conditional = r; break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!("    resolve {}/{nres}  {:.0}s elapsed", k + 1, t_res.elapsed().as_secs_f64());
+    }
+    let res_s = t_res.elapsed().as_secs_f64();
+
     alldone.store(true, std::sync::atomic::Ordering::Relaxed);
-    let info = server.assemble_from_joined(&ctx, &session, level.pop().expect("one left")).expect("assemble");
+    let info = server.assemble_from_resolved(&session, conditional).expect("assemble");
     let asm_s = t_asm.elapsed().as_secs_f64();
     info.receipt.verify(METHOD_ID).expect("PUSH RECEIPT FAILED verify");
 
     println!();
     println!("  execution      {exec_s:8.1} s");
     println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
-    println!("  assembly       {asm_s:8.1} s   <- last segment + join tree, coordinator-side");
+    println!("  assembly       {asm_s:8.1} s   <- last segment + join tree + resolves");
+    if nres > 0 { println!("    of which resolves {res_s:6.1} s   <- {nres} pushed to workers"); }
     println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
     println!();
     println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
