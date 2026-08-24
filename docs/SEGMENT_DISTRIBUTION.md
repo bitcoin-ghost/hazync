@@ -318,28 +318,72 @@ undivided term, and with the join tree published as work over the same connectio
 The tree behaves as designed: 11 levels for 1,684 segments, 1,683 joins, odd receipts carried in
 position, `log2(N)` depth rather than `N`.
 
-### The block
+### The block — MEASURED end to end (2026-08-24)
 
-Near-tip 962000, measured: 14,167 card-seconds of chunk work plus a 1,466 s aggregate = **15,633
-card-seconds**, against a ~46 s execution floor.
+Near-tip 962000, 16 chunks, po2 22, on one box with 3x L40S. Every term below was measured on the
+same rig on the same day, so the ratios are internally consistent even though this rig runs ~12%
+slower per chunk than the earlier §52 reference.
 
-⚠ **An earlier version of this section put a sub-ten-minute block at ~30 cards and said "every term
-is now measured to scale". Both were wrong**, and #153 is the correction: the numbers divided the
-WHOLE block by the card count, when the aggregate's sixteen assumption resolutions (~175 s) and the
-execution floor (~46 s) did not divide at all. What actually scaled was measured on a chunk.
+    chunk work    15,835 card-seconds  (16 chunks, mean 990 s)
+    aggregate      1,541 s in-process  (the undistributed baseline)
 
-| undivided term | divisible | cards for <10 min |
-|---|---|---|
-| ~221 s — resolves **and** execution (before #153) | ~15,412 s | **~45** |
-| ~46 s — execution only (after #153, PROJECTED) | ~15,587 s | ~30 |
+**The aggregate now divides**, which is the whole point. Same block, same 16 chunk receipts, workers
+added one at a time:
 
-#153 built the second row: the aggregate is now servable and resolves are discharged on workers,
-gated on digest equality. But **it is a projection, not a measurement.** The ~175 s resolve figure
-comes from a different block, and resolves are a chain rather than a tree, so distributing them moves
-work off the segment coordinator rather than parallelising it — the gain is real but bounded, and its size is
-unknown until the aggregate is measured on real cards.
+| | in-process | 1 worker | 2 workers | 3 workers |
+|---|---|---|---|---|
+| segment proving | — | 1448.2 s | 760.1 s | **506.6 s** |
+| assembly (join tree + resolves) | — | 96.1 s | 51.7 s | **36.0 s** |
+| of which resolves | — | 4.7 s | 4.6 s | 4.2 s |
+| **total** | 1541.3 s | 1565.5 s | 833.3 s | **563.6 s** |
+| speedup vs 1 worker | — | 1.00x | 1.88x | **2.78x** |
+| journal digest | reference | OK | OK | **OK** |
 
-**Quote ~45 until item 3 of #153 is done.**
+Both halves scale. Assembly falling 96.1 -> 36.0 is the join tree distributing, not just the
+segments. Every run produced a byte-identical journal digest, so nothing is bought by dropping work.
+
+One worker costs **1.6% more** than proving in-process (1565.5 vs 1541.3). That is the whole price of
+putting the work on a wire.
+
+### What that does to a whole block
+
+    1 card:   16 x 998 s + 1541 s = 17,509 s = 292 min
+    3 cards:  15,835/3 + 563.6 s  =  5,999 s = 100 min
+
+| | 1 card | 3 cards | speedup |
+|---|---|---|---|
+| before the aggregate divided | 292 min | 116 min | 2.51x |
+| **after** | 292 min | **100 min** | **2.92x** |
+
+Against a theoretical ceiling of 3.0x. What is left undivided is the ~21 s execution floor and a
+per-segment contention cost that grows slowly with worker count (3.8 s solo, 4.0 s at two, 4.26 s at
+three).
+
+⚠ **The ~45-cards figure and the ~175 s resolve estimate were both wrong.** #153 projected the
+sixteen assumption resolutions at ~175 s by converting 11.35 M cycles each at segment-proving rates.
+Measured: **4.7 s for all sixteen**, about 37x out. Resolves are recursion proofs, and recursion is
+far cheaper per cycle on GPU than segment proving -- the same reason a join costs 0.23 s against a
+segment's 3.8 s. So the undivided term was never ~221 s, and distributing `resolve` was never where
+the win was. The win is that a mode-5 aggregate can be **served at all**: 1,448 s of segment proving
+inside it that previously could not leave one machine.
+
+## Cards in one box barely contend
+
+Three cards in one chassis cost each other about **2%**, which is inside run-to-run noise:
+
+    solo (other two cards idle)   998 s
+    three-up                    1,019 s
+    §52 reference (2026-08-23)    892 s
+
+So sharing a chassis is close to free, and a 3-card box is not meaningfully worse than three 1-card
+boxes on contention grounds.
+
+⚠ **This control does NOT explain the 12% gap against §52.** It compared one active card against
+three active cards *on the same three-card rig*. It cannot separate "a card in a dense rig" from "a
+card in a single-card rig", and the §52 reference was almost certainly measured on the latter.
+Candidates for the remaining 12%: host resources per card (16 cores across 3 here, 8 for 1 there),
+PCIe topology, or sustained boost residency. Unresolved, and it does not affect the ratios above
+because every configuration ran on the same rig.
 
 ## The aggregate distributes (2026-08-24, #153)
 
@@ -360,6 +404,9 @@ The segment coordinator's job path needed no change — it already routed result
 produced. `session_assumptions_succinct` returns assumptions in session order, and the segment coordinator
 publishes one job at a time rather than queueing them, because the next job's input is the previous
 job's output.
+
+Also measured on GPU (see the block section above): the aggregate scales **2.78x on three cards**,
+where before it was a fixed cost no matter how much hardware you owned.
 
 Gated against the in-process aggregate, block 130000, on CPU:
 
