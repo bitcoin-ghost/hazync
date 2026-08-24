@@ -227,6 +227,23 @@ pub trait ProverServer: private::Sealed {
         anyhow::bail!("this prover does not support extracting session assumptions")
     }
 
+    /// SEGMENT DISTRIBUTION step 5 (hazync#161). Merge the session output into the last segment's
+    /// claim, without lifting it.
+    ///
+    /// `prepare_lifts` bundles two steps with opposite requirements: this merge needs the session and
+    /// no prover, while the lift needs a prover and no session. Bundling them is the only reason a
+    /// segment coordinator must own a GPU, and it is why a CUDA build whose device has gone away
+    /// aborts at the very end of an otherwise fully distributed run.
+    ///
+    /// Split out so the merge stays on the coordinator and the lift can be handed to a worker.
+    fn merge_session_output(
+        &self,
+        _session: &Session,
+        _last: &mut SegmentReceipt,
+    ) -> Result<()> {
+        anyhow::bail!("this prover does not support merging session output separately")
+    }
+
     /// SEGMENT DISTRIBUTION step 4 (hazync#153). Build the `Receipt` from a conditional receipt whose
     /// assumptions have ALREADY been resolved -- by `resolve`, wherever that ran.
     ///

@@ -76,11 +76,30 @@ impl ProverServer for ProverImpl {
         session: &Session,
         mut segments: Vec<SegmentReceipt>,
     ) -> Result<Vec<SuccinctReceipt<ReceiptClaim>>> {
+        let last = segments.last_mut().ok_or_else(|| anyhow!("session is empty"))?;
+        self.merge_session_output(session, last)?;
+
+        let mut lifted = Vec::with_capacity(segments.len());
+        for seg in segments.iter() {
+            lifted.push(self.lift(seg)?);
+        }
+        Ok(lifted)
+    }
+
+    /// SEGMENT DISTRIBUTION step 5 (hazync#161). The claim surgery half of `prepare_lifts`, on its own.
+    ///
+    /// `prepare_lifts` does two things with very different requirements: it folds the session journal
+    /// digest and assumption set into the LAST segment's claim, and it lifts. The merge needs the
+    /// session and no prover; the lift needs a prover and no session. Bundling them is why the
+    /// coordinator has to own a GPU for one step at the very end of an otherwise fully distributed
+    /// run -- and why a CUDA build whose device has gone away aborts there, discarding everything.
+    ///
+    /// Split out so the merge can happen on the coordinator and the lift can be handed to a worker
+    /// like any other job. `prepare_lifts` is written in terms of this, so there is one definition of
+    /// how the session output is merged rather than two that can drift.
+    fn merge_session_output(&self, session: &Session, last: &mut SegmentReceipt) -> Result<()> {
         let (assumptions, _): (Vec<_>, Vec<_>) = session.assumptions.iter().cloned().unzip();
-        segments
-            .last_mut()
-            .ok_or_else(|| anyhow!("session is empty"))?
-            .claim
+        last.claim
             .output
             .merge_with(
                 &session
@@ -93,12 +112,9 @@ impl ProverServer for ProverImpl {
                     .into(),
             )
             .context("failed to merge output into final segment claim")?;
-
-        let mut lifted = Vec::with_capacity(segments.len());
-        for seg in segments.iter() {
-            lifted.push(self.lift(seg)?);
-        }
-        Ok(lifted)
+        // merge_with hands back a &mut to what it merged into; the caller wants the receipt it
+        // already owns, not a borrow of its interior.
+        Ok(())
     }
 
     /// SEGMENT DISTRIBUTION step 3 (hazync patch). Finish assembly from a continuation receipt whose

@@ -4606,6 +4606,17 @@ const RESOLVE_TAG: u32 = 0x4000_0000;
 // instead of a SuccinctReceipt. The segment coordinator merges and lifts, which is ~3.4x less work than
 // proving and lifting -- and it lands in the undivided term every card in the fleet waits on.
 const NOLIFT_TAG: u32 = 0x2000_0000;
+// LIFT THIS RECEIPT (hazync#161). Bit 28, clear of the three tags above and of any segment index.
+//
+// The last segment's claim must have the session journal digest and assumption set merged into it
+// before it is lifted, and only the coordinator has the session. But the LIFT itself needs no
+// session -- it is an ordinary recursion proof over a receipt. Bundling them in prepare_lifts is the
+// only reason a segment coordinator owns a GPU at all, and it is why a CUDA build whose device has
+// gone away aborts at the final step after a fully successful distributed run.
+//
+// So the coordinator merges (claim surgery, no prover) and sends the merged SegmentReceipt out as a
+// lift job. Body is the bare receipt, not a pair. With this the coordinator holds no prover.
+const LIFT_TAG: u32 = 0x1000_0000;
 
 fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + a.len() + b.len());
@@ -4649,7 +4660,7 @@ fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
 // Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
 // makes no decisions -- the segment coordinator drives. That also makes it simpler than the pull worker.
 fn seg_connect_cmd(addr: &str) {
-    use risc0_zkvm::{VerifierContext, Segment, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::{VerifierContext, Segment, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
     let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "push1".into());
     let opts = ProverOpts::succinct();
@@ -4664,6 +4675,18 @@ fn seg_connect_cmd(addr: &str) {
         let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { println!("[{id}] link closed: {e}"); break; } };
         if idx == SEG_EOF { println!("[{id}] no more work"); break; }
         let t = Instant::now();
+
+        // A lift job carries a single SegmentReceipt whose claim the coordinator has already merged
+        // the session output into. Lifting needs no session, so it is ordinary work.
+        if idx & LIFT_TAG != 0 {
+            let sr: SegmentReceipt = bincode::deserialize(&body).expect("deserialize segment receipt");
+            let lifted = server.lift(&sr).expect("lift");
+            let out = bincode::serialize(&lifted).expect("serialize lift");
+            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            done += 1;
+            println!("[{id}] lifted the merged last segment in {:.2}s", t.elapsed().as_secs_f64());
+            continue;
+        }
 
         // A resolve job carries a conditional receipt and one assumption to discharge against it.
         // Tested BEFORE the join branch: both bodies are pairs, and the only thing telling them
@@ -4983,9 +5006,22 @@ fn seg_serve_cmd() {
     // genuinely needs the session: merging the journal digest and assumption set into its claim, and
     // lifting the result. prepare_lifts merges into the LAST element of what it is given, so a
     // one-element vector does exactly that and nothing else.
-    let last_rcpt: SegmentReceipt = last_out.lock().unwrap().take().expect("last segment receipt");
-    let mut tail = server.prepare_lifts(&ctx, &session, vec![last_rcpt]).expect("merge+lift last");
-    lifted.append(&mut tail);
+    // MERGE HERE, LIFT ON A WORKER (hazync#161). The merge is claim surgery and needs the session;
+    // the lift is a recursion proof and does not. Splitting them means the segment coordinator holds
+    // no prover at all -- so a missing or dead GPU cannot abort a run at its final step, and a
+    // coordinator can be a machine with no card.
+    let mut last_rcpt: SegmentReceipt = last_out.lock().unwrap().take().expect("last segment receipt");
+    server.merge_session_output(&session, &mut last_rcpt).expect("merge session output");
+    {
+        let body = bincode::serialize(&last_rcpt).expect("ser merged last");
+        jobs.lock().unwrap().push_back((LIFT_TAG, body));
+    }
+    let tail_lift = loop {
+        let got = { jout.lock().unwrap().remove(&LIFT_TAG) };
+        if let Some(r) = got { break r; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    lifted.push(tail_lift);
 
     // DISTRIBUTE THE JOIN TREE. Publish a level as jobs, wait for the workers to return them, feed
     // the results in as the next level. The barrier between levels is unavoidable -- level l+1
