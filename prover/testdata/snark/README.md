@@ -3,20 +3,20 @@
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
 push (#23).
 
-⚠ **STALE — proved under the superseded `b62d2a60…`; the guest is now `1d6c3792…`**
-(the 2026-08-23 parallel-block-validation re-baseline). They must be re-proved and re-wrapped
-before a release, and until then `ci_snark_verify.sh`, `ci_verify_any.sh` and
-`verifier-wasm/test-parity.sh` fail — correctly, because a verifier pinned to the new id genuinely
-cannot accept a proof made by the old one.
+Last regenerated 2026-08-24 under `1d6c3792…` (the parallel-block-validation re-baseline — see
+`reproduce/METHOD_ID`), which superseded `b62d2a60…` (2026-08-04, audit #5 guest guards), which
+superseded `b161735a…`.
 
-Last regenerated 2026-08-04 under `b62d2a60…` (audit #5 guest guards — see `reproduce/METHOD_ID`),
-which superseded `b161735a…`. A proof carries its guest id inside it, so a
-re-baseline cannot be absorbed by editing anything: the pair has to be re-proved and re-wrapped, and
-until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and `verifier-wasm/test-parity.sh` fail — as
-they should, since a verifier pinned to the new id genuinely cannot accept a proof made by the old one.
+A proof carries its guest id inside it, so a re-baseline cannot be absorbed by editing anything: the
+pair has to be re-proved and re-wrapped. Until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and
+`verifier-wasm/test-parity.sh` fail — as they should, since a verifier pinned to the new id
+genuinely cannot accept a proof made by the old one. Both earlier regenerations were forced the same
+way.
 
-The 2026-08-02 regeneration before it was forced the same way, by the `b161735a…` lineage changing
-every leaf hash.
+⚠ On the 2026-08-23 re-baseline that produced `1d6c3792…`, the stale pair failed **two** CI jobs, not
+one: `accumulator-tests` at the standalone-verifier step and `reproducible-image-id` at the Groth16
+step. The container build and the METHOD_ID assertion inside that same job both PASSED. If a
+re-baseline shows those two failures together, it is these files, not the Dockerfile.
 
 **They were [1..1000] and are now [1..8].** The originals were folded from 1000 GPU block-proofs; on
 CPU that is ~9.6 days. Range length is irrelevant to what these fixtures test — `[1..8]` is exactly as
@@ -59,8 +59,10 @@ a stale or foreign id in documentation is exactly the drift it exists to catch. 
 
 ## These are tied to a METHOD_ID
 
-Both were wrapped under guest image id `4722cec826239c1b3a3598bbac284376cc7b920c9bcd9863fa34f40c9ea7bbae`
-(audit #5). **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
+Both are wrapped under the canonical guest image id, which is whatever `reproduce/METHOD_ID` pins at
+the time they were made. Do not restate that id here: a second copy of it is a second thing to keep in
+step, and `scripts/check-versions.sh` exists because stale ids in documentation are exactly the drift
+that gets shipped. **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
 re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.
 
@@ -99,6 +101,18 @@ HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h  
 ./host snark-wrap range_500.bin neg500.snark                  # ~75 s
 ./host verify-snark neg500.snark                              # must FAIL, naming the genesis pin
 ```
+
+⚠ **Start from an EMPTY directory.** A regeneration script that skips work already on disk
+(`[ -s range_$h.bin ] && continue`) will silently reuse `range_*.bin` left over from the PREVIOUS
+baseline, because the filenames do not carry the guest id. The proves then all "succeed" instantly
+and the first fold fails with a claim-digest mismatch that reads like a broken fold:
+
+```
+join: Equality check failed: Expecting [0x0000f041, ...] == [0x00008c30, ...]
+```
+
+That is not a fold bug. It is two receipts from two different guests being joined. Move the old
+artefacts aside before starting, and keep the resume-skip only within a single run.
 
 ⚠ **One prove at a time.** A CPU prove holds ~4.7 GB. Three concurrent on a 12 GB box drove available
 memory to 276 MB and the kernel killed two of them — and a Docker OOM kill takes the container's
