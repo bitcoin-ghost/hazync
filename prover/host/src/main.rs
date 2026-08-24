@@ -1964,6 +1964,37 @@ impl risc0_zkvm::SessionEvents for FoldProgress {
     }
 }
 
+// HAZYNC_AGG_EXECUTE=1 — execute mode 5 WITHOUT proving, and report its cycles.
+//
+// Settles which half of the aggregate is expensive. In execute mode `env::verify` merely RECORDS an
+// assumption; RESOLVING it is recursion, and that cost lands in PROVING. So this cycle count is the
+// block-validation work alone, and the gap between it and the measured prove wall-clock is what the
+// sixteen assumption resolutions cost.
+//
+// It matters because the two pull in opposite directions: more chunks parallelise proving better
+// and, if resolution dominates, make the aggregate worse. HAZYNC_CHUNKS has been treated as free.
+// Host-side only; needs no GPU and does not move METHOD_ID.
+//
+// A FUNCTION RATHER THAN AN INLINE BLOCK, because check_seg_guards.sh requires a prove call within
+// 25 lines of its segment_limit_po2 guard, and inline this pushed the aggregate's prove to 38 lines
+// away. The guard was present and the check was right to complain: distance is what makes it
+// readable at a glance that a prove path sets its segment size.
+fn report_agg_execute_only(mut b: risc0_zkvm::ExecutorEnvBuilder) {
+    use std::time::Instant;
+    let t_x = Instant::now();
+    let session = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("execute mode 5");
+    let cycles = session.cycles();
+    println!("=== AGGREGATE, EXECUTE ONLY (no proving) ===");
+    println!("  block validation cycles  {cycles}");
+    println!("  segments at po2 {}        ~{}", seg_po2(), cycles.div_ceil(1u64 << seg_po2()));
+    println!("  executed in              {:.1}s", t_x.elapsed().as_secs_f64());
+    println!();
+    println!("  Scale: chunk 9 is 948,436,992 cycles and proved in ~915 s on a B200, so this much");
+    println!("  block-validation work is roughly {:.0} s of segment proving. Whatever the FULL",
+             cycles as f64 / 948_436_992.0 * 915.0);
+    println!("  aggregate cost beyond that (measured: >3,300 s) is the assumption resolutions.");
+}
+
 fn agg_chunks() {
     use std::time::Instant;
     let (anchor, w) = build_full();
@@ -1989,6 +2020,9 @@ fn agg_chunks() {
     b.write(&state_journal_bytes(&anchor)).unwrap();
     b.write(&w).unwrap();
     b.write(&1u32).unwrap();
+    // Execute-only mode returns before proving; see report_agg_execute_only.
+    if std::env::var("HAZYNC_AGG_EXECUTE").is_ok() { report_agg_execute_only(b); return; }
+
     // Prove the aggregate to SUCCINCT too: the assumptions are already succinct (cheap resolve), and a
     // succinct block proof is a single fixed-size STARK — directly composable in the chain range-fold.
     //
