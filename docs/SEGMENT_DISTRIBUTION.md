@@ -1,5 +1,14 @@
 # Segment distribution — design and build plan
 
+> **Two different things are called "coordinator" in this project.** This document is about the
+> **segment coordinator** — the ephemeral `seg-serve` process that executes one guest run, pushes its
+> segments to workers and drives assembly. It lives for the duration of one prove and needs a GPU.
+>
+> The **board coordinator** (`coordinator/server.py`, [`docs/RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md))
+> is the long-lived public service that hands out block ranges, verifies submitted proofs and runs
+> the scoreboard. It never proves anything and needs no GPU. The two share no code.
+
+
 Status: **design + prototype**. Nothing here is deployed. Written 2026-08-23.
 
 ## Why this and not something else
@@ -86,7 +95,7 @@ vendored risc0 (the preflight pipelining patch) is orthogonal and stays.
 
 ## Running it
 
-Everything below is one binary. The coordinator executes and hands out work; workers connect and
+Everything below is one binary. The segment coordinator executes and hands out work; workers connect and
 prove. Workers hold no work list and make no decisions.
 
 ### A chunk
@@ -96,14 +105,14 @@ prove. Workers hold no work list and make no decisions.
 HAZYNC_BLOCK=block_962000.json HAZYNC_CHUNKS=16 HAZYNC_CHUNK=0 \
   HAZYNC_SEG_PO2=22 HAZYNC_PORT=9110 ./host seg-serve
 
-# each worker, on any machine that can reach the coordinator
+# each worker, on any machine that can reach the segment coordinator
 HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
 ```
 
 ### The aggregate (#153)
 
 Same commands, plus `HAZYNC_AGG=1`, and the chunk receipts must already exist as `chunk_0.bin` …
-`chunk_N.bin` in the coordinator's working directory. They are verified against `METHOD_ID` on the
+`chunk_N.bin` in the segment coordinator's working directory. They are verified against `METHOD_ID` on the
 way in, so a receipt from a different guest is refused by name rather than failing later inside the
 prover.
 
@@ -133,9 +142,9 @@ value enables it and only *unsetting* it disables it. That is the house style he
 5.5 GB spare. Two concurrent proves will OOM it. This is not a loss: concurrency was measured twice
 and buys ~3%, inside noise.
 
-⚠ **The coordinator needs a card too**, but only briefly. It proves the last segment itself, because
+⚠ **The segment coordinator needs a card too**, but only briefly. It proves the last segment itself, because
 the session journal and assumption set merge into that segment's claim and a worker has no session.
-That happens *after* the distributed segments come back, so the coordinator can share a card with a
+That happens *after* the distributed segments come back, so the segment coordinator can share a card with a
 worker without colliding.
 
 ### If a worker dies
@@ -149,7 +158,7 @@ segment is requeued.
 
 This is the property that makes Ghost-node participation possible at all.
 
-- A `SegmentReceipt` and a `SuccinctReceipt` are **self-verifying**. The coordinator
+- A `SegmentReceipt` and a `SuccinctReceipt` are **self-verifying**. The segment coordinator
   verifies every returned receipt before using it.
 - A worker cannot forge a valid receipt for work it did not do — that is what the STARK
   is. It can only fail to return one.
@@ -183,18 +192,18 @@ reassigns the segment, and proving the same segment twice is harmless.
   `HAZYNC_AGG=1` and builds the mode-5 environment; resolves go out under a third job tag.
   The ordering concern was real: resolves are a chain, each consuming the conditional the
   previous one produced, so `session_assumptions_succinct` returns them in SESSION order and
-  the coordinator publishes one job at a time rather than queueing them together. Gated on
+  the segment coordinator publishes one job at a time rather than queueing them together. Gated on
   digest equality at 2- and 4-chunk partitions, with the worker's own log asserting exactly
   N resolves discharged remotely. See the section at the end.
 - **A single card cannot demonstrate speedup.** With one GPU, P2 measures *overhead and
   correctness*, not wall-clock gain. Genuine parallelism can be shown using CPU workers
   alongside the GPU, at a much lower rate.
-- **Join tree distribution** is not in P0–P2. Joins are done by the coordinator. At
+- **Join tree distribution** is not in P0–P2. Joins are done by the segment coordinator. At
   ~0.15 s/segment on GPU that is acceptable; on CPU nodes at 14 s/join it is not, and the
   tree would have to distribute too.
 - **po2 is per-worker, not global.** Nodes are forced to po2 18 by RAM; cards want 21–22.
   A heterogeneous fleet cannot share one segment size, and a session's segments are fixed
-  at execution time — so the coordinator must partition by worker class, or run separate
+  at execution time — so the segment coordinator must partition by worker class, or run separate
   sessions per class. **This is unresolved and is the biggest design risk.**
 
 ## Measured: a second machine added nothing, because of the transport
@@ -224,9 +233,9 @@ down, `scp` up plus `ssh mv` — at roughly 150 ms setup each, against a segment
 **This is a property of fast segments, not of this network.** Any per-segment transport costing
 ~0.5 s erases the entire gain at po2 18.
 
-### The fix: the coordinator should push
+### The fix: the segment coordinator should push
 
-Pull was the wrong choice. The coordinator already holds the work list, so:
+Pull was the wrong choice. The segment coordinator already holds the work list, so:
 
 - **no claim round trip** — it assigns rather than waiting to be asked
 - **transfer overlaps proving** — send segment N+1 while the worker proves N
@@ -309,28 +318,72 @@ undivided term, and with the join tree published as work over the same connectio
 The tree behaves as designed: 11 levels for 1,684 segments, 1,683 joins, odd receipts carried in
 position, `log2(N)` depth rather than `N`.
 
-### The block
+### The block — MEASURED end to end (2026-08-24)
 
-Near-tip 962000, measured: 14,167 card-seconds of chunk work plus a 1,466 s aggregate = **15,633
-card-seconds**, against a ~46 s execution floor.
+Near-tip 962000, 16 chunks, po2 22, on one box with 3x L40S. Every term below was measured on the
+same rig on the same day, so the ratios are internally consistent even though this rig runs ~12%
+slower per chunk than the earlier §52 reference.
 
-⚠ **An earlier version of this section put a sub-ten-minute block at ~30 cards and said "every term
-is now measured to scale". Both were wrong**, and #153 is the correction: the numbers divided the
-WHOLE block by the card count, when the aggregate's sixteen assumption resolutions (~175 s) and the
-execution floor (~46 s) did not divide at all. What actually scaled was measured on a chunk.
+    chunk work    15,835 card-seconds  (16 chunks, mean 990 s)
+    aggregate      1,541 s in-process  (the undistributed baseline)
 
-| undivided term | divisible | cards for <10 min |
-|---|---|---|
-| ~221 s — resolves **and** execution (before #153) | ~15,412 s | **~45** |
-| ~46 s — execution only (after #153, PROJECTED) | ~15,587 s | ~30 |
+**The aggregate now divides**, which is the whole point. Same block, same 16 chunk receipts, workers
+added one at a time:
 
-#153 built the second row: the aggregate is now servable and resolves are discharged on workers,
-gated on digest equality. But **it is a projection, not a measurement.** The ~175 s resolve figure
-comes from a different block, and resolves are a chain rather than a tree, so distributing them moves
-work off the coordinator rather than parallelising it — the gain is real but bounded, and its size is
-unknown until the aggregate is measured on real cards.
+| | in-process | 1 worker | 2 workers | 3 workers |
+|---|---|---|---|---|
+| segment proving | — | 1448.2 s | 760.1 s | **506.6 s** |
+| assembly (join tree + resolves) | — | 96.1 s | 51.7 s | **36.0 s** |
+| of which resolves | — | 4.7 s | 4.6 s | 4.2 s |
+| **total** | 1541.3 s | 1565.5 s | 833.3 s | **563.6 s** |
+| speedup vs 1 worker | — | 1.00x | 1.88x | **2.78x** |
+| journal digest | reference | OK | OK | **OK** |
 
-**Quote ~45 until item 3 of #153 is done.**
+Both halves scale. Assembly falling 96.1 -> 36.0 is the join tree distributing, not just the
+segments. Every run produced a byte-identical journal digest, so nothing is bought by dropping work.
+
+One worker costs **1.6% more** than proving in-process (1565.5 vs 1541.3). That is the whole price of
+putting the work on a wire.
+
+### What that does to a whole block
+
+    1 card:   16 x 998 s + 1541 s = 17,509 s = 292 min
+    3 cards:  15,835/3 + 563.6 s  =  5,999 s = 100 min
+
+| | 1 card | 3 cards | speedup |
+|---|---|---|---|
+| before the aggregate divided | 292 min | 116 min | 2.51x |
+| **after** | 292 min | **100 min** | **2.92x** |
+
+Against a theoretical ceiling of 3.0x. What is left undivided is the ~21 s execution floor and a
+per-segment contention cost that grows slowly with worker count (3.8 s solo, 4.0 s at two, 4.26 s at
+three).
+
+⚠ **The ~45-cards figure and the ~175 s resolve estimate were both wrong.** #153 projected the
+sixteen assumption resolutions at ~175 s by converting 11.35 M cycles each at segment-proving rates.
+Measured: **4.7 s for all sixteen**, about 37x out. Resolves are recursion proofs, and recursion is
+far cheaper per cycle on GPU than segment proving -- the same reason a join costs 0.23 s against a
+segment's 3.8 s. So the undivided term was never ~221 s, and distributing `resolve` was never where
+the win was. The win is that a mode-5 aggregate can be **served at all**: 1,448 s of segment proving
+inside it that previously could not leave one machine.
+
+## Cards in one box barely contend
+
+Three cards in one chassis cost each other about **2%**, which is inside run-to-run noise:
+
+    solo (other two cards idle)   998 s
+    three-up                    1,019 s
+    §52 reference (2026-08-23)    892 s
+
+So sharing a chassis is close to free, and a 3-card box is not meaningfully worse than three 1-card
+boxes on contention grounds.
+
+⚠ **This control does NOT explain the 12% gap against §52.** It compared one active card against
+three active cards *on the same three-card rig*. It cannot separate "a card in a dense rig" from "a
+card in a single-card rig", and the §52 reference was almost certainly measured on the latter.
+Candidates for the remaining 12%: host resources per card (16 cores across 3 here, 8 for 1 there),
+PCIe topology, or sustained boost residency. Unresolved, and it does not affect the ratios above
+because every configuration ran on the same rig.
 
 ## The aggregate distributes (2026-08-24, #153)
 
@@ -345,12 +398,15 @@ constructed; and `resolve` ran inside `assemble_from_joined`, on whichever machi
   worker tests resolve *before* join, because both bodies are pairs and the tag order is the only
   discriminator.
 
-The coordinator's job path needed no change — it already routed results by returned tag.
+The segment coordinator's job path needed no change — it already routed results by returned tag.
 
 **Ordering is load-bearing.** Resolves are a chain: each consumes the conditional the previous one
-produced. `session_assumptions_succinct` returns assumptions in session order, and the coordinator
+produced. `session_assumptions_succinct` returns assumptions in session order, and the segment coordinator
 publishes one job at a time rather than queueing them, because the next job's input is the previous
 job's output.
+
+Also measured on GPU (see the block section above): the aggregate scales **2.78x on three cards**,
+where before it was a fixed cost no matter how much hardware you owned.
 
 Gated against the in-process aggregate, block 130000, on CPU:
 
@@ -359,7 +415,7 @@ Gated against the in-process aggregate, block 130000, on CPU:
 | 2 chunks | `09f4e49c…` | `09f4e49c…` | 2/2 |
 | 4 chunks | `09f4e49c…` | `09f4e49c…` | 4/4 |
 
-The worker counts come from the worker's own log, not the coordinator's, and the 4-chunk gate asserts
+The worker counts come from the worker's own log, not the segment coordinator's, and the 4-chunk gate asserts
 exactly 4 rather than non-zero — so it cannot pass by resolving some locally.
 
 Both partitions produce the same digest, so **a block's proof does not depend on how the block was

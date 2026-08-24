@@ -36,10 +36,13 @@ locally.
 Both partitions produced the same digest, which also shows a block's proof does not depend on how
 the block was chunked.
 
-⚠ **What those two rows do NOT establish is speed.** Resolves are a chain, each consuming the
-previous conditional, so distributing them moves work off the coordinator rather than parallelising
-it. Item 3 of #153 — measuring the aggregate on real cards — is open, and the card count below stands
-at ~45 until it is done.
+**MEASURED on 3x L40S, 2026-08-24.** The aggregate scales **2.78x on three cards** (1565.5 s → 563.6 s),
+with an identical journal digest at every configuration. A whole block goes from 2.51x to **2.92x** on
+three cards, against a 3.0x ceiling.
+
+⚠ Distributing `resolve` turned out to be a rounding error: **4.7 s for all sixteen**, not the ~175 s
+#153 estimated. The win is that the aggregate is servable at all — 1,448 s of segment proving inside
+it that previously could not leave one machine.
 
 ## The measurement
 
@@ -71,7 +74,7 @@ could not be parallelised by threads *or* machines at any cost. Rebalanced to a 
 0.47 s of proving, meant a second GPU added *nothing*. Push holds one connection open and sends
 segment N+1 while the worker proves N.
 
-**Workers are untrusted by construction.** A receipt is self-verifying, the coordinator verifies
+**Workers are untrusted by construction.** A receipt is self-verifying, the segment coordinator verifies
 each on arrival, and `join` asserts `a.post == b.pre` — so a bad worker costs latency, never
 soundness. That is what allows a heterogeneous fleet.
 

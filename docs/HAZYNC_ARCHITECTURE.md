@@ -675,11 +675,25 @@ Gated on digest equality against the in-process aggregate, block 130000, on CPU:
 Both partitions produce the same digest, so **a block's proof does not depend on how the block was
 chunked**. That had not been shown before.
 
-⚠ **The card count is still ~45, not ~30.** Resolves are a CHAIN, not a tree: each consumes the
-conditional the previous one produced, so distributing them moves work off the coordinator rather
-than parallelising it. That should take the undivided term from ~221 s to ~46 s and the fleet from
-~45 cards to ~30, but that is a PROJECTION off a resolve cost measured on a different block. Item 3
-of #153 — measuring the aggregate on real cards — is still open. Quote ~45 until it is done.
+### MEASURED on 3x L40S (2026-08-24) — the aggregate scales 2.78x
+
+Block 962000, 16 chunks, po2 22, same rig throughout:
+
+| | in-process | 1 worker | 2 workers | 3 workers |
+|---|---|---|---|---|
+| segment proving | — | 1448.2 s | 760.1 s | **506.6 s** |
+| assembly | — | 96.1 s | 51.7 s | **36.0 s** |
+| **total** | 1541.3 s | 1565.5 s | 833.3 s | **563.6 s** |
+| digest | ref | OK | OK | **OK** |
+
+Whole block, 1 card vs 3: **292 min → 100 min, 2.92x** against a 3.0x ceiling. Before the aggregate
+divided it was 2.51x, and the gap widened with every card added.
+
+⚠ **Two earlier figures here were wrong and are withdrawn.** The ~221 s undivided term and the
+resulting ~45-vs-~30 card counts came from estimating sixteen assumption resolutions at ~175 s.
+Measured: **4.7 s for all sixteen** — about 37x out, because resolves are recursion proofs and
+recursion is far cheaper per cycle on GPU than segment proving. Distributing `resolve` was never
+where the win was; the win is that a mode-5 aggregate can be served at all.
 
 See `docs/SEGMENT_DISTRIBUTION.md`.
 

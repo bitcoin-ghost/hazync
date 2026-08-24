@@ -58,10 +58,11 @@ it from scratch and checks it matches.
 
 What remains is scale, and there is now an answer to it. **Proving a block divides across
 machines**: segments prove independently, the recursion that folds them is a tree rather than a
-chain, and both halves scale. Measured on two GPUs: **2.03x**, with a verifying receipt each run. A
-near-tip block is 15,633 card-seconds of work, so one card takes 4.3 hours and forty-five take under
-ten minutes. A worker needs only the segment in front of it, so it cannot forge a receipt, only fail
-to return one. [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+chain, and both halves scale. Measured end to end on three GPUs: a near-tip block goes from **4.9
+hours on one card to 100 minutes on three — 2.92x**, against a ceiling of 3.0x, with a byte-identical
+receipt at every configuration. Roughly thirty cards would bring it under ten minutes. A worker needs
+only the segment in front of it, so it cannot forge a receipt, only fail to return one.
+[`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
 
 The board **resets with this release**, as it does at every re-baseline: guest `1d6c3792` (2026-08-23)
 supersedes `b62d2a60` (2026-08-04, audit #5), because `validate_block` was restructured to do

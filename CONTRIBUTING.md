@@ -184,20 +184,21 @@ Proving one block can be split across machines, so a second card halves the wall
 just doubling how many blocks you can work on at once. Both halves of the job divide: the segments a
 block's proof is made of, and the recursion that folds them back into one receipt.
 
-One machine is the coordinator; every other card connects to it and takes work.
+One machine is the **segment coordinator** — a different thing from the board coordinator above;
+it exists only for the duration of one prove. Every other card connects to it and takes work.
 
 ```
-# coordinator
+# segment coordinator
 HAZYNC_PORT=9110 ./host seg-serve
 
 # each worker, anywhere that can reach it
-HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+HAZYNC_WORKER_ID=w1 ./host seg-connect <segment-coordinator-host>:9110
 ```
 
 Workers need nothing but the segment in front of them. A worker **cannot forge a receipt** — every
 one is verified on arrival, and joins assert that the two receipts being merged actually meet — so it
 can only fail to return work, never corrupt it. That is why it is safe to point strangers' cards at
-your coordinator.
+your segment coordinator.
 
 Measured on two matched L40S: **2.03x**, with a verifying receipt each run.
 
