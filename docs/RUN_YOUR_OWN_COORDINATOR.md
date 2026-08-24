@@ -1,157 +1,108 @@
 # Run your own coordinator
 
-A coordinator is an **archive node + bridge + board**, not a mirror of someone else's. If you run one,
-you generate your own witnesses and verify every proof yourself — you are not depending on this
-project's box, and it is not depending on yours.
+A coordinator hands out proving work and keeps the board. It is **not** a trust anchor: a receipt
+verifies against `METHOD_ID` regardless of who coordinated it, so losing a coordinator loses the
+work queue and the scoreboard, never the validity of anything already proved.
 
-This page states the real cost up front, because the software is the easy part.
+This exists so that is true in practice as well as in principle — if one coordinator goes down,
+anyone can stand up another and provers can point at it.
 
-**You need a checkout**, not just the release:
+## The honest cost, first
+
+The software is one file (`coordinator/server.py`) and trivially replicable. **The data is not.**
+
+| what | size | why |
+|---|---|---|
+| Bitcoin archive node, `txindex=1` | ~864 GB | the bridge needs arbitrary historical transactions |
+| witness bundles | ~73 GB | what provers actually receive |
+
+There is no packaging that removes this. A new coordinator either resyncs an archive node from
+scratch, or seeds its bundles from an existing coordinator (below). Anyone telling you it is a
+`docker run` is describing something else.
+
+⚠ **The bridge will fill a disk.** It runs ahead of demand and there is a height cap for exactly
+that reason — without one it fills ~10 hours' worth and stops. Set the cap deliberately.
+
+## Seeding from a peer
+
+`/api/witnesses` streams bundles as a tar, so seeding does not mean 220,001 individual requests:
 
 ```bash
-git clone https://github.com/bitcoin-ghost/hazync
+curl -s "https://peer.example/api/witnesses?from=1&count=1000" | tar -x -C bundles/
 ```
 
-The signed release gives you the prover and the verifiers. The coordinator, the bridge tooling,
-`sync_bundles.py` and the systemd units live in the repo, and every command below is written relative
-to it. Said explicitly because most readers arrive here from the release page — where there is no
-`coordinator/` directory to run any of this from.
+The parameters are `from` and `count` (not `lo`/`hi`), and `count` defaults to `BULK_MAX`. The
+response carries a manifest listing `served` and `missing` heights — **`missing` is reported rather
+than skipped silently**, because a gap in the bridge's output and the end of the chain are different
+facts and a syncing peer must not read one as the other. Compare it against what you extracted.
 
-## What it actually costs
+Streamed rather than buffered — one `RANGE_SIZE` chunk is a few hundred MB and the whole set is
+~73 GB, so building an archive in memory would OOM the coordinator on the first request.
 
-| | |
-|---|---|
-| **Bitcoin Core, `txindex=1`, unpruned** | ~865 GB and growing |
-| **Bundles** the bridge emits | ~73 GB to height 220,000 |
-| **Proof receipts** you accumulate | ~220 KB per block |
-| **RAM** | the bridge peaks around 1.5 GB |
-| **Disk overall** | budget 1 TB, not 100 GB |
+⚠ **Check the transfer completed.** This server speaks HTTP/1.0, so a response without a
+`Content-Length` ends at connection close, and a *truncated* transfer looks exactly like a complete
+one. A tar ends with two zero blocks, so a parser that reads to the end-of-archive marker can tell
+the difference. `tar -x` does this; a naive `read()` loop does not.
 
-**There is no way around the archive node.** The bridge replays the chain to drive a resident Utreexo
-forest forward, so it needs the blocks and it needs the spend history. A pruned node cannot do this.
+## Not duplicating work
 
-**You do not need to copy anyone's bundles.** Bundles are a deterministic function of the chain — same
-blocks, same leaves, same bytes — so your node produces byte-identical ones. Syncing them from a peer
-would be slower than generating them and would introduce a trust relationship you do not need.
+Set `PEER_COORDINATORS` and coordinators stop handing out each other's work:
 
-## Why there is no consensus protocol
-
-Two coordinators do not have to agree on anything, and this is worth understanding before you assume
-it is harder than it is:
-
-* **A proof is self-authenticating.** It verifies against `METHOD_ID` no matter who holds it. There is
-  no canonical store — every coordinator keeps its own copy, and any of them can serve it.
-* **The frontier is a pure function of the verified set.** Two coordinators holding the same set
-  compute the same frontier by construction. Convergence is arithmetic, not agreement — no leader, no
-  quorum, no clock.
-
-So federation is a pull, not a protocol: fetch a peer's index, download what you lack, **verify it
-yourself**, store it.
-
-## Talking to other coordinators (optional)
-
-Both features are off unless you set them, and both fail open — a peer being down never stalls your
-board.
-
-```
-PEER_COORDINATORS=https://bitcoinghost.org/hazync,https://someone-else.example/hazync
-PEER_TTL=300
+```bash
+PEER_COORDINATORS="https://a.example,https://b.example"
+PEER_TTL=300              # seconds to cache a peer's proven set
+PEER_SYNC_INTERVAL=300    # seconds between background proof adoptions
 ```
 
-**`pick()` stops offering heights a peer has already proven.** This does not eliminate duplicate work
-— someone may be mid-proof on a height the peer has claimed but not finished — it bounds it to one
-proof time instead of the whole board.
+Three mechanisms, all failure-tolerant — an unreachable or malformed peer contributes nothing and
+never raises:
 
-**`/api/witnesses?from=&count=` serves bundles in bulk**, as a streamed tar with a manifest, capped
-per request by `BULK_MAX` (default `RANGE_SIZE`). This is what makes seeding a new coordinator from a
-peer possible at all — with only `/api/witness/<n>` it is ~220,000 individual requests.
+- **`peer_proven_heights()`** — heights a peer has already proved are excluded from `pick()`, so
+  finished work is not redone.
+- **`peer_busy_heights()`** — heights a peer is proving *right now* are also excluded, which shrinks
+  collisions to the in-flight window.
+- **`sync_from_peers()`** — proofs are adopted from peers, after downloading and verifying each one.
+  A peer's word is never taken for a frontier.
 
-**`sync_from_peers()` adopts proofs you do not have.** Every receipt goes through the same STARK
-verification a submission does, against *your* `METHOD_ID`. The claimed range is the peer's word; the
-receipt has to prove it.
+**Duplicate work is waste, never fault.** A coordinator that assigns badly, or maliciously, costs
+effort and latency; it cannot produce an invalid proof. That is what makes this sufficient without
+a consensus protocol between coordinators.
 
-**You are not trusting the peer.** The worst a hostile one can do is waste your bandwidth serving junk
-you reject, or withhold work from your own provers. It cannot put anything on your board.
+## Bootstrapping is trustless by omission
 
-## Seeding bundles from a peer instead of your own node
+`/api/vranges` returns only `{lo, hi, handle, proof}` — deliberately not `in_bhash`, `out_bhash` or
+`range_work`. A new coordinator therefore **cannot** take a peer's word for the frontier: it has to
+download each proof and run `verify-any` itself, deriving the seam fields from the receipt.
 
-The bridge run in step 3 below is the long pole, and it is downstream of an ~865 GB node sync. If you
-want a coordinator running *today*, you can pull the bundles from a peer:
+That is the correct behaviour and should stay that way. `_frontier_chain()` is a pure function of
+the verified range set, so two coordinators holding the same set compute the same frontier and
+converge by construction, with nothing to agree on.
 
+## Minimum configuration
+
+```bash
+COORD_PORT=8899                 # listen port
+COORD_BIND=0.0.0.0
+COORD_DB=coordinator.db
+HAZYNC_HOST=                    # archive node RPC
+HAZYNC_BRIDGE_OUT=              # where the bridge writes bundles
+RANGE_SIZE=1000                 # heights per range
+CLAIM_TTL=3600                  # seconds before an unfinished claim is reoffered
+CLAIM_MAX=86400
 ```
-python3 coordinator/sync_bundles.py https://bitcoinghost.org/hazync ./bundles --from 1 --to 220000
-python3 coordinator/sync_bundles.py ... --dry-run     # what is missing, downloads nothing
-```
 
-It walks in chunks, skips what is already on disk (so an interrupted run is *re-run*, not restarted),
-writes atomically, and reports any height the peer could not supply rather than skipping it silently —
-a gap in someone's bridge output and the end of the chain are different facts.
+`CLAIM_TTL` is what recovers work from a prover that dies mid-block. Too short and slow provers lose
+work they were going to finish; too long and a dead prover's blocks sit idle.
 
-**Bundles are witness data, not proofs, and this is not the trustless path.** Nothing downloaded here
-is verified. What limits the damage is that it *cannot* be laundered into a bad proof: a receipt
-verifies against `METHOD_ID` regardless of which witness produced it, so a hostile peer can waste your
-GPU time on bundles that fail to prove and can do nothing else. If you want the stronger property —
-that these are the bundles an archive node would have produced — run the node. That is what the rest
-of this page is about, and the shortcut does not replace it.
+## What a prover needs from you
 
-At ~73 GB this is a large transfer either way; it is just a much shorter one than a node sync.
+Very little, which is the point. A worker needs **no session, no ELF, no `METHOD_ID` and no block** —
+only the work in front of it. Segments have been proved on a machine whose guest image id differed
+from the coordinator's, and the receipts verified where it mattered.
 
-## Getting started
+So a prover can serve any coordinator without trusting it or matching its build.
 
-1. **Sync a node.** `txindex=1`, no pruning. This is the long pole — days, not hours. (Or seed bundles
-   from a peer, above, and come back to this when you have the disk.)
-2. **Get the canonical host.** Either the signed release, or `docker build -f reproduce/Dockerfile .`
-   and check the id matches `reproduce/METHOD_ID`. A host built outside the fixed-path container has a
-   different image id and will reject published proofs — that is the build being wrong, not the proofs.
-3. **Run the bridge.** It walks the chain from genesis emitting one bundle per block. Expect this to
-   take a while and watch your disk: see `HAZYNC_BRIDGE_TO` for a height cap, which exists because an
-   uncapped bridge on a fast box filled a 2 TB disk in about ten hours.
-4. **Run the coordinator.** `coordinator/deploy/` has the unit files and drop-ins.
-5. **Point provers at it** with `COORD_URL`.
+## Related
 
-## Things that will bite you
-
-**Everything must agree on `METHOD_ID`** — coordinator, bridge, provers, and the verifiers you publish.
-A mismatch is not subtle in its effect (nothing verifies) but is easy to cause: the bridge is a
-*separate service with its own binary*, and leaving it on an old guest once stalled a board dead while
-every other component looked healthy.
-
-**Run the services unprivileged, but move the data first.** `ProtectHome=`/`ProtectSystem=strict` are
-worth having, and they are incompatible with keeping the database, proofs and bundles under `/root`.
-See `coordinator/deploy/dropins/` for a working set.
-
-**The spine needs a driver.** `hazync spine` absorbs what it can and returns — it is not a daemon.
-`MODE=spine ./coordinator/run-workers.sh 1` keeps it advancing. Without it your board fills normally
-while `/api/spine/proof` quietly serves nothing, and no other signal tells you.
-
-**Back up the ledger off-box.** The receipts are re-provable, expensively; `coordinator.db` — who
-proved what — is not re-provable at any price.
-
-**Size the backup target for the receipt store, or ship the ledger only.** `BACKUP_REMOTE_PROOFS=1`
-mirrors receipts offsite, and the store grows to a few hundred GB at full chain. Pointing it at
-something too small does not degrade gracefully: it fills the target, and on a box that also serves web
-traffic it takes the site down with it. `BACKUP_REMOTE_DB_ONLY=1` ships the irreplaceable half for
-about 45 MB. See `coordinator/deploy/RUNBOOK.md` § Backup & restore.
-
-**Publish the node height.** The coordinator cannot read bitcoind's datadir if it runs unprivileged, so
-without `hazync-node-tip.timer` its idea of the chain tip is a compiled-in constant that is wrong the
-day after it ships. That understates progress and rejects valid submissions above the constant as out
-of range. RUNBOOK § 1b.
-
-**Contributors can move their blocks between keys.** `POST /api/rotate` takes both public keys and a
-signature from each over one canonical message, and the contributor side is `hazync rotate
-<old-key.hex>`. Requiring both signatures is what makes it safe unattended: the old key is the only way
-to make the claim, and the new key's signature stops anyone pushing history onto a stranger. Rotations
-are recorded as append-only edges and resolved when the board is rendered, so `vranges` and
-`submissions` still record exactly which key signed which proof.
-
-Two consequences worth knowing before someone asks. Moderation follows rotations in both directions, so
-a takedown cannot be escaped by rotating to a fresh key. And the old key is not retired, so a forgotten
-box that is still proving keeps contributing to its owner's current identity instead of silently
-vanishing.
-
-## Reporting problems
-
-If your coordinator disagrees with another about the frontier, that is interesting and worth an issue:
-given the same verified set the rule is deterministic, so a disagreement means the sets differ or the
-rule is not what we think it is. Include both `/api/state` outputs and `/api/vranges`.
+- `docs/HAZYNC_ARCHITECTURE.md` for how the pieces fit together
+- hazync#69 for the design reasoning behind federation

@@ -4,9 +4,10 @@
 |---|---|---|---|
 | `hazync-verify-aarch64` | `aarch64-unknown-linux-gnu` | 1,708,632 B | `d25ab8949eff…` (see `.sha256`) |
 
-Rebuilt for canonical guest `b62d2a60…`, cross-compiled with
-`aarch64-linux-gnu-gcc` in a container. This is the same binary published as the
-v0.14.0 release asset.
+⚠ **SUPERSEDED.** Built for guest `b62d2a60…`, which the 2026-08-23 re-baseline replaced with
+`1d6c3792…`. This binary embeds the old id and will reject proofs from the current guest — it is
+recorded here because it is what v0.14.0 shipped, not because it is usable against current proofs.
+Cross-compiled with `aarch64-linux-gnu-gcc` in a container.
 Verified as ARM64 code under `qemu-aarch64-static` — accepts the
 genesis-anchored fixture (`fold_8.snark`, exit 0), rejects the non-genesis one
 on the pin (exit 2).

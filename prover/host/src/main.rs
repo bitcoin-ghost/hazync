@@ -66,9 +66,9 @@ struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
 struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // F3: superseded coinbase deletes
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
-    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>, wtxids: Vec<[u8; 32]>,
+    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>,
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
-    inputs: Vec<BlockInput>, new_outputs: Vec<[u8; 32]>, root_next: WireStump,
+    inputs: Vec<BlockInput>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
     // #54 — the coinbase-SMT root this block starts from, and the sequenced proofs that advance it.
     // Serialised LAST so the field order matches the guest's, which must stay in step for every wire
@@ -302,7 +302,7 @@ fn build_block(
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -630,7 +630,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     let root_next = wire_stump(&forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30: None, in_smt_root, smt };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -753,12 +753,13 @@ fn check_full() {
         let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
         let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
         println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
-        let idlists = (w.txids.len() + w.wtxids.len()) * 32;
-        let outs = w.new_outputs.len() * 32;
+        // `wtxids` and `new_outputs` were removed from the wire format — the guest recomputes both
+        // and never read either, so they were pure transmission cost.
+        let idlists = w.txids.len() * 32;
         let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
         println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
         println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
-        println!("  txids+wtxids = {}B ({:.1}%)   new_outputs = {}B ({:.1}%)", idlists, pct(idlists), outs, pct(outs));
+        println!("  txids = {}B ({:.1}%)", idlists, pct(idlists));
         return;
     }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
@@ -1013,7 +1014,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     let root_next = wire_stump(forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, wtxids, root_prev, txs, tx_prevouts, inputs, new_outputs, root_next, bip30, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1906,12 +1907,28 @@ fn prove_chunk(idx: usize) {
     b.write(&header_hash(&w.header)).unwrap(); // block hash for flag exceptions
     write_chunk_inputs(&mut b, &w, lo, hi);
     let t = Instant::now();
+    // EXECUTE FIRST, then prove (#145). This printed nothing until it finished, so while a chunk was
+    // running its log was EMPTY and "wedged" was indistinguishable from "working". That is what hid
+    // hazync#147 for 76 minutes and then 3h38m: the only thing that gave it away was nvidia-smi
+    // showing 0% with the process alive, which is a thing you have to already suspect to go and look
+    // at. A start line and periodic progress make a hang visible in the place anyone would look first.
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = risc0_zkvm::VerifierContext::default();
+    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+        .unwrap().run().unwrap();
+    let nseg = session.segments.len();
+    println!("chunk {idx}: {} inputs, {nseg} segments at po2 {} — proving", hi - lo, seg_po2());
+    session.add_hook(FoldProgress {
+        total: nseg,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        t0: Instant::now(),
+        every: (nseg / 20).max(1),
+    });
     // SCALING: prove the chunk to a SUCCINCT receipt (not the default composite). This runs the
     // STARK-to-STARK "lift" NOW, in parallel across the chunk fleet — so agg-chunks resolves each
-    // assumption cheaply instead of lifting all N composite receipts sequentially (the dominant cost
-    // of the 741000 aggregate: ~1645s → expected to collapse to a cheap fold). See HAZYNC_ARCHITECTURE.md.
-    let receipt = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
+    // assumption cheaply instead of lifting all N composite receipts sequentially.
+    let receipt = server.prove_session(&ctx, &session).unwrap().receipt;
     receipt.verify(METHOD_ID).unwrap();
     let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("chunk_{idx}.bin"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
@@ -1919,6 +1936,34 @@ fn prove_chunk(idx: usize) {
 }
 
 // `agg-chunks`: read all chunk receipt files, aggregate into the block/chain proof.
+// Progress for a long prove (hazync#145). `agg-chunks` printed its header and then nothing at all
+// for 35+ minutes, so a working fold and a hung one looked identical from the outside. That is not a
+// cosmetic complaint: hazync#147 wedged twice, for 76 minutes and 3h38m, and what eventually gave it
+// away was `nvidia-smi` showing 0% with the process alive -- not any output from the prover.
+//
+// risc0 fires this per segment. It costs nothing now: hooks used to force the sequential path away
+// from the preflight pipelining, and that patch has been removed, so the sequential loop is the only
+// path and a hook changes no behaviour at all.
+struct FoldProgress {
+    total: usize,
+    done: std::sync::atomic::AtomicUsize,
+    t0: std::time::Instant,
+    every: usize,
+}
+
+impl risc0_zkvm::SessionEvents for FoldProgress {
+    fn on_post_prove_segment(&self, _seg: &risc0_zkvm::Segment) {
+        use std::sync::atomic::Ordering;
+        let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % self.every != 0 && n != self.total { return; }
+        let el = self.t0.elapsed().as_secs_f64();
+        // Rate from work actually done, not from a guess. Early estimates are poor and say so by
+        // being obviously early rather than by being hidden.
+        let eta = if n > 0 { el / n as f64 * (self.total.saturating_sub(n)) as f64 } else { 0.0 };
+        println!("    segment {n}/{}  {:.0}s elapsed, ~{:.0}s left", self.total, el, eta);
+    }
+}
+
 // HAZYNC_AGG_EXECUTE=1 — execute mode 5 WITHOUT proving, and report its cycles.
 //
 // Settles which half of the aggregate is expensive. In execute mode `env::verify` merely RECORDS an
@@ -1980,8 +2025,25 @@ fn agg_chunks() {
 
     // Prove the aggregate to SUCCINCT too: the assumptions are already succinct (cheap resolve), and a
     // succinct block proof is a single fixed-size STARK — directly composable in the chain range-fold.
-    let agg = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).unwrap().receipt;
+    //
+    // EXECUTE FIRST, then prove, rather than one opaque prove_with_opts (#145). Execution is a
+    // couple of percent of the work and it yields the segment count, so the fold can say how much
+    // there is to do BEFORE it starts doing it. Without that the only honest thing anyone could say
+    // about a running fold was "it has not finished".
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = risc0_zkvm::VerifierContext::default();
+    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+        .unwrap().run().unwrap();
+    let nseg = session.segments.len();
+    println!("  {nseg} segments to prove at po2 {}", seg_po2());
+    session.add_hook(FoldProgress {
+        total: nseg,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        t0: Instant::now(),
+        every: (nseg / 20).max(1),      // ~20 lines whatever the size, so it scales with the fold
+    });
+    let agg = server.prove_session(&ctx, &session).unwrap().receipt;
     agg.verify(METHOD_ID).unwrap();
     let tip: ChainState = agg.journal.decode().unwrap();
     assert!(tip.self_id == METHOD_ID, "S1: proof recursed against wrong image id");
@@ -2124,7 +2186,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
         &cb_spends_from(&inputs, &wtxs));
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, wtxids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, new_outputs: vec![], root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -2208,9 +2270,8 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
         cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
         txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
-        wtxids: vec![[0u8; 32], t.compute_wtxid().to_byte_array()],
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
-        inputs: vec![in0, in1], new_outputs: vec![], root_next: wire_stump(&forest), bip30: None,
+        inputs: vec![in0, in1], root_next: wire_stump(&forest), bip30: None,
         in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
 }
 
@@ -2336,8 +2397,8 @@ fn check_bip30() {
         (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
-        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid], wtxids: vec![[0u8; 32]],
-        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], new_outputs: vec![], root_next: root_next.clone(), bip30,
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid],
+        root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], root_next: root_next.clone(), bip30,
         in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
     let honest = block_out(&mk(Some(Bip30Overwrite { old_height, old_mtp, dels: dels.clone() })));
@@ -2532,10 +2593,10 @@ fn bundle_roundtrip_test() {
     let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
     let w = BlockWitness {
         header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
-        txids: vec![[7u8; 32], [8u8; 32]], wtxids: vec![[0u8; 32], [0u8; 32]],
+        txids: vec![[7u8; 32], [8u8; 32]],
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
-        inputs: vec![], new_outputs: vec![[5u8; 32]],
+        inputs: vec![],
         root_next: WireStump { roots: vec![Some([2u8; 32])], num_leaves: 1 }, bip30: None,
         // Round-trip test only — never executed, so a bare standalone transition is enough.
         in_smt_root: [0u8; 32], smt: smt_witness_standalone([1u8; 32], 1, &[]).1,
@@ -3156,6 +3217,60 @@ fn main() {
         cmd_dump_snapshot(out);
         return;
     }
+    if args.iter().any(|a| a == "segment-size") {
+        segment_size_cmd();
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "receipt-digest") {
+        let f = args.get(p + 1).expect("receipt-digest <file>");
+        receipt_digest_cmd(f);
+        return;
+    }
+    if args.iter().any(|a| a == "seg-coordinate-tree") {
+        seg_coordinate_tree_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-serve") {
+        seg_serve_cmd();
+        return;
+    }
+    if let Some(p) = args.iter().position(|a| a == "seg-connect") {
+        let addr = args.get(p + 1).expect("seg-connect <host:port>");
+        seg_connect_cmd(addr);
+        return;
+    }
+    if args.iter().any(|a| a == "seg-prove-one") {
+        seg_prove_one_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-join") {
+        seg_join_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-work") {
+        seg_work_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-coordinate") {
+        seg_coordinate_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "seg-distribute") {
+        seg_distribute_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "segment-mem") {
+        segment_mem_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "exec-time") {
+        exec_time_cmd();
+        return;
+    }
+    if args.iter().any(|a| a == "vb-stages") {
+        vb_stages_cmd();
+        return;
+    }
     if args.iter().any(|a| a == "chunk-profile") {
         chunk_profile();
         return;
@@ -3652,5 +3767,1197 @@ mod chunk_packing_tests {
         assert_eq!(pack_chunks(&[1_950_000], 8), vec![(0, 1)]);
         assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
         assert!(pack_chunks(&[], 8).is_empty());
+    }
+}
+
+/// `vb-stages` — hazync: cost each phase of the aggregate's `validate_block` by subtraction.
+///
+/// The aggregate is 3,636,355,430 cycles on block 962,000 — 3.8x a single chunk, 21% of the block's
+/// total work, and SERIAL where chunks are parallel. Optimising it without knowing which phase it is
+/// would be guessing, and this codebase has a habit of punishing that.
+///
+/// Runs the AGGREGATION path (scripts not re-verified), so the numbers describe mode 5 and not mode 1.
+/// Execute mode: no GPU, no chunk receipts.
+fn vb_stages_cmd() {
+    let (_anchor, w) = build_full();
+    let stages: &[(u32, &str)] = &[
+        (0, "read witness + header/version"),
+        (1, "+ per-tx output leaves (tx_out_leaves)"),
+        (2, "+ created_at in-block-coin map"),
+        (3, "+ input loop: binds & per-tx checks (NO utreexo delete)"),
+        (4, "+ utreexo deletes"),
+        (5, "+ utreexo adds + root compare"),
+        (6, "+ merkle root"),
+        (u32::MAX, "+ wtxids & witness commitment (FULL)"),
+        // Inside the input loop, which is 73% of the total. Each `continue`s after one more call, so
+        // the deltas isolate the per-input work that the phase ladder above could only report in bulk.
+        (20, "  [loop] bare iteration (resolve tx/prevouts only)"),
+        (21, "  [loop] + coin_leaf_only + bind digest"),
+        (22, "  [loop] + per-TX check_tx & is_final_tx"),
+        (23, "  [loop] + check_input_locks"),
+        (24, "  [loop] + created_at lookup & in-block bookkeeping"),
+        (3,  "  [loop] + utreexo proof build (NO delete)"),
+        (4,  "  [loop] + utreexo delete"),
+        // Not a phase: asserts the batched leaves and locks equal the per-input ones for EVERY input.
+        // It costs more than the full run (it does both), which is the point — correctness, not speed.
+        (30, "DIFFERENTIAL: batch vs per-input, every input"),
+        (31, "DIFFERENTIAL: chunk-supplied leaves/seqs/wtxids vs recomputed"),
+    ];
+    println!("=== validate_block phase costs — block {} ===", w.height);
+    println!("{:<52} {:>16} {:>16}", "phase", "cumulative", "this phase");
+    let mut prev = 0u64;
+    for (stage, label) in stages {
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&12u32).unwrap();
+        b.write(&stage).unwrap();
+        b.write(&w).unwrap();
+        let s = default_executor().execute(b.build().unwrap(), METHOD_ELF).expect("execute mode 12");
+        let c = s.cycles();
+        let delta = c.saturating_sub(prev);
+        println!("{label:<52} {c:>16} {delta:>16}");
+        prev = c;
+    }
+    println!();
+    println!("The largest 'this phase' is where the aggregate's time goes. Anything that is per-TX");
+    println!("and pure is a parallelisation candidate; utreexo is sequential accumulator state.");
+}
+
+/// `segment-size` — how big is one segment on the wire?
+///
+/// Decides whether segment-level distribution is a LAN-only architecture or something ordinary nodes
+/// could join. A worker proving a segment needs that segment; if it is hundreds of MB the network is
+/// the bottleneck rather than the GPU, and the idea is a rack, not a network.
+fn segment_size_cmd() {
+    use risc0_zkvm::ExecutorImpl;
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let n = session.segments.len();
+    let mut sizes: Vec<usize> = Vec::new();
+    for r in session.segments.iter() {
+        let seg = r.resolve().expect("resolve");
+        sizes.push(bincode::serialize(&seg).expect("serialize").len());
+    }
+    sizes.sort_unstable();
+    let tot: usize = sizes.iter().sum();
+    println!("=== segment wire size — block {} chunk {} at po2 {} ===", w.height, idx, seg_po2());
+    println!("  segments          {n}");
+    println!("  total             {:.1} MB", tot as f64 / 1e6);
+    println!("  mean              {:.2} MB", tot as f64 / n as f64 / 1e6);
+    println!("  min / median / max  {:.2} / {:.2} / {:.2} MB",
+        sizes[0] as f64 / 1e6, sizes[n / 2] as f64 / 1e6, sizes[n - 1] as f64 / 1e6);
+    println!();
+    println!("  A whole block is ~16x this. To distribute segment proving, each worker must receive");
+    println!("  its segment: that is the mean above per segment proved, against ~4.2 s of GPU work.");
+    let mean_mb = tot as f64 / n as f64 / 1e6;
+    // MB -> Mbit is x8, then divide by the seconds of work it buys. (An earlier version of this line
+    // multiplied by a further 1000 and printed a figure 1000x too large.)
+    println!("  Break-even at 4.2 s/segment: {:.2} Mbit/s keeps one worker saturated.",
+        mean_mb * 8.0 / 4.2);
+    println!("  So the constraint on distributing segments is not bandwidth. It is the prover's");
+    println!("  working set per segment, which this does not measure.");
+}
+
+// How much of a chunk's wall clock is EXECUTION rather than PROVING?
+//
+// This decides whether distributing segment proving can work at all. Segments are proved
+// independently — that is the whole idea — but they are PRODUCED by one sequential executor pass.
+// That pass is a serial floor no number of workers can cross: with P proving seconds spread over N
+// cards, a chunk cannot finish faster than E + P/N.
+//
+// Measured here on the CPU that runs the harness, which is the conservative direction: this laptop is
+// slower than the prover box, so the execution share reported is an UPPER bound on the real one.
+fn exec_time_cmd() {
+    use risc0_zkvm::ExecutorImpl;
+    use std::time::Instant;
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+
+    let t0 = Instant::now();
+    let (_a, w) = build_full();
+    let t_build = t0.elapsed().as_secs_f64();
+
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+    let env = b.build().unwrap();
+
+    let t1 = Instant::now();
+    let session = ExecutorImpl::from_elf(env, METHOD_ELF).unwrap().run().unwrap();
+    let t_exec = t1.elapsed().as_secs_f64();
+
+    let n = session.segments.len();
+    let po2 = seg_po2();
+    let cyc_cap = (n as f64) * (1u64 << po2) as f64;
+
+    // The one calibration point we have: chunk 9 of this block proved in 915 s on a B200
+    // (948,436,992 cycles -> 1.036 M cycles/s). Anyone re-running on other hardware should
+    // override it rather than trust the default.
+    let prove_s: f64 = std::env::var("HAZYNC_PROVE_S").ok().and_then(|s| s.parse().ok()).unwrap_or(915.0);
+
+    println!("=== execute vs prove — block {} chunk {} at po2 {} ===", w.height, idx, po2);
+    println!("  witness build     {:.1} s", t_build);
+    println!("  EXECUTION         {:.1} s   ({} segments, <= {:.0} M cycles)", t_exec, n, cyc_cap / 1e6);
+    println!("  proving (B200)    {:.1} s   [override with HAZYNC_PROVE_S]", prove_s);
+    println!();
+    println!("  execution share of a 1-card chunk: {:.1}%", 100.0 * t_exec / (t_exec + prove_s));
+    println!();
+    println!("  Serial floor with segment proving spread over N cards (E + P/N):");
+    for n_cards in [1usize, 4, 16, 30, 64, 1000] {
+        let t = t_exec + prove_s / n_cards as f64;
+        println!("    N={:<5} {:7.1} s   (speedup {:.1}x, ceiling {:.1}x)",
+            n_cards, t, (t_exec + prove_s) / t, (t_exec + prove_s) / t_exec);
+    }
+    println!();
+    println!("  The ceiling column is what execution alone caps the chunk at. If that number is");
+    println!("  small, distributing segments cannot reach 10 minutes no matter how many cards join,");
+    println!("  and the executor has to be parallelised or split before anything else matters.");
+}
+
+// Peak memory to prove ONE segment — the number that decides who can be a worker.
+//
+// §29 settled bandwidth for distributing segment proving (0.28 MB mean, 0.53 Mbit/s keeps a worker
+// saturated) and §31 settled the serial floor (execution is 2.2%). The remaining unknown is the
+// prover's WORKING SET per segment. It decides two different things:
+//
+//   CPU  — whether an ordinary Bitcoin Ghost node can take a segment. Nodes run in 3.87 GB.
+//   CUDA — how many proves share one card, which is the #97 OOM in a different disguise.
+//
+// Reports VmHWM, the kernel's peak-RSS high-water mark. It is monotonic across the process, so the
+// FIRST prove's increment is the real per-segment cost and later ones mostly reuse allocations; both
+// are printed so that is visible rather than assumed. VRAM is not visible from inside the process —
+// sample `nvidia-smi` alongside it.
+fn segment_mem_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, get_prover_server};
+    use std::time::Instant;
+
+    fn kb(field: &str) -> f64 {
+        std::fs::read_to_string("/proc/self/status").ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with(field))
+                .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok())))
+            .unwrap_or(0.0) / 1e6  // kB -> GB
+    }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let nseg: usize = std::env::var("HAZYNC_NSEG").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    let backend = std::env::var("RISC0_PROVER").unwrap_or_else(|_| "local".into());
+    println!("=== per-segment prover working set — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  backend {backend}   segments {total}   execution {exec_s:.1} s");
+    println!("  after execute, before any prove:  VmHWM {:.2} GB   VmRSS {:.2} GB", kb("VmHWM:"), kb("VmRSS:"));
+    println!();
+
+    let opts = ProverOpts::default();
+    let server = get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    // Sample across the chunk rather than the first N: segment cost is not uniform, and the first
+    // segment of a session is the least representative one.
+    println!("  {:>4}  {:>8}  {:>10}  {:>10}  {:>10}", "seg", "prove s", "VmHWM GB", "VmRSS GB", "wire MB");
+    let mut peak_delta = 0.0f64;
+    let before_all = kb("VmHWM:");
+    for k in 0..nseg.min(total) {
+        let si = if nseg <= 1 { total / 2 } else { k * (total - 1) / (nseg - 1) };
+        let seg = session.segments[si].resolve().expect("resolve");
+        let wire = bincode::serialize(&seg).map(|v| v.len()).unwrap_or(0) as f64 / 1e6;
+        let before = kb("VmHWM:");
+        let t = Instant::now();
+        let receipt = server.prove_segment(&ctx, &seg).expect("prove segment");
+        let s = t.elapsed().as_secs_f64();
+        receipt.verify_integrity_with_context(&ctx).expect("segment receipt integrity");
+        let hwm = kb("VmHWM:");
+        peak_delta = peak_delta.max(hwm - before);
+        println!("  {:>4}  {:>8.1}  {:>10.2}  {:>10.2}  {:>10.2}", si, s, hwm, kb("VmRSS:"), wire);
+    }
+
+    // Lift and join are the price of a SMALL po2. Segment proving throughput turns out to be flat
+    // across po2 (147.6 / 145.9 / 147.8 us per cycle at 18 / 19 / 20), so shrinking segments to fit a
+    // node's RAM looks free -- until you count recursion. Every segment must be lifted to a succinct
+    // receipt and then joined pairwise, and if lift cost is per-SEGMENT rather than per-CYCLE then
+    // halving po2 doubles the recursion bill. That is the number that decides whether po2 18 holds up.
+    if std::env::var("HAZYNC_LIFT").ok().as_deref() == Some("1") {
+        // CONSECUTIVE segments, not one segment twice. join() checks continuity -- segment a's post
+        // state must be segment b's pre state -- so join(x, x) fails an equality check on the state
+        // digest rather than timing anything. A segment does not follow itself.
+        let i = total / 2;
+        let mut lifted = Vec::new();
+        let mut lift_s = 0.0f64;
+        for k in [i, i + 1] {
+            let seg = session.segments[k].resolve().expect("resolve");
+            let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {i}"));
+            let t = Instant::now();
+            lifted.push(server.lift(&sr).expect("lift"));
+            lift_s = lift_s.max(t.elapsed().as_secs_f64());
+        }
+        println!();
+        println!("  lift  {:.1} s  (per segment)", lift_s);
+        let t = Instant::now();
+        server.join(&lifted[0], &lifted[1]).expect("join");
+        let join_s = t.elapsed().as_secs_f64();
+        println!("  join  {:.1} s  (per PAIR, so ~1 per segment over a whole tree)", join_s);
+        println!("  recursion for {} segments in this chunk: {:.0} s   ({:.0} s lift + {:.0} s join)",
+            total, total as f64 * lift_s + (total - 1) as f64 * join_s,
+            total as f64 * lift_s, (total - 1) as f64 * join_s);
+        println!("  peak RSS after recursion: {:.2} GB", kb("VmHWM:"));
+    }
+
+    println!();
+    println!("  peak RSS overall         {:.2} GB", kb("VmHWM:"));
+    println!("  largest single-prove rise {:.2} GB  (first prove pays setup; later ones reuse)", peak_delta);
+    println!("  rise across all proves    {:.2} GB", kb("VmHWM:") - before_all);
+    println!();
+    println!("  A Bitcoin Ghost node runs in 3.87 GB. The figure that has to fit under that is the");
+    println!("  peak RSS of a worker that ONLY proves segments — it never executes, so it never holds");
+    println!("  the witness. Subtract the pre-prove VmHWM above to get that.");
+    println!("  VRAM is invisible from inside the process: sample nvidia-smi alongside for CUDA.");
+}
+
+// SEGMENT DISTRIBUTION, phase 0: prove a chunk with every segment routed through a wire.
+//
+// Block latency is chunk_work/N + aggregate and the aggregate does not divide, so measured near-tip
+// numbers put the floor near 18 minutes at ANY card count. Distributing SEGMENTS is the only route
+// under ten, because it moves parallelism below the level recursion charges for.
+//
+// This proves the decomposition is sound before any network exists. Each segment is serialised,
+// deserialised, and proved from the deserialised copy; each receipt is serialised and deserialised
+// again. If a segment or a receipt cannot survive that round trip, nothing distributed can work, and
+// this is where it shows -- cheaply, on one machine, with no protocol to debug.
+//
+// Assembly is NOT reimplemented here. `assemble_from_segment_receipts` is the same code
+// `prove_session` runs after its own loop, so the two paths cannot drift. The step that made this
+// worth doing carefully is the journal/assumption merge into the LAST segment's claim: miss it and
+// you get a receipt that fails its own verify with nothing pointing at why.
+fn seg_distribute_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, Segment, SegmentReceipt};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    println!("=== segment-distributed chunk prove — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   segments {total}");
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
+    let (mut wire_out, mut wire_back) = (0usize, 0usize);
+    let t_prove = Instant::now();
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+
+        // OUT: coordinator -> worker.
+        let bytes = bincode::serialize(&seg).expect("serialize segment");
+        wire_out += bytes.len();
+        let seg_wire: Segment = bincode::deserialize(&bytes).expect("deserialize segment");
+
+        // The worker's entire job. Nothing here needs the session, the ELF, or the witness.
+        let sr = prove_segment_resilient(&server, &ctx, &seg_wire, &format!("segment {i}"));
+
+        // BACK: worker -> coordinator. Verified on arrival, because a worker is untrusted: a receipt
+        // is self-verifying, so a bad worker can only fail to produce one, never forge one.
+        let rb = bincode::serialize(&sr).expect("serialize receipt");
+        wire_back += rb.len();
+        let sr_wire: SegmentReceipt = bincode::deserialize(&rb).expect("deserialize receipt");
+        sr_wire.verify_integrity_with_context(&ctx).expect("returned receipt failed verify");
+
+        receipts.push(sr_wire);
+        if i % 50 == 0 || i + 1 == total {
+            println!("    segment {}/{}  {:.0}s elapsed", i + 1, total, t_prove.elapsed().as_secs_f64());
+        }
+    }
+    let prove_s = t_prove.elapsed().as_secs_f64();
+
+    let t_asm = Instant::now();
+    let info = server.assemble_from_segment_receipts(&ctx, &session, receipts)
+        .expect("assemble from distributed receipts");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED RECEIPT FAILED verify against METHOD_ID");
+
+    println!();
+    println!("  execution   {exec_s:8.1} s");
+    println!("  proving     {prove_s:8.1} s   ({total} segments, each through a bincode round trip)");
+    println!("  assembly    {asm_s:8.1} s   (lift + join + succinct, coordinator-side)");
+    println!("  TOTAL       {:8.1} s", exec_s + prove_s + asm_s);
+    println!();
+    println!("  wire out    {:8.2} MB   ({:.3} MB/segment)", wire_out as f64/1e6, wire_out as f64/total as f64/1e6);
+    println!("  wire back   {:8.2} MB   ({:.3} MB/segment)", wire_back as f64/1e6, wire_back as f64/total as f64/1e6);
+    println!();
+    if let Ok(out) = std::env::var("HAZYNC_SEG_OUT") {
+        std::fs::write(&out, bincode::serialize(&info.receipt).expect("serialize")).expect("write receipt");
+        println!("  saved {out}");
+    }
+    println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID.");
+    println!("    journal {} bytes, digest {}", info.receipt.journal.bytes.len(), hex(info.receipt.journal.digest().as_bytes()));
+    println!();
+    println!("  Every segment crossed a wire and every receipt was verified on arrival. What is NOT");
+    println!("  proved here: that this is FASTER. One machine proved them in sequence. The point is");
+    println!("  that the work is now in units a worker can take, and the journal digest above is what");
+    println!("  a monolithic prove of the same chunk must produce.");
+}
+
+// SEGMENT DISTRIBUTION, phase 1/2: a work directory that separate processes can share.
+//
+// The coordinator cannot hand off its Session -- it holds `Box<dyn SegmentRef>` and does not
+// serialise -- and it does not need to. Assembly needs the session (journal, assumptions, claim), so
+// the coordinator executes, publishes segments, and assembles. ONLY segment proving leaves the
+// process, which is the 76% worth moving.
+//
+// Claiming is an O_EXCL create of claim_NNNN. That is atomic on a local filesystem and on NFS, needs
+// no lock server, and a worker that dies simply leaves a claim that a sweeper can expire. Receipts
+// are written to a .tmp and renamed, so the coordinator never sees a half-written file -- it polls
+// for existence and a rename is atomic.
+fn seg_workdir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HAZYNC_WORKDIR").unwrap_or_else(|_| "/tmp/hazync-segwork".into()))
+}
+
+// Worker: claim segments from the directory, prove them, write receipts. Knows nothing about the
+// block, the guest, or the session -- it needs only the segment in front of it.
+fn seg_work_cmd() {
+    use risc0_zkvm::{VerifierContext, Segment};
+    use std::time::Instant;
+    let dir = seg_workdir();
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "w0".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+
+    let count: usize = loop {
+        if let Ok(s) = std::fs::read_to_string(dir.join("MANIFEST")) {
+            if let Ok(n) = s.trim().parse() { break n; }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    };
+
+    let mut done = 0usize;
+    let t0 = Instant::now();
+    for i in 0..count {
+        let claim = dir.join(format!("claim_{i:04}"));
+        // create_new is the whole mutual exclusion: exactly one worker wins each segment.
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(&claim).is_err() { continue; }
+        let seg_path = dir.join(format!("seg_{i:04}.bin"));
+        let bytes = match std::fs::read(&seg_path) { Ok(b) => b, Err(e) => { eprintln!("[{id}] seg {i} unreadable: {e}"); continue; } };
+        let seg: Segment = bincode::deserialize(&bytes).expect("deserialize segment");
+        let t = Instant::now();
+        let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {i}"));
+
+        // STEP 2. Lift here rather than on the coordinator. Lifts are per-segment and wholly
+        // independent, and they are the largest term that does not divide: 886.7 s of 3081 s on
+        // CPU, 679.3 s of 1167 s on GPU. Every worker doing its own removes all of it at once.
+        //
+        // The LAST segment is the exception and has to stay behind. The session journal digest and
+        // assumption set are merged into its claim before it is lifted, and a worker has neither the
+        // session nor any way to get it. So the last worker returns an unlifted SegmentReceipt and
+        // the coordinator finishes that one itself.
+        let lift_here = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1") && i + 1 < count;
+        if lift_here {
+            let lifted = server.lift(&sr).expect("lift");
+            let tmp = dir.join(format!("lift_{i:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&lifted).expect("serialize lift")).expect("write lift");
+            std::fs::rename(&tmp, dir.join(format!("lift_{i:04}.bin"))).expect("rename lift");
+        } else {
+            let tmp = dir.join(format!("rcpt_{i:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
+            std::fs::rename(&tmp, dir.join(format!("rcpt_{i:04}.bin"))).expect("rename receipt");
+        }
+        done += 1;
+        println!("[{id}] segment {i} {} in {:.1}s", if lift_here {"proved+lifted"} else {"proved"}, t.elapsed().as_secs_f64());
+    }
+    println!("[{id}] DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator: execute, publish, wait, assemble, verify.
+fn seg_coordinate_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let dir = seg_workdir();
+    std::fs::create_dir_all(&dir).expect("create workdir");
+    for e in std::fs::read_dir(&dir).unwrap().flatten() { let _ = std::fs::remove_file(e.path()); }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    let t_pub = Instant::now();
+    let mut wire_out = 0usize;
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+        let bytes = bincode::serialize(&seg).expect("serialize segment");
+        wire_out += bytes.len();
+        std::fs::write(dir.join(format!("seg_{i:04}.bin")), &bytes).expect("write segment");
+    }
+    // MANIFEST last: it is the signal that every segment is on disk, so a worker that sees it can
+    // trust any index below the count.
+    std::fs::write(dir.join("MANIFEST"), format!("{total}\n")).expect("write manifest");
+    let pub_s = t_pub.elapsed().as_secs_f64();
+
+    println!("=== coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   published {total} segments in {pub_s:.1} s ({:.2} MB)", wire_out as f64/1e6);
+    println!("  workdir {}", dir.display());
+    println!("  waiting for {total} receipts...");
+
+    let t_wait = Instant::now();
+    let mut last = 0usize;
+    loop {
+        let have = (0..total).filter(|i| dir.join(format!("rcpt_{i:04}.bin")).exists()).count();
+        if have != last { println!("    {have}/{total} receipts  {:.0}s", t_wait.elapsed().as_secs_f64()); last = have; }
+        if have == total { break; }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let wait_s = t_wait.elapsed().as_secs_f64();
+
+    let ctx = VerifierContext::default();
+    let mut receipts: Vec<SegmentReceipt> = Vec::with_capacity(total);
+    let mut wire_back = 0usize;
+    for i in 0..total {
+        let bytes = std::fs::read(dir.join(format!("rcpt_{i:04}.bin"))).expect("read receipt");
+        wire_back += bytes.len();
+        let sr: SegmentReceipt = bincode::deserialize(&bytes).expect("deserialize receipt");
+        // Workers are untrusted. A receipt is self-verifying, so this is the entire defence.
+        sr.verify_integrity_with_context(&ctx).expect("worker receipt failed verify");
+        receipts.push(sr);
+    }
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let t_asm = Instant::now();
+    let info = server.assemble_from_segment_receipts(&ctx, &session, receipts).expect("assemble");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution        {exec_s:8.1} s");
+    println!("  publish          {pub_s:8.1} s");
+    println!("  worker wall      {wait_s:8.1} s   <- this is what more workers shrink");
+    println!("  assembly         {asm_s:8.1} s   <- coordinator-side, does not distribute yet");
+    println!("  TOTAL            {:8.1} s", exec_s + pub_s + wait_s + asm_s);
+    println!("  wire out/back    {:.2} / {:.2} MB", wire_out as f64/1e6, wire_back as f64/1e6);
+    println!();
+    println!(">>> DISTRIBUTED RECEIPT VERIFIED against METHOD_ID");
+    println!("    journal digest {}", hex(info.receipt.journal.digest().as_bytes()));
+}
+
+// Print a saved receipt's journal digest and verify it. The gate for segment distribution is that a
+// distributed prove and a monolithic prove of the SAME chunk agree on this value -- proving that
+// routing every segment across a wire changed nothing about what was proved.
+//
+// Printing the digest from `seg-distribute` alone proves nothing: it would agree with itself.
+fn receipt_digest_cmd(path: &str) {
+    use risc0_zkvm::sha::Digestible;
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let r: risc0_zkvm::Receipt = bincode::deserialize(&bytes).expect("deserialize receipt");
+    match r.verify(METHOD_ID) {
+        Ok(()) => println!("VERIFIED against METHOD_ID"),
+        Err(e) => { println!("VERIFY FAILED: {e}"); std::process::exit(1); }
+    }
+    println!("journal_bytes {}", r.journal.bytes.len());
+    println!("journal_digest {}", hex(r.journal.digest().as_bytes()));
+}
+
+// SEGMENT DISTRIBUTION step 3: run the join tree as distributed work items.
+//
+// The join tree is what caps a distributed prover. Segment proving divides across workers; assembly
+// did not, because risc0's fold was strictly linear -- lift, join into an accumulator, lift, join --
+// so every join depended on the one before it. With the fold rebalanced into a tree (see the
+// vendored crate), the joins at a given level are independent of each other, and independent work
+// is work a worker can take.
+//
+// Level l holds ceil(n_l / 2) joins over n_l receipts. Each is published, claimed with the same
+// O_EXCL create the segment workers use, and collected before the next level starts. The barrier
+// per level is unavoidable -- level l+1 consumes level l's output -- but the DEPTH is log2(N), so
+// at 44 segments that is 6 barriers rather than 43 sequential steps.
+//
+// An odd receipt at the end of a level carries forward untouched. It keeps its position, so
+// adjacency is preserved and the final claim is unchanged.
+fn seg_join_cmd() {
+    use risc0_zkvm::{VerifierContext, SuccinctReceipt, ReceiptClaim};
+    use std::time::Instant;
+    let dir = seg_workdir();
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "j0".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let mut done = 0usize;
+    let t0 = Instant::now();
+
+    // Follow the coordinator level by level. JOINLEVEL names the level currently open for claiming;
+    // JOINDONE appearing ends the run.
+    let mut level = 0usize;
+    loop {
+        if dir.join("JOINDONE").exists() { break; }
+        let lv = match std::fs::read_to_string(dir.join("JOINLEVEL")) {
+            Ok(s) => s.trim().split(',').map(|x| x.to_string()).collect::<Vec<_>>(),
+            Err(_) => { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        };
+        if lv.len() != 2 { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        let (cur, npairs): (usize, usize) = (lv[0].parse().unwrap_or(0), lv[1].parse().unwrap_or(0));
+        if cur < level { std::thread::sleep(std::time::Duration::from_millis(200)); continue; }
+        level = cur;
+
+        for p in 0..npairs {
+            let claim = dir.join(format!("jclaim_{level}_{p:04}"));
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(&claim).is_err() { continue; }
+            let a_path = dir.join(format!("jin_{level}_{:04}.bin", p * 2));
+            let b_path = dir.join(format!("jin_{level}_{:04}.bin", p * 2 + 1));
+            let (ab, bb) = match (std::fs::read(&a_path), std::fs::read(&b_path)) {
+                (Ok(a), Ok(b)) => (a, b),
+                _ => { eprintln!("[{id}] level {level} pair {p}: inputs missing"); continue; }
+            };
+            let a: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&ab).expect("deserialize a");
+            let b: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&bb).expect("deserialize b");
+            let t = Instant::now();
+            // join asserts a.post == b.pre. A worker that returns a join of the wrong two receipts
+            // cannot produce something that survives this, which is why untrusted joins are safe.
+            let j = server.join(&a, &b).expect("join");
+            let tmp = dir.join(format!("jout_{level}_{p:04}.tmp"));
+            std::fs::write(&tmp, bincode::serialize(&j).expect("serialize join")).expect("write join");
+            std::fs::rename(&tmp, dir.join(format!("jout_{level}_{p:04}.bin"))).expect("rename join");
+            done += 1;
+            println!("[{id}] level {level} pair {p} joined in {:.1}s", t.elapsed().as_secs_f64());
+        }
+        level += 1;
+    }
+    println!("[{id}] JOIN DONE {done} joins in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator for step 3: prove segments (workers), lift them, then drive the join tree as
+// distributed levels, then assemble. HAZYNC_JOIN_DISTRIBUTED=1 selects this over the in-process
+// assembly, so both paths stay reachable and comparable.
+fn seg_coordinate_tree_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::sha::Digestible;
+    use std::time::Instant;
+
+    let dir = seg_workdir();
+    std::fs::create_dir_all(&dir).expect("create workdir");
+    for e in std::fs::read_dir(&dir).unwrap().flatten() { let _ = std::fs::remove_file(e.path()); }
+
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve");
+        std::fs::write(dir.join(format!("seg_{i:04}.bin")), bincode::serialize(&seg).expect("ser")).expect("write");
+    }
+    std::fs::write(dir.join("MANIFEST"), format!("{total}\n")).expect("manifest");
+    println!("=== coordinator (distributed join tree) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   {total} segments published");
+
+    let worker_lifts = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1");
+
+    let t_wait = Instant::now();
+    loop {
+        // With worker lifts, segments 0..N-2 arrive as lift_ files and only the last as rcpt_.
+        let have = (0..total).filter(|i| {
+            if worker_lifts && i + 1 < total { dir.join(format!("lift_{i:04}.bin")).exists() }
+            else { dir.join(format!("rcpt_{i:04}.bin")).exists() }
+        }).count();
+        if have == total { break; }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let prove_s = t_wait.elapsed().as_secs_f64();
+
+    let ctx = VerifierContext::default();
+    let mut receipts: Vec<SegmentReceipt> = Vec::new();
+    let first_rcpt = if worker_lifts { total - 1 } else { 0 };
+    for i in first_rcpt..total {
+        let sr: SegmentReceipt = bincode::deserialize(&std::fs::read(dir.join(format!("rcpt_{i:04}.bin"))).expect("read")).expect("de");
+        sr.verify_integrity_with_context(&ctx).expect("worker receipt failed verify");
+        receipts.push(sr);
+    }
+
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+
+    // With HAZYNC_WORKER_LIFTS the workers have already lifted every segment but the last, so all
+    // that remains here is the last one -- merge the session output into its claim, then lift it.
+    // prepare_lifts merges into the LAST element of what it is given, so handing it a one-element
+    // vector does exactly that and nothing else.
+    let t_lift = Instant::now();
+    let lifted = if worker_lifts {
+        let mut v: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(total);
+        for i in 0..total - 1 {
+            let r: SuccinctReceipt<ReceiptClaim> =
+                bincode::deserialize(&std::fs::read(dir.join(format!("lift_{i:04}.bin"))).expect("read lift")).expect("de lift");
+            r.verify_integrity_with_context(&ctx).expect("worker lift failed verify");
+            v.push(r);
+        }
+        let last = receipts.pop().expect("last segment receipt");
+        let mut tail = server.prepare_lifts(&ctx, &session, vec![last]).expect("merge+lift last");
+        v.append(&mut tail);
+        v
+    } else {
+        server.prepare_lifts(&ctx, &session, receipts).expect("prepare lifts")
+    };
+    let lift_s = t_lift.elapsed().as_secs_f64();
+    println!("  lifted {} receipts in {:.1} s{}", lifted.len(), lift_s,
+        if worker_lifts { "  (all but the last done by workers)" } else { "" });
+
+    // Drive the tree. Publish a level, wait for its joins, feed the outputs in as the next level.
+    let t_join = Instant::now();
+    let mut level_recs: Vec<SuccinctReceipt<ReceiptClaim>> = lifted;
+    let mut level = 0usize;
+    while level_recs.len() > 1 {
+        for (i, r) in level_recs.iter().enumerate() {
+            std::fs::write(dir.join(format!("jin_{level}_{i:04}.bin")), bincode::serialize(r).expect("ser")).expect("write");
+        }
+        let npairs = level_recs.len() / 2;                 // odd tail carries, not joined
+        let odd = level_recs.len() % 2 == 1;
+        std::fs::write(dir.join("JOINLEVEL"), format!("{level},{npairs}\n")).expect("level");
+        println!("    level {level}: {} receipts -> {npairs} joins{}", level_recs.len(), if odd {" (+1 carried)"} else {""});
+        loop {
+            let have = (0..npairs).filter(|p| dir.join(format!("jout_{level}_{p:04}.bin")).exists()).count();
+            if have == npairs { break; }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        let mut next: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(npairs + 1);
+        for p in 0..npairs {
+            let r: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(&std::fs::read(dir.join(format!("jout_{level}_{p:04}.bin"))).expect("read")).expect("de");
+            r.verify_integrity_with_context(&ctx).expect("joined receipt failed verify");
+            next.push(r);
+        }
+        if odd { next.push(level_recs.pop().expect("odd tail")); }
+        level_recs = next;
+        level += 1;
+    }
+    std::fs::write(dir.join("JOINDONE"), b"1").expect("done");
+    let join_s = t_join.elapsed().as_secs_f64();
+
+    let joined = level_recs.pop().expect("one receipt remains");
+    let t_asm = Instant::now();
+    let info = server.assemble_from_joined(&ctx, &session, joined).expect("assemble from joined");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("DISTRIBUTED-TREE RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution      {exec_s:8.1} s");
+    println!("  segment prove  {prove_s:8.1} s   (workers)");
+    println!("  lift           {lift_s:8.1} s   (coordinator; step 2 moves this to workers)");
+    println!("  join tree      {join_s:8.1} s   ({level} levels, distributed)");
+    println!("  resolve+build  {asm_s:8.1} s");
+    println!();
+    println!(">>> DISTRIBUTED-TREE RECEIPT VERIFIED against METHOD_ID");
+    println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
+}
+
+// Prove exactly one segment, from a file, to a file. The whole job of a remote worker.
+//
+// It takes no session, no ELF, no METHOD_ID and no block -- a Segment carries everything the
+// prover needs. That is why a worker on another machine, built by a different toolchain against a
+// guest with a different image id, can prove segments for a session it knows nothing about and
+// return receipts that verify there. It is also why workers can be untrusted: the receipt is
+// self-verifying and the coordinator checks it on arrival.
+fn seg_prove_one_cmd() {
+    use risc0_zkvm::{VerifierContext, Segment};
+    use std::time::Instant;
+    let inp = std::env::var("HAZYNC_SEGFILE").expect("HAZYNC_SEGFILE");
+    let out = std::env::var("HAZYNC_RCPTFILE").expect("HAZYNC_RCPTFILE");
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let seg: Segment = bincode::deserialize(&std::fs::read(&inp).expect("read segment")).expect("deserialize segment");
+    let t = Instant::now();
+    let sr = prove_segment_resilient(&server, &ctx, &seg, &inp);
+    sr.verify_integrity_with_context(&ctx).expect("own receipt failed verify");
+    std::fs::write(&out, bincode::serialize(&sr).expect("serialize receipt")).expect("write receipt");
+    println!("proved one segment in {:.1}s -> {out}", t.elapsed().as_secs_f64());
+}
+
+// PUSH TRANSPORT (hazync#151). The coordinator sends work; it does not wait to be asked.
+//
+// The pull worker cost three SSH connections per segment -- claim, fetch, return -- at roughly
+// 150 ms of setup each, against a segment that proves in 470 ms on an L40S at po2 18. A second
+// matched GPU therefore added NOTHING: box 2 took 63% of the segments and the run got no faster,
+// because it spent more time on round trips than on proving. Bandwidth was never the constraint;
+// a segment is 0.06 MB. Connection setup and latency were.
+//
+// Pushing removes all three. The coordinator already holds the work list, so there is nothing to
+// claim; one connection stays open for the whole session; and the pipelining comes free from TCP
+// rather than from threads in the worker. The coordinator writes segment N+1 into the socket while
+// the worker is still proving N, so the worker's next read returns from a buffer that already
+// filled. At depth 4 that is 240 KB in flight, which no socket notices.
+//
+// Frame: [u32 index][u32 len][bytes]. Index 0xFFFF_FFFF means no more work.
+const SEG_EOF: u32 = 0xFFFF_FFFF;
+// A join job rather than a segment. The index space is otherwise segment indices, so the top bit is
+// free and one connection can carry both kinds of work without a second protocol or a second socket.
+// Body is [u32 len_a][a][u32 len_b][b] -- the two lifted receipts to join.
+const JOIN_TAG: u32 = 0x8000_0000;
+
+fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + a.len() + b.len());
+    v.extend_from_slice(&(a.len() as u32).to_le_bytes());
+    v.extend_from_slice(a);
+    v.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    v.extend_from_slice(b);
+    v
+}
+
+fn unpack_pair(body: &[u8]) -> Option<(&[u8], &[u8])> {
+    if body.len() < 8 { return None; }
+    let la = u32::from_le_bytes(body[0..4].try_into().ok()?) as usize;
+    if body.len() < 4 + la + 4 { return None; }
+    let lb = u32::from_le_bytes(body[4 + la..8 + la].try_into().ok()?) as usize;
+    if body.len() < 8 + la + lb { return None; }
+    Some((&body[4..4 + la], &body[8 + la..8 + la + lb]))
+}
+
+fn write_frame(s: &mut std::net::TcpStream, idx: u32, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    s.write_all(&idx.to_le_bytes())?;
+    s.write_all(&(body.len() as u32).to_le_bytes())?;
+    s.write_all(body)?;
+    s.flush()
+}
+
+fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
+    use std::io::Read;
+    let mut i = [0u8; 4];
+    s.read_exact(&mut i)?;
+    let idx = u32::from_le_bytes(i);
+    if idx == SEG_EOF { return Ok((idx, Vec::new())); }
+    let mut l = [0u8; 4];
+    s.read_exact(&mut l)?;
+    let mut body = vec![0u8; u32::from_le_bytes(l) as usize];
+    s.read_exact(&mut body)?;
+    Ok((idx, body))
+}
+
+// Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
+// makes no decisions -- the coordinator drives. That also makes it simpler than the pull worker.
+fn seg_connect_cmd(addr: &str) {
+    use risc0_zkvm::{VerifierContext, Segment, SuccinctReceipt, ReceiptClaim};
+    use std::time::Instant;
+    let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "push1".into());
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = VerifierContext::default();
+    let mut s = std::net::TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
+    s.set_nodelay(true).ok();   // these are small frames; Nagle would add 40 ms for nothing
+    println!("[{id}] connected to {addr}");
+
+    let (mut done, t0) = (0usize, Instant::now());
+    loop {
+        let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { println!("[{id}] link closed: {e}"); break; } };
+        if idx == SEG_EOF { println!("[{id}] no more work"); break; }
+        let t = Instant::now();
+
+        // A join job carries two lifted receipts instead of a segment. Same connection, same loop.
+        // join() asserts a.post == b.pre, so a worker cannot return a join of the wrong two receipts
+        // and have it survive the next level -- untrusted joins are safe for the same reason
+        // untrusted proving is.
+        if idx & JOIN_TAG != 0 {
+            let (ab, bb) = unpack_pair(&body).expect("malformed join pair");
+            let a: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(ab).expect("deserialize a");
+            let b: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(bb).expect("deserialize b");
+            let j = server.join(&a, &b).expect("join");
+            let out = bincode::serialize(&j).expect("serialize join");
+            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            done += 1;
+            if done % 25 == 0 { println!("[{id}] join {} in {:.2}s ({done} done)", idx & !JOIN_TAG, t.elapsed().as_secs_f64()); }
+            continue;
+        }
+
+        let seg: Segment = bincode::deserialize(&body).expect("deserialize segment");
+        let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {idx}"));
+        let lifted = server.lift(&sr).expect("lift");
+        let out = bincode::serialize(&lifted).expect("serialize lift");
+        if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+        done += 1;
+        if done % 25 == 0 || done < 3 {
+            println!("[{id}] segment {idx} in {:.2}s ({done} done, {:.1}s elapsed)", t.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64());
+        }
+    }
+    println!("[{id}] PUSH DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
+}
+
+// Coordinator with a push transport. Executes, then serves segments to whoever connects, keeping
+// several in flight per worker so the network never becomes the worker's critical path.
+//
+// One thread per connection, sharing a work queue behind a mutex. Each thread writes up to
+// PUSH_DEPTH segments before reading the first receipt back; because the worker proves serially,
+// receipts return in the order they were sent, so a VecDeque is enough to match them up.
+//
+// If a worker dies its in-flight segments go back on the queue and another worker takes them. That
+// is the same reassignment the pull design got from expiring a stale claim, without needing claims.
+fn seg_serve_cmd() {
+    use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::sha::Digestible;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let port: u16 = std::env::var("HAZYNC_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9110);
+    let depth: usize = std::env::var("HAZYNC_PUSH_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let idx: usize = std::env::var("HAZYNC_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let (_a, w) = build_full();
+    let bounds = chunk_bounds(&w, nchunks_env());
+    let (lo, hi) = *bounds.get(idx).expect("chunk index");
+    let mut b = ExecutorEnv::builder();
+    b.segment_limit_po2(seg_po2());
+    b.write(&4u32).unwrap();
+    b.write(&w.height).unwrap();
+    b.write(&header_hash(&w.header)).unwrap();
+    write_chunk_inputs(&mut b, &w, lo, hi);
+
+    let t_exec = Instant::now();
+    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = session.segments.len();
+
+    // Serialise every segment once, up front. The alternative -- resolving on demand -- would put
+    // disk work on the critical path of a worker that is waiting.
+    let mut wire: Vec<Vec<u8>> = Vec::with_capacity(total);
+    for sref in session.segments.iter() {
+        wire.push(bincode::serialize(&sref.resolve().expect("resolve")).expect("serialize"));
+    }
+    let wire = Arc::new(wire);
+    let bytes: usize = wire.iter().map(|v| v.len()).sum();
+
+    println!("=== push coordinator — block {} chunk {} po2 {} ===", w.height, idx, seg_po2());
+    println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
+    println!("  listening on 0.0.0.0:{port}");
+
+    // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
+    // and assumption set are merged into its claim before it is lifted, and a worker has no session,
+    // so the coordinator proves that one itself. Handing it out anyway is what made the wait below
+    // spin -- workers returned all `total` segments while the loop tested for exactly `total - 1`.
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total - 1).collect()));
+    let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
+    // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
+    // connection stays open across both phases instead of the fleet disbanding after proving and
+    // leaving the coordinator to fold alone -- which is what left assembly flat at 373 s while
+    // segment proving scaled 1.96x.
+    let jobs: Arc<Mutex<VecDeque<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let jout: Arc<Mutex<std::collections::HashMap<u32, SuccinctReceipt<ReceiptClaim>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let alldone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).expect("bind");
+    listener.set_nonblocking(true).ok();
+
+    let t_work = Instant::now();
+    let ctx = VerifierContext::default();
+
+    // NO thread::scope HERE, and that is the fix for a deadlock I introduced. The scope's implicit
+    // join waited for the connection threads; the connection threads waited for join work; and the
+    // join work was only published after the scope returned. A circular wait, and it hung a run for
+    // 35 minutes with the GPU idle.
+    //
+    // The connection threads touch only Arc state -- the queues, the outputs, the serialised
+    // segments -- and never the prover or the session, so they do not need to borrow anything and
+    // can be plain detached threads. The main thread then stays free to drive the tree WHILE they
+    // are still alive, which is the whole point.
+    let acc_alldone = alldone.clone();
+    let (aq, ao, aw, aj, ajo) = (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone());
+    let acceptor = std::thread::spawn(move || {
+        let mut handles = Vec::new();
+        while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, peer)) => {
+                    println!("  worker connected from {peer}");
+                    let (queue, out, wire, jobs, jout, alldone) =
+                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone());
+                    handles.push(std::thread::spawn(move || {
+                        // Each thread builds its own VerifierContext: it holds Rc, so it is not Sync.
+                        let ctx = &VerifierContext::default();
+                        s.set_nodelay(true).ok();
+                        let mut inflight: VecDeque<usize> = VecDeque::new();
+                        loop {
+                            while inflight.len() < depth {
+                                let next = { queue.lock().unwrap().pop_front() };
+                                match next {
+                                    Some(i) => {
+                                        if write_frame(&mut s, i as u32, &wire[i]).is_err() {
+                                            queue.lock().unwrap().push_front(i);
+                                            break;
+                                        }
+                                        inflight.push_back(i);
+                                    }
+                                    None => break,
+                                }
+                            }
+                            if inflight.is_empty() {
+                                // Segments are gone: take join work as each level is published, and
+                                // idle between levels rather than disconnecting.
+                                let job = { jobs.lock().unwrap().pop_front() };
+                                if let Some((tag, body)) = job {
+                                    if write_frame(&mut s, tag, &body).is_err() {
+                                        jobs.lock().unwrap().push_front((tag, body));
+                                        break;
+                                    }
+                                    match read_frame(&mut s) {
+                                        Ok((rt, rb)) => {
+                                            match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&rb) {
+                                                Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
+                                                    jout.lock().unwrap().insert(rt, r);
+                                                }
+                                                _ => {
+                                                    println!("  worker returned a bad join for {}", rt & !JOIN_TAG);
+                                                    jobs.lock().unwrap().push_back((tag, body));
+                                                }
+                                            }
+                                        }
+                                        Err(_) => { jobs.lock().unwrap().push_front((tag, body)); break; }
+                                    }
+                                    continue;
+                                }
+                                if alldone.load(std::sync::atomic::Ordering::Relaxed) {
+                                    let _ = write_frame(&mut s, SEG_EOF, &[]);
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                continue;
+                            }
+                            match read_frame(&mut s) {
+                                Ok((i, body)) => {
+                                    let r: SuccinctReceipt<ReceiptClaim> = match bincode::deserialize(&body) {
+                                        Ok(r) => r, Err(e) => { println!("  bad receipt for {i}: {e}"); break; }
+                                    };
+                                    if r.verify_integrity_with_context(ctx).is_err() {
+                                        println!("  worker returned an invalid receipt for {i}");
+                                        queue.lock().unwrap().push_back(i as usize);
+                                    } else {
+                                        out.lock().unwrap()[i as usize] = Some(r);
+                                    }
+                                    inflight.retain(|&x| x != i as usize);
+                                }
+                                Err(_) => {
+                                    let mut q = queue.lock().unwrap();
+                                    for i in inflight.drain(..) { q.push_front(i); }
+                                    break;
+                                }
+                            }
+                        }
+                    }));
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => { println!("  accept failed: {e}"); break; }
+            }
+        }
+        for h in handles { let _ = h.join(); }
+    });
+
+    // Wait for every segment to come back before lifting. The threads stay alive throughout and
+    // pick up join work as the tree below publishes it.
+    // Report progress while segments come in. Without this the coordinator prints its header and
+    // then nothing for the whole segment phase, which is both the #145 complaint again and, more
+    // immediately, a run that any no-output watchdog will kill for looking wedged while it is
+    // working perfectly well. It already killed one.
+    let mut nextmark = 0usize;
+    let step = (total / 20).max(1);
+    loop {
+        let have = { out.lock().unwrap().iter().filter(|r| r.is_some()).count() };
+        if have >= nextmark {
+            let el = t_work.elapsed().as_secs_f64();
+            let eta = if have > 0 { el / have as f64 * (total - 1 - have) as f64 } else { 0.0 };
+            println!("    {have}/{} segments  {el:.0}s elapsed, ~{eta:.0}s left", total - 1);
+            nextmark = have + step;
+        }
+        if have >= total - 1 { break; }       // >= not ==: a strict equality here spins forever if
+                                              // the count ever overshoots, which is exactly what
+                                              // happened when the last segment was still queued.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let work_s = t_work.elapsed().as_secs_f64();
+
+    // Every segment but the last arrives lifted. The last cannot -- the session journal and
+    // assumptions merge into its claim before lifting and a worker has no session -- so it is
+    // proved here. In this mode the coordinator keeps that one segment for itself.
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let t_asm = Instant::now();
+    let mut lifted: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(total);
+    {
+        let o = out.lock().unwrap();
+        for i in 0..total - 1 { lifted.push(o[i].clone().expect("missing lift")); }
+    }
+    let last_seg = session.segments[total - 1].resolve().expect("resolve last");
+    let last_rcpt: SegmentReceipt = prove_segment_resilient(&server, &ctx, &last_seg, "last segment");
+    let mut tail = server.prepare_lifts(&ctx, &session, vec![last_rcpt]).expect("merge+lift last");
+    lifted.append(&mut tail);
+
+    // DISTRIBUTE THE JOIN TREE. Publish a level as jobs, wait for the workers to return them, feed
+    // the results in as the next level. The barrier between levels is unavoidable -- level l+1
+    // consumes level l's output -- but the depth is log2(N), so 1,684 segments is eleven barriers
+    // rather than 1,683 sequential joins.
+    //
+    // In-process joining is what left assembly flat at 373 s while segment proving scaled 1.96x on
+    // two cards. Everything else divided; this was the part that did not.
+    let mut level = lifted;
+    let mut lv = 0u32;
+    while level.len() > 1 {
+        let npairs = level.len() / 2;
+        let odd = level.len() % 2 == 1;
+        {
+            let mut q = jobs.lock().unwrap();
+            for p in 0..npairs {
+                let a = bincode::serialize(&level[p * 2]).expect("ser a");
+                let b = bincode::serialize(&level[p * 2 + 1]).expect("ser b");
+                q.push_back((JOIN_TAG | (lv << 16) | p as u32, pack_pair(&a, &b)));
+            }
+        }
+        println!("    level {lv}: {} receipts -> {npairs} joins{}", level.len(), if odd { " (+1 carried)" } else { "" });
+        loop {
+            let have = { jout.lock().unwrap().len() };
+            if have >= npairs { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut next = Vec::with_capacity(npairs + 1);
+        {
+            let mut m = jout.lock().unwrap();
+            for p in 0..npairs {
+                next.push(m.remove(&(JOIN_TAG | (lv << 16) | p as u32)).expect("missing join result"));
+            }
+        }
+        // An odd receipt carries forward untouched, keeping its position so adjacency holds.
+        if odd { next.push(level.pop().expect("odd tail")); }
+        level = next;
+        lv += 1;
+    }
+    alldone.store(true, std::sync::atomic::Ordering::Relaxed);
+    let info = server.assemble_from_joined(&ctx, &session, level.pop().expect("one left")).expect("assemble");
+    let asm_s = t_asm.elapsed().as_secs_f64();
+    info.receipt.verify(METHOD_ID).expect("PUSH RECEIPT FAILED verify");
+
+    println!();
+    println!("  execution      {exec_s:8.1} s");
+    println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
+    println!("  assembly       {asm_s:8.1} s   <- last segment + join tree, coordinator-side");
+    println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
+    println!();
+    println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
+    println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
+}
+
+// Survive hazync#119: the CUDA prover intermittently returns a segment proof that fails its own
+// internal verify. Reproduced this session at po2 22 on an idle card, with UNMODIFIED upstream
+// scheduling, so it is the prover and not anything layered on it. Filed upstream as risc0 #3798 /
+// #3799; no replies, repo dormant.
+//
+// We cannot fix it, but we do not have to lose work to it. The failure is DETECTABLE -- prove_segment
+// verifies before returning -- and it is intermittent, so re-proving the same segment almost always
+// succeeds. One bad segment killed a whole measurement run today; it should have cost one retry.
+//
+// LOUD ON PURPOSE. A silent retry would turn a known prover fault into an invisible one and hide any
+// change in its rate, which is the number #119 actually needs. Every retry prints, and the total is
+// reported at the end of a run, so the rate stays measurable. If a segment fails REPEATEDLY that is
+// not #119 and the error is propagated unchanged.
+fn prove_segment_resilient(
+    server: &std::rc::Rc<dyn risc0_zkvm::ProverServer>,
+    ctx: &risc0_zkvm::VerifierContext,
+    seg: &risc0_zkvm::Segment,
+    what: &str,
+) -> risc0_zkvm::SegmentReceipt {
+    const ATTEMPTS: usize = 3;
+    let mut last: Option<String> = None;
+    for attempt in 1..=ATTEMPTS {
+        match server.prove_segment(ctx, seg) {
+            Ok(r) => {
+                if attempt > 1 {
+                    println!("  [#119] {what}: succeeded on attempt {attempt}");
+                    RETRIES_119.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return r;
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // Only retry the fault we know is transient. An OOM, a malformed segment or a
+                // missing zkr will fail identically every time, and retrying those wastes a card
+                // for three times as long before saying the same thing.
+                let transient = msg.contains("verification indicates proof is invalid")
+                    || msg.contains("verify segment");
+                println!("  [#119] {what}: attempt {attempt}/{ATTEMPTS} failed: {}",
+                    msg.lines().next().unwrap_or("?"));
+                if !transient {
+                    panic!("{what}: not a #119 fault, not retrying: {msg}");
+                }
+                last = Some(msg);
+            }
+        }
+    }
+    panic!("{what}: failed {ATTEMPTS} times, last error: {}", last.unwrap_or_default());
+}
+
+static RETRIES_119: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn report_119_retries() {
+    let n = RETRIES_119.load(std::sync::atomic::Ordering::Relaxed);
+    if n > 0 {
+        println!("  [#119] {n} segment(s) needed a retry this run — the rate is worth recording on the issue");
     }
 }

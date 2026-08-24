@@ -30,7 +30,7 @@ curl -f https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules, checked in **milliseconds** on a laptop, with no node, no peers, no chain data and
 nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
-verifier is a WebAssembly module served in **~295 KB** gzipped (1,065,791 bytes raw) that peaks at
+verifier is a WebAssembly module served in **~285 KB** gzipped (1,066,001 bytes raw) that peaks at
 **1.9 MiB of memory**, small enough for a phone.
 
 N is however far the anchored proof currently reaches, and it grows as the board does. Swap the URL
@@ -56,10 +56,18 @@ The hard part is done: real Core consensus code, proving real mainnet blocks, va
 segwit, taproot, big-block and pre-BIP34 eras. The guest image id is **reproducible**; CI rebuilds
 it from scratch and checks it matches.
 
-What remains is scale. The board **restarted from genesis on 2026-08-04**, when the audit #5
-re-baseline (shipped in v0.17.0) pinned the current guest `b62d2a60`. Changing the guest at all is
-what costs a reset: the id is what makes a proof checkable, so a proof made under the old guest
-cannot verify under the new one.
+What remains is scale, and there is now an answer to it. **Proving a block divides across
+machines**: segments prove independently, the recursion that folds them is a tree rather than a
+chain, and both halves scale. Measured on two GPUs: **2.03x**, with a verifying receipt each run. A
+near-tip block is 15,633 card-seconds of work, so one card takes 4.3 hours and forty-five take under
+ten minutes. A worker needs only the segment in front of it, so it cannot forge a receipt, only fail
+to return one. [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+
+The board **resets with this release**, as it does at every re-baseline: guest `1d6c3792` (2026-08-23)
+supersedes `b62d2a60` (2026-08-04, audit #5), because `validate_block` was restructured to do
+per-transaction work once per transaction rather than once per input: 3,455 M cycles down to 955 M,
+with Core's consensus code untouched. Changing the guest at all is what costs a reset: the id is what
+makes a proof checkable, so a proof made under the old guest cannot verify under the new one.
 
 The board is open and anyone can join. Whatever figure it shows is not seventeen years of
 accumulated work; it is what has been re-proved since that re-baseline.

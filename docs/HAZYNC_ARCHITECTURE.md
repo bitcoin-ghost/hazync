@@ -626,6 +626,40 @@ only *depth* is sequential. log₂(140) ≈ 8 levels × ~10–20s ≈ **~2–3 m
 flat. Combined with FIX A (each node verifies two O(1) receipts), the aggregation layer becomes a
 rounding error. This is §2.4's "balanced binary tree over ranges" at the block level.
 
+### 2a. BUILT AND MEASURED (2026-08-23) — and the level below the one this section describes
+
+Sections 1 and 2 reason about folding *block* proofs. The binding constraint turned out to be one
+level down: folding the **segments** of a single block prove. risc0 splits a prove into segments,
+lifts each to a succinct receipt, and joins them; that join was a chain of N sequential steps, and it
+is the larger half of a block prove, not a rounding error.
+
+Two changes, both in `vendor/risc0-zkvm`:
+
+- The linear fold is now a **balanced join tree** of depth `log2(N)`. For 1,684 segments that is
+  eleven levels and 1,683 joins, odd receipts carried in position.
+- Each tree level is **published as work over a push transport**, so joins run on the same worker
+  pool as the segments. The previous pull worker cost three SSH round trips per segment, which is
+  why a remote worker ran at half the speed of a local one on identical hardware.
+
+Measured, two matched L40S:
+
+| term | 1 card | 2 cards | speedup |
+|---|---|---|---|
+| segment proving | 862.6 s | 410.9 s | 2.10x |
+| assembly | 409.7 s | 211.5 s | 1.94x |
+| total | 1279.1 s | 629.3 s | 2.03x |
+
+Both runs produced a verifying receipt with a matching journal digest.
+
+⚠ **Two corrections to §2 above.** A tree does convert the fold from sequential to parallelisable, as
+that section says, but the "aggregation layer becomes a rounding error" framing is too strong: the
+speedup is bounded by Amdahl, not by depth. And the block-level aggregate **still does not
+distribute** — `seg-serve` is mode 4 only and `resolve` is coordinator-side and sequential, so a
+sub-ten-minute block currently needs ~45 cards rather than the ~30 an extrapolation from a single
+chunk suggested. Tracked as #153. Do not quote the ~30 figure.
+
+See `docs/SEGMENT_DISTRIBUTION.md`.
+
 ### 3. Chain-level fold — the 100-day sequential floor (load-bearing for the Bitcoin costing)
 The block→chain fold is **~10s of irreducibly-sequential recursion per block**.
 - **Tip-following:** nothing (10s / 600s interval).

@@ -29,3 +29,14 @@ third-party components under their own licences. This file records them.
 
 Nothing here overrides the terms of the components' own licences; consult each upstream project for
 the authoritative text.
+
+## Prior art
+
+Not a dependency, and nothing of theirs is compiled in — recorded because the idea is theirs before
+it was ours.
+
+- **ZeroSync** — https://zerosync.org. Robin Linus and collaborators. The project that established
+  proving Bitcoin chain state as a real engineering problem rather than a thought experiment.
+  Hazync takes a different trade (Core's own consensus sources in a general-purpose zkVM, rather
+  than a purpose-built circuit) and is downstream of theirs in the sense that matters: the question
+  was already asked.
