@@ -12,7 +12,16 @@
 #   docker run --rm hazync-repro          # prints the canonical METHOD_ID
 #
 # Two independent builds (different machines) that print the same id == reproducibility proven.
-FROM ubuntu:22.04
+#
+# PINNED BY DIGEST, not by tag (hazync#146). `ubuntu:22.04` is a moving pointer: the same Dockerfile
+# built a month apart can start from different bytes, and the one property this container exists to
+# provide is that it does not. The digest below is the image that produced the canonical guest
+# 1d6c3792. Verified: rebuilding with the pin produces the same METHOD_ID as the tag did, so the pin
+# freezes what was already true rather than changing it.
+#
+# To move it deliberately, change the digest and rebuild -- CI's reproducible-image-id job asserts
+# the resulting METHOD_ID against reproduce/METHOD_ID, so an unintended change cannot pass silently.
+FROM ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
