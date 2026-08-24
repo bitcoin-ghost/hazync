@@ -24,8 +24,19 @@ on:
 # Superseding a branch makes its in-flight run pointless; let it be cancelled rather than sit in the
 # queue ahead of the run that matters. NOT applied to main: those runs are the record of what the
 # released tree actually does, and cancelling one leaves a commit with no verdict.
+#
+# `cancel-in-progress: false` alone did NOT achieve that, and the comment above used to claim it did
+# (hazync#155). It protects the run that is already EXECUTING; it does not protect one QUEUED behind
+# it, because GitHub cancels previously-pending runs in a group when a newer one arrives. Pushing
+# three commits to main in quick succession gave verdicts to the first and the last and cancelled the
+# middle -- observed on b878503/3f958e8/2d9a636, and on three earlier main commits.
+#
+# That is exactly the failure this exemption exists to prevent, and it is quiet: a release can be cut
+# from a tree whose own commit never ran, because release.sh checks HEAD and HEAD is usually the
+# newest push. So main commits now get a group PER SHA and never queue behind each other. Branches
+# keep the shared group and keep cancelling, which is where the runner time actually matters.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:

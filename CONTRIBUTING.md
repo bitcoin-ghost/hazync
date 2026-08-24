@@ -178,6 +178,35 @@ Whoever advances the spine cannot corrupt it. Every absorption is re-verified ag
 guest id and pinned to genesis, and because every per-block receipt is retained, anyone can rebuild
 the spine from scratch without re-proving anything.
 
+## Got more than one card?
+
+Proving one block can be split across machines, so a second card halves the wall-clock rather than
+just doubling how many blocks you can work on at once. Both halves of the job divide: the segments a
+block's proof is made of, and the recursion that folds them back into one receipt.
+
+One machine is the coordinator; every other card connects to it and takes work.
+
+```
+# coordinator
+HAZYNC_PORT=9110 ./host seg-serve
+
+# each worker, anywhere that can reach it
+HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+```
+
+Workers need nothing but the segment in front of them. A worker **cannot forge a receipt** — every
+one is verified on arrival, and joins assert that the two receipts being merged actually meet — so it
+can only fail to return work, never corrupt it. That is why it is safe to point strangers' cards at
+your coordinator.
+
+Measured on two matched L40S: **2.03x**, with a verifying receipt each run.
+
+⚠ **One prove per card.** At the default segment size a prove peaks at about 40.6 GB of VRAM, so a
+48 GB card holds exactly one. Running two on the same card will exhaust it, and it would buy roughly
+3% even if it fit.
+
+Details, the aggregate case, and every knob: [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+
 ## Just want to check a proof, not make one?
 
 You never have to trust the party. Every verified proof is public — fetch any proven block from `https://bitcoinghost.org/hazync/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.34+ / Ubuntu 22.04+):

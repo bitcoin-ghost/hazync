@@ -209,6 +209,43 @@ pub trait ProverServer: private::Sealed {
         anyhow::bail!("this prover does not support assembling from an externally joined receipt")
     }
 
+    /// SEGMENT DISTRIBUTION step 4 (hazync#153). The session's assumptions as succinct receipts,
+    /// ready to be resolved.
+    ///
+    /// `assemble_from_joined` resolves them itself, in a loop, on whichever machine calls it. For a
+    /// mode-5 aggregate that is sixteen recursion proofs the coordinator does alone -- the last
+    /// undivided term of a block prove once segments and joins distribute. Handing the list out
+    /// lets the resolves be done elsewhere.
+    ///
+    /// A composite assumption is converted here rather than at the caller, because
+    /// `composite_to_succinct` is the prover's business and a worker should receive something it can
+    /// resolve directly.
+    fn session_assumptions_succinct(
+        &self,
+        _session: &Session,
+    ) -> Result<Vec<SuccinctReceipt<Unknown>>> {
+        anyhow::bail!("this prover does not support extracting session assumptions")
+    }
+
+    /// SEGMENT DISTRIBUTION step 4 (hazync#153). Build the `Receipt` from a conditional receipt whose
+    /// assumptions have ALREADY been resolved -- by `resolve`, wherever that ran.
+    ///
+    /// This is the tail of `assemble_from_joined` with the resolve loop lifted out, exactly as
+    /// `prepare_lifts` + `assemble_from_joined` are `assemble_from_segment_receipts` with the join
+    /// tree lifted out. `assemble_from_joined` is now written in terms of it, so there is one
+    /// implementation of how a `Receipt` is built and not two that can drift.
+    ///
+    /// It CANNOT check that the assumptions were all discharged: a receipt carrying an unresolved
+    /// assumption is structurally identical to one that never had any. What catches that is the
+    /// caller verifying the returned `Receipt` against the image id, which every path here does.
+    fn assemble_from_resolved(
+        &self,
+        _session: &Session,
+        _resolved: SuccinctReceipt<ReceiptClaim>,
+    ) -> Result<ProveInfo> {
+        anyhow::bail!("this prover does not support assembling from a resolved receipt")
+    }
+
     /// SEGMENT DISTRIBUTION (hazync patch). Assemble a `Receipt` from segment receipts that were
     /// proved somewhere else.
     ///

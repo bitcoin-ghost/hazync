@@ -123,19 +123,40 @@ impl ProverServer for ProverImpl {
         let (_, session_assumption_receipts): (Vec<_>, Vec<_>) =
             session.assumptions.iter().cloned().unzip();
 
+        let _ = session_assumption_receipts;
+
+        // Written in terms of the two step-4 methods rather than repeating the loop, so that
+        // resolving locally and resolving on a worker cannot drift apart in how they finish.
         let mut conditional = joined;
+        for assumption in self.session_assumptions_succinct(session)? {
+            conditional = self.resolve(&conditional, &assumption)?;
+        }
+        self.assemble_from_resolved(session, conditional)
+    }
+
+    /// SEGMENT DISTRIBUTION step 4 (hazync#153). See the trait for why this exists.
+    fn session_assumptions_succinct(
+        &self,
+        session: &Session,
+    ) -> Result<Vec<SuccinctReceipt<Unknown>>> {
+        let (_, session_assumption_receipts): (Vec<_>, Vec<_>) =
+            session.assumptions.iter().cloned().unzip();
+
+        let mut out = Vec::with_capacity(session_assumption_receipts.len());
         for assumption_receipt in session_assumption_receipts {
             let inner = match assumption_receipt {
                 AssumptionReceipt::Proven(receipt) => receipt,
-                AssumptionReceipt::Unresolved(a) => bail!(
-                    "assemble_from_joined cannot discharge an unresolved assumption: {a:#?}"
-                ),
+                AssumptionReceipt::Unresolved(a) => {
+                    bail!("cannot discharge an unresolved assumption: {a:#?}")
+                }
             };
-            conditional = match inner {
-                InnerAssumptionReceipt::Succinct(a) => self.resolve(&conditional, &a)?,
+            out.push(match inner {
+                InnerAssumptionReceipt::Succinct(a) => a,
                 InnerAssumptionReceipt::Composite(a) => {
+                    // Converted here, not at the caller: a worker should get something it can
+                    // resolve directly, and composite_to_succinct is the prover's business.
                     let s = self.composite_to_succinct(&a)?;
-                    self.resolve(&conditional, &SuccinctReceipt::<ReceiptClaim>::into_unknown(s))?
+                    SuccinctReceipt::<ReceiptClaim>::into_unknown(s)
                 }
                 InnerAssumptionReceipt::Fake(_) => {
                     bail!("fake receipt assumptions are not supported here")
@@ -143,11 +164,22 @@ impl ProverServer for ProverImpl {
                 InnerAssumptionReceipt::Groth16(_) => {
                     bail!("Groth16 receipt assumptions are not supported here")
                 }
-            };
+            });
         }
+        // ORDER IS LOAD-BEARING. Resolves are a chain, each consuming the previous conditional, and
+        // the guest recorded its assumptions in a definite order. Returning them in session order is
+        // what lets a caller resolve them elsewhere and still land on the same claim.
+        Ok(out)
+    }
 
+    /// SEGMENT DISTRIBUTION step 4 (hazync#153). See the trait for why this exists.
+    fn assemble_from_resolved(
+        &self,
+        session: &Session,
+        resolved: SuccinctReceipt<ReceiptClaim>,
+    ) -> Result<ProveInfo> {
         let receipt = Receipt::new(
-            InnerReceipt::Succinct(conditional),
+            InnerReceipt::Succinct(resolved),
             session.journal.clone().unwrap_or_default().bytes,
         );
         Ok(ProveInfo {

@@ -84,6 +84,67 @@ derive `Serialize + Deserialize`, and `prove_segment`, `lift`, `join` and `resol
 all on the public `ProverServer` trait via `get_prover_server(&opts)`. The existing
 vendored risc0 (the preflight pipelining patch) is orthogonal and stays.
 
+## Running it
+
+Everything below is one binary. The coordinator executes and hands out work; workers connect and
+prove. Workers hold no work list and make no decisions.
+
+### A chunk
+
+```sh
+# coordinator: executes, serves segments, drives the join tree
+HAZYNC_BLOCK=block_962000.json HAZYNC_CHUNKS=16 HAZYNC_CHUNK=0 \
+  HAZYNC_SEG_PO2=22 HAZYNC_PORT=9110 ./host seg-serve
+
+# each worker, on any machine that can reach the coordinator
+HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+```
+
+### The aggregate (#153)
+
+Same commands, plus `HAZYNC_AGG=1`, and the chunk receipts must already exist as `chunk_0.bin` …
+`chunk_N.bin` in the coordinator's working directory. They are verified against `METHOD_ID` on the
+way in, so a receipt from a different guest is refused by name rather than failing later inside the
+prover.
+
+```sh
+HAZYNC_BLOCK=block_962000.json HAZYNC_CHUNKS=16 \
+  HAZYNC_AGG=1 HAZYNC_SEG_PO2=22 HAZYNC_PORT=9110 ./host seg-serve
+```
+
+Workers are identical — they take segments, joins and resolves off the same connection and do not
+need to know which phase is running.
+
+### Knobs that matter
+
+| variable | what it does |
+|---|---|
+| `HAZYNC_SEG_PO2` | segment size. **22 is the default on CUDA and peaks at ~40.6 GB of VRAM** |
+| `HAZYNC_PORT` | coordinator listen port (default 9110) |
+| `HAZYNC_PUSH_DEPTH` | segments in flight per worker (default 4) |
+| `HAZYNC_AGG` | serve the mode-5 aggregate instead of a mode-4 chunk. **Presence is what counts** |
+| `HAZYNC_WORKER_ID` | worker name in logs; `seg-connect` defaults to `push1`, so set it per worker |
+
+⚠ **`HAZYNC_AGG=0` still turns the aggregate ON.** It is tested with `env::var(...).is_ok()`, so any
+value enables it and only *unsetting* it disables it. That is the house style here — twelve flags in
+`main.rs` work the same way — but it reads like a boolean and is not one.
+
+⚠ **One prove per card at po2 22.** A full chunk peaks at 40,609 MiB of a 46 GB card — 88%, about
+5.5 GB spare. Two concurrent proves will OOM it. This is not a loss: concurrency was measured twice
+and buys ~3%, inside noise.
+
+⚠ **The coordinator needs a card too**, but only briefly. It proves the last segment itself, because
+the session journal and assumption set merge into that segment's claim and a worker has no session.
+That happens *after* the distributed segments come back, so the coordinator can share a card with a
+worker without colliding.
+
+### If a worker dies
+
+Its in-flight segments go back on the queue and another worker takes them. That is the same
+reassignment the pull design got from expiring a claim, without needing claims. A worker returning a
+bad receipt is caught by `verify_integrity_with_context` before the receipt is stored, and the
+segment is requeued.
+
 ## Trust model — why untrusted workers are safe
 
 This is the property that makes Ghost-node participation possible at all.
@@ -116,9 +177,15 @@ reassigns the segment, and proving the same segment twice is harmless.
 
 ## Known open questions
 
-- **Assumptions.** Chunk proving (guest mode 4) has none, so P0/P1 target it. The
+- ~~**Assumptions.** Chunk proving (guest mode 4) has none, so P0/P1 target it. The
   aggregate resolves 16 chunk receipts; `resolve` is on the same trait but the ordering
-  against the join tree needs care.
+  against the join tree needs care.~~ **RESOLVED 2026-08-24 (#153).** `seg-serve` takes
+  `HAZYNC_AGG=1` and builds the mode-5 environment; resolves go out under a third job tag.
+  The ordering concern was real: resolves are a chain, each consuming the conditional the
+  previous one produced, so `session_assumptions_succinct` returns them in SESSION order and
+  the coordinator publishes one job at a time rather than queueing them together. Gated on
+  digest equality at 2- and 4-chunk partitions, with the worker's own log asserting exactly
+  N resolves discharged remotely. See the section at the end.
 - **A single card cannot demonstrate speedup.** With one GPU, P2 measures *overhead and
   correctness*, not wall-clock gain. Genuine parallelism can be shown using CPU workers
   alongside the GPU, at a much lower rate.
@@ -168,8 +235,8 @@ Pull was the wrong choice. The coordinator already holds the work list, so:
 At queue depth 2 the worker never waits on the network. Bandwidth was never the constraint
 (0.06 MB per segment); it is connection setup and latency, and pushing removes both.
 
-**This is P3 and it is not built.** Until it is, cross-machine segment distribution is correct
-and gains nothing.
+**This was P3.** It is built — see the next section — and it is what turned "correct but gains
+nothing" into a measured 2.03x.
 
 ## Push transport: built, gated, and faster even on localhost
 
@@ -218,7 +285,7 @@ At 98% efficiency:
 | **30** | **9.6 min** |
 | 64 | 4.8 min |
 
-### The remaining gap
+### The remaining gap (closed by the next section)
 
 Assembly did not divide here (373.1 vs 370.4 s) because `seg-serve` runs the join tree in-process.
 That term *does* distribute — `seg-join` is built and gated — but **push and distributed joins are
@@ -245,12 +312,55 @@ position, `log2(N)` depth rather than `N`.
 ### The block
 
 Near-tip 962000, measured: 14,167 card-seconds of chunk work plus a 1,466 s aggregate = **15,633
-card-seconds**, against a ~46 s execution floor:
+card-seconds**, against a ~46 s execution floor.
 
-| cards | block |
-|---|---|
-| 16 | 17.0 min |
-| **30** | **9.5 min** |
-| 64 | 4.8 min |
+⚠ **An earlier version of this section put a sub-ten-minute block at ~30 cards and said "every term
+is now measured to scale". Both were wrong**, and #153 is the correction: the numbers divided the
+WHOLE block by the card count, when the aggregate's sixteen assumption resolutions (~175 s) and the
+execution floor (~46 s) did not divide at all. What actually scaled was measured on a chunk.
 
-**Every term is now measured to scale**, rather than one phase measured and the other assumed.
+| undivided term | divisible | cards for <10 min |
+|---|---|---|
+| ~221 s — resolves **and** execution (before #153) | ~15,412 s | **~45** |
+| ~46 s — execution only (after #153, PROJECTED) | ~15,587 s | ~30 |
+
+#153 built the second row: the aggregate is now servable and resolves are discharged on workers,
+gated on digest equality. But **it is a projection, not a measurement.** The ~175 s resolve figure
+comes from a different block, and resolves are a chain rather than a tree, so distributing them moves
+work off the coordinator rather than parallelising it — the gain is real but bounded, and its size is
+unknown until the aggregate is measured on real cards.
+
+**Quote ~45 until item 3 of #153 is done.**
+
+## The aggregate distributes (2026-08-24, #153)
+
+Until this, the aggregate could not be distributed at all. `seg_serve_cmd` wrote `4u32`
+unconditionally and never called `add_assumption`, so a mode-5 session could not even be
+constructed; and `resolve` ran inside `assemble_from_joined`, on whichever machine called it.
+
+- **`HAZYNC_AGG=1`** makes `seg-serve` build the mode-5 environment. Downstream is unchanged, because
+  an aggregate session produces ordinary segments like any other.
+- **`RESOLVE_TAG`** (bit 30, disjoint from `JOIN_TAG`'s bit 31 and above any segment index) carries a
+  resolve job: the conditional receipt and one assumption, in the same pair body a join uses. The
+  worker tests resolve *before* join, because both bodies are pairs and the tag order is the only
+  discriminator.
+
+The coordinator's job path needed no change — it already routed results by returned tag.
+
+**Ordering is load-bearing.** Resolves are a chain: each consumes the conditional the previous one
+produced. `session_assumptions_succinct` returns assumptions in session order, and the coordinator
+publishes one job at a time rather than queueing them, because the next job's input is the previous
+job's output.
+
+Gated against the in-process aggregate, block 130000, on CPU:
+
+| partition | in-process | pushed | resolves on worker |
+|---|---|---|---|
+| 2 chunks | `09f4e49c…` | `09f4e49c…` | 2/2 |
+| 4 chunks | `09f4e49c…` | `09f4e49c…` | 4/4 |
+
+The worker counts come from the worker's own log, not the coordinator's, and the 4-chunk gate asserts
+exactly 4 rather than non-zero — so it cannot pass by resolving some locally.
+
+Both partitions produce the same digest, so **a block's proof does not depend on how the block was
+chunked**. That had not been demonstrated before.

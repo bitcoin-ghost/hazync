@@ -651,12 +651,35 @@ Measured, two matched L40S:
 
 Both runs produced a verifying receipt with a matching journal digest.
 
-⚠ **Two corrections to §2 above.** A tree does convert the fold from sequential to parallelisable, as
+⚠ **One correction to §2 above.** A tree does convert the fold from sequential to parallelisable, as
 that section says, but the "aggregation layer becomes a rounding error" framing is too strong: the
-speedup is bounded by Amdahl, not by depth. And the block-level aggregate **still does not
-distribute** — `seg-serve` is mode 4 only and `resolve` is coordinator-side and sequential, so a
-sub-ten-minute block currently needs ~45 cards rather than the ~30 an extrapolation from a single
-chunk suggested. Tracked as #153. Do not quote the ~30 figure.
+speedup is bounded by Amdahl, not by depth.
+
+### 2b. THE AGGREGATE DISTRIBUTES TOO (2026-08-24, #153)
+
+The measurement above was taken on a **chunk**. The block-level aggregate could not be distributed at
+all until now: `seg-serve` wrote mode 4 unconditionally and never added the chunk receipts as
+assumptions, and `resolve` ran wherever `assemble_from_joined` was called. Both are fixed.
+
+- `seg-serve` takes `HAZYNC_AGG=1` and builds the mode-5 environment. Downstream is unchanged,
+  because an aggregate session produces ordinary segments like any other.
+- Resolves go out as work under a third job tag, discharged on a worker.
+
+Gated on digest equality against the in-process aggregate, block 130000, on CPU:
+
+| partition | in-process | pushed | resolves on worker |
+|---|---|---|---|
+| 2 chunks | `09f4e49c…` | `09f4e49c…` | 2/2 |
+| 4 chunks | `09f4e49c…` | `09f4e49c…` | 4/4 |
+
+Both partitions produce the same digest, so **a block's proof does not depend on how the block was
+chunked**. That had not been shown before.
+
+⚠ **The card count is still ~45, not ~30.** Resolves are a CHAIN, not a tree: each consumes the
+conditional the previous one produced, so distributing them moves work off the coordinator rather
+than parallelising it. That should take the undivided term from ~221 s to ~46 s and the fleet from
+~45 cards to ~30, but that is a PROJECTION off a resolve cost measured on a different block. Item 3
+of #153 — measuring the aggregate on real cards — is still open. Quote ~45 until it is done.
 
 See `docs/SEGMENT_DISTRIBUTION.md`.
 
