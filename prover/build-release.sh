@@ -118,7 +118,16 @@ echo "   HEAD: $(git -C "$REPO" describe --tags --always 2>/dev/null || echo unk
 # matter — only $HOME") is true once more. Keep the fixed mount anyway: it costs nothing, it keeps this
 # script and the Dockerfile visibly in agreement, and if an external path dependency is ever
 # re-introduced it is the difference between a shipped-and-broken host and a working one.
+# RECURSION_SRC_PATH points at the vendored zkr (hazync#164). This script does NOT use
+# reproduce/Dockerfile -- it bind-mounts the repo into a bare $IMAGE -- so the ENV set there does not
+# reach here and has to be passed explicitly. Without it, risc0-circuit-recursion's build.rs
+# downloads a 57 MB blob from S3, and on 2026-08-24 that object returned 403 from every network,
+# aborting the build ~14 minutes in, after every other fetch had already succeeded.
+#
+# Passed unconditionally: if the file is absent build.rs simply falls back to downloading, so this
+# costs nothing when upstream is healthy.
 docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
+    -e "RECURSION_SRC_PATH=/hazync-zkvm/reproduce/vendor/recursion_zkr.zip" \
     -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e

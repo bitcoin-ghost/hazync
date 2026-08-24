@@ -82,12 +82,41 @@ That gap is the important part and it has been consistently understated:
 | | measured |
 |---|---|
 | block 741,000 (post-taproot, 670 inputs) | **3,275 s = 55 min** of GPU time, 16 chunks |
+| **block 962,000 (near tip, ~7,200 inputs)** | **17,340 s = 4.8 hours** of L40S time at po2 22 (2026-08-24) |
 | blocks below the frontier | nearly empty — block 20,000 holds 19,023 UTXOs in total (re-confirmed 2026-08-01) |
 | historical board rate | 2,220 blocks/hr — **measured on those empty blocks only** |
 
 Extrapolating the 2,220 blocks/hr figure to the remaining 931,664 blocks gives ~17 GPU-days and is
-wrong by orders of magnitude. At even a 10-minute average — generous, given 55 min for a *modest*
-modern block — the remainder is **~17 GPU-years**.
+wrong by orders of magnitude.
+
+⚠ **The ~17 GPU-years figure that replaced it is also too low, by roughly an order of magnitude.** It
+assumed a 10-minute average per block. A near-tip block measured on 2026-08-24 took **289 minutes** of
+card time on its own.
+
+**Cost the work by INPUTS, not blocks.** Early blocks are nearly empty, so a per-block average is
+meaningless; script verification dominates and it scales with inputs. Measured on an L40S at po2 22:
+**2.41 card-seconds per input** (17,340 s over ~7,200 inputs), which agrees with the independently
+estimated ~2.7 s/GPU-input in `ACCELERATION.md`.
+
+Bitcoin's history is somewhere around 1.8–3.0 billion inputs, so:
+
+| total inputs | card-years | on L40S (€1.11/hr) | on RTX 4090 (\$0.39/hr) | on RTX 4090 (\$0.13/hr) |
+|---|---|---|---|---|
+| 1.8bn | ~138 | £1.15m | £0.53m | £0.18m |
+| 2.4bn | ~183 | £1.53m | £0.70m | £0.23m |
+| 3.0bn | ~229 | £1.92m | £0.88m | £0.29m |
+
+**Keeping up with the tip** — one block per 600 s — needs about **29 L40S** continuously (~£20k/month),
+or **~41 RTX 4090s** at the lower po2 they can hold (~£3k–9k/month depending on the listing).
+
+⚠ **The card matters, and the constraint is VRAM rather than price.** A full chunk at po2 22 peaks at
+**40.6 GB**, so 24 GB cards (4090, 3090) cannot run it and must drop to po2 20 — measured at **1.42x**
+slower. They need more cards for the same throughput, and are still several times cheaper per unit of
+work. Do not quote a fleet size without saying which po2 it assumes.
+
+These are ballparks with real uncertainty: the input count is an estimate, per-input cost varies with
+script type, and everything is priced at spot rates that move. The order of magnitude is the point —
+**hundreds of card-years, not tens.**
 
 Two consequences:
 

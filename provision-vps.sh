@@ -228,6 +228,23 @@ export HAZYNC_BASE="$WORK"
 export RISC0_HOME="$HOME/.risc0"
 export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:$PATH"
 
+# VENDORED zkr (hazync#164). risc0-circuit-recursion's build.rs downloads a 57 MB blob from
+# risc0-artifacts.s3.us-west-2.amazonaws.com during cargo build. On 2026-08-24 that object returned
+# 403 from every network tried, aborting the build ~14 minutes in, after every other fetch had
+# already succeeded.
+#
+# Set HERE rather than in reproduce/Dockerfile alone, because there are THREE build paths and only
+# one of them is that Dockerfile: prover/build-release.sh bind-mounts the repo into a bare ubuntu
+# image, and CI runs this script directly. All three go through this file, so one line covers them.
+#
+# build.rs prefers a local path and verifies it against the SHA256_HASH compiled into the crate, so
+# this satisfies the same check the download would have. Respects an existing value, and if the file
+# is missing build.rs simply downloads as before.
+if [ -z "${RECURSION_SRC_PATH:-}" ]; then
+  _zkr="$REPO_DIR/reproduce/vendor/recursion_zkr.zip"
+  [ -f "$_zkr" ] && export RECURSION_SRC_PATH="$_zkr"
+fi
+
 # ...including the CUDA env, and GPU_FEATURES itself. Phase 7 is the ONLY place that sets
 # GPU_FEATURES=--features cuda, and `build` skips phase 7 — so before this, `GPU=1 HAZYNC_PROVISION=build`
 # accepted the flag and silently produced a CPU binary. Nothing failed and nothing warned; you only
