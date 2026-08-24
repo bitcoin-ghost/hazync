@@ -99,7 +99,11 @@ HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h  
 
 # negative: wrap any single mid-chain range
 ./host snark-wrap range_500.bin neg500.snark                  # ~75 s
-./host verify-snark neg500.snark                              # must FAIL, naming the genesis pin
+# ⚠ NOT `./host verify-snark neg500.snark`. That asserts the range starts at block 1 and PANICS
+# (exit 101) on a mid-chain range, which looks like a bad fixture and is not. Check the negative
+# with the STANDALONE verifier, which is also what CI asserts:
+cargo build --release --manifest-path ../../../verifier/Cargo.toml
+../../../verifier/target/release/hazync-verify neg500.snark    # must exit 2 — see below
 ```
 
 ⚠ **Start from an EMPTY directory.** A regeneration script that skips work already on disk
@@ -117,6 +121,13 @@ artefacts aside before starting, and keep the resume-skip only within a single r
 ⚠ **One prove at a time.** A CPU prove holds ~4.7 GB. Three concurrent on a 12 GB box drove available
 memory to 276 MB and the kernel killed two of them — and a Docker OOM kill takes the container's
 stdout with it, so they failed with ZERO-BYTE logs that look like a mystery rather than exhaustion.
+
+⚠ **The negative fixture's exit code is 2, and only the standalone verifier produces it.** The gate
+is not "the negative fails" — it is that the negative is refused *on the anchor*: `0` would mean the
+genesis pin is not enforced, `1` would mean the proof was judged invalid, and only `2` means "valid
+SNARK, not genesis-anchored". `host verify-snark` cannot express that distinction; it panics. This
+cost a run on 2026-08-24: every proof, fold and wrap was correct and the run reported failure because
+the final gate asked the wrong binary.
 
 ⚠ Sanity-check the mid-chain receipt with `verify-any`, **not** `verify-range`. `verify-range` asserts
 the range starts at block 1, so it panics `range must start at block 1` on the negative fixture —
