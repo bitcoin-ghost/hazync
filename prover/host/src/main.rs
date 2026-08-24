@@ -4594,6 +4594,18 @@ const JOIN_TAG: u32 = 0x8000_0000;
 // parallelising it. That is a smaller prize than the join tree and it is the whole of the remaining
 // undivided term, which is why it is worth having anyway.
 const RESOLVE_TAG: u32 = 0x4000_0000;
+// PROVE BUT DO NOT LIFT (hazync#157). Bit 29, clear of JOIN_TAG's bit 31 and of any segment index.
+//
+// The last segment cannot be lifted by a worker: the session journal digest and the assumption set
+// are merged into its CLAIM first, and a worker has neither. The push design therefore withheld it
+// and proved it on the coordinator -- but the merge is the only step that needs the session.
+// PROVING never did. The pull design already had this right: the worker proved it and returned the
+// unlifted receipt.
+//
+// So the last segment goes out like any other, tagged, and the worker returns a SegmentReceipt
+// instead of a SuccinctReceipt. The coordinator merges and lifts, which is ~3.4x less work than
+// proving and lifting -- and it lands in the undivided term every card in the fleet waits on.
+const NOLIFT_TAG: u32 = 0x2000_0000;
 
 fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + a.len() + b.len());
@@ -4689,9 +4701,19 @@ fn seg_connect_cmd(addr: &str) {
         }
 
         let seg: Segment = bincode::deserialize(&body).expect("deserialize segment");
-        let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {idx}"));
-        let lifted = server.lift(&sr).expect("lift");
-        let out = bincode::serialize(&lifted).expect("serialize lift");
+        let sr = prove_segment_resilient(&server, &ctx, &seg, &format!("segment {}", idx & !NOLIFT_TAG));
+
+        // NOLIFT: prove and stop. This is the LAST segment, and lifting it needs the session journal
+        // digest and assumption set merged into its claim first -- which the coordinator has and a
+        // worker does not. Proving never needed the session, so it is done here like any other
+        // segment and only the merge stays central (hazync#157).
+        let out = if idx & NOLIFT_TAG != 0 {
+            println!("[{id}] segment {} proved, returned UNLIFTED (last)", idx & !NOLIFT_TAG);
+            bincode::serialize(&sr).expect("serialize segment receipt")
+        } else {
+            let lifted = server.lift(&sr).expect("lift");
+            bincode::serialize(&lifted).expect("serialize lift")
+        };
         if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
         done += 1;
         if done % 25 == 0 || done < 3 {
@@ -4769,7 +4791,12 @@ fn seg_serve_cmd() {
     // and assumption set are merged into its claim before it is lifted, and a worker has no session,
     // so the coordinator proves that one itself. Handing it out anyway is what made the wait below
     // spin -- workers returned all `total` segments while the loop tested for exactly `total - 1`.
-    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total - 1).collect()));
+    // ALL segments, including the last (hazync#157). It is tagged NOLIFT at write time rather than
+    // being stored tagged, so `wire[i]` stays a plain index.
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
+    // The last segment comes back as a SegmentReceipt, not a SuccinctReceipt, so it needs its own
+    // slot -- the `out` vector is typed for lifted receipts.
+    let last_out: Arc<Mutex<Option<SegmentReceipt>>> = Arc::new(Mutex::new(None));
     let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
     // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
     // connection stays open across both phases instead of the fleet disbanding after proving and
@@ -4795,15 +4822,16 @@ fn seg_serve_cmd() {
     // can be plain detached threads. The main thread then stays free to drive the tree WHILE they
     // are still alive, which is the whole point.
     let acc_alldone = alldone.clone();
-    let (aq, ao, aw, aj, ajo) = (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone());
+    let (aq, ao, aw, aj, ajo, alo) =
+        (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone());
     let acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
         while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut s, peer)) => {
                     println!("  worker connected from {peer}");
-                    let (queue, out, wire, jobs, jout, alldone) =
-                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone());
+                    let (queue, out, wire, jobs, jout, alldone, last_out) =
+                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(), alo.clone());
                     handles.push(std::thread::spawn(move || {
                         // Each thread builds its own VerifierContext: it holds Rc, so it is not Sync.
                         let ctx = &VerifierContext::default();
@@ -4814,7 +4842,9 @@ fn seg_serve_cmd() {
                                 let next = { queue.lock().unwrap().pop_front() };
                                 match next {
                                     Some(i) => {
-                                        if write_frame(&mut s, i as u32, &wire[i]).is_err() {
+                                        // Tagged here, not in the queue, so `wire[i]` stays plain.
+                                        let tag = if i == total - 1 { i as u32 | NOLIFT_TAG } else { i as u32 };
+                                        if write_frame(&mut s, tag, &wire[i]).is_err() {
                                             queue.lock().unwrap().push_front(i);
                                             break;
                                         }
@@ -4865,16 +4895,35 @@ fn seg_serve_cmd() {
                             }
                             match read_frame(&mut s) {
                                 Ok((i, body)) => {
+                                    let plain = (i & !NOLIFT_TAG) as usize;
+                                    if i & NOLIFT_TAG != 0 {
+                                        // The last segment comes back PROVED but not lifted, because
+                                        // lifting it needs the session output merged into its claim
+                                        // first and a worker has no session. Verified exactly as
+                                        // every other receipt is -- an untrusted worker gets no more
+                                        // trust for this one than for any other.
+                                        match bincode::deserialize::<SegmentReceipt>(&body) {
+                                            Ok(sr) if sr.verify_integrity_with_context(ctx).is_ok() => {
+                                                *last_out.lock().unwrap() = Some(sr);
+                                            }
+                                            _ => {
+                                                println!("  worker returned an invalid LAST segment receipt");
+                                                queue.lock().unwrap().push_back(plain);
+                                            }
+                                        }
+                                        inflight.retain(|&x| x != plain);
+                                        continue;
+                                    }
                                     let r: SuccinctReceipt<ReceiptClaim> = match bincode::deserialize(&body) {
                                         Ok(r) => r, Err(e) => { println!("  bad receipt for {i}: {e}"); break; }
                                     };
                                     if r.verify_integrity_with_context(ctx).is_err() {
                                         println!("  worker returned an invalid receipt for {i}");
-                                        queue.lock().unwrap().push_back(i as usize);
+                                        queue.lock().unwrap().push_back(plain);
                                     } else {
-                                        out.lock().unwrap()[i as usize] = Some(r);
+                                        out.lock().unwrap()[plain] = Some(r);
                                     }
-                                    inflight.retain(|&x| x != i as usize);
+                                    inflight.retain(|&x| x != plain);
                                 }
                                 Err(_) => {
                                     let mut q = queue.lock().unwrap();
@@ -4910,9 +4959,11 @@ fn seg_serve_cmd() {
             println!("    {have}/{} segments  {el:.0}s elapsed, ~{eta:.0}s left", total - 1);
             nextmark = have + step;
         }
-        if have >= total - 1 { break; }       // >= not ==: a strict equality here spins forever if
-                                              // the count ever overshoots, which is exactly what
-                                              // happened when the last segment was still queued.
+        // Both conditions: total-1 lifted receipts AND the last segment's unlifted receipt. Testing
+        // only the first would fall through with the last segment still in flight -- the same class
+        // of bug as the earlier `== total - 1` spin, in the opposite direction.
+        let have_last = { last_out.lock().unwrap().is_some() };
+        if have >= total - 1 && have_last { break; }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let work_s = t_work.elapsed().as_secs_f64();
@@ -4928,8 +4979,11 @@ fn seg_serve_cmd() {
         let o = out.lock().unwrap();
         for i in 0..total - 1 { lifted.push(o[i].clone().expect("missing lift")); }
     }
-    let last_seg = session.segments[total - 1].resolve().expect("resolve last");
-    let last_rcpt: SegmentReceipt = prove_segment_resilient(&server, &ctx, &last_seg, "last segment");
+    // The last segment was PROVED by a worker (hazync#157). All that is left here is the part that
+    // genuinely needs the session: merging the journal digest and assumption set into its claim, and
+    // lifting the result. prepare_lifts merges into the LAST element of what it is given, so a
+    // one-element vector does exactly that and nothing else.
+    let last_rcpt: SegmentReceipt = last_out.lock().unwrap().take().expect("last segment receipt");
     let mut tail = server.prepare_lifts(&ctx, &session, vec![last_rcpt]).expect("merge+lift last");
     lifted.append(&mut tail);
 
