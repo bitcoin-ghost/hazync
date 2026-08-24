@@ -14,8 +14,15 @@ Complete. Design: `docs/SEGMENT_DISTRIBUTION.md`. Full measurement log: `~/hazyn
 | push transport (`seg-serve` / `seg-connect`) | ✅ identical digest, 10% faster than pull |
 | distributed joins over push | ✅ both phases scale |
 
-**Nine execution paths produce identical receipts**, including segments proved on a different
-machine, by a different binary, against a guest with a different image id.
+**Every path in that table produces an identical receipt**, and so does the monolithic prove they
+are all checked against — nine in total, counting the baseline. The gates are listed row by row above
+rather than summarised as a number, because a bare count is not checkable: an earlier tally in the
+run log says "six execution paths", which was correct when it was written and predates the last three
+rows.
+
+The strongest of the nine is the cross-machine one: segments proved on a different machine, by a
+different binary, against a guest with a different image id, still fold into the same journal
+digest.
 
 ## The measurement
 
