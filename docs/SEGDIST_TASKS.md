@@ -91,5 +91,9 @@ soundness. That is what allows a heterogeneous fleet.
 
 ## Related
 
-#148 (this work), #143, #151, #145, #119, #69. #152 remains: rescue the lax-DER tests before
-`feat/pipeline-preflight` is dropped.
+#148 (this work), #143, #151, #145, #119, #69.
+
+⚠ **#152 is closed, but its rescue never happened.** `feat/pipeline-preflight` was dropped and now
+exists only as tag `archive/pipeline-preflight`. The 152-line differential it was meant to rescue,
+`guest-pure-fuzz/tests/der_lax_historical.rs`, is **not on `main`** and has no equivalent there. It is
+recoverable only from that tag, so the tag must not be deleted until the file is cherry-picked.
