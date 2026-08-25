@@ -28,7 +28,12 @@ cd "$(dirname "$0")/.." || exit 1
 # shadow is not a default.
 REGISTRY="${HAZYNC_REGISTRY:-ghcr.io}"
 OWNER="${HAZYNC_OWNER:-bitcoin-ghost}"
-NAME="${HAZYNC_DEPS_NAME:-hazync-deps}"
+# Which variant. cpu is the default because it is what `reproduce/Dockerfile` builds from and what
+# anyone standing up a non-GPU box wants; cuda exists for release builds of the CUDA host (#167).
+VARIANT="${1:-cpu}"
+case "$VARIANT" in cpu|cuda) ;; *) echo "usage: $0 [cpu|cuda]" >&2; exit 2 ;; esac
+STAGE="deps-$VARIANT"
+NAME="${HAZYNC_DEPS_NAME:-hazync-deps-$VARIANT}"
 PUSH="${HAZYNC_PUSH:-0}"
 
 # Everything that determines the deps stage -- the STAGE ITSELF plus the content of every path it
@@ -44,8 +49,16 @@ PUSH="${HAZYNC_PUSH:-0}"
 base=$(grep -oE 'ubuntu:[0-9.]+@sha256:[0-9a-f]{64}' reproduce/Dockerfile | head -1)
 [ -n "$base" ] || { echo "no digest-pinned FROM in reproduce/Dockerfile"; exit 2; }
 
-deps_stage=$(awk '/^FROM /{ if (started) exit; if ($0 ~ / AS deps$/) started=1 } started' reproduce/Dockerfile)
-[ -n "$deps_stage" ] || { echo "could not extract the 'AS deps' stage from reproduce/Dockerfile"; exit 2; }
+# Hash from the FIRST stage through the END of the target stage, not the target stage alone.
+# deps-cuda is `FROM deps-cpu`, so its content depends on deps-cpu's content: hashing only its own
+# two lines would leave a change to the cpu base unable to move the cuda tag -- the exact defect
+# hazync#171 was about, one level up.
+deps_stage=$(awk -v t="AS $STAGE" '
+  /^FROM / { if (intarget) exit; if (index($0, t)) intarget=1; started=1 }
+  started  { print }
+' reproduce/Dockerfile)
+[ -n "$deps_stage" ] || { echo "could not extract the '$STAGE' stage from reproduce/Dockerfile"; exit 2; }
+printf '%s\n' "$deps_stage" | grep -q "AS $STAGE" || { echo "extracted text does not contain '$STAGE' -- refusing to hash the wrong stage"; exit 2; }
 copy_paths=$(printf '%s\n' "$deps_stage" | awk '/^COPY /{print $2}')
 [ -n "$copy_paths" ] || { echo "no COPY lines found in the deps stage -- refusing to hash nothing"; exit 2; }
 
@@ -55,7 +68,8 @@ tag=$( { printf '%s\n' "$deps_stage"
 ref="$REGISTRY/$OWNER/$NAME:$tag"
 
 echo "base:  $base"
-echo "tag:   $tag   (sha256 of the whole deps stage + every path it COPYs)"
+echo "variant: $VARIANT   (stage $STAGE)"
+echo "tag:   $tag   (sha256 of every stage up to $STAGE + every path they COPY)"
 echo "copies:$(printf '%s' "$copy_paths" | tr '\n' ' ')"
 echo "ref:   $ref"
 
@@ -65,8 +79,8 @@ echo "building the deps stage…"
 # must use the LOCAL tag -- a bare sha256:... passed through --build-arg is resolved by buildkit as
 # a REGISTRY reference (docker.io/library/sha256:...) and fails with "pull access denied", and the
 # registry ref would be pulled rather than found locally because it has not been pushed yet.
-local_tag="hazync-deps:$tag"
-docker build --target deps -t "$local_tag" -t "$ref" -f reproduce/Dockerfile . || { echo "build failed"; exit 3; }
+local_tag="hazync-deps-$VARIANT:$tag"
+docker build --target "$STAGE" -t "$local_tag" -t "$ref" -f reproduce/Dockerfile . || { echo "build failed"; exit 3; }
 id=$(docker image inspect "$local_tag" --format '{{.Id}}')
 echo "local image id: $id"
 echo "local tag:      $local_tag"
@@ -75,9 +89,9 @@ echo "local tag:      $local_tag"
 # does not, the image is wrong and publishing it would hand people a broken shortcut.
 echo
 echo "verifying a full build from it yields the canonical guest id…"
-docker build --build-arg DEPS_IMAGE="$local_tag" -t hazync-repro-verify:$tag -f reproduce/Dockerfile . \
+docker build --build-arg DEPS_IMAGE="$local_tag" -t hazync-repro-verify-$VARIANT:$tag -f reproduce/Dockerfile . \
   || { echo "build from the deps image failed"; exit 4; }
-got=$(docker run --rm hazync-repro-verify:$tag 2>/dev/null | awk '/^METHOD_ID/{print $2}')
+got=$(docker run --rm hazync-repro-verify-$VARIANT:$tag 2>/dev/null | awk '/^METHOD_ID/{print $2}')
 want=$(grep -oE '^[0-9a-f]{64}$' reproduce/METHOD_ID | head -1)
 echo "  from deps image: ${got:-<none>}"
 echo "  canonical pin:   ${want:-<none>}"

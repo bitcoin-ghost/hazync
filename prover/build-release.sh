@@ -42,6 +42,40 @@ esac
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 OUT="${OUT:-$REPO/dist}"
 IMAGE="${IMAGE:-ubuntu:22.04}"
+
+# hazync#167: optionally start from a published deps image instead of provisioning from scratch.
+#
+# OPT-IN, and it must stay opt-in. With HAZYNC_DEPS_IMAGE unset this script behaves exactly as it
+# always has: bare ubuntu, all eight provision phases, no network dependency on anything we publish.
+# That matters because this is the path that produces the SHIPPED binaries.
+#
+# The saving is real but conditional -- measured at ~5 min per build on a datacenter host and ~30 on
+# a domestic link, because phases 1-7 are almost entirely download. Worth having, not worth risking
+# a release for, which is why an unreachable image falls back rather than failing.
+#
+# ⚠ The variant must match the build. deps-cuda is deps-cpu plus phase 7, and `HAZYNC_PROVISION=build`
+# SKIPS phase 7 -- so a cuda build handed the cpu image would compile the CUDA backend against a
+# toolkit that was never installed. Checked below rather than trusted.
+PROVISION_PHASE=all
+if [ -n "${HAZYNC_DEPS_IMAGE:-}" ]; then
+    want="deps-$MODE"
+    case "$HAZYNC_DEPS_IMAGE" in
+        *"$want"*) ;;
+        *) echo "  REFUSING the deps image: $MODE build needs a $want image, got:" >&2
+           echo "      $HAZYNC_DEPS_IMAGE" >&2
+           echo "  A cuda build on a cpu deps image compiles CUDA against a toolkit phase 7 never" >&2
+           echo "  installed, because HAZYNC_PROVISION=build skips phase 7." >&2
+           exit 2 ;;
+    esac
+    if docker image inspect "$HAZYNC_DEPS_IMAGE" >/dev/null 2>&1 || docker pull -q "$HAZYNC_DEPS_IMAGE" >/dev/null 2>&1; then
+        IMAGE="$HAZYNC_DEPS_IMAGE"
+        PROVISION_PHASE=build
+        echo "  using deps image $IMAGE (phases 1-7 already baked; running phase 8 only)"
+    else
+        echo "  deps image $HAZYNC_DEPS_IMAGE is unreachable — falling back to a full provision." >&2
+        echo "  (A release must not fail because a registry was down; it may only be slower.)" >&2
+    fi
+fi
 mkdir -p "$OUT"
 
 [ -x "$REPO/provision-vps.sh" ] || { echo "no provision-vps.sh under REPO=$REPO" >&2; exit 1; }
@@ -129,6 +163,7 @@ echo "   HEAD: $(git -C "$REPO" describe --tags --always 2>/dev/null || echo unk
 docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninteractive \
     -e "RECURSION_SRC_PATH=/hazync-zkvm/reproduce/vendor/recursion_zkr.zip" \
     -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
+    -e "HAZYNC_PROVISION=$PROVISION_PHASE" \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
