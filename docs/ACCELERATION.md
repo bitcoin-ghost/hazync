@@ -69,6 +69,49 @@ board and nothing about it is contingent on #139.
 | **A faster card** | **0.95x** — the bandwidth model is dead | 3.9x the HBM bandwidth bought nothing. The run is **25.1% GPU-idle** waiting on host-side work between segments, and bandwidth cannot fill an idle gap |
 | po2 23 | Blocked | `DEFAULT_MAX_PO2 = 22` in risc0-zkvm. A software cap, not a VRAM one |
 
+### po2 23 does not work — and the "software cap" framing above is wrong
+
+Tested directly on the B200: `DEFAULT_MAX_PO2` raised 22 -> 23 in `vendor/risc0-zkvm`, rebuilt
+(2m 50s, cached kernels), native `sm_100`, same aggregate.
+
+**Control first.** The cap-23 binary at po2 **22** produced digest `306fc568...` — identical — and
+TOTAL 1,678.0 s against the cap-22 binary's 1,702.3 s, a 1.4% difference well inside run-to-run
+variance. So the constant is inert until the larger po2 is actually requested, and any po2 23 result
+is comparable.
+
+**Then po2 23, which engages and then fails:**
+
+```
+execution 28.7 s   186 segments, 261.9 MB      <- 186, down from 375: the cap IS live
+peak VRAM 79,454 MiB                            <- the 1.8x-per-step ladder extrapolated ~78 GB
+
+[#119] segment 0: attempt 1/3 failed: verify segment: verification indicates proof is invalid
+[#119] segment 0: attempt 2/3 failed: verify segment: verification indicates proof is invalid
+[#119] segment 0: attempt 3/3 failed: verify segment: verification indicates proof is invalid
+thread 'main' panicked at host/src/main.rs:5236:5
+```
+
+**Every proof of segment 0 failed its own verification.** Three times, identically. That is not the
+#119 transient: at the measured 1-in-750 base rate, three consecutive failures is ~2e-9. It is
+systematic.
+
+⚠ **So `DEFAULT_MAX_PO2` is not merely a policy gate, and this document's "po2 23 is a SOFTWARE cap,
+not a VRAM one" is misleading.** True as far as it goes — the H100's spare VRAM is indeed irrelevant
+— but it reads as "one constant stands between us and po2 23", and that is not the case. Raising it
+lets the prover ATTEMPT a segment size the recursion circuit and verifier parameters do not support,
+and the result is an invalid proof. The 97-bits-at-po2-21, 1-bit-per-po2 security trade-off recorded
+beside the constant never arises, because there is nothing valid to trade.
+
+Two things worth crediting:
+
+* **The #148 retry wrapper behaved exactly right on a fault it was not written for.** It retried the
+  transient-looking signature three times, then panicked naming the segment and the error, rather
+  than shipping an invalid proof or retrying for ever.
+* **The VRAM ladder extrapolates well** even where the po2 does not work: predicted ~78 GB from
+  1.8x per step, measured 79,454 MiB.
+
+Anyone revisiting po2 23 needs a risc0 version whose circuits support it, not a one-line edit.
+
 ### Open
 
 | Option | Gain | New `METHOD_ID`? | Core code no longer proven |
