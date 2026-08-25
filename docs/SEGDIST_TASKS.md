@@ -93,7 +93,23 @@ soundness. That is what allows a heterogeneous fleet.
 
 #148 (this work), #143, #151, #145, #119, #69.
 
-⚠ **#152 is closed, but its rescue never happened.** `feat/pipeline-preflight` was dropped and now
-exists only as tag `archive/pipeline-preflight`. The 152-line differential it was meant to rescue,
-`guest-pure-fuzz/tests/der_lax_historical.rs`, is **not on `main`** and has no equivalent there. It is
-recoverable only from that tag, so the tag must not be deleted until the file is cherry-picked.
+⛔ **#152 is closed, its rescue never happened, and the rescue is NOT a cherry-pick.**
+`feat/pipeline-preflight` was dropped and survives only as tag `archive/pipeline-preflight`. Two test
+files are missing from `main` -- `guest-pure-fuzz/tests/der_lax_historical.rs` (152 lines, 35
+constructed DER violations) and `der_lax_differential.rs` (122 lines) -- and neither can be lifted
+across on its own.
+
+They include the guest parser BY PATH:
+
+    #[path = "../../prover/methods/guest/src/ecdsa_der.rs"]
+    pub mod ecdsa_der;
+
+and `prover/methods/guest/src/ecdsa_der.rs` **does not exist on `main`**. It arrives only with #139's
+wholesale bigint2 ECDSA, together with `ecdsa_bigint2.rs`. Copying the parser into the test crate
+instead is explicitly ruled out by the tests' own rationale -- a differential checked against a stale
+copy proves only that the copy matches itself.
+
+So the rescue is **blocked on #139 landing**, not on anyone remembering to cherry-pick, and closing
+#152 was defensible. What is NOT safe is deleting the tag: it is the sole copy of both the tests and
+the guest modules under test. Verified by build, not by inspection -- restoring the two files onto
+`main` fails to compile with `could not find ecdsa_der in guest_pure_fuzz`.
