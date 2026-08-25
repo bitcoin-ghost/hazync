@@ -100,7 +100,17 @@ echo "published: $ref"
 # Pin by DIGEST, not by tag. A registry tag is mutable by definition -- anyone who can push can move
 # it, and hazync#171 showed the tag can even fail to move when the content does. The digest cannot.
 # This is the same reasoning that pinned reproduce/Dockerfile's own base image by digest (hazync#146).
-digest=$(docker image inspect "$ref" --format '{{index .RepoDigests 0}}' 2>/dev/null)
+# Select the digest FOR THIS REGISTRY, do not take RepoDigests[0]. The image is deliberately tagged
+# twice -- a local name for verification and the registry ref for pushing -- so RepoDigests holds
+# BOTH, and index 0 was the LOCAL one:
+#
+#     hazync-deps@sha256:f45e2787…                          <- index 0, unusable by anyone else
+#     ghcr.io/bitcoin-ghost/hazync-deps@sha256:f45e2787…     <- the one to publish
+#
+# The digest itself was right; the reference around it named a repository that exists only on the
+# machine that built it, so the pin instruction this script prints could not resolve for a reader.
+digest=$(docker image inspect "$ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
+         | grep "^$REGISTRY/$OWNER/$NAME@" | head -1)
 echo
 if [ -n "$digest" ]; then
   echo "digest:    $digest"
