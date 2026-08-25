@@ -24,9 +24,9 @@
 # Declared BEFORE any FROM on purpose: docker only substitutes an ARG into a FROM line if it was
 # declared in the global scope. Put it next to stage 2 where it is used and the build fails with
 # "base name (${DEPS_IMAGE}) should not be blank".
-ARG DEPS_IMAGE=deps
+ARG DEPS_IMAGE=deps-cpu
 
-FROM ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 AS deps
+FROM ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 AS deps-cpu
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
@@ -73,6 +73,26 @@ RUN --mount=type=secret,id=gh_token,required=false \
 # when it had not.
 LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
 
+# ── STAGE 1b: the same dependencies PLUS CUDA (hazync#167) ────────────────────────────────────────
+#
+# FROM deps-cpu, not a second copy of stage 1. CUDA is purely ADDITIVE: provision-vps.sh has no GPU
+# conditional anywhere in phases 1-6, and its only GPU branch IS phase 7, `install CUDA 12.6`. So
+# deps-cuda is deps-cpu plus exactly one phase, and building it as a layer on top says so.
+#
+# Two images rather than one because the delta is not small -- CUDA is several GB against an 8.35 GB
+# cpu image -- and every cpu-build consumer, plus everyone standing up a non-GPU box, would otherwise
+# download it for nothing. And two rather than THREE: a "combined" image would be byte-identical to
+# this one under a different name.
+#
+# ⚠ Re-running the deps phase re-runs 1-6. They are idempotent and near-instant on an already
+# provisioned image; phase 7 is the part that does work. That is the price of provision-vps.sh
+# having no gpu-only phase, and it is paid once per published image, not per build.
+FROM deps-cpu AS deps-cuda
+RUN --mount=type=secret,id=gh_token,required=false \
+    if [ -s /run/secrets/gh_token ]; then export GITHUB_TOKEN="$(cat /run/secrets/gh_token)"; fi && \
+    SKIP_GROTH16=1 GPU=1 HAZYNC_PROVISION=deps ./provision-vps.sh
+LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
+
 # ── STAGE 2: the guest build ──────────────────────────────────────────────────────────────────────
 #
 # Now the repo. Everything above is cached, so this is the only layer an ordinary change rebuilds.
@@ -87,7 +107,7 @@ LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
 # new box) fetches the lot every time, and a cache cannot help a machine that has never built.
 #
 #   # build the dependency layer once, and pin what you got:
-#   docker build --target deps -t hazync-deps -f reproduce/Dockerfile .
+#   docker build --target deps-cpu -t hazync-deps -f reproduce/Dockerfile .
 #   docker image inspect hazync-deps --format '{{index .Id}}'
 #
 #   # thereafter, no network fetch at all:
