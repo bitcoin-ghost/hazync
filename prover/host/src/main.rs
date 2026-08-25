@@ -4806,6 +4806,28 @@ fn seg_serve_cmd() {
     let wire = Arc::new(wire);
     let bytes: usize = wire.iter().map(|v| v.len()).sum();
 
+    // hazync#163: bound the in-flight window by BYTES, not by frame count.
+    //
+    // `depth` alone is meaningless because HAZYNC_SEG_PO2 changes segment size underneath it: at
+    // po2 18 a segment is small enough that depth 16 fits in the socket buffers, at po2 22 it is
+    // ~0.77 MB and the same depth puts 12.3 MB in flight, which does not. The old failure was a
+    // write/write deadlock -- silent, unbounded, and indistinguishable from a slow run.
+    //
+    // The reader/writer split below removes that deadlock outright; this clamp keeps the knob
+    // MEANINGFUL, so a depth that is safe on one po2 does not silently become absurd on another.
+    // It announces itself: a cap applied in silence reads as "your setting was honoured".
+    let depth = {
+        let budget: usize = std::env::var("HAZYNC_PUSH_BYTES").ok().and_then(|s| s.parse().ok())
+            .unwrap_or(4 * 1024 * 1024);
+        let maxseg = wire.iter().map(|v| v.len()).max().unwrap_or(1).max(1);
+        let cap = (budget / maxseg).max(1);
+        if depth > cap {
+            println!("  push depth {depth} -> {cap}: {maxseg} B/segment against a {budget} B budget \
+(HAZYNC_PUSH_BYTES). Raise the budget, not the depth.");
+            cap
+        } else { depth }
+    };
+
     if !agg { println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
     println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
     println!("  listening on 0.0.0.0:{port}");
@@ -4856,75 +4878,61 @@ fn seg_serve_cmd() {
                     let (queue, out, wire, jobs, jout, alldone, last_out) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(), alo.clone());
                     handles.push(std::thread::spawn(move || {
-                        // Each thread builds its own VerifierContext: it holds Rc, so it is not Sync.
-                        let ctx = &VerifierContext::default();
+                        // hazync#163: one READER thread and one WRITER thread per connection.
+                        //
+                        // The old shape was a single thread that topped up to `depth` frames before
+                        // it could reach any read_frame, so depth*segment_bytes went out with
+                        // nothing draining the return path. write_frame is write_all on a BLOCKING
+                        // socket and no write timeout is ever set, so once the buffers filled both
+                        // ends blocked in write_all for ever. Splitting the directions across two
+                        // threads on cloned handles removes the class, rather than tuning around it.
+                        //
+                        // No new correlation scheme is needed: receipts are matched by the RETURNED
+                        // TAG, not by position, so `inflight` is only a bound and a requeue list.
                         s.set_nodelay(true).ok();
-                        let mut inflight: VecDeque<usize> = VecDeque::new();
-                        loop {
-                            while inflight.len() < depth {
-                                let next = { queue.lock().unwrap().pop_front() };
-                                match next {
-                                    Some(i) => {
-                                        // Tagged here, not in the queue, so `wire[i]` stays plain.
-                                        let tag = if i == total - 1 { i as u32 | NOLIFT_TAG } else { i as u32 };
-                                        if write_frame(&mut s, tag, &wire[i]).is_err() {
-                                            queue.lock().unwrap().push_front(i);
-                                            break;
-                                        }
-                                        inflight.push_back(i);
-                                    }
-                                    None => break,
-                                }
-                            }
-                            if inflight.is_empty() {
-                                // Segments are gone: take join work as each level is published, and
-                                // idle between levels rather than disconnecting.
-                                let job = { jobs.lock().unwrap().pop_front() };
-                                if let Some((tag, body)) = job {
-                                    if write_frame(&mut s, tag, &body).is_err() {
-                                        jobs.lock().unwrap().push_front((tag, body));
-                                        break;
-                                    }
-                                    match read_frame(&mut s) {
-                                        Ok((rt, rb)) => {
-                                            match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&rb) {
-                                                Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
-                                                    jout.lock().unwrap().insert(rt, r);
-                                                }
-                                                _ => {
-                                                    // Tag-aware: this path now carries resolves as
-                                                    // well as joins, and printing a resolve's index
-                                                    // masked with !JOIN_TAG would name the wrong job.
-                                                    let (kind, n) = if rt & RESOLVE_TAG != 0 {
-                                                        ("resolve", rt & !RESOLVE_TAG)
-                                                    } else {
-                                                        ("join", rt & !JOIN_TAG)
-                                                    };
-                                                    println!("  worker returned a bad {kind} for {n}");
-                                                    jobs.lock().unwrap().push_back((tag, body));
-                                                }
+                        let mut ws = s;
+                        let mut rs = match ws.try_clone() { Ok(r) => r, Err(e) => {
+                            println!("  cannot split connection: {e}"); return; } };
+
+                        // Sent-but-unanswered work, so a dropped connection returns exactly what it owed.
+                        let inflight: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(VecDeque::new()));
+                        let injobs: Arc<Mutex<VecDeque<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
+                        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+                        let reader = {
+                            let (inflight, injobs, stop) = (inflight.clone(), injobs.clone(), stop.clone());
+                            let (out, jout, last_out, queue, jobs) =
+                                (out.clone(), jout.clone(), last_out.clone(), queue.clone(), jobs.clone());
+                            std::thread::spawn(move || {
+                                // Its own VerifierContext: it holds Rc, so it is not Sync.
+                                let ctx = &VerifierContext::default();
+                                loop {
+                                    let (i, body) = match read_frame(&mut rs) { Ok(v) => v, Err(_) => break };
+                                    if i & JOIN_TAG != 0 || i & RESOLVE_TAG != 0 {
+                                        // The worker proves serially and answers in order, so the
+                                        // front of injobs is the job this reply belongs to.
+                                        let owed = { injobs.lock().unwrap().pop_front() };
+                                        match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&body) {
+                                            Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
+                                                jout.lock().unwrap().insert(i, r);
+                                            }
+                                            _ => {
+                                                let (kind, n) = if i & RESOLVE_TAG != 0 {
+                                                    ("resolve", i & !RESOLVE_TAG)
+                                                } else { ("join", i & !JOIN_TAG) };
+                                                println!("  worker returned a bad {kind} for {n}");
+                                                // MUST requeue explicitly: it has been popped off
+                                                // injobs, so the teardown requeue will not cover it.
+                                                // Dropping it would lose a join for ever and the tree
+                                                // would wait on it until the run died.
+                                                if let Some(j) = owed { jobs.lock().unwrap().push_back(j); }
                                             }
                                         }
-                                        Err(_) => { jobs.lock().unwrap().push_front((tag, body)); break; }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                if alldone.load(std::sync::atomic::Ordering::Relaxed) {
-                                    let _ = write_frame(&mut s, SEG_EOF, &[]);
-                                    break;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(20));
-                                continue;
-                            }
-                            match read_frame(&mut s) {
-                                Ok((i, body)) => {
                                     let plain = (i & !NOLIFT_TAG) as usize;
+                                    inflight.lock().unwrap().retain(|&x| x != plain);
                                     if i & NOLIFT_TAG != 0 {
-                                        // The last segment comes back PROVED but not lifted, because
-                                        // lifting it needs the session output merged into its claim
-                                        // first and a worker has no session. Verified exactly as
-                                        // every other receipt is -- an untrusted worker gets no more
-                                        // trust for this one than for any other.
                                         match bincode::deserialize::<SegmentReceipt>(&body) {
                                             Ok(sr) if sr.verify_integrity_with_context(ctx).is_ok() => {
                                                 *last_out.lock().unwrap() = Some(sr);
@@ -4934,26 +4942,72 @@ fn seg_serve_cmd() {
                                                 queue.lock().unwrap().push_back(plain);
                                             }
                                         }
-                                        inflight.retain(|&x| x != plain);
                                         continue;
                                     }
-                                    let r: SuccinctReceipt<ReceiptClaim> = match bincode::deserialize(&body) {
-                                        Ok(r) => r, Err(e) => { println!("  bad receipt for {i}: {e}"); break; }
-                                    };
-                                    if r.verify_integrity_with_context(ctx).is_err() {
-                                        println!("  worker returned an invalid receipt for {i}");
-                                        queue.lock().unwrap().push_back(plain);
-                                    } else {
-                                        out.lock().unwrap()[plain] = Some(r);
+                                    match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&body) {
+                                        Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
+                                            out.lock().unwrap()[plain] = Some(r);
+                                        }
+                                        _ => {
+                                            println!("  worker returned an invalid receipt for {i}");
+                                            queue.lock().unwrap().push_back(plain);
+                                        }
                                     }
-                                    inflight.retain(|&x| x != plain);
                                 }
-                                Err(_) => {
-                                    let mut q = queue.lock().unwrap();
-                                    for i in inflight.drain(..) { q.push_front(i); }
-                                    break;
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            })
+                        };
+
+                        // Writer. It can block in write_all without consequence now, because the
+                        // reader is draining the other direction on its own thread.
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed)
+                              && !alldone.load(std::sync::atomic::Ordering::Relaxed) {
+                            let room = { depth.saturating_sub(inflight.lock().unwrap().len()) };
+                            let mut wrote = false;
+                            for _ in 0..room {
+                                let next = { queue.lock().unwrap().pop_front() };
+                                match next {
+                                    Some(i) => {
+                                        let tag = if i == total - 1 { i as u32 | NOLIFT_TAG } else { i as u32 };
+                                        inflight.lock().unwrap().push_back(i);   // record BEFORE the write
+                                        if write_frame(&mut ws, tag, &wire[i]).is_err() {
+                                            inflight.lock().unwrap().retain(|&x| x != i);
+                                            queue.lock().unwrap().push_front(i);
+                                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                            break;
+                                        }
+                                        wrote = true;
+                                    }
+                                    None => break,
                                 }
                             }
+                            if !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                let job = { jobs.lock().unwrap().pop_front() };
+                                if let Some((tag, body)) = job {
+                                    injobs.lock().unwrap().push_back((tag, body.clone()));
+                                    if write_frame(&mut ws, tag, &body).is_err() {
+                                        injobs.lock().unwrap().pop_back();
+                                        jobs.lock().unwrap().push_front((tag, body));
+                                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    } else { wrote = true; }
+                                }
+                            }
+                            if !wrote { std::thread::sleep(std::time::Duration::from_millis(20)); }
+                        }
+                        if alldone.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = write_frame(&mut ws, SEG_EOF, &[]);
+                        }
+
+                        // Break the reader out of its blocking read, then return what was owed.
+                        let _ = ws.shutdown(std::net::Shutdown::Both);
+                        let _ = reader.join();
+                        {
+                            let mut q = queue.lock().unwrap();
+                            for i in inflight.lock().unwrap().drain(..) { q.push_front(i); }
+                        }
+                        {
+                            let mut j = jobs.lock().unwrap();
+                            for it in injobs.lock().unwrap().drain(..) { j.push_front(it); }
                         }
                     }));
                 }
