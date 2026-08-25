@@ -281,6 +281,36 @@ paging, and a sweep that only goes up cannot falsify it. Record peak guest memor
 **E3 note.** This experiment produces a *price*, not a decision. If it is under ~1%, close §3.4
 permanently and write down that it was measured — that is worth more than the cycles.
 
+#### Harness validated on the laptop, 2026-08-26
+
+Tier 0 was checked as runnable rather than assumed, because a plan whose experiments cannot execute is
+worth much less than it looks.
+
+| precondition | state |
+|---|---|
+| riscv cpp toolchain | `v2024.1.5-cpp` — **matches the pin** |
+| rust toolchain | `v1.94.1-rust` — **matches the pin** |
+| Bitcoin Core source | `v28.0` — **matches the pin** |
+| secp256k1 source | `v0.5.1` — **matches the pin** |
+| block witness | `prover/block_962000.json`, 4.3 MB, real |
+| control build | `cargo build --release -j2`, **3m26s**, exit 0 |
+| disk | 209 GB free — the 2026-08 wedge condition is absent |
+
+⚠ **The local build yields guest id `916cde9e…`, not the canonical `1d6c3792…`, and that is EXPECTED.**
+`reproduce/METHOD_ID` states the canonical id is produced only by `docker build -f reproduce/Dockerfile .`
+at fixed `/root` paths; a local checkout builds at a different absolute path and hazync#88 explains why
+that alone moves the id (panic metadata).
+
+What matters for these experiments is that **every pinned input matches**, so the guest SOURCE and
+toolchain here are identical to the fleet's. A/B cycle comparisons taken on this laptop are therefore
+valid and transfer; only the absolute id does not. Any arm must still be compared against a control
+built on the same machine in the same session, never against a number carried from a box.
+
+⚠ **Reading the id needs the `method-id` subcommand, not `strings`.** Scraping the first 64-hex string
+out of the binary returns `000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f` — the
+Bitcoin genesis hash — which looks exactly like a plausible id and is not one. Verified by control: a
+nonsense subcommand prints no hex at all.
+
 ### Tier 1 — one card, hours
 
 | id | experiment | arms | decides |
