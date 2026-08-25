@@ -4817,8 +4817,17 @@ fn seg_serve_cmd() {
     // MEANINGFUL, so a depth that is safe on one po2 does not silently become absurd on another.
     // It announces itself: a cap applied in silence reads as "your setting was honoured".
     let depth = {
+        // 64 MB, not 4 MB. Measured cross-box on block 962000 at po2 22: segments average
+        // 288.7 MB / 376 = 0.77 MB, but the LARGEST is 3.98 MB. Clamping by max() against a 4 MB
+        // budget therefore yielded cap = 1 -- no pipelining at all, one segment in flight, and a
+        // measured 10.7% throughput loss against the unclamped control (360/375 at 1535 s vs
+        // 1387 s). A guard against a hang that has never reproduced must not cost that.
+        //
+        // This bound is now belt-and-braces: the reader/writer split above removes the deadlock
+        // class outright, so the budget only exists to stop a pathological depth from queueing
+        // absurd amounts. Sized so the default depth stays fully pipelined at po2 22.
         let budget: usize = std::env::var("HAZYNC_PUSH_BYTES").ok().and_then(|s| s.parse().ok())
-            .unwrap_or(4 * 1024 * 1024);
+            .unwrap_or(64 * 1024 * 1024);
         let maxseg = wire.iter().map(|v| v.len()).max().unwrap_or(1).max(1);
         let cap = (budget / maxseg).max(1);
         if depth > cap {
@@ -4908,7 +4917,23 @@ fn seg_serve_cmd() {
                                 let ctx = &VerifierContext::default();
                                 loop {
                                     let (i, body) = match read_frame(&mut rs) { Ok(v) => v, Err(_) => break };
-                                    if i & JOIN_TAG != 0 || i & RESOLVE_TAG != 0 {
+                                    // EVERY job reply lands in jout, keyed by the tag it came
+                                    // back under -- joins, resolves AND the merged lift (#161).
+                                    //
+                                    // Omitting LIFT_TAG here was fatal: the coordinator pushes the
+                                    // merged last segment as jobs.push_back((LIFT_TAG, body)) and
+                                    // then waits on jout.remove(&LIFT_TAG), so the reply has to be
+                                    // routed here. Falling through instead reached the segment path,
+                                    // where `plain = i & !NOLIFT_TAG` leaves bit 28 set and indexes
+                                    // out[0x10000000] -- panicking at the LAST step of every
+                                    // distributed aggregate:
+                                    //
+                                    //   index out of bounds: the len is 376 but the index is 268435456
+                                    //
+                                    // The pre-split code could not have this bug: it read each job
+                                    // reply inline and inserted under whatever tag returned. Making
+                                    // the routing explicit is what created the chance to miss one.
+                                    if i & (JOIN_TAG | RESOLVE_TAG | LIFT_TAG) != 0 {
                                         // The worker proves serially and answers in order, so the
                                         // front of injobs is the job this reply belongs to.
                                         let owed = { injobs.lock().unwrap().pop_front() };
