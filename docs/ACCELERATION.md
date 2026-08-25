@@ -69,6 +69,68 @@ board and nothing about it is contingent on #139.
 | **A faster card** | **0.95x** — the bandwidth model is dead | 3.9x the HBM bandwidth bought nothing. The run is **25.1% GPU-idle** waiting on host-side work between segments, and bandwidth cannot fill an idle gap |
 | po2 23 | Blocked | `DEFAULT_MAX_PO2 = 22` in risc0-zkvm. A software cap, not a VRAM one |
 
+### po2 23 does not work — and the "software cap" framing above is wrong
+
+Tested directly on the B200: `DEFAULT_MAX_PO2` raised 22 -> 23 in `vendor/risc0-zkvm`, rebuilt
+(2m 50s, cached kernels), native `sm_100`, same aggregate.
+
+**Control first.** The cap-23 binary at po2 **22** produced digest `306fc568...` — identical — and
+TOTAL 1,678.0 s against the cap-22 binary's 1,702.3 s, a 1.4% difference well inside run-to-run
+variance. So the constant is inert until the larger po2 is actually requested, and any po2 23 result
+is comparable.
+
+**Then po2 23, which engages and then fails:**
+
+```
+execution 28.7 s   186 segments, 261.9 MB      <- 186, down from 375: the cap IS live
+peak VRAM 79,454 MiB                            <- the 1.8x-per-step ladder extrapolated ~78 GB
+
+[#119] segment 0: attempt 1/3 failed: verify segment: verification indicates proof is invalid
+[#119] segment 0: attempt 2/3 failed: verify segment: verification indicates proof is invalid
+[#119] segment 0: attempt 3/3 failed: verify segment: verification indicates proof is invalid
+thread 'main' panicked at host/src/main.rs:5236:5
+```
+
+**Every proof of segment 0 failed its own verification.** Three times, identically. That is not the
+#119 transient: at the measured 1-in-750 base rate, three consecutive failures is ~2e-9. It is
+systematic.
+
+⚠ **It is NOT that po2 23 is unsupported.** That was the first explanation and it is wrong, checked
+against upstream:
+
+* `risc0-zkp` sets **`MAX_CYCLES_PO2 = 24`** — po2 23 is inside the prover's range.
+* `zkr::lift(claim.po2)` selects a lift program by po2, and our vendored `recursion_zkr.zip` contains
+  **`lift_rv32im_v2_14.zkr` through `lift_rv32im_v2_24.zkr`** — 23 and 24 are both present.
+
+So the machinery for po2 23 exists at every layer we can see, and the failure is **unexplained**.
+
+⚠⚠ **AND THE ERROR IS #119's EXACT SIGNATURE.** `verify segment: verification indicates proof is
+invalid` is the CUDA prover emitting a receipt that fails its own verification — the fault #119 has
+tracked for months at an unknown rate, with upstream dormant.
+
+| | rate |
+|---|---|
+| po2 22, measured over 1,500 segments | **~1 in 750** |
+| po2 23 | **3 of 3 on segment 0** |
+
+**If that holds, po2 23 is a deterministic reproducer for #119.** That is exactly what the upstream
+report (risc0 #3798/#3799, no replies) has lacked: an intermittent 0.13% fault is hard to act on,
+whereas "set `segment_limit_po2 = 23` and it fails every time" is not. Worth confirming on a second
+card and at a second po2 before filing, but it is the strongest lead #119 has had.
+
+What this does NOT establish is the security trade-off recorded beside the constant
+(97 bits at po2 21, 1 bit per po2). That question is untouched: nothing valid was produced to trade.
+
+Two things worth crediting:
+
+* **The #148 retry wrapper behaved exactly right on a fault it was not written for.** It retried the
+  transient-looking signature three times, then panicked naming the segment and the error, rather
+  than shipping an invalid proof or retrying for ever.
+* **The VRAM ladder extrapolates well** even where the po2 does not work: predicted ~78 GB from
+  1.8x per step, measured 79,454 MiB.
+
+Anyone revisiting po2 23 needs a risc0 version whose circuits support it, not a one-line edit.
+
 ### Open
 
 | Option | Gain | New `METHOD_ID`? | Core code no longer proven |
@@ -726,3 +788,171 @@ evidence, **7,015** after #138 zero-priced anyone-can-spend programs, and **7,20
 built on the third. The 2.36x conclusion is robust to the discrepancy (it follows from the per-type
 divergence, which is measured), but **the absolute cycle figures in the packer table should not be
 quoted until one classifier is agreed and validated against `predicted_ec_ops`.**
+
+## The three-card run (2026-08-25) — the aggregate, and a JIT nobody had counted
+
+Three cards on the **aggregate** (mode 5, `HAZYNC_AGG=1`) over block 962,000's sixteen chunk
+receipts, using the signed v0.19.0 binary and canonical guest `1d6c3792`. Inputs sha256-verified
+identical on every box. Utilisation sampled with `nvidia-smi --loop-ms=200` for whole runs, ~9,500
+samples each, not spot checks.
+
+⚠ **Different workload from the 2026-08-21 section above, which measured chunk 9 (mode 4).** That
+section's cycles/sec table is not contradicted by this one; the two measure different things.
+
+| card | power | po2 | s/segment | total wall | mean util | ≤5% idle | peak VRAM | #119 |
+|---|---|---|---|---|---|---|---|---|
+| L4 | 72 W | 20 | 2.34 | **4,183.1 s** | **87.3%** | 3.1% | 11,160 MiB | 0 / 1,569 |
+| L40S | 350 W | 22 | **3.82** | **1,565.9 s** | — | — | ~41 GB | 2 / 1,500 |
+| B200 | 1000 W | 22 | **3.99** | **1,917.7 s** | **52.1%** | **36.7%** | 45,030 MiB | 0 / 375 |
+
+### On the aggregate, the B200 is slower than the L40S
+
+3.99 s/segment warm against 3.82, and **1,917.7 s total against 1,565.9 s — 22% slower on identical
+work** at roughly 3x the power. On this workload the card axis is not merely closed, it is mildly
+inverted.
+
+### Every B200 figure so far was of JIT-compiled code, and the JIT is 286 seconds
+
+The shipped fatbin carries `sm_80 sm_86 sm_89 sm_90` and **no `sm_100`**; `cuobjdump --list-elf`
+confirms it. A B200 is compute capability 10.0, so the driver JIT-compiles PTX at first kernel
+launch. Measured exactly:
+
+```
+segment 0 in 289.94s   (1 done, 290.0s elapsed)     <- the JIT
+segment 1 in   3.98s
+```
+
+**286 s of driver compile**, producing 279 MB of cached SASS in `~/.nv/ComputeCache`, paid by the
+B200 and by neither other card. Two consequences:
+
+* Any B200 run timed from process start attributes ~5 minutes of *compilation* to proving. Earlier
+  B200 figures are worth auditing for this.
+* ⚠ **Do not read the coordinator's ETA field on a cold B200.** It averages over elapsed time, so
+  during the JIT it projected `~7129s left` against an actual ~1,900 s.
+
+It cannot be fixed by flags alone: `sm_100` needs CUDA 12.8+, and `provision-vps.sh` phase 7 pins
+**12.6**. Note the 2026-08-21 section above ran **CUDA 12.9**, so that pin is more conservative than
+the evidence requires — the comment beside it only rules out 13.x.
+
+### The idle fraction scales INVERSELY with card speed
+
+**52.1% mean utilisation on the B200 (36.7% of samples idle) against 87.3% on the L4 (3.1% idle).**
+Preflight is host work and roughly card-independent; the GPU term is not. The faster the card, the
+larger the share of wall-clock it spends waiting on one host core. A 72 W card cannot find the idle;
+a 1000 W card spends over a third of its life there.
+
+⚠ **That idle is not recoverable by concurrency, and this document already says so three times.**
+See the third rejection above: utilisation rose 66.3% -> 83.9% while throughput FELL, because
+`nvidia-smi` counts kernel *residency*, not useful work. **Every utilisation number in this section
+is a comparison between cards, not a measure of headroom.**
+
+So the B200 idles 37%, that idle cannot be filled, and it still loses to an L40S.
+
+### po2 20 peaks at 11.2 GB, not 13.8 — 16 GB cards are in play
+
+Measured on the L4. The VRAM ladder reserved 16 GB cards for po2 19 and its steeper ~1.6-1.8x
+penalty; at 11,160 MiB they run **po2 20**. This widens the cheap-card field materially.
+
+### The cheap tier does NOT pay at UpCloud prices — it loses by 37%
+
+Comparing measured TOTALS at each card's best feasible configuration, not worker wall:
+
+| | total wall | EUR/hr | EUR per aggregate |
+|---|---|---|---|
+| L40S @ po2 22 | 1,565.9 s | 1.132 | **0.492** |
+| L4 @ po2 20 | 4,183.1 s | 0.58 | **0.674** |
+
+**2.67x slower against 1.95x cheaper = 37% MORE expensive per proof.**
+
+⚠ **Assembly scales with segment count, and the VRAM ladder's wall penalty hides it.** The L4's
+assembly was **488.5 s against the L40S's 95.2 s** — 5.1x, because po2 20 yields 1,569 segments and
+therefore ~4.2x the joins. An earlier estimate here used the ladder's 1.38x figure against worker
+wall and concluded "~5% cheaper"; that was wrong. Any cheap-card analysis must price the assembly
+penalty of the lower po2, not just the proving penalty.
+
+A cheap-card tier therefore needs a discount large enough to absorb BOTH, which means consumer cards
+on a community cloud, not this provider's cheapest tier.
+
+The striking part is that a **72 W** card is only 1.86x slower than a 350 W one at a smaller po2 —
+the same finding as the section above, from the other end.
+
+### Native sm_100 kills the JIT, does NOT make proving faster, and the B200 still loses
+
+Both questions above are now answered. **RISC0 3.0.5 builds cleanly against CUDA 12.8** — the `cccl`
+blocker documented beside the 12.6 pin is 13.x-specific, consistent with the 2026-08-21 run having
+used 12.9. Adding `-gencode arch=compute_100,code=sm_100` produces a fatbin carrying
+`sm_100 sm_80 sm_86 sm_89 sm_90` (`cuobjdump --list-elf`), 356,372,344 B against the release's
+330,278,784 — and **`METHOD_ID` is unchanged**, so it is a drop-in for proving, not a re-baseline.
+
+| B200 @ po2 22 | segment 0 (JIT) | s/segment warm | assembly | TOTAL | mean util |
+|---|---|---|---|---|---|
+| JIT'd `sm_90` PTX | **289.94 s** | 3.98 | 113.3 s | 1,917.7 s | 52.1% |
+| native `sm_100` | **4.59 s** | **4.14** | 122.2 s | **1,702.3 s** | 56.8% |
+
+**The JIT vanishes — and proving gets ~4% SLOWER.** `nvcc`'s Blackwell codegen for these kernels is
+marginally worse than what the driver produces JIT-compiling `sm_90` PTX. One run each, so 4% is
+within plausible variance; the direction was consistent across the run but it wants a repeat before
+being treated as fact.
+
+Net is still a clear win — the 285 s of JIT dwarfs the 61 s regression, so **TOTAL improves 11.2%**.
+Anyone running B200s should ship `sm_100`, and the gain is proportionally larger on short jobs.
+
+⚠ **But it does not rescue the card.** At 1,702.3 s the B200 is still **8.7% slower than the L40S's
+1,565.9 s**, with native code and zero JIT. The handicap hypothesis is dead: the gap was never
+codegen. Three architectures have now been measured on native SASS and all land within ~10% of each
+other, with the 1000 W card behind the 350 W one.
+
+### ⚠ The B200 result may be a statement about software, not silicon
+
+Recorded because "the B200 loses to an L40S" is the kind of conclusion that hardens into folklore,
+and this one has a plausible expiry date.
+
+**Our driver was the OLDEST of its line.** The box ran **595.58.03**; NVIDIA has since shipped
+595.71.05 and 595.91.07. Blackwell is supported from R570, so 595.58.03 is not unsupported — but it
+is the first release of that series, on an architecture whose software is visibly still settling.
+
+**And the underperformance is widely reported, not ours alone:**
+
+* [pytorch#161134](https://github.com/pytorch/pytorch/issues/161134) — "Vector-Matrix Multiplication
+  is slower in Blackwell (B200) than Hopper (H200)"
+* [vllm#27879](https://github.com/vllm-project/vllm/issues/27879) — "significantly poor performance
+  of gpt-oss on blackwell b200"
+* B200 measured roughly on par with, or slightly slower than, an H100 on large models
+
+The consistent framing across those reports: the gaps are attributed to **early software support
+rather than inherent hardware limitations**.
+
+**So read the table above as measured-in-August-2026, not as a property of the card.** What we can
+say firmly is that a B200 bought *today*, on the driver and toolkit available *today*, does not beat
+an L40S on this workload — which is the question that matters for a purchasing decision, and is
+unaffected by what a later driver might do. What we cannot say is that Blackwell is inherently
+unsuited to this; that would need re-measuring on a mature stack.
+
+⚠ There is a second reason to hold this loosely: **the CUDA prover has a known correctness bug that
+scales with segment size** (upstream risc0#3773, fix #3781 unmerged, confirmed present in our
+risc0-sys 1.5.0). It does not trigger at po2 22 so it does not explain these timings — but it is a
+reminder that the CUDA path is not yet a settled quantity on any card.
+
+### Build cost: kernel assembly is a large, uncounted part of a `cuda` release
+
+`ptxas` compiles each architecture **sequentially, ~6-7 minutes apiece per kernel file**, across two
+parallel `nvcc` invocations (`risc0-circuit-rv32im-sys`, `keccak-sys`). Adding a fifth architecture
+is a ~25% surcharge, not a step change — but the existing four already cost most of an hour.
+
+⚠ Relevant to hazync#167, which frames release time as provision-dominated. That holds for `cpu`
+builds; for `cuda` the kernel assembly rivals it, and **no deps image can cache it** — it happens in
+phase 8, not provisioning.
+
+The corollary is cheerful: changing anything in `vendor/risc0-zkvm` does NOT invalidate
+`risc0-circuit-*-sys`, so a rebuild reuses the cached kernels. Measured: **2m 50s** against the first
+build's 40+ minutes.
+
+### Open
+* ~~L4 total wall~~ — 4,183.1 s, recorded above.
+
+### The final digest is po2-invariant — measured, not inferred
+
+The L4 ran at **po2 20** and the L40S and B200 at **po2 22**; all three produced byte-identical
+`306fc568...`. Different segment decompositions, same proof. `ChunkOut`'s journal carries no po2, and
+this confirms the property survives all the way to the aggregate receipt — so a fleet may be
+partitioned by card class, each class at whatever po2 its VRAM allows, without a mixed-po2 session.
