@@ -31,15 +31,32 @@ OWNER="${HAZYNC_OWNER:-bitcoin-ghost}"
 NAME="${HAZYNC_DEPS_NAME:-hazync-deps}"
 PUSH="${HAZYNC_PUSH:-0}"
 
-# Exactly the inputs stage 1 consumes: the pinned base digest, plus the three paths COPYed into it.
+# Everything that determines the deps stage -- the STAGE ITSELF plus the content of every path it
+# COPYs (hazync#171). The old version hashed the base digest plus three hard-coded directories, which
+# left the image changeable while the tag stayed byte-identical:
+#
+#   * `SKIP_GROTH16=1` is a CONTENT decision and lived only in the RUN line
+#   * RISC0_HOME / PATH / HAZYNC_BASE decide where the toolchain lands, and lived only in ENV
+#   * the COPY list was enumerated BY NAME, so a newly-COPYed path was the LEAST covered input
+#
+# Hashing the stage text closes the first two. Deriving the COPY list from that same text closes the
+# third: a path cannot be added to the stage without entering the hash.
 base=$(grep -oE 'ubuntu:[0-9.]+@sha256:[0-9a-f]{64}' reproduce/Dockerfile | head -1)
 [ -n "$base" ] || { echo "no digest-pinned FROM in reproduce/Dockerfile"; exit 2; }
-tag=$( { echo "$base"; cat provision-vps.sh; find patches coreshim -type f | sort | xargs cat; } \
-       | sha256sum | cut -c1-16 )
+
+deps_stage=$(awk '/^FROM /{ if (started) exit; if ($0 ~ / AS deps$/) started=1 } started' reproduce/Dockerfile)
+[ -n "$deps_stage" ] || { echo "could not extract the 'AS deps' stage from reproduce/Dockerfile"; exit 2; }
+copy_paths=$(printf '%s\n' "$deps_stage" | awk '/^COPY /{print $2}')
+[ -n "$copy_paths" ] || { echo "no COPY lines found in the deps stage -- refusing to hash nothing"; exit 2; }
+
+tag=$( { printf '%s\n' "$deps_stage"
+         for p in $copy_paths; do find "$p" -type f | sort | xargs cat; done
+       } | sha256sum | cut -c1-16 )
 ref="$REGISTRY/$OWNER/$NAME:$tag"
 
 echo "base:  $base"
-echo "tag:   $tag   (sha256 of the base digest + provision-vps.sh + patches/ + coreshim/)"
+echo "tag:   $tag   (sha256 of the whole deps stage + every path it COPYs)"
+echo "copies:$(printf '%s' "$copy_paths" | tr '\n' ' ')"
 echo "ref:   $ref"
 
 echo
@@ -79,6 +96,19 @@ echo
 echo "pushing $ref"
 docker push "$ref" || { echo "push failed — is the registry authenticated? (docker login $REGISTRY)"; exit 6; }
 echo "published: $ref"
+
+# Pin by DIGEST, not by tag. A registry tag is mutable by definition -- anyone who can push can move
+# it, and hazync#171 showed the tag can even fail to move when the content does. The digest cannot.
+# This is the same reasoning that pinned reproduce/Dockerfile's own base image by digest (hazync#146).
+digest=$(docker image inspect "$ref" --format '{{index .RepoDigests 0}}' 2>/dev/null)
 echo
-echo "record this in reproduce/METHOD_ID or the runbook so others can pin it:"
-echo "  docker build --build-arg DEPS_IMAGE=$ref -f reproduce/Dockerfile ."
+if [ -n "$digest" ]; then
+  echo "digest:    $digest"
+  echo
+  echo "record this in reproduce/METHOD_ID or the runbook so others can pin it -- BY DIGEST:"
+  echo "  docker build --build-arg DEPS_IMAGE=$digest -f reproduce/Dockerfile ."
+  echo "(the tag $tag is a convenience; the digest is the thing that cannot move under you)"
+else
+  echo "WARNING: could not read the pushed digest back. Pin by digest, not by tag:"
+  echo "  docker image inspect $ref --format '{{index .RepoDigests 0}}'"
+fi
