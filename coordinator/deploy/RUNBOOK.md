@@ -265,12 +265,21 @@ offsite. A same-disk copy dies with the box.
 **Option A — systemd timer (recommended):** install the units shipped alongside `backup.sh`, set an
 offsite `BACKUP_REMOTE` in the service, and enable the timer:
 
-⚠️ **First check the paths match the coordinator's own unit** — they are env-driven and differ per
-deployment (production uses `/root/...`, not the `/opt/hazync` defaults):
+⚠️ **Read the paths off the running unit — and NOT with `systemctl cat`.** They are env-driven and
+differ per deployment, so this section deliberately does not tell you what they are.
+
+`systemctl cat` prints the unit *file*, including lines a drop-in has superseded. On the production
+coordinator it still shows `/root/...` values, and `/root/hazync` **does not exist on that box** — the
+paths moved on 2026-08-02 (#58) because `/root` is `0700 root` and blocked `User=`, `ProtectHome=` and
+`ProtectSystem=strict`. Only `systemctl show` reports what the service actually runs:
 
 ```bash
-systemctl cat hazync-coordinator | grep -E 'COORD_DB|COORD_PROOFS'
+systemctl show hazync-coordinator -p Environment | tr ' ' '\n' | grep -E 'COORD_DB|COORD_PROOFS'
 ```
+
+This paragraph previously asserted "production uses `/root/...`" and was wrong for three weeks — the
+re-baseline section further down had been updated by #58 and this one had not. That is why it now names
+a *command* instead of a path: a command cannot go stale.
 
 If they differ, set the same values in the backup service (`systemctl edit`, see the comments in the
 unit). `backup.sh` aborts loudly on a path that doesn't exist, isn't a SQLite file, or isn't the
