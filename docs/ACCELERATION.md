@@ -739,7 +739,7 @@ section's cycles/sec table is not contradicted by this one; the two measure diff
 
 | card | power | po2 | s/segment | total wall | mean util | ≤5% idle | peak VRAM | #119 |
 |---|---|---|---|---|---|---|---|---|
-| L4 | 72 W | 20 | 2.34 | **4,183.1 s** | **90.6%** | 3.2% | 11,160 MiB | 0 / 1,569 |
+| L4 | 72 W | 20 | 2.34 | **4,183.1 s** | **87.3%** | 3.1% | 11,160 MiB | 0 / 1,569 |
 | L40S | 350 W | 22 | **3.82** | **1,565.9 s** | — | — | ~41 GB | 2 / 1,500 |
 | B200 | 1000 W | 22 | **3.99** | **1,917.7 s** | **52.1%** | **36.7%** | 45,030 MiB | 0 / 375 |
 
@@ -774,7 +774,7 @@ the evidence requires — the comment beside it only rules out 13.x.
 
 ### The idle fraction scales INVERSELY with card speed
 
-**52.1% mean utilisation on the B200 (36.7% of samples idle) against 90.6% on the L4 (3.2% idle).**
+**52.1% mean utilisation on the B200 (36.7% of samples idle) against 87.3% on the L4 (3.1% idle).**
 Preflight is host work and roughly card-independent; the GPU term is not. The faster the card, the
 larger the share of wall-clock it spends waiting on one host core. A 72 W card cannot find the idle;
 a 1000 W card spends over a third of its life there.
