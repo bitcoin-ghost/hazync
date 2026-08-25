@@ -902,6 +902,37 @@ Anyone running B200s should ship `sm_100`, and the gain is proportionally larger
 codegen. Three architectures have now been measured on native SASS and all land within ~10% of each
 other, with the 1000 W card behind the 350 W one.
 
+### ⚠ The B200 result may be a statement about software, not silicon
+
+Recorded because "the B200 loses to an L40S" is the kind of conclusion that hardens into folklore,
+and this one has a plausible expiry date.
+
+**Our driver was the OLDEST of its line.** The box ran **595.58.03**; NVIDIA has since shipped
+595.71.05 and 595.91.07. Blackwell is supported from R570, so 595.58.03 is not unsupported — but it
+is the first release of that series, on an architecture whose software is visibly still settling.
+
+**And the underperformance is widely reported, not ours alone:**
+
+* [pytorch#161134](https://github.com/pytorch/pytorch/issues/161134) — "Vector-Matrix Multiplication
+  is slower in Blackwell (B200) than Hopper (H200)"
+* [vllm#27879](https://github.com/vllm-project/vllm/issues/27879) — "significantly poor performance
+  of gpt-oss on blackwell b200"
+* B200 measured roughly on par with, or slightly slower than, an H100 on large models
+
+The consistent framing across those reports: the gaps are attributed to **early software support
+rather than inherent hardware limitations**.
+
+**So read the table above as measured-in-August-2026, not as a property of the card.** What we can
+say firmly is that a B200 bought *today*, on the driver and toolkit available *today*, does not beat
+an L40S on this workload — which is the question that matters for a purchasing decision, and is
+unaffected by what a later driver might do. What we cannot say is that Blackwell is inherently
+unsuited to this; that would need re-measuring on a mature stack.
+
+⚠ There is a second reason to hold this loosely: **the CUDA prover has a known correctness bug that
+scales with segment size** (upstream risc0#3773, fix #3781 unmerged, confirmed present in our
+risc0-sys 1.5.0). It does not trigger at po2 22 so it does not explain these timings — but it is a
+reminder that the CUDA path is not yet a settled quantity on any card.
+
 ### Build cost: kernel assembly is a large, uncounted part of a `cuda` release
 
 `ptxas` compiles each architecture **sequentially, ~6-7 minutes apiece per kernel file**, across two
