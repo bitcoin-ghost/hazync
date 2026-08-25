@@ -23,7 +23,7 @@ WorkingDirectory=/opt/hazync/coordinator
 # No GPU needed here — proving/folding happen on contributors' boxes.
 Environment=COORD_PORT=8899
 Environment=COORD_DB=/var/lib/hazync/coordinator.db
-Environment=COORD_STATE=/var/lib/hazync/coordinator-state
+Environment=COORD_STATE=/var/lib/hazync/coord_state
 Environment=WITNESS_DIR=/var/lib/hazync/witnesses
 # Co-located archive-node bridge: serve /api/witness/<n> straight from the bridge's bundle dir (local
 # read, no cross-box copy). Leave unset to fall back to the legacy per-block witness window.

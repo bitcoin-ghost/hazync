@@ -5,19 +5,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Since #58. Everything this unit touches moved out of /root so this was possible at all.
+User=hazync
+Group=hazync
 # The bridge drives ONE resident Utreexo forest forward over the chain from the local bitcoind and writes
 # a per-block bundle (in-boundary + real root_prev + inclusion proofs) that provers prove with NO replay.
 # It only EMITS witness data — it never proves — so its guest METHOD_ID is irrelevant (provers use the
 # canonical release binary). CPU-only, no GPU.
-Environment=HAZYNC_BITCOIN_DATADIR=/root/.bitcoin
-Environment=HAZYNC_BRIDGE_OUT=/root/bridge_bundles
+Environment=HAZYNC_BITCOIN_DATADIR=/var/lib/hazync/bitcoin-client
+Environment=HAZYNC_BRIDGE_OUT=/var/lib/hazync/bridge_bundles
 Environment=HAZYNC_BRIDGE_FINALITY=100
 Environment=HAZYNC_BRIDGE_CKPT=2000
 Environment=HAZYNC_BRIDGE_POLL=30
 # Wait for the node to answer before starting (bridge panics -> restarts if bitcoind is down; this avoids
 # a noisy restart loop during the node's own startup).
-ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/root/.bitcoin getblockcount >/dev/null 2>&1; do sleep 5; done'
-ExecStart=/root/host bridge
+ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/var/lib/hazync/bitcoin-client getblockcount >/dev/null 2>&1; do sleep 5; done'
+ExecStart=/usr/local/bin/hazync-host bridge
 Restart=always
 RestartSec=10
 # generous startup: the first genesis->tip pass runs inside the process (checkpoints along the way)
@@ -35,7 +38,9 @@ Nice=5
 # coordinator's verified-proof store.
 #
 # STAGE 1 (this block): everything that does NOT require moving files. The service still runs as
-# root, because ExecStart, the datadir and the output dir all live under /root; dropping privilege
+# Runs as hazync since #58. Everything it touches moved out of /root precisely so it COULD drop
+# privilege: /root is 0700 root, which blocked User=, ProtectHome= and ProtectSystem=strict.
+# (was: root, because ExecStart, the datadir and the output dir all live under /root; dropping privilege
 # means relocating them on a live box mid-campaign, which is a deploy, not a file edit.
 #
 # STAGE 2 (needs a maintenance window, see #58): binary to /usr/local/bin/hazync-host, bundles to
@@ -50,11 +55,12 @@ NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
-# read-only rather than true: ExecStart is /root/host and the datadir is /root/.bitcoin, both of
+# true, not read-only: nothing this unit touches lives under /root any more.
+# (was: read-only rather than true: ExecStart is /root/host and the datadir is /root/.bitcoin, both of
 # which must stay READABLE. ProtectHome=true would make them inaccessible and the unit would not
 # start — the same trap the coordinator unit fell into.
-ProtectHome=read-only
-ReadWritePaths=/root/bridge_bundles
+ProtectHome=true
+ReadWritePaths=/var/lib/hazync/bridge_bundles
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
