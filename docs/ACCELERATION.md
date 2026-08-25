@@ -726,3 +726,83 @@ evidence, **7,015** after #138 zero-priced anyone-can-spend programs, and **7,20
 built on the third. The 2.36x conclusion is robust to the discrepancy (it follows from the per-type
 divergence, which is measured), but **the absolute cycle figures in the packer table should not be
 quoted until one classifier is agreed and validated against `predicted_ec_ops`.**
+
+## The three-card run (2026-08-25) — the aggregate, and a JIT nobody had counted
+
+Three cards on the **aggregate** (mode 5, `HAZYNC_AGG=1`) over block 962,000's sixteen chunk
+receipts, using the signed v0.19.0 binary and canonical guest `1d6c3792`. Inputs sha256-verified
+identical on every box. Utilisation sampled with `nvidia-smi --loop-ms=200` for whole runs, ~9,500
+samples each, not spot checks.
+
+⚠ **Different workload from the 2026-08-21 section above, which measured chunk 9 (mode 4).** That
+section's cycles/sec table is not contradicted by this one; the two measure different things.
+
+| card | power | po2 | s/segment | total wall | mean util | ≤5% idle | peak VRAM | #119 |
+|---|---|---|---|---|---|---|---|---|
+| L4 | 72 W | 20 | 2.34 | — | **90.6%** | 3.2% | 11,160 MiB | 0 / 1,569 |
+| L40S | 350 W | 22 | **3.82** | **1,565.9 s** | — | — | ~41 GB | 2 / 1,500 |
+| B200 | 1000 W | 22 | **3.99** | **1,917.7 s** | **52.1%** | **36.7%** | 45,030 MiB | 0 / 375 |
+
+### On the aggregate, the B200 is slower than the L40S
+
+3.99 s/segment warm against 3.82, and **1,917.7 s total against 1,565.9 s — 22% slower on identical
+work** at roughly 3x the power. On this workload the card axis is not merely closed, it is mildly
+inverted.
+
+### Every B200 figure so far was of JIT-compiled code, and the JIT is 286 seconds
+
+The shipped fatbin carries `sm_80 sm_86 sm_89 sm_90` and **no `sm_100`**; `cuobjdump --list-elf`
+confirms it. A B200 is compute capability 10.0, so the driver JIT-compiles PTX at first kernel
+launch. Measured exactly:
+
+```
+segment 0 in 289.94s   (1 done, 290.0s elapsed)     <- the JIT
+segment 1 in   3.98s
+```
+
+**286 s of driver compile**, producing 279 MB of cached SASS in `~/.nv/ComputeCache`, paid by the
+B200 and by neither other card. Two consequences:
+
+* Any B200 run timed from process start attributes ~5 minutes of *compilation* to proving. Earlier
+  B200 figures are worth auditing for this.
+* ⚠ **Do not read the coordinator's ETA field on a cold B200.** It averages over elapsed time, so
+  during the JIT it projected `~7129s left` against an actual ~1,900 s.
+
+It cannot be fixed by flags alone: `sm_100` needs CUDA 12.8+, and `provision-vps.sh` phase 7 pins
+**12.6**. Note the 2026-08-21 section above ran **CUDA 12.9**, so that pin is more conservative than
+the evidence requires — the comment beside it only rules out 13.x.
+
+### The idle fraction scales INVERSELY with card speed
+
+**52.1% mean utilisation on the B200 (36.7% of samples idle) against 90.6% on the L4 (3.2% idle).**
+Preflight is host work and roughly card-independent; the GPU term is not. The faster the card, the
+larger the share of wall-clock it spends waiting on one host core. A 72 W card cannot find the idle;
+a 1000 W card spends over a third of its life there.
+
+⚠ **That idle is not recoverable by concurrency, and this document already says so three times.**
+See the third rejection above: utilisation rose 66.3% -> 83.9% while throughput FELL, because
+`nvidia-smi` counts kernel *residency*, not useful work. **Every utilisation number in this section
+is a comparison between cards, not a measure of headroom.**
+
+So the B200 idles 37%, that idle cannot be filled, and it still loses to an L40S.
+
+### po2 20 peaks at 11.2 GB, not 13.8 — 16 GB cards are in play
+
+Measured on the L4. The VRAM ladder reserved 16 GB cards for po2 19 and its steeper ~1.6-1.8x
+penalty; at 11,160 MiB they run **po2 20**. This widens the cheap-card field materially.
+
+### The cheap tier is real but marginal at UpCloud prices
+
+L4 at EUR0.58/hr against L40S at EUR1.132/hr is 1.95x cheaper; the po2 20 penalty is 1.38x; the L4
+measures ~1.86x slower. Net **~5% cheaper per proof** — genuinely cheaper, and nothing like the 2-3x
+a cheap-card pivot assumes. That arbitrage needs consumer cards on a community cloud, not this
+provider's cheapest tier.
+
+The striking part is that a **72 W** card is only 1.86x slower than a 350 W one at a smaller po2 —
+the same finding as the section above, from the other end.
+
+### Open
+
+* Does RISC0 3.0.5 build against CUDA 12.8, and does native `sm_100` change the per-segment rate or
+  only delete the JIT? Different wins: the JIT is a one-off per box, a per-segment gain compounds.
+* L4 total wall (still in assembly at the time of writing).
