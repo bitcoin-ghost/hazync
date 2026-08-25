@@ -12,3 +12,12 @@ lto = true
 
 [patch.crates-io]
 risc0-zkvm = { path = "../vendor/risc0-zkvm" }
+# ⚠ UNVERIFIED ON HARDWARE. Vendored solely to carry upstream risc0#3781's one-line fix for
+# risc0#3773: a u32 overflow in the poseidon2 row-commit CUDA kernel that silently commits a hash
+# over the wrong data once column*domain crosses 2^32. Confirmed present in risc0-sys 1.5.0.
+#
+# It cannot change behaviour below the threshold -- widening a multiply is a no-op when the product
+# fits -- so po2 <= 22 is unaffected by construction. But "by construction" is not "measured", and
+# this sits in the path that produces SHIPPED proofs. Do not merge until a po2 23 run on a real
+# card demonstrates it. See docs/ACCELERATION.md and hazync#178.
+risc0-sys = { path = "../vendor/risc0-sys" }
