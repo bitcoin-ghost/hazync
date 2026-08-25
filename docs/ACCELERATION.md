@@ -95,12 +95,31 @@ thread 'main' panicked at host/src/main.rs:5236:5
 #119 transient: at the measured 1-in-750 base rate, three consecutive failures is ~2e-9. It is
 systematic.
 
-⚠ **So `DEFAULT_MAX_PO2` is not merely a policy gate, and this document's "po2 23 is a SOFTWARE cap,
-not a VRAM one" is misleading.** True as far as it goes — the H100's spare VRAM is indeed irrelevant
-— but it reads as "one constant stands between us and po2 23", and that is not the case. Raising it
-lets the prover ATTEMPT a segment size the recursion circuit and verifier parameters do not support,
-and the result is an invalid proof. The 97-bits-at-po2-21, 1-bit-per-po2 security trade-off recorded
-beside the constant never arises, because there is nothing valid to trade.
+⚠ **It is NOT that po2 23 is unsupported.** That was the first explanation and it is wrong, checked
+against upstream:
+
+* `risc0-zkp` sets **`MAX_CYCLES_PO2 = 24`** — po2 23 is inside the prover's range.
+* `zkr::lift(claim.po2)` selects a lift program by po2, and our vendored `recursion_zkr.zip` contains
+  **`lift_rv32im_v2_14.zkr` through `lift_rv32im_v2_24.zkr`** — 23 and 24 are both present.
+
+So the machinery for po2 23 exists at every layer we can see, and the failure is **unexplained**.
+
+⚠⚠ **AND THE ERROR IS #119's EXACT SIGNATURE.** `verify segment: verification indicates proof is
+invalid` is the CUDA prover emitting a receipt that fails its own verification — the fault #119 has
+tracked for months at an unknown rate, with upstream dormant.
+
+| | rate |
+|---|---|
+| po2 22, measured over 1,500 segments | **~1 in 750** |
+| po2 23 | **3 of 3 on segment 0** |
+
+**If that holds, po2 23 is a deterministic reproducer for #119.** That is exactly what the upstream
+report (risc0 #3798/#3799, no replies) has lacked: an intermittent 0.13% fault is hard to act on,
+whereas "set `segment_limit_po2 = 23` and it fails every time" is not. Worth confirming on a second
+card and at a second po2 before filing, but it is the strongest lead #119 has had.
+
+What this does NOT establish is the security trade-off recorded beside the constant
+(97 bits at po2 21, 1 bit per po2). That question is untouched: nothing valid was produced to trade.
 
 Two things worth crediting:
 
