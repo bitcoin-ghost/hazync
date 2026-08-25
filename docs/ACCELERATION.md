@@ -739,7 +739,7 @@ section's cycles/sec table is not contradicted by this one; the two measure diff
 
 | card | power | po2 | s/segment | total wall | mean util | ≤5% idle | peak VRAM | #119 |
 |---|---|---|---|---|---|---|---|---|
-| L4 | 72 W | 20 | 2.34 | — | **90.6%** | 3.2% | 11,160 MiB | 0 / 1,569 |
+| L4 | 72 W | 20 | 2.34 | **4,183.1 s** | **90.6%** | 3.2% | 11,160 MiB | 0 / 1,569 |
 | L40S | 350 W | 22 | **3.82** | **1,565.9 s** | — | — | ~41 GB | 2 / 1,500 |
 | B200 | 1000 W | 22 | **3.99** | **1,917.7 s** | **52.1%** | **36.7%** | 45,030 MiB | 0 / 375 |
 
@@ -791,12 +791,25 @@ So the B200 idles 37%, that idle cannot be filled, and it still loses to an L40S
 Measured on the L4. The VRAM ladder reserved 16 GB cards for po2 19 and its steeper ~1.6-1.8x
 penalty; at 11,160 MiB they run **po2 20**. This widens the cheap-card field materially.
 
-### The cheap tier is real but marginal at UpCloud prices
+### The cheap tier does NOT pay at UpCloud prices — it loses by 37%
 
-L4 at EUR0.58/hr against L40S at EUR1.132/hr is 1.95x cheaper; the po2 20 penalty is 1.38x; the L4
-measures ~1.86x slower. Net **~5% cheaper per proof** — genuinely cheaper, and nothing like the 2-3x
-a cheap-card pivot assumes. That arbitrage needs consumer cards on a community cloud, not this
-provider's cheapest tier.
+Comparing measured TOTALS at each card's best feasible configuration, not worker wall:
+
+| | total wall | EUR/hr | EUR per aggregate |
+|---|---|---|---|
+| L40S @ po2 22 | 1,565.9 s | 1.132 | **0.492** |
+| L4 @ po2 20 | 4,183.1 s | 0.58 | **0.674** |
+
+**2.67x slower against 1.95x cheaper = 37% MORE expensive per proof.**
+
+⚠ **Assembly scales with segment count, and the VRAM ladder's wall penalty hides it.** The L4's
+assembly was **488.5 s against the L40S's 95.2 s** — 5.1x, because po2 20 yields 1,569 segments and
+therefore ~4.2x the joins. An earlier estimate here used the ladder's 1.38x figure against worker
+wall and concluded "~5% cheaper"; that was wrong. Any cheap-card analysis must price the assembly
+penalty of the lower po2, not just the proving penalty.
+
+A cheap-card tier therefore needs a discount large enough to absorb BOTH, which means consumer cards
+on a community cloud, not this provider's cheapest tier.
 
 The striking part is that a **72 W** card is only 1.86x slower than a 350 W one at a smaller po2 —
 the same finding as the section above, from the other end.
@@ -805,4 +818,11 @@ the same finding as the section above, from the other end.
 
 * Does RISC0 3.0.5 build against CUDA 12.8, and does native `sm_100` change the per-segment rate or
   only delete the JIT? Different wins: the JIT is a one-off per box, a per-segment gain compounds.
-* L4 total wall (still in assembly at the time of writing).
+* ~~L4 total wall~~ — 4,183.1 s, recorded above.
+
+### The final digest is po2-invariant — measured, not inferred
+
+The L4 ran at **po2 20** and the L40S and B200 at **po2 22**; all three produced byte-identical
+`306fc568...`. Different segment decompositions, same proof. `ChunkOut`'s journal carries no po2, and
+this confirms the property survives all the way to the aggregate receipt — so a fleet may be
+partitioned by card class, each class at whatever po2 its VRAM allows, without a mixed-po2 session.
