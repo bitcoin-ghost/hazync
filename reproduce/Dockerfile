@@ -65,6 +65,14 @@ RUN --mount=type=secret,id=gh_token,required=false \
     if [ -s /run/secrets/gh_token ]; then export GITHUB_TOKEN="$(cat /run/secrets/gh_token)"; fi && \
     SKIP_GROTH16=1 HAZYNC_PROVISION=deps ./provision-vps.sh
 
+# LAST in this stage ON PURPOSE. A LABEL is metadata, but Docker layers are ordered: placing it above
+# the RUN would invalidate the provision layer and turn every republish into a ~35 minute rebuild.
+#
+# GitHub links a ghcr package to a repository by this label and nothing else. Without it the package
+# publishes fine, resolves fine, and is INVISIBLE on the repo page -- which read as "the push failed"
+# when it had not.
+LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
+
 # ── STAGE 2: the guest build ──────────────────────────────────────────────────────────────────────
 #
 # Now the repo. Everything above is cached, so this is the only layer an ordinary change rebuilds.
