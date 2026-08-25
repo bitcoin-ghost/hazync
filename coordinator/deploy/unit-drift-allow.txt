@@ -1,0 +1,6 @@
+# Settings that are legitimately per-box and will never be in this repo.
+# One KEY per line (no value). Anything not listed here that is live on a box and undeclared is
+# DRIFT, and check-unit-drift.sh will fail on it.
+#
+# Keep this list SHORT. It is an escape hatch, and every entry is a thing nobody can rebuild the
+# box from the repo without knowing. Prefer committing a drop-in to adding a key here.
