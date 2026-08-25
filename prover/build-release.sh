@@ -80,7 +80,28 @@ mkdir -p "$OUT"
 
 [ -x "$REPO/provision-vps.sh" ] || { echo "no provision-vps.sh under REPO=$REPO" >&2; exit 1; }
 
-NVCC_FLAGS='-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90'
+# Native SASS for every architecture we expect to meet, plus PTX for anything newer (hazync#178).
+#
+# ⚠ sm_100 (Blackwell) is here for a MEASURED reason. Without it a B200 has no native code in the
+# fatbin and the driver JIT-compiles PTX at first kernel launch — measured on 2026-08-25:
+#
+#     segment 0 in 289.94s   (1 done, 290.0s elapsed)     <- the JIT
+#     segment 1 in   3.98s
+#
+# 286 seconds of driver compile, 279 MB of cached SASS, paid once per cold process. Adding sm_100
+# removes it: segment 0 drops to 4.59 s and TOTAL falls 1,917.7 s -> 1,702.3 s, an 11% saving that is
+# proportionally larger on short jobs.
+#
+# ⚠ IT DOES NOT MAKE PROVING FASTER. Warm rate went 3.98 -> 4.14 s/segment, i.e. ~4% SLOWER: nvcc's
+# Blackwell codegen for these kernels is marginally worse than the driver's JIT from sm_90 PTX. The
+# net win is entirely the JIT. One run each, so treat 4% as within variance.
+#
+# ⚠ AND IT DOES NOT MAKE THE B200 WORTH BUYING. At 1,702.3 s it still loses to an L40S's 1,565.9 s by
+# 8.7%, with native code and no JIT. See docs/ACCELERATION.md, "The three-card run (2026-08-25)".
+#
+# COST: ptxas assembles each architecture SEQUENTIALLY at ~6-7 min per kernel file, so this fifth
+# target adds roughly that to every cuda release. It needs CUDA 12.8+ (see provision-vps.sh phase 7).
+NVCC_FLAGS='-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_100,code=compute_100'
 
 if [ "$MODE" = cuda ]; then
     docker_args=(-e "NVCC_APPEND_FLAGS=$NVCC_FLAGS" -e GPU=1)
