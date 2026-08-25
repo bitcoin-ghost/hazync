@@ -183,9 +183,21 @@ EOF
 # 7. (optional) CUDA for GPU proving — installed BEFORE the build so we can compile the CUDA backend.
 # (GPU_FEATURES is initialised above the phase gate — see the note there.)
 if [ "${GPU:-0}" = "1" ]; then
-  echo "== 7. GPU proving: install CUDA 12.6 (RISC0 3.0.5 kernels DO NOT build against the CUDA 13.x"
-  echo "   that some L40S boxes ship — cccl header errors; 12.6 works). =="
-  if [ ! -d /usr/local/cuda-12.6 ]; then
+  # CUDA version is a KNOB with a measured default, not a hardcode (hazync#178).
+  #
+  # 12.8 is the first release with Blackwell (sm_100) support, and it is required for the native
+  # sm_100 target in build-release.sh — without it a B200 JIT-compiles PTX at first launch, measured
+  # at 289.94 s of driver compile before the first segment proves.
+  #
+  # 12.6 was pinned because RISC0 3.0.5 kernels do NOT build against 13.x (cccl header errors). That
+  # is 13.x-specific: 12.8 was verified building risc0-circuit-{rv32im,keccak,recursion}-sys cleanly
+  # on 2026-08-25, and the 2026-08-21 B200 run had already used 12.9. Set HAZYNC_CUDA_VER to pin back
+  # if a toolkit regression ever surfaces.
+  CUDA_VER="${HAZYNC_CUDA_VER:-12.8}"
+  CUDA_PKG="cuda-toolkit-${CUDA_VER/./-}"
+  echo "== 7. GPU proving: install CUDA ${CUDA_VER} (RISC0 3.0.5 kernels DO NOT build against 13.x —"
+  echo "   cccl header errors. 12.6 and 12.8 both verified working). =="
+  if [ ! -d /usr/local/cuda-${CUDA_VER} ]; then
     # Pick the CUDA repo matching this Ubuntu release (don't hardcode 24.04).
     . /etc/os-release
     case "${VERSION_ID:-}" in
@@ -198,18 +210,18 @@ if [ "${GPU:-0}" = "1" ]; then
       "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
     $SUDO dpkg -i "$tmp/cuda-keyring.deb"
     $SUDO apt-get update -qq
-    $SUDO apt-get install -y -qq cuda-toolkit-12-6
+    $SUDO apt-get install -y -qq "$CUDA_PKG"
     rm -rf "$tmp"
   fi
-  $SUDO ln -sfn /usr/local/cuda-12.6 /usr/local/cuda   # make the build pick 12.6, not a shipped 13.x
-  export CUDA_PATH=/usr/local/cuda-12.6
-  export PATH="/usr/local/cuda-12.6/bin:$PATH"
-  export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+  $SUDO ln -sfn /usr/local/cuda-${CUDA_VER} /usr/local/cuda   # pick OUR version, not a shipped 13.x
+  export CUDA_PATH=/usr/local/cuda-${CUDA_VER}
+  export PATH="/usr/local/cuda-${CUDA_VER}/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-${CUDA_VER}/lib64:${LD_LIBRARY_PATH:-}"
   GPU_FEATURES="--features cuda"
-  grep -q 'CUDA_PATH' "$HOME/.bashrc" || cat >> "$HOME/.bashrc" <<'EOF'
-export CUDA_PATH=/usr/local/cuda-12.6
-export PATH="/usr/local/cuda-12.6/bin:$PATH"
-export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+  grep -q 'CUDA_PATH' "$HOME/.bashrc" || cat >> "$HOME/.bashrc" <<EOF
+export CUDA_PATH=/usr/local/cuda-${CUDA_VER}
+export PATH="/usr/local/cuda-${CUDA_VER}/bin:\$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda-${CUDA_VER}/lib64:\${LD_LIBRARY_PATH:-}"
 EOF
 fi
 
@@ -254,12 +266,12 @@ fi
 # A flag that is accepted and ignored is worse than one that is rejected, so this mirrors phase 7
 # exactly rather than erroring: the same paths, the same feature string.
 if [ "${GPU:-0}" = "1" ]; then
-  export CUDA_PATH=/usr/local/cuda-12.6
-  export PATH="/usr/local/cuda-12.6/bin:$PATH"
-  export LD_LIBRARY_PATH="/usr/local/cuda-12.6/lib64:${LD_LIBRARY_PATH:-}"
+  export CUDA_PATH=/usr/local/cuda-${CUDA_VER}
+  export PATH="/usr/local/cuda-${CUDA_VER}/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-${CUDA_VER}/lib64:${LD_LIBRARY_PATH:-}"
   GPU_FEATURES="--features cuda"
   command -v nvcc >/dev/null || {
-    echo "GPU=1 but nvcc is not on PATH (looked for /usr/local/cuda-12.6/bin/nvcc)." >&2
+    echo "GPU=1 but nvcc is not on PATH (looked for /usr/local/cuda-${CUDA_VER}/bin/nvcc)." >&2
     echo "Run the deps phase first: GPU=1 HAZYNC_PROVISION=deps $0" >&2
     exit 1
   }
