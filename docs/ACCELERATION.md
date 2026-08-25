@@ -814,10 +814,47 @@ on a community cloud, not this provider's cheapest tier.
 The striking part is that a **72 W** card is only 1.86x slower than a 350 W one at a smaller po2 —
 the same finding as the section above, from the other end.
 
-### Open
+### Native sm_100 kills the JIT, does NOT make proving faster, and the B200 still loses
 
-* Does RISC0 3.0.5 build against CUDA 12.8, and does native `sm_100` change the per-segment rate or
-  only delete the JIT? Different wins: the JIT is a one-off per box, a per-segment gain compounds.
+Both questions above are now answered. **RISC0 3.0.5 builds cleanly against CUDA 12.8** — the `cccl`
+blocker documented beside the 12.6 pin is 13.x-specific, consistent with the 2026-08-21 run having
+used 12.9. Adding `-gencode arch=compute_100,code=sm_100` produces a fatbin carrying
+`sm_100 sm_80 sm_86 sm_89 sm_90` (`cuobjdump --list-elf`), 356,372,344 B against the release's
+330,278,784 — and **`METHOD_ID` is unchanged**, so it is a drop-in for proving, not a re-baseline.
+
+| B200 @ po2 22 | segment 0 (JIT) | s/segment warm | assembly | TOTAL | mean util |
+|---|---|---|---|---|---|
+| JIT'd `sm_90` PTX | **289.94 s** | 3.98 | 113.3 s | 1,917.7 s | 52.1% |
+| native `sm_100` | **4.59 s** | **4.14** | 122.2 s | **1,702.3 s** | 56.8% |
+
+**The JIT vanishes — and proving gets ~4% SLOWER.** `nvcc`'s Blackwell codegen for these kernels is
+marginally worse than what the driver produces JIT-compiling `sm_90` PTX. One run each, so 4% is
+within plausible variance; the direction was consistent across the run but it wants a repeat before
+being treated as fact.
+
+Net is still a clear win — the 285 s of JIT dwarfs the 61 s regression, so **TOTAL improves 11.2%**.
+Anyone running B200s should ship `sm_100`, and the gain is proportionally larger on short jobs.
+
+⚠ **But it does not rescue the card.** At 1,702.3 s the B200 is still **8.7% slower than the L40S's
+1,565.9 s**, with native code and zero JIT. The handicap hypothesis is dead: the gap was never
+codegen. Three architectures have now been measured on native SASS and all land within ~10% of each
+other, with the 1000 W card behind the 350 W one.
+
+### Build cost: kernel assembly is a large, uncounted part of a `cuda` release
+
+`ptxas` compiles each architecture **sequentially, ~6-7 minutes apiece per kernel file**, across two
+parallel `nvcc` invocations (`risc0-circuit-rv32im-sys`, `keccak-sys`). Adding a fifth architecture
+is a ~25% surcharge, not a step change — but the existing four already cost most of an hour.
+
+⚠ Relevant to hazync#167, which frames release time as provision-dominated. That holds for `cpu`
+builds; for `cuda` the kernel assembly rivals it, and **no deps image can cache it** — it happens in
+phase 8, not provisioning.
+
+The corollary is cheerful: changing anything in `vendor/risc0-zkvm` does NOT invalidate
+`risc0-circuit-*-sys`, so a rebuild reuses the cached kernels. Measured: **2m 50s** against the first
+build's 40+ minutes.
+
+### Open
 * ~~L4 total wall~~ — 4,183.1 s, recorded above.
 
 ### The final digest is po2-invariant — measured, not inferred
