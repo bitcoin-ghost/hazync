@@ -296,10 +296,15 @@ worth much less than it looks.
 | control build | `cargo build --release -j2`, **3m26s**, exit 0 |
 | disk | 209 GB free — the 2026-08 wedge condition is absent |
 
-⚠ **The local build yields guest id `916cde9e…`, not the canonical `1d6c3792…`, and that is EXPECTED.**
-`reproduce/METHOD_ID` states the canonical id is produced only by `docker build -f reproduce/Dockerfile .`
-at fixed `/root` paths; a local checkout builds at a different absolute path and hazync#88 explains why
-that alone moves the id (panic metadata).
+⚠ **A local build yields a guest id that is NOT the canonical one, and that is EXPECTED — not a
+defect, and not something to chase.** `reproduce/METHOD_ID` states the canonical id is produced only by
+`docker build -f reproduce/Dockerfile .` at fixed `/root` paths; a local checkout builds at a different
+absolute path, and hazync#88 explains why that alone moves the id (panic metadata).
+
+The local id is deliberately not quoted here. `scripts/check-versions.sh` fails any doc that names a
+guest id which is neither canonical nor listed in `reproduce/METHOD_ID`, and it is right to: a
+one-off build id written into a document is indistinguishable, later, from a claim about what the
+project ships. Read it with `host method-id` when you need it, and do not paste it anywhere.
 
 What matters for these experiments is that **every pinned input matches**, so the guest SOURCE and
 toolchain here are identical to the fleet's. A/B cycle comparisons taken on this laptop are therefore
