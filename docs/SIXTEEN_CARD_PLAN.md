@@ -227,14 +227,41 @@ against today's. The board has been bitten by this twice already and both were c
 
 | | why |
 |---|---|
-| **Profile the aggregate** — `HAZYNC_AGG_EXECUTE=1` | it is 43% of the post-#139 cost and has never been looked at (§5.2) |
+| **Measure the block's real cycle count** — `HAZYNC_PROFILE_EXEC=1 chunk-profile` | `14.34 G` is **MODELLED**, and `FLEET_SIZING.md` §4 lists that as reason #3 not to trust the card count. Every figure in §1 and §2 divides by it. Needs no receipts and no GPU |
 | **Price bounded-lag pipelining** (§1.1) | drops the bar 1.95x → 1.69x, costs nothing, needs only a design decision |
 | **Close E9 in the docs** | measured out at ≤1.09x (§3); it carries deadlock risk and a fork |
 | **Correct §4.2's "65% idle"** in `PERF_INVESTIGATION_2026-08-26.md` | it contradicts §1 of its own file and the measurement (§3) |
 
+⛔ **The aggregate profile is NOT free, and this document said it was.** `agg_chunks()` calls
+`read_chunk_receipts()` *before* the execute-mode branch, and it verifies every receipt against
+`METHOD_ID` (`main.rs:2030`). Execute mode therefore still needs sixteen real chunk receipts from the
+**current** guest, and producing those needs a GPU. Checked rather than assumed:
+
+| receipt set / binary | id | usable? |
+|---|---|---|
+| `hazync-artifacts/box1/` — all 16, block 962,000 | `b62d2a60…` | **superseded 2026-08-24** |
+| `hazync-dist-v0.18.5/hazync-host` | `4722cec8…` | no |
+| current canonical (`main`, v0.19.0) | `1d6c3792…` | **no receipts exist locally** |
+
+**`HAZYNC_AGG_EXECUTE` has never been run by anyone**, and it moves to the card day. Nor can
+arithmetic stand in for it: `reproduce/METHOD_ID` records the aggregate at `~1,137 M` cycles, which at
+the measured L40S rate is 1,162 s of the 1,566 s total — but the same composition on the
+pre-re-baseline figure (`3,636.4 M`) predicts ~3,500 s against a measured total of **>3,300 s**, i.e.
+it overshoots the entire run. Aggregate segments do not prove at the chunk rate, so the
+validation/resolution split is UNKNOWN until the real run happens.
+
+✅ **One risk to this document was checked and it holds.** `FLEET_SIZING.md`'s 1,565.9 s aggregate is
+cited to #180 on "the v0.19.0 signed binary", and the re-baseline that made the aggregate **3.20x**
+cheaper landed in `2d9a636` (2026-08-24 02:56). v0.19.0 was tagged 22:37 the same day and
+`git merge-base --is-ancestor` confirms it **contains** that commit. The aggregate term is current,
+not stale, and §1's arithmetic stands.
+
 ### One card, one day — the run that decides the project
 
-**L2 + L3 + L4 on the same chunk-9 prove, reconciled to the same 399 s.** One L40S, a few hours.
+**L2 + L3 + L4 on the same chunk-9 prove, reconciled to the same 399 s, plus the aggregate profile
+above** — the sixteen chunk proves that session produces are exactly the receipts
+`HAZYNC_AGG_EXECUTE` has been blocked on, so it costs nothing extra once the card is up. One L40S, a
+few hours.
 Deliverable: a single table where execute + preflight + witgen + NTT + hash + merkle sum to the wall,
 each attributed host-side or device-side, and `ncu` occupancy/bandwidth figures for the top five
 kernels by total time. Then answer H1-H4.
