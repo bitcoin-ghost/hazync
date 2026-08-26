@@ -70,10 +70,9 @@ the budget, and it is why the card count is 32 rather than 28.
 
 Four things could each move the answer, in rough order of how much:
 
-1. **Coordinator egress is uncosted and may bind first.** The coordinator pushes every segment: ~6,600
-   per block at up to ~4 MB, an ESTIMATED **~26 GB per block from a single host**, or ~320 Mbps
-   sustained to hold 10 minutes. If the link saturates around 15 workers the fleet caps there and card
-   count stops mattering. This is experiment **E5** and it should run first.
+1. ~~**Coordinator egress may bind first.**~~ ✅ **MEASURED 2026-08-26 — RETIRED.** It is **~1.3 GB per
+   block, about 18 Mbps** sustained, not the ~26 GB / ~320 Mbps this section estimated. Egress does not
+   cap the fleet at any plausible size. See §6.
 2. **The 83 s floor is inferred from a two-worker run**, not measured as a floor. With 32 workers the
    assembly critical path could shorten (more resolves distributed) or lengthen (more coordination).
    It is the difference between 28 and 32 cards.
@@ -82,7 +81,7 @@ Four things could each move the answer, in rough order of how much:
 4. **Nothing above N=2 has ever been run.** Near-linear scaling is plausible -- chunks are independent
    and every proof is verified separately -- but it is an assumption, not a result.
 
-**What would settle it:** E5, plus a real scaling run at N = 2, 4, 8. Three points on the curve
+**What would settle it:** a real scaling run at N = 2, 4, 8 (E5 is now done — see §6). Three points on the curve
 distinguish "linear" from "saturating" long before anyone commits to a fleet, and the gap between those
 two outcomes is worth far more than the ~€7/hour between 28 and 32 cards.
 
@@ -98,3 +97,49 @@ two outcomes is worth far more than the ~€7/hour between 28 and 32 cards.
 
 The card axis is closed. What is open is host-side scheduling (worker processes per card, experiment
 **E6**) and the guest's cycle count -- see `PERF_INVESTIGATION_2026-08-26.md`.
+
+
+## 6. Coordinator egress, measured — the risk is retired
+
+§4 originally listed egress as the **largest** reason not to trust the card count. It was an estimate,
+it was wrong by ~20x, and it is now measured.
+
+Segment production needs **no GPU**: `seg-serve` runs `ExecutorImpl::run()` and `bincode::serialize`,
+then prints its totals *before* it starts listening. So this was measurable on a laptop all along, and
+filing it as Tier 1 "needs one card" was a mistake.
+
+**MEASURED**, block 962,000, four chunks each at two segment sizes:
+
+| po2 | segments/chunk | MB/chunk | KB/segment |
+|---|---|---|---|
+| 20 | 844–913 | 118.7–135.8 | 141–149 |
+| **22** | **202–218** | **55.3–62.0** | **273–284** |
+
+Chunk-to-chunk spread at po2 22 is ~4%, so cost-packing is working and a mean extrapolates safely.
+
+| component | per block | basis |
+|---|---|---|
+| 16 chunks @ po2 22 | **~949 MB** | MEASURED |
+| aggregate @ po2 22 | ~390 MB | ESTIMATE — see below |
+| **total** | **~1.34 GB** | |
+| **sustained for a 600 s block** | **~2.2 MB/s ≈ 18 Mbps** | |
+
+⚠ The aggregate figure is an **estimate**, not a measurement. The aggregate consumes chunk RECEIPTS,
+which only exist after proving, so it cannot be measured without a GPU. It is scaled from the one
+recorded `seg-serve` line for an aggregate — `186 segments, 261.9 MB` at po2 23, i.e. **1.41 MB/segment**
+— using the po2 slope the chunk table above measures (~1.48x more total bytes per step down). Even if
+that estimate is off by 3x, egress remains under 60 Mbps.
+
+**18 Mbps does not cap anything.** Two consequences:
+
+- Egress is removed as a fleet-planning risk. What remains uncertain about the card count is the
+  **83 s serial floor** (§3) and the fact that **nothing above N=2 has ever been run** — not bandwidth.
+- **Wire compression is pointless.** `PERF_INVESTIGATION_2026-08-26.md` §5.1 proposed it as the lever
+  if egress bound. It does not bind, so that closes too.
+
+⚠ **How the estimate went wrong, because both halves are traps this repo has already documented.**
+The ~26 GB figure multiplied two errors: a segment size of ~4 MB inferred from the push-budget default
+(real chunk segments are 273–284 KB; the ~4 MB figure belongs to the AGGREGATE, whose segments carry
+chunk receipts as assumptions), and a count of 415 segments/chunk, which is the **pre-#136/#137**
+number — those changes halved the cycles and so halved the segments to ~213. This file's own §1 warns
+against exactly that second mistake.
