@@ -344,7 +344,68 @@ nonsense subcommand prints no hex at all.
 | id | experiment | arms | decides |
 |---|---|---|---|
 | **E5** | segment egress | instrument the coordinator: bytes/segment distribution, total per block, sustained MB/s at N workers | §5.1 — is there a fleet ceiling |
-| **E6** | worker-process sweep | `seg-connect` processes per card: 1, 2, 3, 4, 6 | §4.1 — is 1.20x the ceiling or the first step |
+| **E6** | **worker processes × po2 (2D)** | processes 1,2,3,4 × po2 20,21,22 — every cell, VRAM recorded | §4.1 — and whether po2 22 admits a second process AT ALL |
+
+#### E6 must be TWO-DIMENSIONAL — the constraint is VRAM, not scheduling
+
+⛔ **Correction to this section's original framing.** It specified a 1-D sweep of processes at fixed
+po2. That cannot answer the question, because processes and po2 trade directly against each other
+through VRAM:
+
+**L40S at po2 22 peaks at ~41 GB of a 46 GB card — 89%.** There is very likely no room for a second
+worker process at po2 22 at all. So "just run more processes" may be capped at **N=1** on the exact
+card the fleet would be built from.
+
+And the removal note carries a detail that was skimmed: removing the in-process pipeline *"also
+unblocked po2 22, worth **1.15x on chunks and 1.42x on the aggregate**"*. So po2 22 is worth more than
+either scheduling fix, and anything that costs po2 22 to gain parallelism is probably a bad trade.
+
+| approach | VRAM | keeps po2 22? | fills the 65% idle? |
+|---|---|---|---|
+| 1 process, po2 22 | 41 GB (89%) | ✓ | ✗ |
+| N processes, po2 20 | ~11–14 GB each | ✗ (loses 1.15–1.42x) | ✓ |
+| in-process pipelining | one allocation | it BLOCKED po2 22 last time | partially |
+
+⚠ **The 1.20x figure has no recorded conditions.** Neither `ACCELERATION.md` nor the removal note in
+`prover_impl.rs` says at what po2 or on which card it was measured. If it was taken at po2 20 it is not
+comparable to a po2 22 baseline, and the "1.20x beats the pipeline's ~6%" comparison may be between
+different workloads. **Record po2, card and peak VRAM for every cell of E6**, including cells that OOM
+— the failures are the data that distinguishes "contention" from "memory".
+
+**Why this now gates E9.** If the throughput optimum is 3 processes at po2 20, processes already fill
+the idle time and E9 is dead. If it is 1 process at po2 22 — VRAM-bound, GPU still 65% idle — then
+pipelining is the ONLY thing that can fill that idle time, because it shares one context and one
+allocation. E9's value is entirely conditional on which, and E6 is cheap.
+
+### E10 — a newer risc0: CLOSED, there is nothing to upgrade to
+
+Checked 2026-08-26 rather than assumed. The result is negative and worth recording so nobody re-asks.
+
+| | |
+|---|---|
+| pinned | `risc0-zkvm =3.0.5` (circuit crates 4.0.x, `risc0-sys` 1.5.0) |
+| latest stable | **3.0.6** |
+| 3.0.6's entire content | *"Repair Rust 1.97.0 guest build with `heap-embedded-alloc` feature"* |
+| do we use `heap-embedded-alloc`? | **No** — guest features are `['std','unstable']` |
+| do we use Rust 1.97? | **No** — pinned at **1.94.1** |
+
+So **3.0.6 is a literal no-op for this build**: it fixes a feature we do not enable, on a toolchain we
+do not use.
+
+`5.0.0-rc.1` looks newer by version number and is not. The crates.io publish order is
+`… 3.0.4, 5.0.0-rc.1, 3.0.5, 3.0.6` — **the RC predates our own pin** and the 3.0.x line superseded it.
+
+⛔ **And upstream is dormant.** Five commits in three months, all housekeeping (Rust 1.97 bump, docker
+image, sccache, Metal skip). risc0#3781 — the CUDA `u32` overflow fix that blocks po2 23 — is **still
+open and unmerged**. Our own risc0#3798 and #3799 have **zero comments**.
+
+**Three consequences, and they reverse earlier advice in this repo:**
+
+1. **#182's hand-vendored #3773 fix is permanent, not a stopgap.** Nobody is going to merge #3781.
+2. **The vendor policy's premise is gone.** `vendor/risc0-zkvm` is kept verbatim "so the diff stays
+   re-appliable when risc0 moves". It is not moving. Divergence costs less than that policy assumes.
+3. **E9 has no upstream route.** Adopting risc0#3201's GPU locking would be a fork, not an upgrade —
+   which raises its cost and makes E6 settling the question first more valuable, not less.
 
 **E6 is the highest-value Tier 1 experiment** and should run first. It is pure configuration, it
 directly tests the lever the board calls the remaining zero-fidelity one, and its result determines
