@@ -28,36 +28,49 @@ should have.
 | SHA256 → risc0 accelerator (`patches/0002`) | SHA down to 3.4% of cycles | Yes (spent) | **~3.4%** — Core's SHA256 transform |
 | Cost-based chunk packing (#134) | straggler 1.22x → 1.10x | **No** — host packer | **None** |
 | Anyone-can-spend priced at zero (#138) | straggler 1.10x → **1.02x** | **No** — host packer | **None** |
+| **#136 — read the payload with `read_slice`** (#142) | **1.71x** on the block (2.03x on the chunk) | Yes (spent) | **None** — committed journal digest proven byte-identical |
+| **#137 — group the payload by transaction** (#142) | **2.00x** on the block cumulative (2.56x on the chunk) | Yes (spent) | **None** — same digest; restores BIP143's once-per-transaction `Init` |
 
 The SHA256 row is the precedent every later precompile argument rests on, and it is worth naming as such:
 a precompile is *constrained, not trusted* — the circuit proves it computed correctly. That argument was
 accepted once already, at 3.4%. What follows asks for it at 85%.
 
-### Built and measured, not merged
+### Shipped in #142 — the section that used to say "not merged"
 
-Both live on `bench/135-on-main` (guest `b62d2a60`), the build the H100 run below was taken on.
+⛔ **#136 and #137 ARE MERGED.** `cf04525` — "Land #136 + #137 and re-baseline the guest to
+`b62d2a60`" (#142) — merged 2026-08-21T19:51:06Z, and both issues closed two minutes later. They are in
+the guest on `main` today: `read_slice` in `prover/methods/guest/src/main.rs:1606`, and
+`verify_inputs_batch` in `prover/methods/guest/verify_input.cpp:705`.
 
-| Improvement | Gain | New `METHOD_ID`? | Core code no longer proven |
-|---|---|---|---|
-| #136 — read the payload with `read_slice` | **1.65x** on the block | **Yes** | **None** — committed journal digest proven byte-identical |
-| #137 — group the payload by transaction | **1.19x** further (**1.96x** cumulative) | **Yes** | **None** — same digest; restores BIP143's once-per-transaction `Init` |
+This section previously read **"Built and measured, not merged"** and said both lived on
+`bench/135-on-main` -- a branch that no longer exists on origin (it survives as tag
+`archive/rebaseline-135-compose`). That was wrong for five days and it was believed: on 2026-08-26 it
+sent a whole performance investigation out with "the largest available win is already written and
+unmerged" as its headline recommendation. **The 1.96x is BANKED, not available.** It is in the current
+guest and in every proof made since the re-baseline.
 
-Modelled on block 962,000 from #138's fitted coefficients (`COST_INPUT_BASE` 34K, `COST_PER_EC_OP`
-1.95M, byte coefficient at its refitted value for each stage) and a full script-type classification of
-all 8,006 inputs:
+What they actually bought, MEASURED on block 741000 chunk 1 and recorded on the issues:
 
-```
-main today (182 c/B, per-input payload)      28.17 G cycles     1.00x
-+ #136 read_slice (36 c/B)                   17.06 G            1.65x
-+ #137 group-by-tx (6 c/B, unique bytes)     14.34 G            1.96x
-```
+| stage | chunk cycles | block |
+|---|---|---|
+| before | 221,538,730 | 2,923 M |
+| + #136 `read_slice` | 109,113,751 (**2.03x**) | 1,706 M (**1.71x**) |
+| + #137 group-by-tx | 86,495,630 (**2.56x**) | 1,458 M (**2.00x**) |
 
-Two independent checks that this model is not fitted to itself: the #136 stage lands within ~5% of the
-16.2 G budget #138 measured on the `read_slice` payload, and the classification reproduces #138's
-13.7% anchor share exactly (1,093 P2A spends of 8,006).
+#136's mechanism is worth remembering, because it is the largest single inefficiency ever found here:
+`env::read` of the payload was **50.9% of the chunk's entire cycle count before any Bitcoin logic ran**
+-- ~147 cycles per byte, because serde walks risc0's word stream one byte at a time. #137's was
+similar in spirit: the payload carried the spending transaction once per INPUT rather than once per
+transaction (block 741000 shipped 6,995,621 bytes of a distinct 123,883, a factor of **56.5**), so
+`PrecomputedTransactionData::Init` ran once per input when BIP143 exists precisely so it runs once per
+transaction.
 
-**This is 1.96x for no fidelity cost at all, and it is already written.** It is the best trade on the
-board and nothing about it is contingent on #139.
+Both are byte-identical -- same journal digest `02a7463d…`, same `ChunkOut`, same binds. Wire format
+and loop structure, never what is proven.
+
+The modelled projection that used to sit here (28.17 G -> 17.06 G -> 14.34 G on block 962,000, from
+#138's fitted coefficients) is kept only as the record of how the gain was predicted before it landed.
+It is no longer a forecast of anything available.
 
 ### Measured and rejected
 
