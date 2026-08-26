@@ -221,7 +221,33 @@ Priority: **below §4.1**, because §4.1 buys the same utilisation with no new f
 
 ## 5. Waste and scale
 
-### 5.1 Coordinator egress may cap the fleet before the GPUs do
+### 5.1 Coordinator egress — MEASURED, and it does NOT cap the fleet
+
+✅ **RESOLVED 2026-08-26. The estimate below was wrong by ~20x and is kept only as the record of how.**
+
+Measured on block 962,000 with no GPU at all — `seg-serve` runs `ExecutorImpl::run()` plus
+`bincode::serialize` and prints its totals before it listens, so filing this as Tier 1 was a mistake:
+
+| po2 | segments/chunk | MB/chunk | KB/segment |
+|---|---|---|---|
+| 20 | 844–913 | 118.7–135.8 | 141–149 |
+| **22** | **202–218** | **55.3–62.0** | **273–284** |
+
+**16 chunks ≈ 949 MB MEASURED, plus ~390 MB ESTIMATED for the aggregate ≈ 1.34 GB per block ≈ 18 Mbps**
+sustained for a 600 s block. That caps nothing. Full working in `FLEET_SIZING.md` §6.
+
+⛔ **The compression proposal below is therefore CLOSED.** It was conditional on egress binding. It does
+not bind, and compression would trade coordinator CPU -- which IS the serial bottleneck -- for
+bandwidth that is not scarce. Do not implement it.
+
+The original estimate multiplied two errors: ~4 MB/segment inferred from the push-budget default (real
+chunk segments are 273–284 KB; ~4 MB belongs to the AGGREGATE, whose segments carry chunk receipts as
+assumptions, measured at 1.41 MB/segment even at po2 23), and 415 segments/chunk, which is the
+**pre-#136/#137** count — those changes halved the cycles and so halved the segments to ~213.
+
+<details><summary>The original (wrong) estimate, kept as the record</summary>
+
+### 5.1-original Coordinator egress may cap the fleet before the GPUs do
 
 This is the finding I would most like to be wrong about, because it constrains the "~28 cards gets a
 tip block under 10 minutes" plan.
@@ -247,6 +273,8 @@ why this is an estimate with an experiment attached rather than a claim.
 dependency at all. Segment data is largely memory images, which typically compress well. If E5 shows
 egress is a real ceiling, this is the obvious lever, and it trades coordinator CPU (which is *already*
 the serial bottleneck, §4.2) against bandwidth — so it is not free and must be measured both ways.
+
+</details>
 
 ### 5.2 `write_frame` sends two tiny packets ahead of every payload
 
