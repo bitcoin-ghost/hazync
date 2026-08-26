@@ -33,9 +33,12 @@ interchangeable, and the board has historically conflated two of them:
   10-minute block reachable; it does not make the chain cheaper. Conflating the two is how "17
   GPU-years" and "under 10 minutes" ended up sounding like the same claim.
 
-**The headline for anyone reading only this section:** the largest available win is already written and
-sitting unmerged (§3.1), and the largest *unexplored* class is guest codegen (§3.2), which has never
-been touched and can be measured for free.
+**The headline for anyone reading only this section:** the largest *unexplored* class is guest codegen
+(§3.2), which has never been touched and can be measured for free. The largest remaining ACTIONABLE
+lever is worker processes per card (§4.1).
+
+⛔ **This section originally said the largest win was "already written and sitting unmerged", meaning
+#136/#137. That was wrong — they were merged five days earlier. See §3.1.**
 
 ---
 
@@ -43,7 +46,7 @@ been touched and can be measured for free.
 
 | # | Finding | Factor | Size | Status | Cost to test |
 |---|---|---|---|---|---|
-| 3.1 | #136/#137 payload encoding, **built and unmerged** | cycles | **1.96x** MEASURED | needs a decision, not an experiment | free |
+| 3.1 | ~~#136/#137 payload encoding~~ — **MERGED in #142**, gain is BANKED | cycles | 2.00x MEASURED | ✅ shipped 2026-08-21 | — |
 | 3.2 | Guest C/C++ compiled at `-O2`, **no LTO** | cycles | UNKNOWN | never tried | free (execute mode) |
 | 3.3 | Guest Rust gets Cargo defaults: `lto=false`, `codegen-units=16` | cycles | UNKNOWN | never tried | free |
 | 3.4 | `NDEBUG` never defined — 31 live `assert()`s in `interpreter.cpp` | cycles | UNKNOWN | never considered | free (but see fidelity) |
@@ -57,19 +60,39 @@ been touched and can be measured for free.
 
 ## 3. Cycles — the factor that actually makes it cheaper
 
-### 3.1 The biggest win is already written and not merged
+### 3.1 #136/#137 are MERGED — a correction, not an opportunity
 
-`ACCELERATION.md` records #136 (`read_slice` payload) and #137 (group-by-transaction) as **1.96x
-cumulative on the block, at zero fidelity cost**, living on `bench/135-on-main` (guest `b62d2a60`).
-MEASURED, with two independent cross-checks recorded against #138's fitted coefficients.
+⛔ **They landed in `cf04525` (#142) on 2026-08-21T19:51:06Z**, and the guest was re-baselined to
+`b62d2a60` for them. `read_slice` is in the guest at `main.rs:1606`; `verify_inputs_batch` is at
+`verify_input.cpp:705`. **The 2.00x is banked, not available.**
 
-Nothing in this investigation beats it, and nothing here is contingent on it. **Before any experiment
-below is run, this should be merged or explicitly rejected.** A 1.96x sitting on a branch is the single
-largest cost item on the board, and it is a decision, not a discovery.
+The first draft of this document said the opposite -- "1.96x, already written, unmerged, the best trade
+on the board" -- and ranked it as the single most important action. It was taken from
+`ACCELERATION.md`'s section headed "Built and measured, not merged", which pointed at
+`bench/135-on-main`, a branch that no longer exists on origin.
 
-The only reason it is not simply "do it" is that it changes `METHOD_ID` and therefore forces a board
-re-baseline — which is exactly what just happened with #166, and the board has not yet rebuilt to its
-previous frontier. That is a scheduling question, not a technical one.
+That is the same failure this document opens by warning about, made in the opposite direction and in
+the same evening. It is recorded here rather than quietly edited out, because the interesting part is
+not the error: it is that a stale heading survived five days, was read by someone who had spent the
+night removing stale headings from the same file, and still won.
+
+What they bought, MEASURED on block 741000 chunk 1:
+
+| stage | chunk cycles | block |
+|---|---|---|
+| before | 221,538,730 | 2,923 M |
+| + #136 `read_slice` | 109,113,751 (**2.03x**) | 1,706 M (**1.71x**) |
+| + #137 group-by-tx | 86,495,630 (**2.56x**) | 1,458 M (**2.00x**) |
+
+Both byte-identical: same journal digest, same `ChunkOut`, same binds.
+
+**Why it still matters to read this section.** #136 found that `env::read` of the payload was **50.9%
+of a chunk's entire cycle count before any Bitcoin logic ran** -- serde walking risc0's word stream one
+byte at a time at ~147 cycles per byte. #137 found the payload shipping the spending transaction once
+per INPUT rather than once per transaction, a factor of 56.5 in bytes on block 741000. Neither was in
+the consensus code at all. **Both were in the plumbing around it**, and both were invisible until
+somebody profiled the read rather than the compute. That is the strongest available argument for
+running the cheap experiments in §6: this system has form for hiding large wins in unglamorous places.
 
 ### 3.2 The guest's C and C++ are built at `-O2`, with no LTO
 
@@ -362,9 +385,11 @@ Recorded so this file does not become the next stale document.
 
 ## 8. If only three things get done
 
-1. **Decide #136/#137** (§3.1). 1.96x is written and waiting. No experiment can beat it.
-2. **Run E6** (§4.1). One card, a few hours, pure config, and it gates the riskiest remaining work.
-3. **Run E1 and E4 together** (§3.2, §3.5). Free, they cover the entire untouched codegen axis, and E4
-   may move in the direction nobody expects.
+1. **Run E6** (§4.1). 1.2–1.45x, one card, a few hours, pure config — the largest actionable lever now
+   that #136/#137 are banked, and it gates whether the deadlock-prone preflight work is worth touching.
+2. **Run E4** (§3.5). Free, and the only one likely to produce a surprise: the 15 → 19 window move
+   bought far too little, and the sweep must go DOWNWARD as well as up to find out why.
+3. **Run E1, E2 and E3 together** (§3.2–§3.4). Free, one rebuild each, and they close the entire
+   untouched codegen axis — including permanently retiring the `NDEBUG` question.
 
 E5 (§5.1) is the one to run before promising anyone a 28-card fleet.
