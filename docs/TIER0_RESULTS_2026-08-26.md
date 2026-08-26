@@ -62,8 +62,13 @@ control   digest=607f4a7e259b5570e0acbd74ff649ed5991f1552fef270faf03b3883e8f15fe
 combined  digest=607f4a7e259b5570e0acbd74ff649ed5991f1552fef270faf03b3883e8f15fea kind=0xc4a10004 binds=212
 ```
 
-Byte-identical journal, identical `ChunkOut`, and the two `METHOD_ID`s differ (`916cde9e` vs
-`19d181a3`) proving both genuinely rebuilt. **No UB surfaced.**
+Byte-identical journal, identical `ChunkOut`, and **the two `METHOD_ID`s differ**, proving both arms
+genuinely rebuilt rather than one answering from a stale binary. **No UB surfaced.**
+
+(The local ids are deliberately not quoted. `scripts/check-versions.sh` rejects any doc naming a guest
+id that is neither canonical nor listed in `reproduce/METHOD_ID`, and it is right to: a one-off local
+build id in a document is later indistinguishable from a claim about what the project ships. A local
+build never matches the canonical id anyway -- see `reproduce/METHOD_ID` and hazync#88.)
 
 ## 3. E1: `-O3` is worth 0.26%, and LTO is not merely unmeasured but impossible
 
