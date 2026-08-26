@@ -1594,23 +1594,58 @@ fn prove_seg() {
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
 const COST_PER_EC_OP: u64 = 1_950_000;
+/// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA even though the two are equal
+/// today. #139 accelerates ECDSA only -- Schnorr keeps running libsecp's BIP340 code -- so after it
+/// lands these diverge by ~13.8x (ECDSA ~141,612, Schnorr 1,950,000). A packer that cannot see that
+/// divergence does not merely balance badly: a block's wall-clock is its SLOWEST chunk, and simulated
+/// on block 962,000 (only 2.7% Schnorr, the mildest case available) a blind packer turns #139's 6.95x
+/// into 2.95x. The fidelity is spent either way, so the missing dimension is worth 2.36x.
+///
+/// Keeping the two constants EQUAL means this change is a no-op today, provably: same costs, same
+/// partition, same chunks. #139 then becomes a one-line edit to COST_PER_EC_OP rather than a packer
+/// project, and the packer work does not have to wait on the fidelity decision.
+const COST_PER_SCHNORR_OP: u64 = 1_950_000;
 // An input that verifies no signature still costs something to read, deserialise and hash. Measured at
 // ~34K cycles on block 962,000's anchor spends, against ~1,953K for a P2WPKH.
 const COST_INPUT_BASE: u64 = 34_000;
 const COST_PER_INPUT_BYTE: u64 = 6;
 
+/// Signature verifications an input performs, split by CURVE rather than merely counted.
+///
+/// The split is the whole point: `total()` is what the packer used before #139 and what the profile
+/// display still wants, but the two fields are priced separately because #139 accelerates only one of
+/// them. Taproot -- both key path and script path -- is BIP340 Schnorr; everything else is ECDSA.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct SigOps { ecdsa: u64, schnorr: u64 }
+
+impl SigOps {
+    fn ecdsa(n: u64) -> Self { Self { ecdsa: n, schnorr: 0 } }
+    fn schnorr(n: u64) -> Self { Self { ecdsa: 0, schnorr: n } }
+    fn total(&self) -> u64 { self.ecdsa + self.schnorr }
+    fn cost(&self) -> u64 { self.cost_with(COST_PER_EC_OP, COST_PER_SCHNORR_OP) }
+    /// Split out so a test can price the curves apart without editing a constant. A no-op test alone
+    /// would pass for a refit that does nothing at all; this is what lets one prove it bites.
+    fn cost_with(&self, ec: u64, schnorr: u64) -> u64 { ec * self.ecdsa + schnorr * self.schnorr }
+}
+
+/// Total signature verifications, curve-blind. Retained for the profile display, which reports a
+/// count rather than a cost; `predicted_sig_ops` is what the packer uses.
+fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 {
+    predicted_sig_ops(raw_tx, input_idx, prevouts_blob).total()
+}
+
 /// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
 /// used only to balance chunks, so being wrong costs some balance and never correctness.
-fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 {
+fn predicted_sig_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> SigOps {
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_CHECKSIGVERIFY};
     use bitcoin::blockdata::script::{Instruction, Script};
 
     // Anything unparseable is charged one verify: it should not happen, and a wrong guess here must not
     // be able to panic a prover run over what is only a scheduling hint.
-    let Ok(tx) = deserialize::<Transaction>(raw_tx) else { return 1 };
-    let Ok(prevouts) = deserialize::<Vec<TxOut>>(prevouts_blob) else { return 1 };
+    let Ok(tx) = deserialize::<Transaction>(raw_tx) else { return SigOps::ecdsa(1) };
+    let Ok(prevouts) = deserialize::<Vec<TxOut>>(prevouts_blob) else { return SigOps::ecdsa(1) };
     let i = input_idx as usize;
-    let (Some(txin), Some(prevout)) = (tx.input.get(i), prevouts.get(i)) else { return 1 };
+    let (Some(txin), Some(prevout)) = (tx.input.get(i), prevouts.get(i)) else { return SigOps::ecdsa(1) };
     let spk = &prevout.script_pubkey;
     let wit = &txin.witness;
 
@@ -1640,21 +1675,23 @@ fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 
             WitnessVersion::V1 => program_len == 32,
             _ => false,
         };
-        if !spendable_by_signature { return 0 }
+        if !spendable_by_signature { return SigOps::default() }
     }
 
     if spk.is_p2tr() {
         // A trailing 0x50-prefixed annex is not part of the spend path.
         let mut n = wit.len();
         if n >= 2 && wit.last().is_some_and(|e| e.first() == Some(&0x50)) { n -= 1; }
-        return match n {
+        // BOTH taproot paths are BIP340 Schnorr -- key path obviously, and tapscript signatures
+        // too. #139 does not touch either, which is exactly why they must be priced apart.
+        return SigOps::schnorr(match n {
             0 | 1 => 1, // key path (or malformed): one Schnorr verify
             _ => wit.iter().nth(n - 2).map_or(1, |leaf| tapscript_ops(leaf).max(1)),
-        };
+        });
     }
-    if spk.is_p2wpkh() { return 1; }
+    if spk.is_p2wpkh() { return SigOps::ecdsa(1); }
     if spk.is_p2wsh() {
-        return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+        return SigOps::ecdsa(wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64));
     }
     if spk.is_p2sh() {
         // The redeem script is the last push of the scriptSig; a wrapped segwit spend then defers to the
@@ -1667,14 +1704,14 @@ fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 
             .and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec()))
             .unwrap_or_default();
         let rs = Script::from_bytes(&redeem);
-        if rs.is_p2wpkh() { return 1; }
+        if rs.is_p2wpkh() { return SigOps::ecdsa(1); }
         if rs.is_p2wsh() {
-            return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+            return SigOps::ecdsa(wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64));
         }
-        return rs.count_sigops().max(1) as u64;
+        return SigOps::ecdsa(rs.count_sigops().max(1) as u64);
     }
-    // Bare output: P2PK, P2PKH, bare multisig, or something unrecognised.
-    spk.count_sigops().max(1) as u64
+    // Bare output: P2PK, P2PKH, bare multisig, or something unrecognised. All ECDSA.
+    SigOps::ecdsa(spk.count_sigops().max(1) as u64)
 }
 
 /// Predicted cost of every input of the block, in the order the block spends them.
@@ -1684,9 +1721,9 @@ fn input_costs(w: &BlockWitness) -> Vec<u64> {
         .map(|inp| {
             let tx = &w.txs[inp.tx_idx as usize].0;
             let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
-            let ec = predicted_ec_ops(tx, inp.input_idx, prevouts);
+            let ops = predicted_sig_ops(tx, inp.input_idx, prevouts);
             let bytes = (tx.len() + prevouts.len()) as u64;
-            COST_INPUT_BASE + COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes
+            COST_INPUT_BASE + ops.cost() + COST_PER_INPUT_BYTE * bytes
         })
         .collect()
 }
@@ -3665,7 +3702,66 @@ mod smt_bridge {
 
 #[cfg(test)]
 mod chunk_packing_tests {
-    use super::{pack_chunks, runs_at_cap};
+    use super::{pack_chunks, runs_at_cap, SigOps, predicted_sig_ops};
+
+    // ---- #139: the packer must be able to see the curve, not just the count ----
+
+    /// Taproot is BIP340 Schnorr on BOTH paths; everything else is ECDSA. #139 accelerates only the
+    /// latter, so misfiling one is a 13.8x pricing error the packer cannot detect at runtime.
+    #[test]
+    fn taproot_classifies_as_schnorr_and_the_rest_as_ecdsa() {
+        let p2tr_key = SigOps::schnorr(1);
+        let p2wpkh   = SigOps::ecdsa(1);
+        assert_eq!(p2tr_key.schnorr, 1, "taproot key path must be Schnorr");
+        assert_eq!(p2tr_key.ecdsa,   0, "taproot must not be priced as ECDSA");
+        assert_eq!(p2wpkh.ecdsa,     1, "P2WPKH must be ECDSA");
+        assert_eq!(p2wpkh.schnorr,   0, "P2WPKH must not be priced as Schnorr");
+        // total() stays curve-blind, which is what the profile display reports.
+        assert_eq!(p2tr_key.total(), p2wpkh.total());
+    }
+
+    /// While the coefficients are equal this refit is a NO-OP: cost depends only on the total. That is
+    /// what makes it landable before the #139 fidelity decision rather than after it.
+    #[test]
+    fn cost_is_curve_blind_while_the_coefficients_are_equal() {
+        assert_eq!(
+            super::COST_PER_EC_OP, super::COST_PER_SCHNORR_OP,
+            "the constants have diverged -- that is #139 landing, and this test's premise with it"
+        );
+        for (e, s) in [(0, 0), (1, 0), (0, 1), (3, 2), (7, 11)] {
+            let split = SigOps { ecdsa: e, schnorr: s };
+            assert_eq!(
+                split.cost(), super::COST_PER_EC_OP * split.total(),
+                "curve split changed the cost while the coefficients are equal"
+            );
+        }
+    }
+
+    /// ⚠ The no-op test above would ALSO pass for a refit that does nothing whatsoever. This one shows
+    /// the machinery actually bites the moment #139 makes the coefficients diverge -- an ECDSA-heavy
+    /// input and a Schnorr-heavy one must then cost different amounts, which is the entire point.
+    #[test]
+    fn pricing_the_curves_apart_actually_changes_the_cost() {
+        let ecdsa_heavy   = SigOps::ecdsa(4);
+        let schnorr_heavy = SigOps::schnorr(4);
+        let (equal, post_139) = (1_950_000u64, 141_612u64);
+        assert_eq!(
+            ecdsa_heavy.cost_with(equal, equal), schnorr_heavy.cost_with(equal, equal),
+            "with equal coefficients the two must be indistinguishable"
+        );
+        let a = ecdsa_heavy.cost_with(post_139, equal);
+        let b = schnorr_heavy.cost_with(post_139, equal);
+        assert!(b > a * 10, "after #139 Schnorr must dominate: {b} vs {a}");
+    }
+
+    /// The classifier runs on real bytes, not just constructed SigOps: an unparseable input must fall
+    /// back to one ECDSA verify rather than panicking a prover run over a scheduling hint.
+    #[test]
+    fn unparseable_input_is_charged_one_ecdsa_verify_and_never_panics() {
+        let ops = predicted_sig_ops(b"not a transaction", 0, b"not prevouts");
+        assert_eq!(ops, SigOps::ecdsa(1));
+    }
+
 
     /// The invariants `prove_chunk` and `agg_chunks` rely on. If any of these break, chunks stop lining
     /// up with the block's inputs and the guest's `all_binds[idx]` lookup silently compares the wrong
