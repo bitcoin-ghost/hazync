@@ -136,14 +136,15 @@ Anyone revisiting po2 23 needs a risc0 version whose circuits support it, not a 
 | Option | Gain | New `METHOD_ID`? | Core code no longer proven |
 |---|---|---|---|
 | **More cards** | Near-linear | **No** | **None** — chunks are independent and every parallel proof is independently verified |
-| **Host-side pipelining** | **1.39x on segment proving, ~1.31x on a chunk — MEASURED** | **No** | **None** — overlaps host preflight with the GPU; changes the schedule, not the proof |
+| ~~Host-side pipelining~~ | **REMOVED** — deadlocked CUDA (#147), reverted by #148. Superseded by worker processes: **1.20x on one card** | **No** | **None** |
 | Host-side tree-fold | **not supported as the serial section** — a profile names preflight instead | **No** | **None** |
 | **#139 middle path** | **5.25x** on the block (execute-derived) | **Yes** | **~85%** |
 | **#139 wholesale** | **7.18x on the block, MEASURED at proving time** (8.85x execute-derived) | **Yes** | **~95%** |
 
-The pipelining row is new and follows from the H100 measurement rather than from any plan. It is the
-only remaining zero-fidelity lever that has not been costed, and it is host-side, so it costs no
-`METHOD_ID`. It should be measured before anything in the last two rows is argued about.
+The pipelining row is CLOSED, not open: it was measured, landed, and reverted. Read "Pipelining
+preflight against prove_core" below before proposing it again. The zero-fidelity lever that remains is
+worker PROCESSES per card, which costs no `METHOD_ID` and should be pushed to its limit before
+anything in the last two rows is argued about.
 
 ### What #139 actually costs
 
@@ -739,28 +740,55 @@ which is verifier-blocked, so that part is not recoverable.)
 `vmstat` says the same thing on two machines: H100 12 cores at us 7.2%, B200 24 cores at us 3.4% —
 **0.86 and 0.82 busy cores.** Doubling the core count changed nothing. It is one thread.
 
-### Pipelining preflight against prove_core: 1.39x, measured
+### Pipelining preflight against prove_core: TRIED, REMOVED (#147, #148)
+
+⛔ **This section used to record a 1.39x lever and point at `feat/pipeline-preflight`. That lever was
+landed, it deadlocked CUDA, and #148 removed it from `main` on 2026-08-24. The branch survives only as
+tag `archive/pipeline-preflight`. Do not resurrect it from this document.**
+
+What was measured still stands as a description of the GAP, and that is why the section is kept:
 
 | arm | wall | GPU mean | busy>=90% |
 |---|---|---|---|
 | sequential | 776 s | 60.3% | 55.3% |
-| **pipelined** | **554 s / 560 s** | **84.7% / 83.6%** | **77.6% / 73.9%** |
+| pipelined | 554 s / 560 s | 84.7% / 83.6% | 77.6% / 73.9% |
 
-Two runs of the pipelined arm agree to 1.1%. The utilisation jump is the preflight gap being filled.
+Preflight leaves the GPU idle and something can fill it. What was wrong was the SCHEDULE used to fill
+it, not the observation.
 
-⛔ **This is the discriminator against the concurrency null.** Running two chunk proves concurrently
-raised utilisation 66% -> 84% and throughput FELL. Pipelining raises it to the same place and
-wall-clock DROPS 29%. Inter-process contention (two CUDA contexts, driver time-slicing) is not
-intra-process pipelining (one context, CPU phase overlapped with GPU phase).
+**Why it was removed.** `ProverImpl::prove_session` overlapped `segment_preflight` with
+`prove_segment_core` by spawning preflight on a thread inside `thread::scope`. Both reach
+`risc0_circuit_rv32im::prove::segment_prover()`, which under the `cuda` feature is the CUDA-backed
+prover object, and nothing serialised access to it. It **deadlocked**: hazync#147, chunk 11 of block
+962000 at po2 22, hung twice for 76 min and 3h38m with the GPU at 0% and the consumer parked in
+`rx.recv()`. Confirmed with the same chunk, same po2 and same binary, with the schedule as the only
+variable. This is the documented CUDA failure mode: once one thread hangs inside the driver, every
+other thread hangs on its next driver call.
 
-⚠ **1.39x is on SEGMENT PROVING, not on a chunk.** A `prove-chunk` is ~18 s execute + 776 s segments +
-~121 s succinct lift; the lift is untouched, so a chunk goes ~915 s -> ~699 s = **~1.31x**. The lift is
-then ~17% of what remains, unoverlapped, and `lift(N)` does not depend on `prove_core(N+1)` either.
+**What replaced it.** More worker PROCESSES, which do not share a CUDA context: **1.20x on one card**,
+against the ~6% the in-process pipeline delivered end to end. Removing the pipeline also unblocked
+po2 22, worth 1.15x on chunks and 1.42x on the aggregate.
 
-`ProverServer` already exposes `segment_preflight` and `prove_segment_core` as separate public methods
-with a `PreflightResults` handoff, so this needs no fork of risc0 — `bench-pipeline` on
-`feat/pipeline-preflight` measures it. It is host-only: rebuilding the branch reproduced its base
-tree's guest id unchanged, so no re-baseline is implied and no board reset follows.
+⚠ **The ~6% here and the 1.39x above are not the same measurement, and the gap is unexplained.** 1.39x
+is `bench-pipeline` on segment proving alone; ~6% is what survived end to end. Treat 1.39x as an upper
+bound from a microbenchmark, never as a chunk-level result.
+
+⚠ **The "concurrency null" that used to sit here is RETRACTED.** It read: two concurrent chunk proves
+raised utilisation 66% -> 84% but throughput FELL, therefore only in-process pipelining can work. The
+process result above contradicts that conclusion. The likely reconciliation is memory rather than
+scheduling -- one chunk prove peaks ~22 GB, so two at po2 22 contend for VRAM, whereas `seg-connect`
+segment workers are far lighter. **This is unmeasured.**
+
+**Upstream solved the same problem in a different layer.** risc0#3201 -- "Split out preflight from
+prove_segment. Run them in parallel in the worker.", merged 2025-06-02 -- reports po2 20 falling from
+800 ms to 400 ms, and records that **GPU locking adjustments were required**. It lives in the actor
+worker, not in `ProverImpl`, and risc0#3524 later moved preflight out of the prover object altogether.
+So the overlap is achievable, with a lock we never had, but the supported path is upstream's worker
+rather than a hand-rolled `thread::scope` in `prove_session`.
+
+Anyone revisiting this should start from #3201's locking, and should assume `preflight()` may itself
+touch CUDA until proven otherwise -- `risc0-circuit-rv32im` is not vendored here, so that has never
+been checked.
 
 ### #139 at proving time, and the Schnorr floor measured rather than assumed
 
