@@ -91,11 +91,22 @@ Cheap, and it converts the one remaining estimate in `FLEET_SIZING.md` §6 into 
 
 ## 5. E11 — is `HAZYNC_CHUNKS = 16` optimal?
 
-**Free half, already measured.** The cost-packed packer holds the straggler at **1.00x from 4 to 64
-chunks** (1.01x at 96 and 128), and the slowest chunk halves on every doubling. Total work is *exactly*
-invariant: 4 x 3,585,326,976 = 128 x 112,041,468 = 14,341,307,904 cycles. So chunking is free at the
-execute level, and 16 is a default nobody revisited — the code says so: *"HAZYNC_CHUNKS has been
-treated as free."*
+**Free half, measured — and the answer is that chunking is free ALL THE WAY to the aggregate.**
+
+| quantity | N=4 | N=16 | invariant? |
+|---|---|---|---|
+| total execute cycles | 14,341,307,904 | 14,341,307,904 | **exactly** (also at N=128) |
+| total segments | **3,411** | ~3,404 | yes (0.2%) |
+| total wire bytes | **949.9 MB** | ~949 MB | yes |
+| straggler | 1.00x | 1.00x | 1.00x through N=64, 1.01x at 96/128 |
+
+Segments per chunk halve almost exactly on every doubling: 805 → 426 → 213 → 104 → 49. The N=4 total
+is measured across **all four** chunks, not extrapolated — extrapolating from chunk 0 alone gives
+3,220 and is wrong, because chunk 0 is the *smallest* (805 against 864/871/871).
+
+So `HAZYNC_CHUNKS = 16` is a default nobody revisited — the code says so outright: *"HAZYNC_CHUNKS has
+been treated as free"* — and splitting finer costs **nothing** before the aggregate. That isolates the
+GPU half to a single unknown.
 
 **GPU half.** More chunks means more **assumption resolutions** in the aggregate, and resolution is
 recursion, so that cost lands in proving and is invisible to execute mode.
