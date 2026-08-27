@@ -876,3 +876,60 @@ the highest-value open question on the board, because fan-out is what is left.
 destruction, the mechanism identified (`ptxas`, at no GPU cost), and the reason recorded so nobody
 re-runs a register sweep in six months. The kernels are not the missing 1.8x, and that is now
 established rather than assumed.
+
+### 8.12 ✅ Fan-out is FREE — the aggregate does not scale with N
+
+MEASURED 2026-08-27 on a second L40S (`hazync-l40s6`, same model, same driver 595.58.03, same
+`METHOD_ID 1d6c3792`). §8.8's first caveat is now closed.
+
+**One block, one box, one card, one binary — only N moves:**
+
+| | N=4 | N=8 | change |
+|---|---|---|---|
+| segments at po2 22 | 28 | **28** | none |
+| segment proving | 100 s | **100 s** | none |
+| **assumption resolution** | **16 s** | **17 s** | **+1 s** |
+| total aggregate | 115.8 s | **116.6 s** | **+0.7%** |
+| per assumption | 4.00 s | 2.12 s | halved |
+
+Both receipts VERIFIED. **Doubling the chunk count changed the aggregate by 0.8 seconds.**
+
+⇒ Resolution is not merely flat per-assumption — **total resolution is essentially constant in N**.
+The aggregate's cost is a function of the BLOCK, not of how many pieces it is split into.
+
+⛔ **§8.8's N^1.79 reading was an artefact of its confound, and acting on it would have been
+expensive.** The pair it rested on — 4.1 s/assumption at N=4 (block 741,000) against 12.2 s at N=16
+(block 962,000) — moved the block as well as N, from ~670 inputs to 8,006. The block was doing all
+of the work. That fit argued for an optimal fleet size near 16 and against buying cards; it was
+exactly backwards.
+
+✅ **The cross-box control is what licenses believing this.** The N=4 arm was re-measured here rather
+than compared against the previous box's number: 116 s against 117.3 s, resolution 16 s against
+16.3 s, chunk times within 1.8% across all four. Two boxes, ~1% apart. That cost 25 extra minutes
+and is the only reason N=8 can be read as a clean single-variable comparison.
+
+### 8.13 What it costs to reach ten minutes
+
+From measured block-962,000 figures: 14,926 chunk card-seconds, 1.05x straggler, 1,575 s aggregate
+(1,379 s segment proving + 196 s resolution).
+
+| | 32 cards | 48 cards |
+|---|---|---|
+| **(a)** aggregate fully distributes (#153/#157/#161) | **9.0 min** ✅ | 6.0 min ✅ |
+| **(b)** only its segments distribute; resolution serial | 12.2 min | **9.2 min** ✅ |
+| **(c)** nothing distributes | 34 min ❌ | 31 min ❌ |
+
+⇒ **The ten-minute block is now a purchasing decision: ~32 cards under (a), ~48 under (b).** The
+sixteen-card target is not reachable — §8.5's chunk floor alone is 16.3 min — but the goal is, at
+roughly twice the fleet. And §1.1's throughput framing, which needs ~28 cards for the same result,
+is still unpriced and cheaper than all of them.
+
+⏰ **The one remaining blocker is scenario (c), and it is the only one that fails.** Whether the
+distributed aggregate works is claimed by #153/#157/#161 and has never been exercised. It needs
+>= 2 boxes rather than one, and it is now the cheapest decision-relevant measurement left on the
+board — it separates "buy 32 cards" from "buy 48" from "the fleet cannot get there".
+
+⇒ **Ranked, what is left:** (1) the distributed-aggregate check, (2) price §1.1's throughput framing
+against the latency framing on these numbers, (3) #139 for ~1.1x on chunks, (4) po2 23 on a B200,
+never quantified. The kernel lever is closed (§8.11) and chunk cost is EC verification (§8.6), which
+fidelity rightly protects.
