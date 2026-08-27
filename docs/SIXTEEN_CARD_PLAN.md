@@ -321,3 +321,91 @@ more E-series experiments first is precisely the shooting-in-the-dark this docum
 Four columns or it does not get discussed: **factor on divisible card-seconds · effect on the floor ·
 fidelity cost · `METHOD_ID`.** No execute-mode cycles quoted as proving cost. No lever quoted against a
 profile it will itself invalidate.
+
+---
+
+## 7. The flow map — stage by stage, what enters and what is done twice
+
+Workstream B, started 2026-08-27. The premise is this project's own history: the three largest wins
+ever found here (#136 `read_slice`, #137 group-by-tx, and the `1d6c3792` re-baseline at 3.62x) were
+**all in the plumbing, none in consensus code**, and none was visible until somebody profiled the
+data path rather than the compute.
+
+### 7.1 What each chunk actually receives — grouping works, the model does not describe it
+
+FROM CODE. `write_chunk_inputs` (`main.rs:1852`) walks the chunk's inputs, coalesces **consecutive
+runs sharing a `tx_idx`**, and writes each group's transaction and prevout blob **once**:
+
+```rust
+b.write(&(groups.len() as u32));
+for (tx_idx, gs, ge) in groups {           // one entry per RUN of inputs sharing a tx
+    b.write_slice(&padded(tx));            // the transaction: ONCE per group
+    b.write_slice(&padded(prevouts));      // the whole prevout blob: ONCE per group
+    for inp in &w.inputs[gs..ge] { ... }   // then the per-input fields
+}
+```
+
+`input_costs` (`main.rs:1681`) prices the same work **per input, at full transaction size**:
+
+```rust
+let bytes = (tx.len() + prevouts.len()) as u64;
+COST_INPUT_BASE + COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes   // charged for EVERY input
+```
+
+**The encoder is per-group; the cost model is per-input.** On block 962,000 that is a large gap:
+summed over inputs, the per-input charge counts **53.40 MB** where each transaction counted once is
+**1.53 MB** — a factor of **34.9x**. The measured consequence is already in §2.1: the three
+highest-byte chunks come in at **-12.3%, -12.7% and -6.2%** against prediction, and the packer's
+predicted straggler reads 1.001x where the measured one is 1.059x.
+
+⚠ **This is NOT a stale constant, and calling it one would be wrong.** `git log -S` puts the last
+change to `COST_PER_INPUT_BYTE = 6` in `c6e95ff` — *the same commit that introduced grouping*
+("Group the chunk payload by transaction", 2026-08-21). The value was chosen with grouping in view.
+
+**The defect is a missing dimension, not a wrong number.** The byte term is carrying two costs that
+now scale differently, and one constant cannot express both:
+
+| cost | scales with | after grouping |
+|---|---|---|
+| marshalling — shipping and reading the payload | **bytes per GROUP** | paid once per transaction per chunk |
+| `input_bind` — re-hashing the whole transaction | **bytes per INPUT** | still paid per input |
+
+The comment at `main.rs:1585` says as much: *"What remains in the byte term is mostly `input_bind`,
+which still hashes the whole transaction once per input. That is ~2.5 cycles/byte of the 6."*
+So ~3.5 of the 6 describes work that is now per-group, charged as though it were per-input.
+
+**The fix is a second term, not a refit** — `COST_PER_GROUP_BYTE * grouped_bytes +
+COST_PER_INPUT_BYTE * per_input_bytes`. That is the same shape of defect the board already records
+against #139 (a missing *type* dimension) and that #190 is adding a curve dimension for. A packer
+being taught one new dimension should be taught both at once.
+
+### 7.2 The re-hash itself, priced
+
+MEASURED from the witness: `input_bind` re-hashing costs `53.40 MB x ~2.5 cyc/byte` = **~133 M
+cycles, 0.95% of the block**. Hoisting it to once-per-transaction would recover ~130 M (0.92%).
+
+⚠ Small in total, but **87% of those bytes sit in 10% of the inputs**, so its effect on the
+*straggler* — which is what a block's wall-clock actually is — is larger than 0.95% and lands on
+whichever chunk holds the fat transactions. Worth having, nowhere near the 1.92x bar.
+
+### 7.3 A simulator that does not match the code it simulates
+
+`prover/tools/pack_after_139.py` builds its per-input cost with
+`txb//max(1,len(t['prevouts']))` — the transaction's bytes **amortised across its inputs**. The real
+`input_costs` charges `tx.len() + prevouts.len()` **in full, per input**. The script is explicit that
+it reproduces the packer's *shape* rather than calling it, but this is a different byte model, not an
+approximation of the same one.
+
+That matters because this script is the source of the **2.36x** figure for the packer refit — the
+number that makes the refit a #139 *prerequisite* rather than a follow-up. The finding may well
+survive (it rests on the 13.8x ECDSA/Schnorr divergence, which is independent), but **the 2.36x
+itself should be re-derived against the real cost function before it is quoted again.**
+
+### 7.4 Still to map
+
+`BlockWitness` construction · execute -> segment boundary · the wire · lift · the join tree · what
+the aggregate re-derives that sixteen chunks already knew. ⚠ A refit must be fitted in **Rust**,
+where `predicted_ec_ops` lives: a Python reconstruction of it disagreed with the binary on EC counts
+for 5 of 16 chunks and on prevout framing by 30 bytes per input, so no fit taken outside the binary
+is trustworthy. `chunk-profile` at several `HAZYNC_CHUNKS` values is the honest way to get more
+measured points, and it is CPU-only — it can run beside GPU work rather than competing with it.
