@@ -70,7 +70,8 @@ This has never been written down as an option. It should be priced before anyone
 | More cards | — (latency only) | — | none | no | not a cost lever at all |
 | **#139 middle path** | 5.25x | — | **~85% of Core** | yes | measured execute-derived |
 | **#139 wholesale + type-aware packer** | **6.95x** | — | **~95% of Core** | yes | 7.18x MEASURED at proving time |
-| Bounded-lag pipelining (§1.1) | 1.15x-equivalent (bar 1.95x → 1.69x) | **removes it** | none | no | UNPRICED — free to settle |
+| Bounded-lag pipelining (§1.1) | 1.15x-equivalent (bar 1.92x → 1.66x) | **removes it** | none | no | UNPRICED — free to settle |
+| **Witness read via `read_slice`** (§7.5-7.7) | **1.06x now, ~1.34x after #139** | — | **none** | **check — may be none** | MEASURED 2026-08-27 |
 
 **The conclusion is arithmetic, not judgement:**
 
@@ -469,3 +470,29 @@ answer decides whether a ~2.5 G-cycle inefficiency is real and sitting in the te
 ⚠ Reading the table above: `vb-stages` carries one `prev` across both the phase ladder and the
 `[loop]` breakdown, so the printed "this phase" for the `[loop]` rows subtracts the FULL run and is
 meaningless. Read those rows as cumulative only.
+
+### 7.7 Priced in the denominator — because 78% is not the same as a large lever
+
+The §1 rule exists for exactly this case. A finding that reads as "78% of block validation" has to be
+converted into **factor on divisible card-seconds** before it can be compared to anything.
+
+The aggregate is **1,566 s of the 15,933 s one-card total — 9.8%**. Assume the read is 78.2% of the
+aggregate's *validation* half and that assumption resolution is roughly fixed (300-500 s, the
+uncertainty §6 flags):
+
+| | saving | one-card | wall(16) | **factor** |
+|---|---|---|---|---|
+| today | 834-990 s | 14,943-15,099 s | **16.9-17.0 min** | **1.06x** |
+| after #139 | same | 2,643-2,800 s vs 3,633 s | | **1.30-1.37x** |
+
+⚠ **So it is worth ~1.06x today and ~1.34x after #139**, not the 4.5x its share suggests. It does not
+close the 1.92x gap on its own, and nothing about it changes §2's conclusion.
+
+**But it is the best-value item on the board by cost-to-fix**: the technique is already written and
+shipped (#136's `write_slice`/`read_slice`), it costs **no fidelity**, and — unlike every cycles-axis
+lever — the encoding of the host→guest environment is *not* guest source, so it should be checked
+whether it moves `METHOD_ID` at all. If it does not, it can land without a re-baseline, which no
+other lever of this size can claim.
+
+⚠ And it is worth **more** later than now, which is §5.2's rule working: the aggregate is 9.8% of
+cost today and 43% after #139. A board ranked on today's profile would rank this eighth.
