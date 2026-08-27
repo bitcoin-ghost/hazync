@@ -71,7 +71,7 @@ This has never been written down as an option. It should be priced before anyone
 | **#139 middle path** | 5.25x | — | **~85% of Core** | yes | measured execute-derived |
 | **#139 wholesale + type-aware packer** | **6.95x** | — | **~95% of Core** | yes | 7.18x MEASURED at proving time |
 | Bounded-lag pipelining (§1.1) | 1.15x-equivalent (bar 1.92x → 1.66x) | **removes it** | none | no | UNPRICED — free to settle |
-| **Witness read via `read_slice`** (§7.5-7.7) | **1.06x now, ~1.34x after #139** | — | **none** | **check — may be none** | MEASURED 2026-08-27 |
+| **Witness read via `read_slice`** (§7.5-7.7) | **1.06x now, ~1.34x after #139** | — | **none** | **yes** — batch it | MEASURED 2026-08-27 |
 
 **The conclusion is arithmetic, not judgement:**
 
@@ -488,11 +488,16 @@ uncertainty §6 flags):
 ⚠ **So it is worth ~1.06x today and ~1.34x after #139**, not the 4.5x its share suggests. It does not
 close the 1.92x gap on its own, and nothing about it changes §2's conclusion.
 
-**But it is the best-value item on the board by cost-to-fix**: the technique is already written and
-shipped (#136's `write_slice`/`read_slice`), it costs **no fidelity**, and — unlike every cycles-axis
-lever — the encoding of the host→guest environment is *not* guest source, so it should be checked
-whether it moves `METHOD_ID` at all. If it does not, it can land without a re-baseline, which no
-other lever of this size can claim.
+**It is still the best-value item on the board by cost-to-fix**: the technique is already written and
+shipped (#136's `write_slice`/`read_slice`) and it costs **no fidelity**.
+
+⛔ **Correction — it DOES move `METHOD_ID`.** An earlier draft of this section reasoned that the
+host→guest environment encoding is not guest source and might therefore land without a re-baseline.
+That is wrong: the guest reads it with `let w: BlockWitness = env::read()` (guest `main.rs:1186` and
+`:1291`), so changing the encoding changes guest source like any other guest edit. It must be
+**batched** with the other re-baselining changes — Tier 0's codegen and #139 — exactly as
+`ACCELERATION.md`'s "`METHOD_ID` constraint" section requires. That does not reduce its value; it
+fixes where it sits in the order.
 
 ⚠ And it is worth **more** later than now, which is §5.2's rule working: the aggregate is 9.8% of
 cost today and 43% after #139. A board ranked on today's profile would rank this eighth.
