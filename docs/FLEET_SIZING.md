@@ -27,10 +27,10 @@ carries roughly twice the cycles of today's guest. Dividing with it gives ~50 ca
 ## 2. One card
 
 ```
-chunks     14.34e9 / 978,435 cyc/s  ≈ 14,656 s
-aggregate  measured                 =  1,566 s
-                                      ────────
-total                                ≈ 16,222 s  ≈ 4.5 GPU-hours per block
+chunks     14.057e9 / 978,435 cyc/s  = 14,367 s   (MEASURED 2026-08-27, was 14,656 modelled)
+aggregate  measured                  =  1,566 s
+                                       ────────
+total                                 ≈ 15,933 s  ≈ 4.4 GPU-hours per block
 ```
 
 So **a single L40S proves a tip block in about four and a half hours.**
@@ -76,8 +76,12 @@ Four things could each move the answer, in rough order of how much:
 2. **The 83 s floor is inferred from a two-worker run**, not measured as a floor. With 32 workers the
    assembly critical path could shorten (more resolves distributed) or lengthen (more coordination).
    It is the difference between 28 and 32 cards.
-3. **14.34 G is modelled**, not measured. It carries two independent cross-checks, but it is not a
-   direct count of today's guest on today's block.
+3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27 — RETIRED.** `HAZYNC_PROFILE_EXEC=1
+   chunk-profile` on block 962,000, production cost-packed partition, gives **14.057 G** — the model was
+   **+2.0%** high. Chunk work on one L40S is **14,367 s**, not 14,656 s, and the one-card total is
+   **15,933 s**. Needed no GPU and no chunk receipts. See `SIXTEEN_CARD_PLAN.md` §2.1, which also records
+   that the measured straggler is **1.059x** where the packer's own metric — computed from predictions —
+   reports 1.00x.
 4. **Nothing above N=2 has ever been run.** Near-linear scaling is plausible -- chunks are independent
    and every proof is verified separately -- but it is an assumption, not a result.
 

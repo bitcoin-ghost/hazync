@@ -22,19 +22,23 @@ Four columns, no exceptions. Anything quoted in other units gets converted befor
 From `FLEET_SIZING.md` (MEASURED throughput, MEASURED aggregate, MODELLED cycle count):
 
 ```
-one card   chunks 14,656 s  +  aggregate 1,566 s  =  16,222 s
+one card   chunks 14,367 s  +  aggregate 1,566 s  =  15,933 s
 floor      ~83 s does not divide  (INFERRED from a two-worker run)
-wall(N)    83 + (16,222 - 83) / N
+wall(N)    83 + (15,933 - 83) / N
 ```
+
+✅ **The chunk term is now MEASURED, not modelled** (2026-08-27, §2.1). `FLEET_SIZING.md` §4 lists
+"14.34 G is modelled" as reason #3 not to trust the card count; it measures **14.057 G**, so the model
+was **+2.0%** high and that reason retires. Every figure below divides by a measured number now.
 
 **Two different bars, and they are not the same number.**
 
 | framing | what it means | bar at N=16 |
 |---|---|---|
-| **latency** | one block, start to finish, inside 600 s | **1.95x** on divisible work |
-| **throughput** | keep up with the chain at a fixed lag | **1.69x** — `16,222 / (16 x 600)` |
+| **latency** | one block, start to finish, inside 600 s | **1.92x** on divisible work |
+| **throughput** | keep up with the chain at a fixed lag | **1.66x** — `15,933 / (16 x 600)` |
 
-Today: `wall(16) = 83 + 16,139/16 = 1,092 s = 18.2 min`.
+Today: `wall(16) = 83 + 15,850/16 = 1,074 s = 17.9 min`.
 
 ⚠ **The floor is the hidden multiplier on the difficulty.** At an 83 s floor the bar is 1.95x. If
 coordination at N=16 pushes the floor to 150 s the bar becomes 2.24x; at 300 s it becomes 3.36x.
@@ -72,11 +76,11 @@ This has never been written down as an option. It should be priced before anyone
 
 ```
 all known zero-fidelity levers, multiplied:  1.012 x 1.09  =  1.106x
-wall(16) after all of them:  83 + 14,595/16  =  995 s  =  16.6 min
+wall(16) after all of them:  83 + 14,331/16  =  979 s  =  16.3 min
 target:                                          600 s  =  10.0 min
 ```
 
-⛔ **16 cards is not reachable on the known zero-fidelity levers. They take 18.2 min to 16.6 min,
+⛔ **16 cards is not reachable on the known zero-fidelity levers. They take 17.9 min to 16.3 min,
 against a 10.0 min target.** Every remaining item on the board, added together and all landing
 perfectly, closes about a fifth of the gap in seconds and none of it in fidelity terms.
 
@@ -84,7 +88,7 @@ That leaves exactly three routes, and they are not alternatives to each other �
 a measurement, and a search:
 
 1. **Take a fidelity trade (#139).** Even the *middle* path overshoots: `wall(16) = 350 s = 5.8 min`.
-   Wholesale with the type-aware packer gives 307 s, and reaches 600 s on **~7 cards**.
+   Wholesale with the type-aware packer gives 305 s, and reaches 600 s on **~7 cards**.
 2. **Take the free 1.15x-equivalent** by accepting bounded lag (§1.1) — real, but not sufficient alone.
 3. **Find a lever class nobody has enumerated.** §4 argues there is one, and names where it is.
 
@@ -92,6 +96,41 @@ a measurement, and a search:
 smallest #139 variant delivers 5.25x. Nobody has asked *what the smallest concession worth 1.95x looks
 like* — the board only prices the two variants that happen to exist. That question is open and it is
 the right one to ask before spending 85% of Core.
+
+---
+
+### 2.1 The block's real cycle count, and two things it exposes
+
+MEASURED 2026-08-27, `HAZYNC_PROFILE_EXEC=1 chunk-profile`, block 962,000, 8,006 inputs, 16 chunks,
+laptop, no GPU, 604 s. Evidence: `~/hazync-l40s-evidence-2026-08-26/execmode-cycle-profile-962000-2026-08-27.log`.
+
+| | count-packed (old) | **cost-packed (production)** |
+|---|---|---|
+| measured total | 14.048 G | **14.057 G** |
+| predicted total | 14.341 G | 14.341 G |
+| measured mean chunk | 878 M | 879 M |
+| **measured straggler** (max / mean) | **1.251x** | **1.059x** |
+| *predicted* straggler | 1.308x | **1.001x** |
+| max / min chunk | 4.57x | 1.19x |
+
+**Cost-packing is worth 1.18x on the slowest chunk — and a block's wall-clock IS its slowest chunk —
+for a total-cycles cost of +0.06%.** That trade was previously argued from a model; it is now measured,
+and `reproduce/METHOD_ID`'s note that cost-packing "costs slightly MORE" is quantified: 0.06%.
+
+⚠ **The packer's own balance metric is computed from PREDICTIONS, and it reads perfect when it is not.**
+`chunk-profile` prints `straggler: max 897454514 vs mean 896331744 = 1.00x` — both numbers are
+*predicted*. Measured, the same partition is **1.059x**. A check that reports 1.00x whatever the guest
+actually does is the failure mode this repo already has a name for.
+
+⚠ **The byte term is still over-charging after #136/#137 — the fourth instance of that pattern.**
+Per-chunk model error is 2.4-2.6% mean absolute, but it is not noise, it is signed and it tracks
+payload size: the three highest-byte chunks (16.5 MB, 17.4 MB, 26.9 MB) measure **-12.3%, -12.7% and
+-6.2%** against prediction, while compute-heavy chunks run over. So the packer under-fills chunks
+carrying large transactions. The 32 measured points in the log above are the refit's input.
+
+⚠ Neither of these is a lever in the §2 sense — together they are worth ~6% on the slowest chunk, not
+2x. They are recorded because **#190 is already adding a curve dimension to this packer**, the refit is
+a #139 *prerequisite* worth 2.36x, and this is the measurement that refit should be fitted against.
 
 ---
 
@@ -227,7 +266,7 @@ against today's. The board has been bitten by this twice already and both were c
 
 | | why |
 |---|---|
-| **Measure the block's real cycle count** — `HAZYNC_PROFILE_EXEC=1 chunk-profile` | `14.34 G` is **MODELLED**, and `FLEET_SIZING.md` §4 lists that as reason #3 not to trust the card count. Every figure in §1 and §2 divides by it. Needs no receipts and no GPU |
+| ~~Measure the block's real cycle count~~ | ✅ **DONE 2026-08-27** — 14.057 G measured, model +2.0% high, `FLEET_SIZING.md` §4 reason #3 retires. See §2.1 |
 | **Price bounded-lag pipelining** (§1.1) | drops the bar 1.95x → 1.69x, costs nothing, needs only a design decision |
 | **Close E9 in the docs** | measured out at ≤1.09x (§3); it carries deadlock risk and a fork |
 | **Correct §4.2's "65% idle"** in `PERF_INVESTIGATION_2026-08-26.md` | it contradicts §1 of its own file and the measurement (§3) |
