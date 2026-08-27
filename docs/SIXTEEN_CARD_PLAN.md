@@ -501,3 +501,33 @@ fixes where it sits in the order.
 
 ⚠ And it is worth **more** later than now, which is §5.2's rule working: the aggregate is 9.8% of
 cost today and 43% after #139. A board ranked on today's profile would rank this eighth.
+
+### 7.8 What the witness actually is — and `HAZYNC_WITNESS_SIZES` does not report it
+
+MEASURED across four blocks. The tool's four categories (`proof_siblings`, `raw_tx`, `prevouts`,
+`txids`) account for only **34.5%** of block 962,000's witness. The rest scales per input:
+
+| block | inputs | total | accounted | **residual** | residual/input |
+|---|---|---|---|---|---|
+| 130,000 | 10 | 27,096 | 3,792 | 23,304 | 2,330 |
+| 140,000 | 212 | 273,704 | 93,902 | 179,802 | 848 |
+| 741,000 | 670 | 846,656 | 265,485 | 581,171 | 867 |
+| **962,000** | **8,006** | **7,256,592** | 2,497,413 | **4,759,179** | **595** |
+
+⇒ **the `inputs` vector is ~65% of the witness**, at roughly 600-870 bytes per input (130,000 is
+fixed overhead dominating ten inputs, not a contradiction). Transaction bytes — the thing one would
+assume dominates — are **21%**.
+
+`BlockInput` (guest `main.rs:291`) is seven scalars plus **two `WireProof`s**, each carrying a
+`[u8; 32]` leaf, a `u64` position and a siblings `Vec<[u8; 32]>`. Sibling counts here are ~1 per
+proof, so the bulk is the struct encoding itself, which is consistent with 32-byte hashes and small
+scalars each occupying ~4x their raw size in risc0's word stream.
+
+⚠ **This redirects the fix.** The obvious reading of §7.5 is "pack the transaction bytes" — but those
+are already only a fifth of it. **The target is the per-input structs.** Anyone acting on §7.7 should
+confirm this by instrumenting `to_vec` per sub-structure before writing an encoder, because the
+figures above are a residual, not a direct measurement of the `inputs` field.
+
+⚠ Also: line 898 of the guest says the proofs clone *"~28x32 B of siblings per input"*. Measured here
+it is **~66 B per input** — about one sibling per proof. That comment describes a different
+accumulator state and should not be used to size anything.
