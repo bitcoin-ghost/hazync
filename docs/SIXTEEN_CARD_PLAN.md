@@ -826,3 +826,53 @@ global traffic against 23.36 G of spill. Splitting into 4 passes costs ~4x the g
 while removing the spill — roughly **flat on total sectors**, but converting scattered local traffic
 into coalesced global reads. That is the trade worth prototyping, and it is measurable before it is
 committed to.
+
+### 8.11 The kernel lever is CLOSED at the compiler level — stock is already the best arrangement
+
+Five arms, same segment, median of 9, `METHOD_ID` identical throughout:
+
+| arm | regs | blk/SM | `sm__throughput` | local traffic (G sectors) | wall | vs stock |
+|---|---|---|---|---|---|---|
+| **stock** | 255 | 1 | 15.21% | **23.36** | **4,115 ms** | — |
+| `__noinline__` | 255 | 1 | 14.85% | 23.85 | 4,154 ms | +0.9% |
+| `-dlto` | 255 | 1 | **22.24%** | **45.72** | 4,260 ms | +3.5% |
+| `-maxrregcount=128` | 128 | 2 | 11.74% | 40.89 | 4,552 ms | +10.6% |
+| `-maxrregcount=64` | 64 | 4 | 7.78% | 67.13 | 5,446 ms | +32.3% |
+
+⛔ **Every arm is slower than stock. nvcc's default is already the best available arrangement.**
+
+The `-dlto` arm is the one that settles it. LTO genuinely worked — throughput rose **46%**, which is
+only possible if it inlined across the `eval_check_*.cu` boundary — and local traffic still **doubled**.
+It removed `poly_fp`'s 6,952-byte ABI frame and the twenty per-call frames, and the union live set
+then exceeded 255 registers by enough to spill *more* than the frames had cost.
+
+⇒ **The live set does not fit, under any arrangement.** Registers pin at 255 — the architectural
+maximum — in all five arms. The three degrees of freedom available at the compiler level are
+"call it" (stock: ABI frames), "inline it" (`-dlto`: register spill), and "cap it"
+(`-maxrregcount`: more register spill). All three were measured; stock is the cheapest.
+
+⚠ The `unity` arm (compiling the four generated files as one translation unit) was staged and
+**deliberately not run**: it reaches the same mechanism as `-dlto` through the compiler rather than
+the linker, and `-dlto` already demonstrated that inlining doubles local traffic. Running it would
+have bought a second measurement of a settled question.
+
+⚠ Note `-dlto` costs **1,422 s to build** (23.7 min, single-threaded `nvlink`, against a ~400 s
+baseline). Even had it won, that build cost would need weighing. That it takes a compiler 24 minutes
+to inline this is itself evidence about `poly_fp`'s shape: one enormous data-flow graph, not twenty
+loosely-coupled functions.
+
+⇒ **What this does to §8.7's arithmetic.** The 1.3-2.1x kernel lever is NOT reachable by any means
+available to this project. It required removing spill; every mechanism that removes one kind of
+local traffic adds more of another. The remaining path to it is restructuring the constraint
+polynomial itself — generator-level work in RISC0's circuit DSL, upstream, in a repo that is dormant
+on two filed issues. That is a materially different commitment from a compiler flag.
+
+⇒ **The board therefore returns to:** ~16.3 min at 16 cards (§8.5), 1.106x of known zero-fidelity
+levers, and **fan-out as the live lever** — chunk cost tracks EC verifies (§8.6), which divide by N,
+so 32 cards is ~7.7 min of chunk time. §8.8's first caveat (does resolution scale with N?) is now
+the highest-value open question on the board, because fan-out is what is left.
+
+✅ **What the workstream bought.** Not a speedup, but a closed question: four hypotheses tested to
+destruction, the mechanism identified (`ptxas`, at no GPU cost), and the reason recorded so nobody
+re-runs a register sweep in six months. The kernels are not the missing 1.8x, and that is now
+established rather than assumed.
