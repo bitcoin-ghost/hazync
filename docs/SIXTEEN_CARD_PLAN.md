@@ -409,3 +409,63 @@ where `predicted_ec_ops` lives: a Python reconstruction of it disagreed with the
 for 5 of 16 chunks and on prevout framing by 30 bytes per input, so no fit taken outside the binary
 is trustworthy. `chunk-profile` at several `HAZYNC_CHUNKS` values is the honest way to get more
 measured points, and it is CPU-only — it can run beside GPU work rather than competing with it.
+
+### 7.5 The aggregate never got #136's fix — 78% of block validation is deserialisation
+
+MEASURED 2026-08-27, `host vb-stages`, current guest (`main`), execute mode, laptop, no GPU.
+Evidence: `~/hazync-l40s-evidence-2026-08-26/vbstages-*.log`.
+
+| phase | this phase | share of FULL |
+|---|---|---|
+| **read witness + header/version** | **2,519,517,266** | **78.2%** |
+| + per-tx output leaves (`tx_out_leaves`) | 38,034 | 0.0% |
+| + `created_at` in-block-coin map | 143,033,709 | 4.4% |
+| + input loop: binds & per-tx checks | 146,219,635 | 4.5% |
+| + utreexo deletes | 57,216,172 | 1.8% |
+| + utreexo adds + root compare | 14,081,829 | 0.4% |
+| + merkle root | 65,570,323 | 2.0% |
+| + wtxids & witness commitment | 277,529,575 | 8.6% |
+| **FULL** | **3,223,206,543** | |
+
+**The witness is 7,256,592 B, so the read costs 347 cycles per byte.**
+
+⛔ **This is #136's finding, unfixed, in the path #136 did not touch.** #136 measured `env::read` of
+the *chunk* payload at ~147 cycles/byte — *"50.9% of a chunk's entire cycle count before any Bitcoin
+logic ran"* — and replaced it with `write_slice`/`read_slice`. Both `write_aggregate_env`
+(`main.rs:2016`) and `vb_stages_cmd` (`main.rs:3843`) still do a plain **`b.write(&w)`** over the
+whole `BlockWitness`. Same disease, **2.4x worse per byte**, never profiled.
+
+In absolute terms that single read is **17.9% of the entire block's measured chunk work** (2.52 G
+against 14.06 G), paid once per block.
+
+**And the per-byte cost is not constant — it worsens with block size.** Four blocks, same command:
+
+| block | inputs | witness | stage-0 cycles | cyc/byte |
+|---|---|---|---|---|
+| 130,000 | 10 | 27,096 | 1,334,605 | **49.3** |
+| 140,000 | 212 | 273,704 | 19,050,711 | **69.6** |
+| 741,000 | 670 | 846,656 | 268,640,421 | **317.3** |
+| **962,000** | **8,006** | **7,256,592** | **2,519,517,266** | **347.2** |
+
+⚠ **Superlinear, but do not quote an exponent.** Overall it fits `bytes^1.35`, yet the local
+exponents are **1.15, 2.34, 1.04** — nothing like a clean power law, and these blocks differ in era
+and structure as well as size. What is safe to say: **cost per byte rises ~7x** from small historical
+blocks to modern ones, so this gets worse in the direction of the tip, not better. The mechanism
+needs a guest-side profile to pin down; serde's byte-at-a-time walk is the obvious suspect (it is
+what #136 found) but it is not proven here.
+
+### 7.6 Two things this contradicts
+
+⚠ **`vb_stages_cmd`'s own comment says the input loop is "73% of the total".** Measured: **4.5%**.
+The comment is describing a guest that no longer exists.
+
+⛔ **`reproduce/METHOD_ID` records the aggregate at `~1,137 M` cycles.** The aggregate reads *this
+same witness* plus sixteen chunk journals, so it cannot cost less than the 2,519 M this read
+measures. One of the two is wrong. **`HAZYNC_AGG_EXECUTE` settles it**, and §6's sixteen chunk
+proves are what unblock it — which is now the single highest-value item on the card day, because the
+answer decides whether a ~2.5 G-cycle inefficiency is real and sitting in the term that becomes
+**43% of cost after #139**.
+
+⚠ Reading the table above: `vb-stages` carries one `prev` across both the phase ladder and the
+`[loop]` breakdown, so the printed "this phase" for the `[loop]` rows subtracts the FULL run and is
+meaningless. Read those rows as cumulative only.
