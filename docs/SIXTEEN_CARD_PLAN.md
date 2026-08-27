@@ -761,3 +761,68 @@ registers buys warps by spilling *more*, into kernels already spilling 3-4x.
 
 Then §8.8's two measurements, in that order — the N-scaling test decides how many cards to buy, and
 the distributed-aggregate test decides whether 16 cards means 18 minutes or 43.
+
+### 8.10 The sweep, RUN — §8.9's first item is refuted, and it yields a model
+
+MEASURED 2026-08-27, L40S, `seg-prove-one` on a fixed 495,009-byte segment, median of 9 reps per
+arm. `METHOD_ID` identical on every arm. Vendored control (`stock`, var unset) reproduced the
+pre-vendoring binary to **0.2%** on wall-clock and to the *sector* on spill counters, so the flag is
+the only thing that varied.
+
+| arm | regs | blk/SM | warps% | `sm__throughput` | spill (G sectors) | wall (median) | vs stock |
+|---|---|---|---|---|---|---|---|
+| **stock** | 255 | 1 | 16.65 | **15.21%** | 23.36 | **4,115 ms** | — |
+| 128 | 128 | 2 | 31.76 | 11.74% | 40.89 | 4,552 ms | **+10.6%** |
+| 96 | 96 | 2 | 31.82 | 10.69% | 49.30 | 4,741 ms | **+15.2%** |
+| 64 | 64 | **4** | **60.59** | 7.78% | 67.13 | 5,446 ms | **+32.3%** |
+
+⛔ **Every arm is slower, monotonically.** Distributions do not overlap (stock 4,085-4,155 ms; 64
+arm 5,407-5,516 ms). The 64 arm raised occupancy **3.6x** — precisely the mechanism §8.9 hoped for —
+and **halved throughput**.
+
+⇒ **Occupancy is not the constraint. Spill traffic is.** The cap delivers the resident warps it
+promises and loses anyway, because it buys them by manufacturing more of the traffic that was
+already the bottleneck. Note 128 and 96 have *identical* occupancy (2 blocks/SM); 96 bought no warps
+at all and merely added 21% more spill, which is why it is purely worse.
+
+⛔ **No compiler flag can fix this.** 255 registers/thread is the **architectural maximum** on NVIDIA
+hardware. Stock is already at the ceiling — the compiler wants more than the hardware permits and
+spills the remainder by force. There is no headroom upward, and every step downward is worse.
+
+**The model this yields.** Fitting wall-clock against spill across the three capped arms:
+
+| arm | spill | wall | implied *k* |
+|---|---|---|---|
+| 128 | x1.75 | x1.106 | 0.180 |
+| 96 | x2.11 | x1.152 | 0.190 |
+| 64 | x2.87 | x1.323 | 0.265 |
+
+⇒ **wall ∝ spill^0.21** (mean). Extrapolated in the direction that matters — *cutting* spill:
+
+| spill cut by | predicted speedup |
+|---|---|
+| 2x | 1.16x |
+| 4x | 1.34x |
+| 10x | 1.63x |
+| **32x** | **2.08x** |
+
+✅ **Independent corroboration.** `_poseidon2_rows` runs at 78.3% against `eval_check`'s 15.21% —
+**5.1x** the throughput, with essentially no spill. Solving `spill^-0.47 = 5.1` on the same fit puts
+its spill at ~3% of `eval_check`'s, i.e. a **~32x** cut. The extrapolation and the existence proof
+land on the same number from opposite directions.
+
+⚠ **Do not over-trust this.** The exponent is fitted over a 2.9x range in the direction of INCREASING
+spill and extrapolated 32x in the other. It also curves (0.180 → 0.265 as the cap tightens), so it is
+not a clean power law. Use it to size the difficulty, not to predict a result.
+
+⇒ **This reframes §8.9's ordering.** The relationship is sublinear: halving spill buys 16%, not 50%.
+A win of consequence needs spill **nearly eliminated**, which means only §8.9 item 3 — splitting
+`eval_check` into passes over constraint groups — has the right shape. Item 1 is refuted; item 2
+(rematerialisation) helps only if it removes nearly all spill, which is unlikely for a single
+inlined `poly_fp`.
+
+**And the traffic budget for item 3 is favourable.** `eval_check` currently moves 7.16 G sectors of
+global traffic against 23.36 G of spill. Splitting into 4 passes costs ~4x the global reads (~29 G)
+while removing the spill — roughly **flat on total sectors**, but converting scattered local traffic
+into coalesced global reads. That is the trade worth prototyping, and it is measurable before it is
+committed to.
