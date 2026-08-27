@@ -290,6 +290,11 @@ pre-re-baseline figure (`3,636.4 M`) predicts ~3,500 s against a measured total 
 it overshoots the entire run. Aggregate segments do not prove at the chunk rate, so the
 validation/resolution split is UNKNOWN until the real run happens.
 
+⛔ **SUPERSEDED — see §8.4.** The `>3,300 s` figure above predates four commits that change
+exactly this path (#148, #153, #157, #161). MEASURED 2026-08-27: the N=16 **tip** aggregate is
+**1,574.9 s**, and the GPU is never idle. Any reasoning below that rests on a 3,300 s aggregate,
+or on "aggregation is the binding constraint", is reasoning from a stale number.
+
 ✅ **One risk to this document was checked and it holds.** `FLEET_SIZING.md`'s 1,565.9 s aggregate is
 cited to #180 on "the v0.19.0 signed binary", and the re-baseline that made the aggregate **3.20x**
 cheaper landed in `2d9a636` (2026-08-24 02:56). v0.19.0 was tagged 22:37 the same day and
@@ -531,3 +536,228 @@ figures above are a residual, not a direct measurement of the `inputs` field.
 ⚠ Also: line 898 of the guest says the proofs clone *"~28x32 B of siblings per input"*. Measured here
 it is **~66 B per input** — about one sibling per proof. That comment describes a different
 accumulator state and should not be used to size anything.
+
+## 8. The kernels, measured at last — and the figure that was stale
+
+MEASURED 2026-08-27 on an L40S (46,068 MiB, 350 W), po2 22, `METHOD_ID 1d6c3792`. Evidence:
+`~/hazync-l40s5-evidence-2026-08-27/`.
+
+§4 called the CUDA layer "the loudest unexplained signal on the board" and §4.1 noted it is exempt
+from `METHOD_ID` and fidelity. It has now been profiled. Two things came out of it: the kernels are
+nowhere near roofline, and the aggregate figure this plan has been reasoning from is **stale**.
+
+### 8.1 The first `ncu` profile of the prove kernels
+
+| kernel | % GPU time | `sm__throughput` | ALU | DRAM | `warps_active` | regs/thread | blocks/SM |
+|---|---|---|---|---|---|---|---|
+| `eval_check` | **49.5%** | **15.24%** | 9.41% | **58.71%** | **16.66%** | **255** | **1** |
+| `par_stepExec` | **19.8%** | 3.73% | 3.00% | 3.60% | 14.90% | **255** | **1** |
+| `_poseidon2_rows` | 8.1% | **78.31%** | 65.50% | 8.60% | 65.34% | 60 | 4 |
+
+⇒ **H4 (int32-roofline) is TRUE only for `_poseidon2_rows`, which is 8.1% of GPU time.** For the
+69.3% the other two own it is false. Both sit at **255 registers/thread** — the hard maximum. An SM
+has 65,536 registers, so 256 threads x 255 regs = 65,280: one block fills the register file, leaving
+8 resident warps of a possible 64. `eval_check` has 461 waves/SM available, so this is not a
+shortage of work; it is too few resident warps to hide latency.
+
+⚠ Block size cannot fix this. 65,536 / 255 = 257 threads per SM however they are grouped. Registers
+per thread is the only lever that exists.
+
+⚠ Getting this measurement at all needs `--replay-mode application`. Default kernel replay saves and
+restores device memory between passes, doubling the largest working set, and `eval_check` OOMs:
+`Launch failed (error = 2)`. **The failed run still writes a full-length CSV whose every value is
+`nan`.** Row count is a check that cannot fail; judge by `grep -c ',"nan"'`.
+
+### 8.2 They already spill — which corrects §8.1's own roofline reading
+
+| kernel | local ld+st (spill) | global ld+st (real data) | spill : data |
+|---|---|---|---|
+| `eval_check` | 23,358,078,976 sectors | 7,163,871,232 | **3.26 : 1** |
+| `par_stepExec` | 7,928,700,826 | 1,899,264,744 | **4.17 : 1** |
+
+**76-81% of all L1 sector traffic on both dominant kernels is register spill, not data.** 255 is the
+compiler capping out and dumping the remainder to local memory — not a working set that genuinely
+fits in 255 registers.
+
+⛔ **This invalidates the obvious reading of the DRAM column above.** `eval_check` at 58.71% of DRAM
+peak looks memory-bound, implying a ceiling of ~1.70x. Most of that traffic is spill — traffic that
+should not exist. The bandwidth pressure and the occupancy cap have the **same cause**, so the
+ceiling is higher than 1.70x, not lower.
+
+⇒ It also reconciles the card-invariance tension §2 never resolved. Spill is served largely by
+per-SM L1/L2, whose per-SM bandwidth is roughly flat across GPU generations — consistent with
+L4/L40S/H100/B200 landing within ±9% despite 4-9x differences in DRAM bandwidth and large
+differences in SM count.
+
+⇒ And `_poseidon2_rows` is the control that settles the question of blame: **the same BabyBear
+integer arithmetic, on the same card, at 78.3% of peak**, with 60 registers and 4 blocks/SM. The
+field arithmetic is not the constraint. The register footprint is.
+
+### 8.3 The power rail says the same thing, independently
+
+| phase | power draw | of 350 W |
+|---|---|---|
+| chunk proving (`eval_check`-dominated) | **147 W** | 42% |
+| tip aggregate (different kernel mix) | **276 W** | 79% |
+
+At 46 °C, SM clock pinned 2520/2520 MHz, `clocks_event_reasons.active 0x0` — **no throttling of any
+kind**. A card reporting 99-100% *residency* while drawing 42% of its power budget is full of warps
+that cannot issue. Two independent instruments — `ncu` counters and the power telemetry — agree.
+
+⇒ The 276 W figure kills the remaining escape hatch. "BabyBear integer work simply does not draw
+power" cannot explain 42% in one phase and 79% in another on the same card in the same session.
+
+### 8.4 ⛔ The `>3,300 s` aggregate figure is STALE
+
+`report_agg_execute_only` prints *"the FULL aggregate cost beyond that (measured: >3,300 s)"*, and
+this plan and the session notes have both treated **"aggregation is the binding constraint and does
+not parallelise ⇒ a 10-minute block is impossible at any N"** as settled. It is not.
+
+MEASURED, full prove, GPU sampled every 2 s throughout:
+
+| | N=4, block 741,000 | **N=16, block 962,000 (tip)** |
+|---|---|---|
+| segments at po2 22 | 28 | **376** |
+| segment proving | 101 s | **1,379 s** (3.67 s/seg) |
+| assumption resolution | 16.3 s | **196 s** |
+| **total wall** | **117.3 s** | **1,574.9 s** |
+| GPU samples at 0% | 0 of 59 | **0 of 779** |
+
+Both receipts VERIFIED. **The tip aggregate is 1,575 s, not 3,300 s — 2.1x cheaper than the stale
+figure, at the harder of the two scales.** The GPU is never idle, so the "resolution runs off-GPU"
+hypothesis (which hazync#147's `nvidia-smi` at 0% suggested) is REFUTED.
+
+**Why it went stale.** The string was written in `c201f3f` (#150) at 2026-08-24 00:34. Four commits
+that change exactly this path landed *after* it:
+
+| | | |
+|---|---|---|
+| `2d9a636` | 08-24 02:56 | #148 segment distribution + **balanced join tree** |
+| `78d42e9` | 08-24 13:22 | #153 aggregate distributes, **resolves as work** |
+| `2facde4` | 08-24 18:21 | #157 distribute the last segment |
+| `7701b86` | 08-25 03:16 | #161 distribute the last lift |
+
+⚠ The figure is still hardcoded in the printed output, so **every execute-mode run reprints a number
+measured before its own fix**. That is how it survived into the notes as fact. It should be deleted
+or re-measured, not left to be re-quoted.
+
+✅ **And this measurement independently confirms `FLEET_SIZING.md`.** That document records a
+**1,565.9 s** aggregate; the tip run above measured **1,574.9 s** — **0.6% apart**. §6 had already
+reasoned that the FLEET_SIZING term was current rather than stale, because v0.19.0 contains the
+re-baseline commit `2d9a636`, and concluded "§1's arithmetic stands". It does. That reasoning was
+right and is now confirmed by direct measurement.
+
+⇒ **The correction is therefore narrower than it first appears, and it lands on the notes rather
+than on this plan.** The project held two aggregate figures — 1,565.9 s and >3,300 s — and this
+document had already worked out which one was live. What carried the stale number forward was the
+session record, where "aggregation is the binding constraint ⇒ 10-minute block impossible at any N"
+had hardened into a settled conclusion. §1's 16.6 min was never in doubt; §8.5 now explains where it
+comes from.
+
+### 8.5 The binding constraint is the CHUNK side
+
+Block 962,000, 16 cost-packed chunks, each proved to a succinct receipt:
+
+| | |
+|---|---|
+| total sequential | 14,926 s (4.15 h) |
+| mean / max / min | 933 s / **980 s** / 828 s |
+| **straggler, MEASURED** | **1.05x** (predicted 1.00x) |
+| 16-card wall = slowest chunk | **980 s = 16.3 min** |
+
+⇒ 16.3 min lands almost exactly on §1's 16.6 min. **The chunk side explains the plan's headline
+number**, which the 55-minute aggregate claim never could — the two were always in contradiction and
+§8.4 says which one was wrong.
+
+⚠ The aggregate's 376 segments and its resolutions both distribute (#153/#157/#161). Across 16 cards
+that is ~98 s. **The distributed path was NOT exercised today** — this is the code's claim, not a
+measurement, and it is now the most load-bearing unmeasured thing on the board. If it does not hold,
+the block is 16.3 + 26.3 = 42.6 min rather than ~17.9 min.
+
+### 8.6 What a chunk actually costs: EC verifies — not bytes, not inputs
+
+`chunk-profile` predicts cycles, and the prediction is honest: chunk 0 predicted 895,783,010 against
+214 segments x 4,194,304 = 897,581,056, **0.2% apart**. Two falsifiable tests, both stated before
+the data arrived:
+
+**Bytes do not drive cost.** Predicted cost is flat while bytes vary 86x:
+
+| chunk | bytes | vs chunk 0 | time |
+|---|---|---|---|
+| 0 | 313,835 | 1x | 923 s |
+| 1 | 1,603,016 | 5.1x | 927 s |
+| 2 | 16,459,628 | 52x | **830 s** |
+| 4 | 26,886,050 | **86x** | **882 s** |
+
+**Inputs do not drive cost either.** Chunk 6 carries 1,522 inputs — 3.6x chunk 0 — with *fewer* EC
+verifies (432 vs 451), and took 962 s: 4% more, not 260% more.
+
+Normalising by EC verifies gives ~2.06 s/EC across chunks 0-3, with chunk 4 (the 86x-bytes one) at
+**2.38 s/EC**. ⇒ the witness read is real but **worth ~15% on the most byte-heavy chunk**, not the
+~50% that #136's per-chunk figure implies at tip scale.
+
+⛔ **This downgrades #139 on the chunk side to roughly 1.1x, not the 1.5x §7.7 would suggest.** §7.7
+priced it against `validate_block`; `validate_block` is ~3% of the aggregate (110.9 M cycles of a
+run whose block-validation share is ~107 s of 1,575 s), and a small share of a chunk. The fix is
+still worth taking — it is cheap and it compounds — but it is not the lever.
+
+⇒ Chunk cost is dominated by **EC verification — Core's real libsecp256k1 in the guest**. That is
+the one thing fidelity forbids touching, and correctly so. It also means fan-out works: EC verifies
+divide by N, so per-chunk time falls ~1/N.
+
+### 8.7 The arithmetic, revised
+
+Amdahl on the measured shares (`eval_check` 49.5%, `par_stepExec` 19.8%, `_poseidon2_rows` 8.1%
+already at roofline, ~22.6% unprofiled NTT/bit-reverse assumed flat):
+
+| | `eval_check` | `par_stepExec` | **kernel lever** |
+|---|---|---|---|
+| conservative | 1.2x | 1.5x | **1.17x** |
+| mid | 1.4x | 2.5x | **1.35x** |
+| optimistic | 1.7x | 4x | **1.54x** |
+
+§8.2 argues the true ceiling is above the 1.70x roofline bound used for `eval_check` here, so these
+are, if anything, conservative. **Every other known zero-fidelity lever combined is 1.106x.**
+
+| | 16 cards |
+|---|---|
+| chunk floor (slowest chunk) | 16.3 min |
+| aggregate, if distributed | ~1.6 min |
+| **total today** | **~17.9 min** |
+| **with the kernel lever at 1.75x** | **~10.2 min** |
+
+⇒ At 32 cards with the kernel lever, ~6 min — **subject to §8.8's first caveat**.
+
+### 8.8 ⚠ What is NOT established
+
+**1. Whether resolution scales with N.** Per-assumption resolution was 4.1 s at N=4 and 12.2 s at
+N=16 — but the **block changed too** (741,000 → 962,000, ~1,600 → 8,006 inputs). Two variables moved
+between two points. A power law through two points fits perfectly by construction and is worth
+nothing. If it *is* N-driven (~N^1.8), N=32 costs ~680 s of resolution and there is an **optimal
+fan-out not far above 16** — which would contradict the whole "more cards" framing. The clean test
+is same-block, different-N: **block 741,000 at N=8** against the N=4 run already measured, ~50 min.
+
+**2. That the distributed aggregate works.** See §8.5. Claimed by #153/#157/#161, unexercised today.
+
+**3. That the spill is removable.** §8.2 shows the headroom exists. Cutting spill means restructuring
+generated kernels — less per-thread state, smaller tiles — which is real engineering. The
+`-maxrregcount` sweep (§8.9) is the cheap probe, and it may well come back negative: capping
+registers buys warps by spilling *more*, into kernels already spilling 3-4x.
+
+### 8.9 What to do, in order
+
+1. **`-maxrregcount` / `__launch_bounds__` sweep.** Neither kernel carries `__launch_bounds__`, so
+   nvcc optimises per-thread latency with **no occupancy target** and settles on 255. This is not
+   fighting a tuning decision; it is supplying information the compiler was never given. Vendored on
+   `perf/kernel-occupancy` behind `HAZYNC_MAXRREG`; unset reproduces the stock build exactly.
+   ⛔ **Judge on wall-clock.** An arm that doubles occupancy and loses wall-clock is a loss.
+   ⛔ Receipt bytes are not a control — seal bytes carry ZK blinding. Use `METHOD_ID` + `verify`.
+2. **Rematerialisation** — recompute intermediates instead of holding them, trading ALU (9.4% used)
+   for registers (100% used). The trade runs in exactly the right direction.
+3. **Split `eval_check` into passes** over constraint groups. Its body is one inlined `poly_fp` call
+   generated across `eval_check_0..3.cu` (200-278 KB each), so the fix likely belongs in the
+   generator, not in hand-written CUDA.
+4. **Explicit shared memory** instead of compiler-chosen spill.
+
+Then §8.8's two measurements, in that order — the N-scaling test decides how many cards to buy, and
+the distributed-aggregate test decides whether 16 cards means 18 minutes or 43.
