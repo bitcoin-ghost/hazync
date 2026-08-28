@@ -192,6 +192,8 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
 - **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
+- Why those numbers, and what we got wrong reaching them:
+  [`docs/TEN_MINUTE_BLOCK.md`](docs/TEN_MINUTE_BLOCK.md)
 - How it's built: [`docs/`](docs/)
 
 ## Prior art and credit

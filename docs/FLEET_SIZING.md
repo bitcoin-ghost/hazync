@@ -7,6 +7,23 @@ threshold for tracking the chain rather than falling behind it.
 cycle count. Nobody has run more than TWO workers.** Everything past N=2 is extrapolation, and the
 sections below say which parts are which. Read §4 before spending money on it.
 
+> ## ⚠ STATUS 2026-08-28 — this page is kept for its evidence, not for its conclusions
+>
+> The documentation now has one reference sheet and one evidence trail, and this file is neither:
+>
+> - **What to run** — fleet, card, po2, build flags: **`TOPOLOGY_AND_SETTINGS.md`**.
+> - **How the fleet question was answered, and what was got wrong** — **`TEN_MINUTE_BLOCK.md`**.
+>
+> **What is still live here is §6**, the coordinator-egress measurement, which exists nowhere else.
+>
+> ⛔ **§3's `wall(N)` model is SUPERSEDED.** It divides the entire one-card total — aggregate included —
+> by `N`, leaving only 83 s undivided, which assumes the aggregate distributes across cards. See §4's
+> caveat 5. The live scenarios are in `TEN_MINUTE_BLOCK.md` §8.13 and `TOPOLOGY_AND_SETTINGS.md` §1.
+>
+> ⚠ **This page is still cited by `TEN_MINUTE_BLOCK.md` as an independent source** — its 1,565.9 s
+> aggregate corroborates a later direct measurement of 1,574.9 s, 0.6% apart. That is why the file is
+> demoted rather than deleted: a corroborating document that no longer exists corroborates nothing.
+
 ## 1. The inputs
 
 | quantity | value | status |
@@ -27,10 +44,10 @@ carries roughly twice the cycles of today's guest. Dividing with it gives ~50 ca
 ## 2. One card
 
 ```
-chunks     14.34e9 / 978,435 cyc/s  ≈ 14,656 s
-aggregate  measured                 =  1,566 s
-                                      ────────
-total                                ≈ 16,222 s  ≈ 4.5 GPU-hours per block
+chunks     14.057e9 / 978,435 cyc/s  = 14,367 s   (MEASURED 2026-08-27, was 14,656 modelled)
+aggregate  measured                  =  1,566 s
+                                       ────────
+total                                 ≈ 15,933 s  ≈ 4.4 GPU-hours per block
 ```
 
 So **a single L40S proves a tip block in about four and a half hours.**
@@ -86,8 +103,12 @@ Four things could each move the answer, in rough order of how much:
    coordination — it is the **whole aggregate**, ~1,575 s on block 962,000, and it is **constant in N**.
    ⛔ What is still unmeasured is whether that aggregate **distributes across cards** — see the new
    caveat below, which this page's arithmetic silently assumes.
-3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27: 14.057 G.** The model was
-   **+2.0% high**. This reason is retired.
+3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27 — RETIRED.** `HAZYNC_PROFILE_EXEC=1
+   chunk-profile` on block 962,000, production cost-packed partition, gives **14.057 G** — the model was
+   **+2.0%** high. Chunk work on one L40S is **14,367 s**, not 14,656 s, and the one-card total is
+   **15,933 s**. Needed no GPU and no chunk receipts. See `TEN_MINUTE_BLOCK.md` §2.1, which also records
+   that the measured straggler is **1.059x** where the packer's own metric — computed from predictions —
+   reports 1.00x.
 4. ~~**Nothing above N=2 has ever been run.**~~ ✅ **N=4 and N=8 RUN 2026-08-27.** Chunk work scales
    near-perfectly — 1,511 vs 1,525 card-seconds across the two arms, ~1% apart, with a cross-box
    control. Near-linear scaling is now a result, not an assumption.
@@ -157,8 +178,10 @@ that estimate is off by 3x, egress remains under 60 Mbps.
 
 **18 Mbps does not cap anything.** Two consequences:
 
-- Egress is removed as a fleet-planning risk. What remains uncertain about the card count is the
-  **83 s serial floor** (§3) and the fact that **nothing above N=2 has ever been run** — not bandwidth.
+- Egress is removed as a fleet-planning risk. ⚠ **Both items this bullet named as the remaining
+  uncertainty have since been measured** (2026-08-27): N=4 and N=8 were run, and the "83 s floor" turned
+  out to be the whole aggregate and constant in `N`. What actually remains open is whether the aggregate
+  **distributes across cards** — see §4 caveat 5.
 - **Wire compression is pointless.** `PERF_INVESTIGATION_2026-08-26.md` §5.1 proposed it as the lever
   if egress bound. It does not bind, so that closes too.
 

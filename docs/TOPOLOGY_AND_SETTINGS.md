@@ -4,6 +4,11 @@
 settings, guest build flags, provisioning. Everything else in `docs/` is an investigation; this is the
 conclusion those investigations currently support.
 
+⇒ **For the evidence behind these numbers — how the fleet question was answered, and what was got
+wrong on the way — read `TEN_MINUTE_BLOCK.md`.** This page is deliberately short and states
+conclusions; that one carries the measurements, the cross-checks and the post-mortems. If a number
+here ever looks surprising, its working is there.
+
 **Every row is labelled.** MEASURED means it exists in this repo's evidence. INFERRED means arithmetic
 over measured inputs. UNKNOWN means nobody has measured it and the row says so. **A setting with no
 label is a bug in this page.**
