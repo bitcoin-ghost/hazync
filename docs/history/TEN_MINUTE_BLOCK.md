@@ -1021,9 +1021,56 @@ box2 (2 workers, REMOTE): mean 59% util, 35% idle
 roughly equally. The **remote** box starves while the local one does not, which points at work
 *delivery* rather than work *availability*. Not decisive.
 
-⏰ **What settles it: the same test on a 16-chunk aggregate**, which needs 16 chunk receipts
-(~100 min of proving). Until then "the aggregate distributes" is true at N=2 and **unproven above it**,
-and every card count assuming full distribution inherits that caveat.
+### ⛔ SETTLED — join-tree width is REFUTED; the segment coordinator is the ceiling
+
+The 16-chunk test was run. A 16-chunk aggregate has an **8-wide** join tree, so if width were the
+limit it would have scaled. It did not move at all:
+
+| workers | 4 chunks | **16 chunks** |
+|---|---|---|
+| 1 | 163 s | **165 s** |
+| 2 | 90 s — 1.81x | **94 s — 1.76x** |
+| 4 | 89 s — no gain | **95 s — no gain** |
+
+**Both saturate at exactly N=2.** And GPU utilisation confirms it from a second, independent angle —
+the **remote** box starves *worse* as workers are added while the local one stays busy:
+
+| | N=2 | N=4 |
+|---|---|---|
+| box1 (local) | 13% idle | 11% idle |
+| box2 (remote) | **26% idle** | **36% idle** |
+
+⇒ **The parallel work exists and is not being delivered.** `seg_serve_cmd`
+(`prover/host/src/main.rs`) is single-threaded — it runs `ExecutorImpl::run()` *and* dispatches
+segments *and* collects receipts — and it caps the aggregate at **~1.76x regardless of fleet size**.
+
+⚠ Note this is the **segment** coordinator (the ephemeral `seg-serve` process), not the **board**
+coordinator (`coordinator/server.py`). Two different things share the name.
+
+### What it costs, and the two ways out
+
+At a 1.76x ceiling the aggregate floors at **1,575 / 1.76 = 897 s** — above the entire 600 s budget,
+so **ten minutes is unreachable at any fleet size today.**
+
+| fix | fleet |
+|---|---|
+| neither | **IMPOSSIBLE at any N** |
+| `seg-serve` dispatch only | **7 cards** |
+| aggregate witness read only (§7.5) | 8-15 cards |
+| **both** | **5-6 cards** |
+
+✅ **Neither is architectural — both are ordinary software.** And they ship very differently:
+
+- **`seg-serve` is HOST-side.** It moves no `METHOD_ID`, needs **no re-baseline and no board reset**,
+  and can land on its own. It alone takes the target from impossible to reachable.
+- **The witness read is guest source**, so it rides the re-baseline already queued with #139.
+
+⇒ **Sequence `seg-serve` first.** It banks the largest single improvement — impossible to 7 cards —
+without waiting on the fidelity decision, and it de-risks #139 stalling again.
+
+⚠ **A two-point Amdahl fit on N=1,2 predicted 54 s at N=4; it measured 89 s.** Two points cannot
+constrain a curve. This is the second instance of that exact error in this document (§8.12 is the
+first) and it was caught only because a third point was requested.
 
 ### 8.13 What it costs to reach ten minutes
 

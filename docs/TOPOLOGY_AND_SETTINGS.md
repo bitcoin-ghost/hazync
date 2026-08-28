@@ -65,13 +65,48 @@ taproot by input**, so #139 accelerates essentially the whole block.
 
 ⇒ **With #139, a near-tip block needs ~7-9 cards rather than 32.**
 
-⛔ **Two caveats, neither small.**
+⛔ **But the aggregate does NOT scale past 2 workers, and that decides the fleet.**
 
-1. **The aggregate saturates at N=2** on a 4-chunk test (163 → 90 → 89 s for 1 → 2 → 4 workers). It is
-   **not known** whether that is join-tree width — harmless, since 16 chunks would be 8 wide — or a
-   coordinator bottleneck, which would be fatal: capped at 1.8x, the aggregate is 1,575/1.8 = **865 s,
-   above the 600 s budget at any fleet size**. A 16-chunk test settles it.
-2. **hazync#190 must land**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
+The 16-chunk test settled it: an 8-wide join tree still saturates at N=2 (165 → 94 → **95 s**), and
+the **remote** worker starves worse as workers are added (26% → 36% idle) while the local one does
+not. **`seg_serve_cmd` is single-threaded and caps the aggregate at ~1.76x**, so it floors at
+**897 s — above the whole 600 s budget at any fleet size.**
+
+| fix | fleet |
+|---|---|
+| neither | ⛔ **IMPOSSIBLE at any N** |
+| **`seg-serve` dispatch** (host-side, **no re-baseline**) | **7 cards** |
+| aggregate witness read (§7.5, guest — rides the #139 re-baseline) | 8-15 cards |
+| **both** | **5-6 cards** |
+
+⇒ **Do `seg-serve` first.** It is host code: no `METHOD_ID` move, no board reset, no waiting on the
+fidelity decision — and it alone takes the target from unreachable to 7 cards.
+
+⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the
+win.
+
+### ⚖ Decision 2026-08-28: the MIDDLE path, not wholesale
+
+The wholesale arm is 15% faster (9.10x vs 8.00x) but buys **at most one card**, and only in the
+pessimistic aggregate case:
+
+| | aggregate 767 s | aggregate 497 s |
+|---|---|---|
+| middle path | **6 cards** | 5 cards |
+| wholesale | 5 cards | 5 cards |
+
+⇒ **One card is a cheap price for keeping Core's ECDSA logic** — DER parsing, low-S handling, the r/s
+checks, the inversion and the final `r == x(R) mod n` comparison all stay libsecp's literal code, and
+only the group arithmetic moves.
+
+⇒ **This likely retires `HELIX_DUAL_BACKEND.md`.** Helix exists to run wholesale for backfill and
+Core at the tip. If the middle path runs **everywhere**, there is no second backend — no height gate,
+no committed cutover constant, no doubled audit surface, and none of the silent-divergence risk of two
+implementations disagreeing across a cutover.
+
+⚠ The middle path is **not** zero-surface: `double_scalar_mul` is Shamir's trick, so it does not
+preserve libsecp's wNAF/GLV. Much smaller than wholesale, not nil — differential testing across chain
+history remains the load-bearing work.
 
 → `TEN_MINUTE_BLOCK.md` §8.14 for the full curve and the diagnostic.
 
