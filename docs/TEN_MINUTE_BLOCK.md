@@ -1021,7 +1021,33 @@ box2 (2 workers, REMOTE): mean 59% util, 35% idle
 roughly equally. The **remote** box starves while the local one does not, which points at work
 *delivery* rather than work *availability*. Not decisive.
 
-### ⛔ SETTLED — join-tree width is REFUTED; the segment coordinator is the ceiling
+### ⛔⛔ RETRACTED 2026-08-28 — the N=4 arm ADDED NO COMPUTE, so it measured nothing
+
+**Everything in this subsection is void. Read this before any of it.**
+
+The N=4 arm ran **2 workers on box1 + 2 workers on box2 — still only TWO PHYSICAL CARDS.** Each
+`seg-connect` is a separate process on the same GPU, and **GPU concurrency has been measured and
+rejected three times at 0.95-1.03x** (`ACCELERATION.md`): two proves on one card do not go faster.
+
+⇒ **N=2 and N=4 had IDENTICAL compute.** The flat result is exactly what that predicts and says
+**nothing whatever** about the segment coordinator, the join tree, or any ceiling.
+
+⇒ The utilisation data agrees and I read it backwards: box2 going from 26% to **36% idle** when its
+second worker was added is **two processes contending for one card**, not a coordinator failing to
+feed them.
+
+✅ **What was actually measured: the aggregate scales 1.76-1.81x on TWO CARDS** — 88-91% efficiency,
+which is *good*. **Scaling beyond two cards is UNMEASURED**, and needs a third box, not a fourth
+worker process.
+
+⚠ Method note, and it is the third instance in this document: §8.12's `N^1.79` artefact moved the
+block as well as N; §8.14's Amdahl fit extrapolated from two points; this one **changed the worker
+count without changing the hardware.** Every one produced a confident, wrong conclusion from a
+variable that was not the one under test.
+
+<details><summary>The superseded reasoning, kept as the record of the error</summary>
+
+#### (VOID) join-tree width is REFUTED; the segment coordinator is the ceiling
 
 The 16-chunk test was run. A 16-chunk aggregate has an **8-wide** join tree, so if width were the
 limit it would have scaled. It did not move at all:
@@ -1069,8 +1095,24 @@ so **ten minutes is unreachable at any fleet size today.**
 without waiting on the fidelity decision, and it de-risks #139 stalling again.
 
 ⚠ **A two-point Amdahl fit on N=1,2 predicted 54 s at N=4; it measured 89 s.** Two points cannot
-constrain a curve. This is the second instance of that exact error in this document (§8.12 is the
-first) and it was caught only because a third point was requested.
+constrain a curve.
+
+</details>
+
+### Where this actually leaves the aggregate
+
+| | status |
+|---|---|
+| aggregate distributes at all | ✅ **yes** — 1.81x on 2 cards, scenario (c) is dead |
+| scales past 2 cards | ⛔ **UNMEASURED** — needs a THIRD box |
+| is `seg-serve` a bottleneck? | ⛔ **UNKNOWN** — nothing here tested it |
+
+⇒ **The fleet arithmetic in `TOPOLOGY_AND_SETTINGS.md` §0.5 stands on the 2-card measurement**, which
+supports scenario (a) as far as it goes. The 7-9 card figure is intact; what is not established is
+whether it holds at the fleet sizes that matter.
+
+⇒ **The witness read (§7.5) is unaffected by any of this** — it shrinks the aggregate rather than
+distributing it, and is worth ~3x on its own.
 
 ### 8.13 What it costs to reach ten minutes
 
