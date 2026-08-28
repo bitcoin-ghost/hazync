@@ -50,7 +50,7 @@ lever is worker processes per card (§4.1).
 | 3.2 | Guest C/C++ compiled at `-O2`, **no LTO** | cycles | UNKNOWN | never tried | free (execute mode) |
 | 3.3 | Guest Rust gets Cargo defaults: `lto=false`, `codegen-units=16` | cycles | UNKNOWN | never tried | free |
 | 3.4 | `NDEBUG` never defined — 31 live `assert()`s in `interpreter.cpp` | cycles | UNKNOWN | never considered | free (but see fidelity) |
-| 3.5 | `ECMULT_WINDOW_SIZE=19` chosen against paging, optimum unverified | cycles | UNKNOWN | one point sampled | free |
+| 3.5 | ~~`ECMULT_WINDOW_SIZE=19` optimum unverified~~ — **SWEPT, E4**: 21 is the optimum | cycles | **1.0163x MEASURED** | ✅ swept 2026-08-27 | free |
 | 4.1 | Worker **processes** per card: 1.20x at one point, never swept | efficiency | ≥1.20x MEASURED | not swept | one card |
 | 4.2 | Preflight serial section — upstream has a **locked** solution | efficiency | ≤1.39x contested | see `ACCELERATION.md` | one card |
 | 5.1 | Coordinator egress may cap the fleet before the GPUs do | waste/scale | ESTIMATE | never costed | free to measure |
@@ -186,6 +186,55 @@ direction.
 This is the highest-value-per-minute experiment in the document: it is a `#define`, it needs no GPU, and
 it could plausibly move in the *unexpected* direction.
 
+#### E4 result — MEASURED 2026-08-27
+
+Execute mode, block 130,000, 1 chunk, 10 inputs. The journal digest `cb0caa8bd67b4c2f…` was **identical
+on every arm**, so each row prices the same computation rather than a config that quietly changed what
+the guest computed.
+
+| `ECMULT_WINDOW_SIZE` | guest cycles | vs shipped |
+|---|---|---|
+| 16 | 18,281,206 | +1.38% |
+| 17 | 18,209,178 | +0.98% |
+| 18 | 18,051,971 | +0.10% |
+| **19 (shipped)** | 18,033,062 | — |
+| 20 | 18,084,883 | +0.29% |
+| **21** | **17,739,133** | **−1.63%** |
+
+**The window was under-sized, not over-sized.** This section predicted that paging had pushed the
+optimum *below* 19 and that a smaller window would be both faster and lower-memory. Smaller is
+monotonically worse. The real optimum is **21**, and it hides behind a **local bump at 20** — which is
+why the original two-point (15 vs 19) measurement missed it, and why any hill-climb from 19 would stop
+at 19 and call it optimal.
+
+Likely mechanism: EC additions fall as roughly `256/(w+1)` while the `pre_g` table grows as `2^(w−2)`,
+and RISC0's paging makes the table cost a **step function** rather than a smooth curve, so the two
+terms do not cross monotonically.
+
+**`ECMULT_GEN_KB` is INERT here.** 2, 22 and 86 all give **18,033,062 cycles — bit-identical**. It sizes
+the `ecmult_gen` table for computing `k·G` when *signing*; verification uses `secp256k1_ecmult` against
+`pre_g`, sized by `ECMULT_WINDOW_SIZE`, and Hazync only ever verifies. **Setting it to 2 reclaims the
+memory for free.**
+
+**Neither default changes in this PR.** Both edit the guest source and therefore move `METHOD_ID`, so
+they must ride the next re-baselining. What lands here is the knob, the guard, and the curve.
+
+⛔ **Windows ≤15 cannot be swept naively.** `build.rs` regenerates `precomputed_ecmult.c` only when the
+window is >15; at ≤15 it reuses whatever table is on disk, which after any >15 arm is the **wrong**
+table. `build.rs` now asserts the table is pristine before compiling a ≤15 arm, so this fails loudly
+rather than producing a plausible wrong number.
+
+**Reproduce:**
+
+```
+HAZYNC_ECMULT_WINDOW=21 HAZYNC_ECMULT_GEN_KB=2 cargo build --release
+HAZYNC_BLOCK=block_130000.json HAZYNC_CHUNKS=1 HAZYNC_PROFILE_EXEC=1 \
+  ./target/release/host chunk-profile
+```
+
+**Method note.** The shipped value sat one step away from an unexplored minimum that a two-point
+measurement structurally could not find. Other knobs in this build were chosen the same way.
+
 ---
 
 ## 4. Prover efficiency — same cycles, fewer GPU-seconds
@@ -319,7 +368,7 @@ this repo before.
 | **E1** | C/C++ opt level | `-O2` (control) vs `-O3` vs `-O2 -flto` vs `-O3 -flto` | §3.2 — is codegen worth anything on the dominant term |
 | **E2** | Rust guest profile | default vs `lto="fat"` vs `codegen-units=1` vs both | §3.3 |
 | **E3** | `NDEBUG` | absent (control) vs `-DNDEBUG` | §3.4 — **price only**, no landing decision implied |
-| **E4** | `ECMULT_WINDOW_SIZE` sweep | 15, 17, 18, **19** (control), 20, 21 | §3.5 — find the real optimum, including *below* 19 |
+| ~~**E4**~~ | `ECMULT_WINDOW_SIZE` sweep | 16, 17, 18, **19** (control), 20, 21 | ✅ **DONE 2026-08-27** — optimum is **21**, −1.63%; see §3.5 |
 
 **E1 gate — mandatory.** `-O3` on `-w` code can activate latent UB. Before any `-O3` arm is believed,
 it must pass the differential suite *and* reproduce a known-good block's journal digest bit-identically
@@ -476,8 +525,9 @@ Recorded so this file does not become the next stale document.
 
 1. **Run E6** (§4.1). 1.2–1.45x, one card, a few hours, pure config — the largest actionable lever now
    that #136/#137 are banked, and it gates whether the deadlock-prone preflight work is worth touching.
-2. **Run E4** (§3.5). Free, and the only one likely to produce a surprise: the 15 → 19 window move
-   bought far too little, and the sweep must go DOWNWARD as well as up to find out why.
+2. ~~**Run E4** (§3.5).~~ ✅ **DONE 2026-08-27** — and it did produce the surprise, in the opposite
+   direction: the optimum is **21** (−1.63%), hidden behind a local bump at 20. Downward is
+   monotonically worse. `ECMULT_GEN_KB` is inert. See §3.5.
 3. **Run E1, E2 and E3 together** (§3.2–§3.4). Free, one rebuild each, and they close the entire
    untouched codegen axis — including permanently retiring the `NDEBUG` question.
 
