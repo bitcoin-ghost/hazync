@@ -5102,44 +5102,107 @@ fn seg_serve_cmd() {
     };
     lifted.push(tail_lift);
 
-    // DISTRIBUTE THE JOIN TREE. Publish a level as jobs, wait for the workers to return them, feed
-    // the results in as the next level. The barrier between levels is unavoidable -- level l+1
-    // consumes level l's output -- but the depth is log2(N), so 1,684 segments is eleven barriers
-    // rather than 1,683 sequential joins.
+    // DISTRIBUTE THE JOIN TREE, PIPELINED. Publish a join the moment its two children exist,
+    // rather than when its whole level does.
     //
-    // In-process joining is what left assembly flat at 373 s while segment proving scaled 1.96x on
-    // two cards. Everything else divided; this was the part that did not.
-    let mut level = lifted;
-    let mut lv = 0u32;
-    while level.len() > 1 {
-        let npairs = level.len() / 2;
-        let odd = level.len() % 2 == 1;
+    // The old driver was level-synchronous: it queued a level, waited for every join in it, then
+    // queued the next. That barrier is NOT inherent -- level l+1 position q consumes exactly two
+    // nodes, (l, 2q) and (l, 2q+1), so it is ready as soon as those two are, regardless of how the
+    // rest of level l is doing. Waiting for the level wastes every card that finishes early, and
+    // the waste grows with the fleet: the tree narrows towards the root, so join-tree efficiency
+    // runs 93% at 2 cards, 68% at 8, 54% at 16 and 40% at 32. That is why the two-card aggregate
+    // test looked healthy -- N=2 is the one regime where this barrier is invisible.
+    //
+    // ORDERING IS UNCHANGED, and that is the point. The tree shape is a function of the leaf count
+    // alone, so it is precomputed here: position p pairs with p^1, and the EVEN position is always
+    // the left operand. Joins chain claims (join asserts a.post == b.pre) so they do not commute --
+    // only the SCHEDULE changes, never which two receipts meet or in which order.
+    let mut widths: Vec<usize> = vec![lifted.len()];
+    {
+        let mut n = lifted.len();
+        while n > 1 {
+            let npairs = n / 2;
+            let odd = n % 2 == 1;
+            n = npairs + if odd { 1 } else { 0 };
+            widths.push(n);
+        }
+    }
+    let depth = widths.len() - 1; // number of join levels; 0 when there is a single leaf
+
+    let mut ready: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> =
+        widths.iter().map(|w| vec![None; *w]).collect();
+    for (i, r) in lifted.into_iter().enumerate() {
+        ready[0][i] = Some(r);
+    }
+    let mut published: Vec<Vec<bool>> = widths.iter().map(|w| vec![false; w / 2]).collect();
+
+    println!("    join tree: {} leaves, {depth} levels, widths {:?}", widths[0], widths);
+    let njoins: usize = widths.iter().take(depth).map(|w| w / 2).sum();
+    let mut harvested = 0usize;
+
+    while depth > 0 && ready[depth][0].is_none() {
+        // Publish every join whose two children have arrived and which has not been queued yet.
         {
             let mut q = jobs.lock().unwrap();
-            for p in 0..npairs {
-                let a = bincode::serialize(&level[p * 2]).expect("ser a");
-                let b = bincode::serialize(&level[p * 2 + 1]).expect("ser b");
-                q.push_back((JOIN_TAG | (lv << 16) | p as u32, pack_pair(&a, &b)));
+            for l in 0..depth {
+                let npairs = widths[l] / 2;
+                for p in 0..npairs {
+                    if published[l][p] {
+                        continue;
+                    }
+                    let (a, b) = (&ready[l][p * 2], &ready[l][p * 2 + 1]);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        let ab = bincode::serialize(a).expect("ser a");
+                        let bb = bincode::serialize(b).expect("ser b");
+                        q.push_back((JOIN_TAG | ((l as u32) << 16) | p as u32, pack_pair(&ab, &bb)));
+                        published[l][p] = true;
+                    }
+                }
             }
         }
-        println!("    level {lv}: {} receipts -> {npairs} joins{}", level.len(), if odd { " (+1 carried)" } else { "" });
-        loop {
-            let have = { jout.lock().unwrap().len() };
-            if have >= npairs { break; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // An odd receipt carries forward untouched, keeping its position so adjacency holds. It is
+        // ready the instant its source node is -- it waits on no join at all.
+        for l in 0..depth {
+            if widths[l] % 2 == 1 {
+                let npairs = widths[l] / 2;
+                if ready[l + 1][npairs].is_none() {
+                    if let Some(r) = ready[l][widths[l] - 1].clone() {
+                        ready[l + 1][npairs] = Some(r);
+                    }
+                }
+            }
         }
-        let mut next = Vec::with_capacity(npairs + 1);
+
+        // Harvest whatever the workers have returned, keyed by tag rather than by count -- results
+        // from different levels are now in flight at the same time.
         {
             let mut m = jout.lock().unwrap();
-            for p in 0..npairs {
-                next.push(m.remove(&(JOIN_TAG | (lv << 16) | p as u32)).expect("missing join result"));
+            if !m.is_empty() {
+                for l in 0..depth {
+                    let npairs = widths[l] / 2;
+                    for p in 0..npairs {
+                        if ready[l + 1][p].is_some() {
+                            continue;
+                        }
+                        if let Some(r) = m.remove(&(JOIN_TAG | ((l as u32) << 16) | p as u32)) {
+                            ready[l + 1][p] = Some(r);
+                            harvested += 1;
+                            if harvested % 25 == 0 || harvested == njoins {
+                                println!("    joins {harvested}/{njoins}");
+                            }
+                        }
+                    }
+                }
             }
         }
-        // An odd receipt carries forward untouched, keeping its position so adjacency holds.
-        if odd { next.push(level.pop().expect("odd tail")); }
-        level = next;
-        lv += 1;
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    let mut level: Vec<SuccinctReceipt<ReceiptClaim>> =
+        vec![ready[depth][0].take().expect("root receipt")];
+
     // DISTRIBUTE THE RESOLVES (hazync#153). This is the last term that stayed on the segment coordinator.
     //
     // A mode-4 chunk has no assumptions, so this loop does nothing and costs nothing. A mode-5
