@@ -128,7 +128,7 @@ need to know which phase is running.
 
 | variable | what it does |
 |---|---|
-| `HAZYNC_SEG_PO2` | segment size. **22 is the default on CUDA and peaks at ~40.6 GB of VRAM** |
+| `HAZYNC_SEG_PO2` | segment size. ⛔ **The CUDA default is 21, not 22** — `main.rs` `seg_po2()` returns `if cfg!(feature = "cuda") { 21 } else { 20 }`. **po2 21 peaks at ~22 GB** (MEASURED 2026-08-28 on an L40S: 22,521-22,917 MiB). po2 22 peaks at ~40.6 GB and you only get it by setting this variable explicitly. |
 | `HAZYNC_PORT` | coordinator listen port (default 9110) |
 | `HAZYNC_PUSH_DEPTH` | segments in flight per worker (default 4) |
 | `HAZYNC_AGG` | serve the mode-5 aggregate instead of a mode-4 chunk. **Presence is what counts** |

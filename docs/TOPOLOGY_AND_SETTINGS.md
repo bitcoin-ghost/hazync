@@ -34,6 +34,28 @@ different open blockers.
 | **Latency (b), only segments distribute** | as above, resolution stays serial | **~48 L40S** | INFERRED |
 | **Latency (c), nothing distributes** | as above | **fails at any size** (34 min at 32) | INFERRED |
 
+#### With hazync#139's middle path — MEASURED 2026-08-28
+
+Per-verify ECDSA drops **1,723,407 → 140,044 cycles (12.31x)**; block 962,000 is 97% EC and 2.7%
+Schnorr, which risc0-crypto cannot accelerate (no BIP340). Chunk work **14,926 → 2,310 card-seconds**:
+
+| framing | today | **with #139** |
+|---|---|---|
+| (a) aggregate distributes | 32 cards | **7 cards** (9.5 min) |
+| (b) segments only, resolution serial | 48 cards | **10 cards** (9.6 min) |
+| (c) aggregate serial | fails | **fails at any N** |
+| throughput (bounded lag) | 29 cards | **7 cards** |
+
+⛔ **#139 makes the aggregate the binding constraint.** It is untouched — no EC verification happens
+there — so it goes from ~10% of one-card cost to **39%**, and under (c) its 1,575 s alone exceeds the
+600 s budget on any hardware. **The entire remaining chunk-side headroom is 7 → 3 cards**, even with
+infinitely fast chunks. ⇒ Whether the aggregate distributes is now worth more than every card, po2 and
+guest-codegen decision combined.
+
+⚠ These assume hazync#190 has landed. Post-#139 ECDSA and Schnorr diverge and #190's simulation puts an
+unaware packer's straggler at **2.45x**, which would roughly halve the win. And 962,000 is only 2.7%
+Schnorr — #190 calls it "the mildest case available", so blocks with more taproot benefit less.
+
 **The arithmetic**, on measured block-962,000 figures — 14,926 chunk card-seconds, 1.05x straggler,
 1,575 s aggregate (1,379 s segment proving + 196 s resolution):
 
@@ -85,11 +107,46 @@ cards.** The card axis is closed — do not re-open it without a new kernel resu
 
 | setting | value | label | why |
 |---|---|---|---|
-| `HAZYNC_SEG_PO2` | **22** | MEASURED | the CUDA default; peaks ~40.6 GB, fits 46 GB at 88% |
+| `HAZYNC_SEG_PO2` | **22 — but you must SET it** | MEASURED | ⛔ **21 is the CUDA default, not 22** (`seg_po2()` in `main.rs`). Setting 22 is worth **~11.5%** and peaks ~40.6 GB, fitting a 46 GB card at 88%. See §3.1 |
 | GPU concurrency | **1** | MEASURED | rejected **three times** at 0.95-1.03x, including on an H100 with 47 GB of 80 free |
 | worker processes / card | 1 today; ceiling **≤1.09x** | MEASURED | the "1.20x" ceiling was corrected downward once the GPU was measured at 91.5% busy |
 | disk per segment work dir | ~**1.6 GB** | MEASURED | boxes have run tight; watch `df` |
 | po2 23 | **do not** | MEASURED | needs ~79 GB (B200-only) **and** two code changes — see §7 |
+
+### 3.1 ⛔ The CUDA default is po2 21, and it leaves ~11.5% on the table
+
+`docs/SEGMENT_DISTRIBUTION.md` said for a long time that "22 is the default on CUDA". It is not.
+`main.rs` is unambiguous:
+
+```rust
+fn seg_po2() -> u32 {
+    std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok())
+        .unwrap_or(if cfg!(feature = "cuda") { 21 } else { 20 })
+}
+```
+
+**MEASURED 2026-08-28**, L40S, one accelerated chunk of block 140,000, two runs each:
+
+| arm | po2 21 | po2 22 | gain |
+|---|---|---|---|
+| stock libsecp | 446, 446, 446 s (189 seg) | **396, 396 s** (93 seg) | **1.126x** |
+| bigint2 | 48, 49 s (18 seg) | **43, 44 s** (9 seg) | **1.111x** |
+| peak VRAM | 22,521 / 22,009 MiB | **40,661 / 40,345 MiB** | 1.8x |
+
+⇒ **po2 22 is ~11-12% faster for ~1.8x the VRAM**, and the gain is **consistent across two
+independent arms** (1.126x and 1.111x), which is what licenses treating it as a property of the setting
+rather than of one workload, and 40.6 GB fits a 46 GB card at 88%. `ACCELERATION.md`'s
+sweep found ~8% on a 415-segment chunk; this confirms the gain **transfers down to a 9-segment chunk**,
+which its own caveat said could not be assumed in the other direction.
+
+⚠ **Two consequences of the doc being wrong.** Any run that did not set the variable was at po2 21, so
+figures labelled "at po2 22" elsewhere were only that if someone set it. And the ~22 GB peak at the real
+default is **half** the 40.6 GB the docs implied, which is the number a fleet's VRAM headroom was being
+sized against.
+
+⛔ **Setting po2 22 carries an obligation: serialise GPU work.** At 88% of the card, two concurrent
+proves OOM — `hazync run` serialises through a lock, a direct `host prove-*` does not (#97). Reproduced
+2026-08-28 by running three proves back to back.
 
 ⚠ **`nvidia-smi utilization.gpu` is kernel RESIDENCY, not useful work.** It read 100% at concurrency 1
 and 2 alike while throughput *fell*. Never tune from it.
