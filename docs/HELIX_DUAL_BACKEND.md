@@ -125,13 +125,32 @@ proof makes rather than an assumption the reader brings. Add a domain-tagged fie
 
 | | status |
 |---|---|
-| bigint2 is materially faster on a **real chunk**, in cycles | ⏳ hazync#139 arms measuring now |
-| **the cycle win survives proving** (bigint2 is a separate coprocessor circuit) | ⛔ needs one GPU prove |
-| the two backends agree on every historical signature | not started — the load-bearing test |
+| bigint2 is materially faster on a **real chunk**, in cycles | ✅ **9.19x** (2026-08-28) |
+| **the cycle win survives proving** | ✅ **8.00x measured on an L40S** — the gate PASSES |
+| is the wholesale arm meaningfully faster than the middle path? | ✅ **yes, 15%** (48.3 s vs 55.8 s) — so the trade is real |
+| the two backends agree on every historical signature | ⛔ not started — **the load-bearing test** |
 | a cutover height is chosen and justified | not started |
-| #190's type-aware packer has landed | ready, unmerged — it is a #139 prerequisite |
+| #190's type-aware packer has landed | ready, unmerged — a #139 prerequisite |
 
-⇒ **If the cycle win does not survive proving, Helix is moot.** That measurement comes first.
+## ✅ The gate passes — Helix is justified, not speculative
+
+The measurement this design was conditional on has been taken. On an L40S, block 140,000, one chunk:
+
+| arm | wall (po2 21) | vs stock |
+|---|---|---|
+| stock libsecp | 446, 446, 446 s | — |
+| **middle path** (one line swapped) | 55, 56, 56, 56 s | **8.00x** |
+| **wholesale** (whole predicate) | 48, 49, 48 s | **9.10x** |
+
+⇒ **And the 15% gap between the two arms is precisely what the height gate is for.** Had wholesale
+been indistinguishable from the middle path, Helix would have been pointless — you would simply keep
+Core's logic everywhere. It is not indistinguishable, so there is something to trade: **wholesale for
+backfill, where the input set is closed and exhaustively testable; Core's own logic at the tip, where
+it is not.**
+
+⚠ **This does not lower the differential-testing bar, it raises it.** The wholesale arm replaces the
+entire verification predicate, so "these two agree on every signature in chain history" becomes the
+thing the whole design rests on. It is still not started.
 
 ## Naming
 
