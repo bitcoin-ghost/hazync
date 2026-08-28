@@ -56,7 +56,7 @@ fidelity decision — and it alone takes the target from unreachable to 7 cards.
 ⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the
 win.
 
-### ⚖ Decision 2026-08-28: the MIDDLE path, not wholesale
+### ⚖ LEANING (not decided) 2026-08-28: the MIDDLE path over wholesale
 
 The wholesale arm is 15% faster (9.10x vs 8.00x) but buys **at most one card**, and only in the
 pessimistic aggregate case:
@@ -66,11 +66,14 @@ pessimistic aggregate case:
 | middle path | **6 cards** | 5 cards |
 | wholesale | 5 cards | 5 cards |
 
-⇒ **One card is a cheap price for keeping Core's ECDSA logic** — DER parsing, low-S handling, the r/s
+⚠ **This is a leaning, not a decision** — the operator has explicitly not committed. Do not treat it
+as settled, and do not let downstream work assume it.
+
+⇒ **One card looks like a cheap price for keeping Core's ECDSA logic** — DER parsing, low-S handling, the r/s
 checks, the inversion and the final `r == x(R) mod n` comparison all stay libsecp's literal code, and
 only the group arithmetic moves.
 
-⇒ **This likely retires `HELIX_DUAL_BACKEND.md`.** Helix exists to run wholesale for backfill and
+⇒ **If that leaning holds, it would retire `HELIX_DUAL_BACKEND.md`.** Helix exists to run wholesale for backfill and
 Core at the tip. If the middle path runs **everywhere**, there is no second backend — no height gate,
 no committed cutover constant, no doubled audit surface, and none of the silent-divergence risk of two
 implementations disagreeing across a cutover.
