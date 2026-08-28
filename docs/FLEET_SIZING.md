@@ -79,7 +79,7 @@ Four things could each move the answer, in rough order of how much:
 3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27 — RETIRED.** `HAZYNC_PROFILE_EXEC=1
    chunk-profile` on block 962,000, production cost-packed partition, gives **14.057 G** — the model was
    **+2.0%** high. Chunk work on one L40S is **14,367 s**, not 14,656 s, and the one-card total is
-   **15,933 s**. Needed no GPU and no chunk receipts. See `SIXTEEN_CARD_PLAN.md` §2.1, which also records
+   **15,933 s**. Needed no GPU and no chunk receipts. See `TEN_MINUTE_BLOCK.md` §2.1, which also records
    that the measured straggler is **1.059x** where the packer's own metric — computed from predictions —
    reports 1.00x.
 4. **Nothing above N=2 has ever been run.** Near-linear scaling is plausible -- chunks are independent

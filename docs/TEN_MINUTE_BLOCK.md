@@ -1,6 +1,24 @@
-# The sixteen-card plan — one denominator, and the layer nobody has measured
+# The ten-minute block — one denominator, and how the fleet question was actually answered
 
-**Target, stated as a number instead of an aspiration: prove a near-tip block on 16 L40S.**
+**Target, stated as a number instead of an aspiration: prove a near-tip block in 600 seconds.**
+
+⚠ **This file was `SIXTEEN_CARD_PLAN.md` and was renamed on 2026-08-28, because its own §8.13 concluded
+that sixteen cards cannot get there** — §8.5's chunk floor alone is 16.3 min. A filename asserting a
+superseded conclusion is the same failure this project keeps hitting, except it sits where nobody edits
+it. **600 s is the goal; the card count was always the derived quantity**, and it has moved 16 → 28 →
+32 → 48 → 29 as the measurements landed. The title now names the thing that does not move.
+
+## What this document is, and what it is not
+
+**This is the evidence trail: how the fleet question was answered, and what was got wrong on the way.**
+The measurements in §7 and §8 exist nowhere else — the first `ncu` profile of the prove kernels and the
+spill test (§8.1-8.3), the fan-out N=4/N=8 run and its cross-box control (§8.12), the 78%
+witness-read finding (§7.5), the flow map (§7), and the post-mortems on the stale `>3,300 s` aggregate
+(§8.4) and the backwards `N^1.79` fit (§8.12).
+
+⇒ **For "what should we actually run", read `TOPOLOGY_AND_SETTINGS.md`.** It is the reference sheet and
+it is deliberately short. This file is why those numbers are believed, which is the part that stops
+them circulating without their labels.
 
 This document exists because the board has many levers quoted in incompatible units — execute-mode
 cycles, one-card wall-clock, per-chunk speedups, block-level bounds — and no shared denominator in
