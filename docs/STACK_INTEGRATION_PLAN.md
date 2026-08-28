@@ -175,6 +175,43 @@ earlier experiment. `build.rs` only asserts pristineness on the `<=15` path, so 
 warned. `ecdsa_impl.h` was verified clean at `308fc36774999286dcc77bf7c7df87b9` first, and both
 mutable files were backed up to `~/hazync-base-backup-2026-08-28/` before building.
 
+### ✅ RESULT: Tier 0 passes its digest gate (2026-08-28, CPU-only)
+
+Block 962,000, 8,006 inputs, `HAZYNC_CHUNKS=16`, `HAZYNC_PROFILE_EXEC=1`, both partitions
+(`count-packed (old)` and `cost-packed (new)`) = 32 chunk executes per arm.
+
+| | control (`main`) | stack (`feat/stack-integration`) |
+|---|---|---|
+| `METHOD_ID` | `916cde9ed4ff3d0bb469b20a33a0a5e2a52e4161a118acd001b284764a288895` | `70fc6484be0a5e2538dd64fae5b0dfcfc82c4a4ae46ea999601d939e053f084d` |
+| journal digests | 32 | 32 |
+| `all_valid=1` | 32/32 | 32/32 |
+
+✅ **ALL 32 JOURNAL DIGESTS BYTE-IDENTICAL.** ✅ **The two `METHOD_ID`s DIFFER**, which is the half
+of the guard that proves both arms genuinely rebuilt rather than one answering from a stale binary --
+without it, "identical" is indistinguishable from "the change never compiled".
+
+⇒ **`-O3` + fat LTO + CGU=1 + ECMULT window 21 compute exactly what `main` computes.** This is a
+NEW result: `TIER0_RESULTS_2026-08-26` validated its combined arm at window **20**; window 21 had
+never had its digest checked, and the guest builds with `-w`, so `-O3` is precisely where latent UB
+would have surfaced. None did.
+
+⚠ **This arm gated Tier 0 ALONE.** bigint2 was not built (see the trap below), and neither the
+witness encoder nor the join tree is reachable from mode 4 -- see "The gate this has NOT passed".
+
+### ✅ RESULT: the join tree's schedule is provably order-identical
+
+Both drivers were rebuilt over symbolic nodes -- the old one transcribed literally, `pop()` and all --
+and their expression trees compared for **2,052 leaf counts**: every value 1..=2048, plus 116, 501,
+1,684 and 8,006. **Identical in every case**: same pairs, same operand order, same carries.
+
+That is the property that would be dangerous if wrong. Joins chain claims (`join` asserts
+`a.post == b.pre`), so they do not commute -- a carry-indexing error would yield receipts that fail
+to verify, not merely a slower tree.
+
+⚠ Tests a faithful transcription of both algorithms, not the shipped function. **TODO: extract the
+width computation into a real function and point the test at it**, so it exercises shipped code.
+⚠ Says nothing about the PERFORMANCE claim (~1.4x at 32 cards); that still needs a third box.
+
 ### ⛔⛔ MERGING THE BRANCH DOES NOT ENABLE bigint2
 
 **Discovered 2026-08-28 by checking, not by reading.** After a full build of
