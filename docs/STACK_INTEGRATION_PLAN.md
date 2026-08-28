@@ -151,6 +151,43 @@ roughly halves the win. It is open with checks pending. Treat it as a gate on th
 ⚠ Chunk receipts must come from the **current** guest — `agg_chunks()` verifies every receipt against
 `METHOD_ID` before the execute-mode branch, so a re-baseline invalidates every stored receipt.
 
+## 4.1 STATUS as of 2026-08-28 22:25
+
+All four levers are implemented, committed, pushed, and merged into `feat/stack-integration`
+with **no conflicts**. The merged tree type-checks: `REAL_EXIT=0`, zero errors, warning count
+unchanged at 8 (all pre-existing and elsewhere in the file).
+
+| branch | commit | state |
+|---|---|---|
+| `feat/bigint2-middle` | `bae4394` | measured 8.00x at proving time |
+| `feat/join-tree-pipelining-v2` | `27163ba` | compiles; **unbenchmarked** — needs a 3rd box |
+| `feat/tier0-codegen` | `3d8f1fd` | compiles; window-21 table regenerated (see below) |
+| `feat/aggregate-witness-read-v2` | `15a1190` | profiled, encoder written, compiles |
+| `feat/stack-integration` | `077b2ee` | all four merged |
+
+✅ **Tier 0 is provably active, not silently ignored.** The build regenerated
+`$HAZYNC_BASE/secp256k1/src/precomputed_ecmult.c` from `#if ECMULT_WINDOW_SIZE > 19` to
+`> 21`, and the file grew 38.5 MB -> 154 MB. That is the observable side effect of the window
+actually changing, which is the guard `TIER0_RESULTS` insists on.
+
+⚠ **The base tree was NOT pristine before this.** It was already regenerated at window 19 by an
+earlier experiment. `build.rs` only asserts pristineness on the `<=15` path, so nothing would have
+warned. `ecdsa_impl.h` was verified clean at `308fc36774999286dcc77bf7c7df87b9` first, and both
+mutable files were backed up to `~/hazync-base-backup-2026-08-28/` before building.
+
+### ⛔ The gate this has NOT passed
+
+**An identical journal digest against control.** The wire format changed; the computation must not
+have. This is CPU-only -- no GPU -- and it is the same gate Tier 0 passed with `607f4a7e...`:
+
+```
+# control (main), then the stack -- digests must be byte-identical
+HAZYNC_BLOCK=block_962000.json host chunk-profile
+```
+
+Until that passes, the stack is code that compiles, not code that is known correct. Nothing here
+should be quoted as a result before it does.
+
 ## 5. Standing caveats — do not quote the stack without these
 
 - **Aggregate scaling past 2 cards is UNMEASURED.** 1.81x at N=2 (88-91% efficient) is real; the N=4
