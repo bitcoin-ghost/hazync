@@ -22,6 +22,30 @@ label is a bug in this page.**
 
 ---
 
+## 0.5 ✅ MEASURED 2026-08-28 — #139 proves out, and the aggregate distributes
+
+Two GPU results move every number below.
+
+| | result |
+|---|---|
+| **#139 bigint2, GPU proving wall** | **8.00x** (middle path) / **9.10x** (wholesale) — the coprocessor takes ~13%, not the win |
+| **distributed aggregate, 2 workers** | **1.81x** — scenario (c), where 10 min is unreachable at any N, is **dead** |
+
+Per-verify ECDSA drops **1,723,407 → 140,044 cycles (12.31x)**, and block 962,000 is only **1.8%
+taproot by input**, so #139 accelerates essentially the whole block.
+
+⇒ **With #139, a near-tip block needs ~7-9 cards rather than 32.**
+
+⛔ **Two caveats, neither small.**
+
+1. **The aggregate saturates at N=2** on a 4-chunk test (163 → 90 → 89 s for 1 → 2 → 4 workers). It is
+   **not known** whether that is join-tree width — harmless, since 16 chunks would be 8 wide — or a
+   coordinator bottleneck, which would be fatal: capped at 1.8x, the aggregate is 1,575/1.8 = **865 s,
+   above the 600 s budget at any fleet size**. A 16-chunk test settles it.
+2. **hazync#190 must land**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
+
+→ `TEN_MINUTE_BLOCK.md` §8.14 for the full curve and the diagnostic.
+
 ## 1. Fleet size — first decide which question you are answering
 
 The two framings are not variants of one number. They have different answers, different risks, and
