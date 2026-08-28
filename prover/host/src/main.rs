@@ -4862,6 +4862,27 @@ fn seg_connect_cmd(addr: &str) {
 //
 // If a worker dies its in-flight segments go back on the queue and another worker takes them. That
 // is the same reassignment the pull design got from expiring a stale claim, without needing claims.
+/// Width of every level of the join tree, given the leaf count -- `widths[0]` is the leaf count and
+/// the last entry is always 1.
+///
+/// The tree's shape is a function of the leaf count ALONE, which is what lets a join be published
+/// the moment its two children exist rather than when its whole level does. Level `l+1` position `p`
+/// joins `(l, 2p)` and `(l, 2p+1)`; when a level is odd its LAST node carries forward untouched to
+/// position `npairs` of the next level, keeping its position so adjacency holds.
+///
+/// Extracted so the equivalence test below exercises the shipped function rather than a copy of it.
+fn join_tree_widths(n: usize) -> Vec<usize> {
+    let mut widths = vec![n];
+    let mut m = n;
+    while m > 1 {
+        let npairs = m / 2;
+        let odd = m % 2 == 1;
+        m = npairs + if odd { 1 } else { 0 };
+        widths.push(m);
+    }
+    widths
+}
+
 fn seg_serve_cmd() {
     use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
     use risc0_zkvm::sha::Digestible;
@@ -5224,16 +5245,7 @@ fn seg_serve_cmd() {
     // alone, so it is precomputed here: position p pairs with p^1, and the EVEN position is always
     // the left operand. Joins chain claims (join asserts a.post == b.pre) so they do not commute --
     // only the SCHEDULE changes, never which two receipts meet or in which order.
-    let mut widths: Vec<usize> = vec![lifted.len()];
-    {
-        let mut n = lifted.len();
-        while n > 1 {
-            let npairs = n / 2;
-            let odd = n % 2 == 1;
-            n = npairs + if odd { 1 } else { 0 };
-            widths.push(n);
-        }
-    }
+    let widths = join_tree_widths(lifted.len());
     let depth = widths.len() - 1; // number of join levels; 0 when there is a single leaf
 
     let mut ready: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> =
@@ -5412,5 +5424,80 @@ fn report_119_retries() {
     let n = RETRIES_119.load(std::sync::atomic::Ordering::Relaxed);
     if n > 0 {
         println!("  [#119] {n} segment(s) needed a retry this run — the rate is worth recording on the issue");
+    }
+}
+
+#[cfg(test)]
+mod join_tree_tests {
+    use super::join_tree_widths;
+
+    /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    enum Node { Leaf(usize), Join(Box<Node>, Box<Node>) }
+
+    /// The OLD level-synchronous driver, transcribed literally -- including `pop()` taking the LAST
+    /// element as the odd carry. This is the behaviour the pipelined version must not change.
+    fn old_tree(n: usize) -> Node {
+        let mut level: Vec<Node> = (0..n).map(Node::Leaf).collect();
+        while level.len() > 1 {
+            let npairs = level.len() / 2;
+            let odd = level.len() % 2 == 1;
+            let mut next: Vec<Node> = Vec::with_capacity(npairs + 1);
+            for p in 0..npairs {
+                next.push(Node::Join(Box::new(level[p * 2].clone()), Box::new(level[p * 2 + 1].clone())));
+            }
+            if odd { next.push(level.pop().expect("odd tail")); }
+            level = next;
+        }
+        level.pop().expect("root")
+    }
+
+    /// The NEW schedule, built from the SHIPPED `join_tree_widths`.
+    fn new_tree(n: usize) -> Node {
+        let widths = join_tree_widths(n);
+        let depth = widths.len() - 1;
+        let mut ready: Vec<Vec<Option<Node>>> = widths.iter().map(|w| vec![None; *w]).collect();
+        for i in 0..n { ready[0][i] = Some(Node::Leaf(i)); }
+        for l in 0..depth {
+            let npairs = widths[l] / 2;
+            for p in 0..npairs {
+                let a = ready[l][p * 2].clone().expect("left child");
+                let b = ready[l][p * 2 + 1].clone().expect("right child");
+                ready[l + 1][p] = Some(Node::Join(Box::new(a), Box::new(b)));
+            }
+            if widths[l] % 2 == 1 {
+                ready[l + 1][npairs] = ready[l][widths[l] - 1].clone();
+            }
+        }
+        ready[depth][0].clone().expect("root")
+    }
+
+    /// Pipelining may change WHEN a join runs; it must never change WHICH two receipts meet, or in
+    /// which order. `join` asserts `a.post == b.pre`, so joins chain claims and do not commute -- a
+    /// carry-indexing error yields receipts that fail to verify, not merely a slower tree.
+    #[test]
+    fn pipelined_schedule_builds_an_identical_tree() {
+        // 1..=2048 covers every parity pattern: powers of two, one either side, and the long runs
+        // of odd levels that exercise repeated carries.
+        for n in 1..=2048usize {
+            assert_eq!(old_tree(n), new_tree(n), "join tree differs at n={n}");
+        }
+        // Real sizes seen in the fleet: a 116-segment aggregate, a 501-input chunk, 1,684 segments,
+        // and block 962,000's full input count.
+        for n in [116usize, 501, 1684, 8006] {
+            assert_eq!(old_tree(n), new_tree(n), "join tree differs at n={n}");
+        }
+    }
+
+    #[test]
+    fn widths_terminate_at_one_and_shrink_monotonically() {
+        for n in 1..=1024usize {
+            let w = join_tree_widths(n);
+            assert_eq!(w[0], n, "first width must be the leaf count");
+            assert_eq!(*w.last().unwrap(), 1, "tree must terminate at a single root, n={n}");
+            for pair in w.windows(2) {
+                assert!(pair[1] < pair[0], "width must strictly shrink, n={n}: {pair:?}");
+            }
+        }
     }
 }
