@@ -981,6 +981,50 @@ than compared against the previous box's number: 116 s against 117.3 s, resoluti
 16.3 s, chunk times within 1.8% across all four. Two boxes, ~1% apart. That cost 25 extra minutes
 and is the only reason N=8 can be read as a clean single-variable comparison.
 
+### 8.14 ✅ The aggregate DOES distribute — measured 2026-08-28, and it saturates
+
+§8.13 ranked "does the distributed aggregate work?" as the blocker and noted it had **never been
+exercised**. It has now been, on two L40S in one datacentre (0.21 ms RTT, identical `METHOD_ID` on
+both, verified before the run because the coordinator refuses foreign receipts by name).
+
+**Block 741,000, 4 chunk receipts, aggregate only:**
+
+| workers | po2 22 | po2 20 |
+|---|---|---|
+| 1 | **118 s** (single-box reference: 115.8 s ✅) | **163 s** |
+| 2 | **65 s** — 1.81x | **90 s** — 1.81x |
+| 4 | — | **89 s** — 1.83x, **no gain** |
+
+⇒ **Scenario (c) is DEAD.** The aggregate is not serial; it distributes, and at N=2 it does so at 91%
+of ideal.
+
+⛔ **But it SATURATES at N=2, and this is not yet explained.** A two-point Amdahl fit on N=1,2
+predicted 54 s at N=4; it measured **89 s**. ⚠ **That is the `N^1.79` mistake repeating** — a curve
+extrapolated from two points that cannot constrain it (§8.12). The third point caught it, and it was
+only run because someone asked for it.
+
+**Two candidate causes, with opposite consequences:**
+
+| hypothesis | mechanism | at 16 chunks |
+|---|---|---|
+| **join-tree width** | 4 chunks = 4 leaves -> 2 joins -> 1, so only ~2-way parallelism EXISTS | 8-way width ⇒ §8.13's numbers hold |
+| **coordinator-bound** | single-threaded `seg-serve` cannot feed 4 workers | no improvement ⇒ the aggregate caps near 1.8x |
+
+**Diagnostic — GPU utilisation, 4 workers, sampled on both boxes:**
+
+```
+box1 (2 workers, LOCAL) : mean 82% util,  7% idle
+box2 (2 workers, REMOTE): mean 59% util, 35% idle
+```
+
+⇒ **Inconclusive, but it rules out the clean "no work exists" reading** — that would idle all four
+roughly equally. The **remote** box starves while the local one does not, which points at work
+*delivery* rather than work *availability*. Not decisive.
+
+⏰ **What settles it: the same test on a 16-chunk aggregate**, which needs 16 chunk receipts
+(~100 min of proving). Until then "the aggregate distributes" is true at N=2 and **unproven above it**,
+and every card count assuming full distribution inherits that caveat.
+
 ### 8.13 What it costs to reach ten minutes
 
 From measured block-962,000 figures: 14,926 chunk card-seconds, 1.05x straggler, 1,575 s aggregate
