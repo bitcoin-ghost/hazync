@@ -64,6 +64,26 @@ shrinks the aggregate rather than needing it to distribute:
 | 767 s | **6** | impossible |
 | 497 s | **5** | **24 — viable** |
 
+### The aggregate, taken apart (2026-08-28)
+
+| lever | worth | where | `METHOD_ID`? |
+|---|---|---|---|
+| **witness read → `write_slice`** | **2.05x** on the aggregate | guest | yes — rides #139 |
+| **pipeline the join tree** | up to **~1.4x at 32 cards** | **host** | **no — ships alone** |
+| ~~resolution~~ | ~4.5 s at 16 chunks — not a floor | — | — |
+| ~~drop `tx_prevouts`~~ | ⛔ breaks the anti-substitution binding | — | — |
+| ~~`seg-serve` dispatch~~ | no evidence it binds | — | — |
+
+⛔ **The join tree is level-synchronous** — every level waits for all of its joins. A 116-segment
+aggregate is 7 levels of `[58, 29, 14, 7, 4, 2, 1]`, so efficiency falls from **93% at 2 cards to 40%
+at 32**. The two-card measurement above is in the one regime where this is invisible.
+
+✅ Under the **bounded-lag** framing the narrow tail costs nothing — block *h*'s tail overlaps block
+*h+1*'s wide segment phase. A performance argument for that framing, not just a cost one.
+
+⛔ **`tx_prevouts` is not payload.** The aggregate recomputes every leaf *because* recomputing is the
+check that a chunk verified THIS input and not a different valid spend. → `TEN_MINUTE_BLOCK.md` §8.15
+
 ⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
 
 ### ⚖ LEANING (not decided) 2026-08-28: the MIDDLE path over wholesale
