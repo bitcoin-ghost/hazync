@@ -152,6 +152,49 @@ it is not.**
 entire verification predicate, so "these two agree on every signature in chain history" becomes the
 thing the whole design rests on. It is still not started.
 
+## ⛔ Helix does not finish the job — it hands the bottleneck to the aggregate
+
+**This is the part most likely to be missed by someone reading only the chunk numbers.** #139
+accelerates ECDSA verification, which lives entirely in the **chunks**. It does not touch the
+**aggregate** at all — no signature verification happens there.
+
+So succeeding at Helix *changes which half is the problem*:
+
+| | before #139 | after #139 |
+|---|---|---|
+| chunk side | 14,926 card-s (**90%**) | 2,426 (**61%**) |
+| aggregate | 1,575 s (**10%**) | 1,575 s (**39%**) |
+
+⇒ **A near-tip block goes to ~7 cards, and then stops.** Stacking the wholesale arm (+15%) and the
+Tier 0 codegen batch (+2.2%) on top still reads **7 cards** — the chunk side has been optimised past
+the point where it decides anything.
+
+### The lever that does move it is already identified and unbuilt
+
+`TEN_MINUTE_BLOCK.md` §7.5, MEASURED: **78.2% of block-validation cycles are deserialising the
+witness**, and **#136's `read_slice` fix went to CHUNKS only** — the aggregate still does
+`b.write(&w)`.
+
+| aggregate | cards (a) | cards if the aggregate is SERIAL |
+|---|---|---|
+| 1,575 s (today) | 7 | **impossible at any N** |
+| 767 s (read cost cut to 25%) | **6** | impossible |
+| 497 s (read cost cut to 0%) | **5** | **24 — viable** |
+
+⇒ **It is worth more than everything on the chunk side combined**, it moves `METHOD_ID` so it rides
+the *same* re-baseline as Helix, and it is the difference between a serial aggregate being fatal and
+merely expensive.
+
+⚠ The board prices this as "1.06x now, ~1.34x after #139". That is the **block-level** factor and it
+badly understates the aggregate-level effect, which is ~3x.
+
+⚠ Resolution (**196 s**) is untouched by that fix and becomes the floor underneath it. It does not
+bind at these numbers; it is the third thing to attack, not the second.
+
+⇒ **Sequencing consequence: land the aggregate's witness read in the same re-baseline as Helix.**
+Shipping Helix alone buys a fleet of 7; shipping both buys 5-6, and insures against the aggregate
+turning out not to distribute.
+
 ## Naming
 
 "Helix" — two strands, one backbone. The two backends run against one chain and one image id.
