@@ -62,9 +62,32 @@ shape, but the constant has not been re-measured after packing. **Measure the cy
 
 ## Before writing the encoder
 
-- **Check whether `txids` is needed on the wire at all.** The guest already receives every transaction
-  in `txs`, and `wtxids` and `new_outputs` were removed precisely because the guest recomputes them.
-  If it can hash txids itself, the field goes to zero rather than to 1x — but hashing 6,303 txids in
-  the guest may well cost more cycles than transmitting them. **Price both; do not assume.**
+- ⛔ **`txids` STAYS on the wire. Pack it; do not try to drop it.** An earlier draft of this document
+  suggested pricing its removal. That is the wrong question, and it is the same shape of mistake as
+  the `tx_prevouts` one recorded in PR #200: *"the aggregate recomputes every leaf despite the chunks
+  supplying `chunk_leaves` — that recomputation IS the anti-substitution check. Sending less is not
+  available."*
+
+  `w.txids` is doing two jobs at once, and the guest code is explicit about both:
+
+  ```rust
+  if w.txids.is_empty() || cb_txid != w.txids[0]     { all_ok = false; }  // coinbase bound
+  if w.txs.len() + 1 != w.txids.len()                { all_ok = false; }  // no add/drop of a tx
+  let t = gather(raw_tx, 0, &mut output_leaves);
+  if tx_pos >= w.txids.len() || t != w.txids[tx_pos] { all_ok = false; }  // per-tx binding
+  if tx_pos != w.txids.len()                         { all_ok = false; }  // count matches
+  ...
+  let flat: Vec<u8> = w.txids.iter().flatten().copied().collect();
+  merkle_root(flat.as_ptr(), w.txids.len() as u32, ...);  // checked against header[36..68]
+  ```
+
+  It is the **merkle preimage** checked against the header, and simultaneously the **binding target**
+  every independently computed txid is held to — together they are what makes "the raw bytes ARE the
+  block's txs" true, which the output-leaf reconstruction then rests on.
+
+  ✅ **None of that obstructs the win.** Packing changes the ENCODING, not whether the field is sent:
+  4 wire bytes per source byte down to 1. The guest receives identical values, performs identical
+  bindings, and hands an identical preimage to `merkle_root`. The 2.09x above is priced as PACKED
+  (source bytes retained at 201,728), so it stands as written.
 - The proofs are `[u8; 32]` leaf + `Vec<[u8; 32]>` siblings inside `WireProof`. Packing them changes
   the wire format on BOTH sides, so it moves `METHOD_ID` and rides the re-baseline batch.
