@@ -123,6 +123,10 @@ fn main() {
     // secp256k1_ecmult against pre_g, which ECMULT_WINDOW_SIZE sizes, and Hazync only ever verifies.
     // Exposed so that stays re-checkable, and so the 22 -> 2 memory saving can be taken for free during
     // the same re-baselining.
+    // hazync#139 middle path. See prover/methods/guest/src/bigint2_ecmult.rs and patches/0005.
+    println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
+    let bigint2 = std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1");
+
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
     let ecmult_window: u32 = std::env::var("HAZYNC_ECMULT_WINDOW")
@@ -167,6 +171,12 @@ fn main() {
         .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
         .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", gen_kb.as_str())
+        // hazync#139 middle-path EXPERIMENT — enables patch 0005's #ifdef'd block in ecdsa_impl.h.
+        // Unset (the normal case) compiles the stock secp256k1_ecmult path and moves nothing.
+        .define(
+            "HAZYNC_BIGINT2_ECDSA",
+            if bigint2 { Some("1") } else { None },
+        )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))

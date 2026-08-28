@@ -79,3 +79,44 @@ pub unsafe extern "C" fn hazync_ecmult_verify(
     ry.to_bigint().write_be_bytes(core::slice::from_raw_parts_mut(out_y, 32));
     1
 }
+
+/// hazync#139 **WHOLESALE** arm — replaces the entire ECDSA verification predicate.
+///
+/// ⛔ This is the maximal-speed, maximal-equivalence-surface option. Where
+/// [`hazync_ecmult_verify`] swaps one line and keeps libsecp's checks around it, this replaces
+/// `secp256k1_ecdsa_sig_verify` outright: the r/s zero checks, the modular inversion, both scalar
+/// multiplications, the group arithmetic AND the final `r == x(R) mod n` comparison all become
+/// risc0-crypto's.
+///
+/// What still remains Core's / libsecp's: DER parsing, low-S enforcement (a script-flag policy
+/// decision Core makes separately, and `Signature::verify` does not enforce — matching libsecp),
+/// pubkey parsing, and the sighash that produced `msg`.
+///
+/// All arguments are 32-byte BIG-ENDIAN. Returns 1 if the signature verifies, else 0.
+///
+/// # Safety
+/// All five pointers must be valid for 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hazync_ecdsa_verify_full(
+    sigr: *const u8,
+    sigs: *const u8,
+    qx: *const u8,
+    qy: *const u8,
+    msg: *const u8,
+) -> i32 {
+    use risc0_crypto::ecdsa::Signature;
+
+    let r = Fr::from_be_bytes_mod_order(&rd(sigr));
+    let s = Fr::from_be_bytes_mod_order(&rd(sigs));
+    let Some(sig) = Signature::new(r, s) else { return 0 };  // None == r or s is zero
+
+    let x = Fq::from_be_bytes_mod_order(&rd(qx));
+    let y = Fq::from_be_bytes_mod_order(&rd(qy));
+    // secp256k1 has cofactor 1, so on-curve implies prime-order subgroup, which is what
+    // Signature::verify documents as its precondition.
+    let Some(q) = Affine::new(x, y) else { return 0 };
+
+    // `verify` reduces the big-endian hash mod n internally, exactly as libsecp does when it turns
+    // the sighash into the scalar `message`.
+    if sig.verify(&q, &rd(msg)) { 1 } else { 0 }
+}

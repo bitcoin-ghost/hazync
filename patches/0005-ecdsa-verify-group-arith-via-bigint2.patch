@@ -16,15 +16,18 @@ The Rust side is prover/methods/guest/src/bigint2_ecmult.rs, behind the `bigint2
 
 --- a/src/ecdsa_impl.h
 +++ b/src/ecdsa_impl.h
-@@ -208,7 +208,32 @@
-     secp256k1_scalar_inverse_var(&sn, sigs);
+diff --git a/src/ecdsa_impl.h b/src/ecdsa_impl.h
+index ce36e85..c0af0a4 100644
+--- a/src/ecdsa_impl.h
++++ b/src/ecdsa_impl.h
+@@ -209,7 +209,35 @@ static int secp256k1_ecdsa_sig_verify(const secp256k1_scalar *sigr, const secp25
      secp256k1_scalar_mul(&u1, &sn, message);
      secp256k1_scalar_mul(&u2, &sn, sigr);
      secp256k1_gej_set_ge(&pubkeyj, pubkey);
 +#ifdef HAZYNC_BIGINT2_ECDSA
-+    /* hazync#139 middle path: u1*G + u2*Q via the bigint2 accelerator. The surrounding ECDSA
-+     * logic is unchanged; only the group arithmetic moves. Big-endian 32-byte interchange,
-+     * matching secp256k1_scalar_get_b32 / secp256k1_fe_get_b32. */
++    /* hazync#139 middle path: u1*G + u2*Q via the bigint2 accelerator. The surrounding ECDSA logic
++     * is unchanged; only the group arithmetic moves. Big-endian 32-byte interchange, matching
++     * secp256k1_scalar_get_b32 / secp256k1_fe_get_b32. */
 +    {
 +        unsigned char bu1[32], bu2[32], bqx[32], bqy[32], brx[32], bry[32];
 +        secp256k1_ge pubkey_n = *pubkey;
