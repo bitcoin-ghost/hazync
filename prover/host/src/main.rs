@@ -747,19 +747,77 @@ fn check_full() {
     use std::time::Instant;
     let (anchor, w) = build_full();
     if std::env::var("HAZYNC_WITNESS_SIZES").is_ok() {
-        let tot = risc0_zkvm::serde::to_vec(&w).unwrap().len() * 4;
+        // MEASURE THE WIRE, NOT THE SOURCE.
+        //
+        // The previous version of this report divided SOURCE byte counts (`t.0.len()`,
+        // `siblings.len() * 32`) by a WIRE total (`to_vec(&w) * 4`). Those are different units, and
+        // the mismatch is not uniform: risc0 serde spends one 32-bit word per byte for a plain
+        // `[u8; 32]` or `Vec<u8>`, so anything going through that path costs 4x on the wire, while a
+        // `PackedBytes` costs 1x. Dividing 1x numerators by a 4x-inflated denominator understates
+        // exactly the structures that pay the penalty -- which is the whole question here.
+        //
+        // Everything below is measured by running the SAME `to_vec` the executor uses, per
+        // sub-structure, so every figure shares one unit and the amplification is visible directly.
+        // TEN_MINUTE_BLOCK.md 7.8 asked for this before anyone writes an encoder; the 3.13x
+        // per-input figure it quotes is arithmetic over a residual, and this replaces it.
+        let wire = |n: usize| n * 4;
+        let tot = wire(risc0_zkvm::serde::to_vec(&w).unwrap().len());
         let n = w.inputs.len();
-        let rawtx: usize = w.txs.iter().map(|t| t.0.len()).sum(); // de-duplicated: one blob per tx
-        let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
-        let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
-        println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
-        // `wtxids` and `new_outputs` were removed from the wire format — the guest recomputes both
-        // and never read either, so they were pure transmission cost.
-        let idlists = w.txids.len() * 32;
         let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
-        println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
-        println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
-        println!("  txids = {}B ({:.1}%)", idlists, pct(idlists));
+
+        let w_txs = wire(risc0_zkvm::serde::to_vec(&w.txs).unwrap().len());
+        let w_prevouts = wire(risc0_zkvm::serde::to_vec(&w.tx_prevouts).unwrap().len());
+        let w_inputs = wire(risc0_zkvm::serde::to_vec(&w.inputs).unwrap().len());
+        let w_txids = wire(risc0_zkvm::serde::to_vec(&w.txids).unwrap().len());
+        let w_header = wire(risc0_zkvm::serde::to_vec(&w.header).unwrap().len());
+        let w_cb = wire(risc0_zkvm::serde::to_vec(&w.coinbase_tx).unwrap().len());
+        let w_stumps = wire(risc0_zkvm::serde::to_vec(&w.root_prev).unwrap().len())
+            + wire(risc0_zkvm::serde::to_vec(&w.root_next).unwrap().len());
+        let w_bip30 = wire(risc0_zkvm::serde::to_vec(&w.bip30).unwrap().len());
+        let w_smt = wire(risc0_zkvm::serde::to_vec(&w.smt).unwrap().len());
+
+        // Inside `inputs`: the two WireProofs against everything else. Each proof is a `[u8; 32]`
+        // leaf plus a `Vec<[u8; 32]>` of siblings, and every one of those bytes is a word on the
+        // wire. This split is what decides whether an encoder is worth writing.
+        let mut w_proofs = 0usize;
+        let mut src_proofs = 0usize;
+        for i in &w.inputs {
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_i).unwrap().len());
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_last).unwrap().len());
+            src_proofs += 32 + i.proof_i.siblings.len() * 32 + 8;
+            src_proofs += 32 + i.proof_last.siblings.len() * 32 + 8;
+        }
+        let w_scalars = w_inputs.saturating_sub(w_proofs);
+
+        let src_txs: usize = w.txs.iter().map(|t| t.0.len()).sum();
+        let src_prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
+        let src_txids = w.txids.len() * 32;
+        let amp = |wire_b: usize, src_b: usize| if src_b > 0 { wire_b as f64 / src_b as f64 } else { 0.0 };
+
+        println!("WITNESS block {} inputs={n} txs(deduped)={} total={tot}B (wire)", w.height, w.txs.len());
+        println!("  field            wire B      %     source B    amplification");
+        println!("  inputs        {w_inputs:>10} {:>6.1}%          --            --", pct(w_inputs));
+        println!("    proofs      {w_proofs:>10} {:>6.1}%  {src_proofs:>10}         {:>5.2}x", pct(w_proofs), amp(w_proofs, src_proofs));
+        println!("    scalars     {w_scalars:>10} {:>6.1}%          --            --", pct(w_scalars));
+        println!("  txs           {w_txs:>10} {:>6.1}%  {src_txs:>10}         {:>5.2}x", pct(w_txs), amp(w_txs, src_txs));
+        println!("  tx_prevouts   {w_prevouts:>10} {:>6.1}%  {src_prevouts:>10}         {:>5.2}x", pct(w_prevouts), amp(w_prevouts, src_prevouts));
+        println!("  txids         {w_txids:>10} {:>6.1}%  {src_txids:>10}         {:>5.2}x", pct(w_txids), amp(w_txids, src_txids));
+        println!("  smt           {w_smt:>10} {:>6.1}%", pct(w_smt));
+        println!("  stumps        {w_stumps:>10} {:>6.1}%", pct(w_stumps));
+        println!("  header+cbtx   {:>10} {:>6.1}%", w_header + w_cb, pct(w_header + w_cb));
+        println!("  bip30         {w_bip30:>10} {:>6.1}%", pct(w_bip30));
+        if n > 0 {
+            println!("  per input: {} wire B, of which {} B is the two proofs", w_inputs / n, w_proofs / n);
+        }
+
+        // What a packed encoding of the proofs would actually buy, on measured numbers rather than
+        // on the residual. Packing takes those bytes from 4 wire bytes each to 1, so the floor is
+        // the source size; everything else on the wire is untouched.
+        let projected = tot - w_proofs + src_proofs;
+        println!("  IF proofs were packed: {projected}B vs {tot}B  =>  {:.3}x on witness bytes",
+            if projected > 0 { tot as f64 / projected as f64 } else { 0.0 });
+        println!("  (witness bytes only -- the cycle win follows only if deserialisation stays at \
+            ~347 cyc/B; that is the next thing to measure, not to assume)");
         return;
     }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
