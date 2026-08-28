@@ -91,3 +91,49 @@ shape, but the constant has not been re-measured after packing. **Measure the cy
   (source bytes retained at 201,728), so it stands as written.
 - The proofs are `[u8; 32]` leaf + `Vec<[u8; 32]>` siblings inside `WireProof`. Packing them changes
   the wire format on BOTH sides, so it moves `METHOD_ID` and rides the re-baseline batch.
+
+
+---
+
+# ✅ MEASURED AFTER THE ENCODER (same block, same command)
+
+```
+WITNESS block 962000 inputs=8006 txs(deduped)=6303 total=3594208B (wire)
+  field            wire B      %     source B    amplification
+  inputs           1552804   43.2%          --            --
+    proofs         1296608   36.1%     1168512          1.11x
+    scalars         256196    7.1%          --            --
+  txs              1568620   43.6%     1529381          1.03x
+  tx_prevouts       266132    7.4%      238272          1.12x
+  txids             201732    5.6%      201728          1.00x
+  per input: 193 wire B, of which 161 B is the two proofs
+```
+
+| | before | after | |
+|---|---|---|---|
+| **witness total** | 7,256,592 B | **3,594,208 B** | **2.019x** |
+| proofs | 4,353,808 (3.73x) | 1,296,608 (**1.11x**) | |
+| `txids` | 806,916 (4.00x) | 201,732 (**1.00x**) | |
+| per input | 575 B | **193 B** | |
+| `txs` (control) | 1,568,620 (1.03x) | 1,568,620 (1.03x) | unchanged, as it must be |
+
+✅ **2.019x measured against 2.09x predicted.** The shortfall is length prefixes: every `PackedHash`
+and `PackedHashes` carries a 4-byte count, and there are 16,012 proofs, so ~128 KB of prefix that the
+idealised projection ignored. `txids` came out at **1.00x** -- as close to free as the encoding gets.
+
+✅ **`txs` is byte-for-byte unchanged**, which is the control: it was already packed, so a change
+there would have meant the edit reached something it should not have.
+
+⇒ The reporter's own projection line now reads **1.037x**, i.e. the lever is spent. What remains is
+prefix overhead, not amplification.
+
+## Inferred, NOT measured
+
+Carrying 2.019x through the 78%-of-validation-is-deserialisation figure gives roughly **1.65x** on
+block validation (`0.78 x 0.4953 + 0.22 = 0.606`), against the 1.69x the plan projected from the
+2.09x estimate.
+
+⛔ **Still inferred.** It assumes deserialisation cost scales with wire bytes at a constant rate.
+And ⛔ **this is a SIZE result, not a CORRECTNESS result** -- it proves the encoder shrinks the
+witness, not that host and guest agree field-for-field. That needs the aggregate path (mode 5) and
+therefore a GPU. See `STACK_INTEGRATION_PLAN.md`.
