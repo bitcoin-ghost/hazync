@@ -510,6 +510,22 @@ because the H100 run has already demonstrated the whole harness working on rente
 > 38 GB is irrelevant until that constant moves. This voids the part of #133 that argued a bigger card
 > makes po2 23 testable.
 >
+> ⛔ **UPDATE 2026-08-28 — "until that constant moves" is TRUE BUT INCOMPLETE, and the gap cost a paid
+> B200 run.** Raising `DEFAULT_MAX_PO2` is necessary and **not sufficient**. `ALLOWED_CONTROL_ROOT` is a
+> baked constant in `risc0-circuit-recursion::control_id`, and `succinct.rs` asserts it equals
+> `allowed_control_root("poseidon2", DEFAULT_MAX_PO2)`. Raising the cap adds `lift_rv32im_v2_23.zkr` to
+> the Merkle group, so the **computed** root changes, no longer matches the constant, and **every proof
+> fails verification**. That is exactly what the 2026-08-25 B200 run hit: cap-23 at po2 22 matched
+> (the cap is inert there), cap-23 at po2 23 produced invalid proofs at 79,454 MiB peak.
+>
+> ⇒ It takes **two changes**: raise the cap, then recompute and ship `allowed_control_root("poseidon2",
+> 23)` in Hazync's own verifier — which is a **compatibility decision**, because proofs then stop
+> verifying against stock `risc0-zkvm`. The lift programs exist (`lift_rv32im_v2_23/24.zkr`,
+> `MAX_CYCLES_PO2 = 24`), so this is a missed second step and not a wall.
+>
+> ⚠ And it is **B200-only**: po2 23 needs ~79 GB and OOMs on a 46 GB L40S. Do not re-price it from the
+> failed run's timings — those proofs were invalid, so their wall-clock means nothing.
+>
 > **CAVEAT, stated because it is not controlled.** The L40S figure is a DIFFERENT chunk (11 of 64) on the
 > PREVIOUS guest (`4722cec8`). cycles/sec is the portable metric and both runs are po2 22 with fully
 > packed segments, but the cycle MIX differs. That could move the ratio by some percent. It cannot turn

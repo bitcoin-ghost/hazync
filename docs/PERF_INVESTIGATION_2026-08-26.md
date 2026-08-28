@@ -11,6 +11,28 @@ removed.
 
 ---
 
+> ## ⚠ STATUS 2026-08-28 — read this before using any row in this file
+>
+> **Tier 0 has RUN.** E1-E4 are recorded as UNKNOWN throughout this document and as experiments in §7;
+> their results are in **`TIER0_RESULTS_2026-08-26.md`**, produced the same day this was written. This
+> file was never updated to link to them, and that omission is not cosmetic: it caused a second E4
+> sweep to be commissioned on 2026-08-27 in the belief that the first had never happened.
+>
+> **This file contradicts itself about GPU utilisation, and the contradiction is now settled.** §1
+> states the GPU is *"already 65% busy, so perfect scheduling is worth at most ~1.5x"*; §4.2 states it
+> is *"65% idle waiting on one host thread"*, and §7's E9 reasoning is built on the second. E7
+> measured **91.5% / 91.7% mean busy** on an L40S across per-second samples, with the only zeros in
+> the first ~8 s of execute. **§1 was right and §4.2 was wrong** — so the efficiency ceiling is ~1.09x,
+> not 1.5x, and the E9 framing that depends on "filling the 65% idle" has no idle to fill.
+>
+> ⚠ `nvidia-smi utilization.gpu` reports kernel **residency**, not useful work — this file's own §4.1
+> makes that point about concurrency, and it applies to every utilisation number quoted here.
+>
+> The per-section labels (MEASURED / FROM CODE / ESTIMATE / UNKNOWN) remain the right convention. What
+> failed was refreshing them once the experiments ran.
+
+---
+
 ## 1. Where the money actually goes
 
 The cost of the chain is GPU-hours, and GPU-hours decompose into exactly three factors:
@@ -50,7 +72,7 @@ lever is worker processes per card (§4.1).
 | 3.2 | Guest C/C++ compiled at `-O2`, **no LTO** | cycles | UNKNOWN | never tried | free (execute mode) |
 | 3.3 | Guest Rust gets Cargo defaults: `lto=false`, `codegen-units=16` | cycles | UNKNOWN | never tried | free |
 | 3.4 | `NDEBUG` never defined — 31 live `assert()`s in `interpreter.cpp` | cycles | UNKNOWN | never considered | free (but see fidelity) |
-| 3.5 | `ECMULT_WINDOW_SIZE=19` chosen against paging, optimum unverified | cycles | UNKNOWN | one point sampled | free |
+| 3.5 | ~~`ECMULT_WINDOW_SIZE=19` optimum unverified~~ — **SWEPT 2026-08-26; 21 never run** | cycles | see §3.5 | ✅ ran, incompletely | free |
 | 4.1 | Worker **processes** per card: 1.20x at one point, never swept | efficiency | ≥1.20x MEASURED | not swept | one card |
 | 4.2 | Preflight serial section — upstream has a **locked** solution | efficiency | ≤1.39x contested | see `ACCELERATION.md` | one card |
 | 5.1 | Coordinator egress may cap the fleet before the GPUs do | waste/scale | ESTIMATE | never costed | free to measure |
@@ -186,6 +208,36 @@ direction.
 This is the highest-value-per-minute experiment in the document: it is a `#define`, it needs no GPU, and
 it could plausibly move in the *unexpected* direction.
 
+#### ⚠ RAN 2026-08-26 — and it stopped one arm short
+
+`TIER0_RESULTS_2026-08-26.md` swept this on **block 140,000, 212 inputs**:
+
+| window | 15 | 17 | 18 | **19** | 20 |
+|---|---|---|---|---|---|
+| vs control | +2.539% | +1.265% | +0.102% | — | **−0.198%** |
+
+**The hypothesis above was wrong in direction.** Smaller windows are monotonically worse, so paging is
+not pushing the optimum below 19; and 20 is *better* than 19, not worse.
+
+⛔ **Window 21 was in E4's specification and was never run.** The sweep tested 15, 17, 18, 20 and
+concluded "19 was a good choice" — a conclusion its own highest untested arm could have changed. Two
+documents then disagreed for two days: `GPU_EXPERIMENT_RUNBOOK.md` §8 lists `ECMULT_WINDOW` as
+"closed — 19 is at the knee" while §9 of the *same file* recommends shipping window **20**.
+
+✅ **SETTLED 2026-08-28.** The missing arm was run on the same block, harness and metric:
+
+| window | 19 (control) | 20 | **21** |
+|---|---|---|---|
+| cycles | 376,662,184 | 375,914,975 | **371,971,773** |
+| vs control | — | −0.198% | **−1.245%** |
+
+The control and the window-20 arm reproduce TIER0's figures **exactly**, and the journal digest is
+identical across all three, so this extends the original sweep rather than competing with it.
+**Window 21 is the optimum and is worth ~6x what window 20 was going to buy.**
+
+⇒ Full verdict, consequences and caveats: **`TOPOLOGY_AND_SETTINGS.md` §4.1**. Do not re-derive it
+from this section.
+
 ---
 
 ## 4. Prover efficiency — same cycles, fewer GPU-seconds
@@ -207,8 +259,15 @@ the single cheapest thing on this list.
 
 ### 4.2 Preflight — covered in full by #183
 
-The serial section is risc0 preflight, the GPU is **65% idle waiting on one host thread**
+⛔ ~~The serial section is risc0 preflight, the GPU is **65% idle waiting on one host thread**~~
 (`vmstat`: 0.86 and 0.82 busy cores across H100 and B200 — doubling cores changed nothing).
+
+⛔ **The "65% idle" half is REFUTED.** E7's per-second sampling on an L40S measured **91.5% / 91.7%
+mean busy**, the only zeros being the first ~8 s of execute. §1 of this file says 65% *busy* and §1 is
+the one that survived. The `vmstat` evidence quoted here is real, but it shows the **host** is
+single-threaded — which is a different claim from the GPU being idle, and it is the claim that should
+have been made. Everything downstream that budgets for "filling the 65% idle" (§7's E9 especially) is
+sized against a gap that is not there: the ceiling is ~1.09x.
 
 Our in-process attempt deadlocked CUDA and was removed (#147, #148). Upstream **risc0#3201** does the
 same overlap successfully in the actor worker — 800 ms → 400 ms at po2 20 — and records that **GPU
@@ -319,7 +378,7 @@ this repo before.
 | **E1** | C/C++ opt level | `-O2` (control) vs `-O3` vs `-O2 -flto` vs `-O3 -flto` | §3.2 — is codegen worth anything on the dominant term |
 | **E2** | Rust guest profile | default vs `lto="fat"` vs `codegen-units=1` vs both | §3.3 |
 | **E3** | `NDEBUG` | absent (control) vs `-DNDEBUG` | §3.4 — **price only**, no landing decision implied |
-| **E4** | `ECMULT_WINDOW_SIZE` sweep | 15, 17, 18, **19** (control), 20, 21 | §3.5 — find the real optimum, including *below* 19 |
+| ~~**E4**~~ | `ECMULT_WINDOW_SIZE` sweep | 15, 17, 18, **19** (control), 20, ~~21~~ | ⚠ **RAN 2026-08-26** — see `TIER0_RESULTS_2026-08-26.md`. ⛔ **Window 21 was specified here and never run**; see §3.5 |
 
 **E1 gate — mandatory.** `-O3` on `-w` code can activate latent UB. Before any `-O3` arm is believed,
 it must pass the differential suite *and* reproduce a known-good block's journal digest bit-identically
@@ -476,8 +535,10 @@ Recorded so this file does not become the next stale document.
 
 1. **Run E6** (§4.1). 1.2–1.45x, one card, a few hours, pure config — the largest actionable lever now
    that #136/#137 are banked, and it gates whether the deadlock-prone preflight work is worth touching.
-2. **Run E4** (§3.5). Free, and the only one likely to produce a surprise: the 15 → 19 window move
-   bought far too little, and the sweep must go DOWNWARD as well as up to find out why.
+2. ~~**Run E4** (§3.5).~~ ⚠ **RAN 2026-08-26** — results in `TIER0_RESULTS_2026-08-26.md`, and the
+   surprise was in the *opposite* direction: downward is monotonically worse, and **window 20 came in
+   at −0.198%**, better than the shipped 19. ⛔ **But window 21, which this table specified, was never
+   run** — so the sweep stopped one step short of its own hypothesis. See §3.5.
 3. **Run E1, E2 and E3 together** (§3.2–§3.4). Free, one rebuild each, and they close the entire
    untouched codegen axis — including permanently retiring the `NDEBUG` question.
 

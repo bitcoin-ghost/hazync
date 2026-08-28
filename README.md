@@ -190,6 +190,8 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - Adversarial fuzzing (what was fuzzed, what wasn't): [`docs/FUZZING.md`](docs/FUZZING.md)
 - What we're for, and how far along: [`docs/GOALS.md`](docs/GOALS.md), six goals, measured status
 - What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
+- **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
+  [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
 - How it's built: [`docs/`](docs/)
 
 ## Prior art and credit

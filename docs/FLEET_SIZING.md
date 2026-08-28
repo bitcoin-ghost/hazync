@@ -59,6 +59,13 @@ of worker wall, **assembly 55.7 s** of which resolves 4.9 s"*, plus ~27 s of agg
 
 **~32 L40S is the 10-minute number. 28 lands at about 11 minutes.**
 
+⚠ **That is the LATENCY number — one block, start to finish, inside 600 s.** `GOALS.md` quotes
+**~29 L40S** for the same 600 s target and is not in conflict: it prices **throughput** — keeping up
+with the chain at a bounded lag, where consecutive blocks overlap. The two framings differ by more
+than three cards, because under throughput the aggregate never has to distribute (per-block aggregates
+run concurrently on different blocks), so caveat 5 below does not apply to it. **Always say which
+framing, and which po2, a fleet size assumes.**
+
 At ~€1.13/card/hour, 32 cards is ~€36/hour, or **~€6 per block** at six blocks an hour.
 
 ⚠ **Amdahl is the point, not a footnote.** The whole achievement of #148/#153/#156/#157/#158 was
@@ -73,17 +80,35 @@ Four things could each move the answer, in rough order of how much:
 1. ~~**Coordinator egress may bind first.**~~ ✅ **MEASURED 2026-08-26 — RETIRED.** It is **~1.3 GB per
    block, about 18 Mbps** sustained, not the ~26 GB / ~320 Mbps this section estimated. Egress does not
    cap the fleet at any plausible size. See §6.
-2. **The 83 s floor is inferred from a two-worker run**, not measured as a floor. With 32 workers the
-   assembly critical path could shorten (more resolves distributed) or lengthen (more coordination).
-   It is the difference between 28 and 32 cards.
-3. **14.34 G is modelled**, not measured. It carries two independent cross-checks, but it is not a
-   direct count of today's guest on today's block.
-4. **Nothing above N=2 has ever been run.** Near-linear scaling is plausible -- chunks are independent
-   and every proof is verified separately -- but it is an assumption, not a result.
+2. ~~**The 83 s floor is inferred from a two-worker run**~~ ⚠ **PARTLY ANSWERED 2026-08-27, and the
+   shape was wrong.** N=4 and N=8 were run on one box, one card, one binary, with only N moving: the
+   aggregate went **115.8 s → 116.6 s, +0.7%**. It is not a small additive floor that grows with
+   coordination — it is the **whole aggregate**, ~1,575 s on block 962,000, and it is **constant in N**.
+   ⛔ What is still unmeasured is whether that aggregate **distributes across cards** — see the new
+   caveat below, which this page's arithmetic silently assumes.
+3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27: 14.057 G.** The model was
+   **+2.0% high**. This reason is retired.
+4. ~~**Nothing above N=2 has ever been run.**~~ ✅ **N=4 and N=8 RUN 2026-08-27.** Chunk work scales
+   near-perfectly — 1,511 vs 1,525 card-seconds across the two arms, ~1% apart, with a cross-box
+   control. Near-linear scaling is now a result, not an assumption.
 
-**What would settle it:** a real scaling run at N = 2, 4, 8 (E5 is now done — see §6). Three points on the curve
-distinguish "linear" from "saturating" long before anyone commits to a fleet, and the gap between those
-two outcomes is worth far more than the ~€7/hour between 28 and 32 cards.
+~~**What would settle it:** a real scaling run at N = 2, 4, 8~~ ✅ **That run happened on 2026-08-27**
+(E5 was already done — see §6). The curve is linear on the chunk side and flat on the aggregate side.
+
+⛔ **5. THE ONE THIS PAGE DOES NOT LIST, AND IT IS THE LARGEST.** The `wall(N)` model above divides the
+**entire** 16,222 s — aggregate included — by `N`, leaving only 83 s undivided. That assumes the
+aggregate **fully distributes across cards**, which is claimed by #153/#157/#161 and **has never been
+exercised**. It needs >= 2 boxes, not one, so none of the 2026-08-27 work touched it.
+
+If it does not distribute, the same measured inputs give a very different answer:
+
+| | 32 cards | 48 cards |
+|---|---|---|
+| aggregate fully distributes (this page's assumption) | **9.0 min** ✅ | 6.0 min ✅ |
+| only its segments distribute, resolution serial | 12.2 min | **9.2 min** ✅ |
+| nothing distributes | **34 min** ❌ | 31 min ❌ |
+
+⇒ **"~32 L40S" is conditional on an unexercised claim.** Do not quote it without saying so.
 
 ## 5. Which card, and why not the others
 

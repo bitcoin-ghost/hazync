@@ -162,7 +162,7 @@ either way. Reproduce the simulation with
 | Cheap-card tiers | closed — L4 is 37% more expensive per proof |
 | Wire compression | closed — egress is ~18 Mbps and does not bind |
 | `NDEBUG` | closed — 0.0018% |
-| `ECMULT_WINDOW` | closed — 19 is at the knee |
+| `ECMULT_WINDOW` | ⛔ **This row was WRONG and contradicted §9 of this file.** It said "19 is at the knee" while §9 recommended window 20. Both were short: **21 is the optimum, −1.245%** (measured 2026-08-28, block 140,000). See `TOPOLOGY_AND_SETTINGS.md` §4.1 |
 | C/C++ LTO | closed — `rust-lld` cannot read GCC LTO bytecode |
 | A newer risc0 | closed — 3.0.6 is a Rust 1.97 fix we do not use; 5.0.0-rc.1 predates our pin |
 
@@ -170,6 +170,11 @@ either way. Reproduce the simulation with
 
 `-O3` + rust `lto="fat"` + `codegen-units=1` + `ECMULT_WINDOW=20` is **−1.160%**, gate-validated
 (byte-identical journal digest, `ChunkOut` unchanged, both arms confirmed rebuilt by differing ids).
+
+⚠ **Use `ECMULT_WINDOW=21`, not 20.** Measured 2026-08-28 on the same block and harness: 21 is
+**−1.245%** on its own against 19, where 20 is −0.198%. That should take the bundle to roughly
+**−2.2%**, though the combined arm has not been re-run with 21 in it — see
+`TOPOLOGY_AND_SETTINGS.md` §4.1.
 
 It is four lines and it moves `METHOD_ID`. It should ride the next guest change already paying for a
 re-baseline rather than resetting the board on its own — the board currently carries the project's
