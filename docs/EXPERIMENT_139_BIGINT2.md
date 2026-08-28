@@ -85,6 +85,60 @@ the path this patches — and it carries no Schnorr, so it measures the accelera
 restore it afterwards, or the canonical build inputs are left carrying the experiment. The same
 hazard as the ECMULT table — see `TOPOLOGY_AND_SETTINGS.md` §4.1.
 
+## ✅ RESULT — middle path measured 2026-08-28: **9.19x on the chunk**
+
+Block 140,000, 212 inputs, 1 chunk, execute mode, no GPU. Same harness and control as the ECMULT
+sweep.
+
+| | guest cycles | |
+|---|---|---|
+| control (stock libsecp) | 376,662,184 | — |
+| **middle path (bigint2 group arithmetic)** | **40,989,238** | **9.189x — 89.1% fewer cycles** |
+
+✅ **The journal digest is IDENTICAL**:
+`607f4a7e259b5570e0acbd74ff649ed5991f1552fef270faf03b3883e8f15fea`, `all_valid=1`, `binds=212`. All
+212 signatures verified to the same result as libsecp. `hazync_ecmult_verify` is confirmed present in
+the guest ELF, so the path was genuinely taken — as the 9x drop independently shows.
+
+### ⇒ This reframes the #139 decision, and against the intuition
+
+#139 predicted **~9.96x on the chunk for the WHOLESALE swap** — substituting risc0-crypto's entire
+`ecdsa` module, which is the reimplementation-equivalence question this project exists to avoid.
+
+**The middle path gets 9.19x of that while replacing one line.**
+
+```
+wholesale / middle  =  9.96 / 9.19  =  1.084x
+```
+
+⇒ **The wholesale substitution buys at most ~8% more than the middle path, and costs the entire
+equivalence surface for it.** The expensive part was always the group arithmetic; libsecp's DER
+parsing, low-S handling, r/s checks, inversion and final comparison are cheap by comparison and can
+stay Core's literal code essentially for free.
+
+⚠ **On this evidence "fastest" and "most faithful of the accelerated options" are the same choice.**
+That is the opposite of what one would assume, and it is the single most decision-relevant thing this
+experiment produced.
+
+### Caveats, none of which are small
+
+- ⛔ **This is execute-mode cycles, NOT proving cost.** bigint2 runs on a separate coprocessor
+  circuit; linearity must not be assumed. **This remains the question that decides everything**, and
+  it now clearly justifies a GPU: one prove of one chunk, both arms.
+- ⚠ **Block 140,000 is ~100% ECDSA** (2011-era, no Schnorr, no taproot). risc0-crypto has **no
+  BIP340**, so at tip-era blocks the chunk-level win is capped by the ECDSA fraction. This number is
+  the *ceiling*, not the tip-era figure — and it is why hazync#190's type-aware packer is a
+  prerequisite.
+- ⚠ Untested: anything other than 212 sequential P2PKH-era signatures. Exhaustive differential
+  testing over the historical set is still the load-bearing work.
+
+### A side effect worth checking
+
+With bigint2 doing the group arithmetic, libsecp's `pre_g` table is no longer on the ECDSA-verify
+path. If verification is its only consumer in this guest, the table (~16 MB at window 19, ~64 MB at
+21) becomes dead weight, the ECMULT window tuning becomes moot, and the guest shrinks. **Not
+verified — check whether `secp256k1_ecmult` has other callers here before assuming it.**
+
 ## What would decide it
 
 | question | how | status |
