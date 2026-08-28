@@ -175,6 +175,31 @@ earlier experiment. `build.rs` only asserts pristineness on the `<=15` path, so 
 warned. `ecdsa_impl.h` was verified clean at `308fc36774999286dcc77bf7c7df87b9` first, and both
 mutable files were backed up to `~/hazync-base-backup-2026-08-28/` before building.
 
+### ⛔⛔ MERGING THE BRANCH DOES NOT ENABLE bigint2
+
+**Discovered 2026-08-28 by checking, not by reading.** After a full build of
+`feat/stack-integration`, `$HAZYNC_BASE/secp256k1/src/ecdsa_impl.h` was still at the CLEAN md5
+`308fc36774999286dcc77bf7c7df87b9`. The stack had built without its largest lever and nothing said so.
+
+Two separate things must BOTH happen, and merging the branch does neither:
+
+1. **Patch 0005 must be applied to `$HAZYNC_BASE`.** The branch ships
+   `patches/0005-ecdsa-verify-group-arith-via-bigint2.patch`, but the patch is what ADDS the
+   `#ifdef` block to `ecdsa_impl.h`. Un-applied, the block does not exist.
+2. **`HAZYNC_BIGINT2_ECDSA=1` must be set.** `guest/build.rs:128` reads it and defines the macro
+   that the `#ifdef` from step 1 tests. It defaults to OFF.
+
+⇒ **Setting the env var alone does nothing** (no `#ifdef` to enable), and **applying the patch alone
+does nothing** (macro undefined). Either one on its own builds stock libsecp and looks like a
+successful build of the stack.
+
+⚠ **Anyone benchmarking `feat/stack-integration` without both steps will measure a stack missing the
+32 -> 8 card lever, and conclude the stack does not work.** Verify with the md5 above: if
+`ecdsa_impl.h` is still `308fc367...`, bigint2 is NOT in the build.
+
+This is deliberate design -- the fidelity decision is meant to be opt-in -- but it is a silent
+default, and a silent default on the biggest lever is a trap.
+
 ### ⛔ The gate this has NOT passed
 
 **An identical journal digest against control.** The wire format changed; the computation must not
