@@ -280,12 +280,46 @@ pub extern "C" fn secp256k1_default_illegal_callback_fn(_msg: *const u8, _data: 
 #[no_mangle]
 pub extern "C" fn secp256k1_default_error_callback_fn(_msg: *const u8, _data: *mut core::ffi::c_void) {}
 
+// A 32-byte hash, and a vector of them, over risc0 serde's PACKED byte path instead of the default
+// one-word-per-byte. MEASURED on block 962,000 (docs/WITNESS_WIRE_PROFILE_2026-08-28.md): `[u8; 32]`
+// and `Vec<[u8; 32]>` amplify 4.00x, and the two WireProofs alone were 60.0% of the whole witness.
+// Values are byte-identical on both sides -- ONLY the encoding changes, so every binding the guest
+// performs against these bytes is unaffected.
+#[derive(Clone, Default, PartialEq)]
+struct PackedHash([u8; 32]);
+impl<'de> serde::Deserialize<'de> for PackedHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() != 32 { return Err(serde::de::Error::custom("PackedHash must be 32 bytes")); }
+        let mut h = [0u8; 32]; h.copy_from_slice(&v); Ok(PackedHash(h))
+    }
+}
+#[derive(Clone, Default)]
+struct PackedHashes(Vec<[u8; 32]>);
+impl<'de> serde::Deserialize<'de> for PackedHashes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() % 32 != 0 { return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32")); }
+        Ok(PackedHashes(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect()))
+    }
+}
+fn packed_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+        fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+        fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+    }
+    d.deserialize_byte_buf(V)
+}
+
 // ---- Block-proof wire format (matches the host structs) ----
 #[derive(Deserialize)]
 struct WireProof {
-    leaf: [u8; 32],
+    leaf: PackedHash,
     position: u64,
-    siblings: Vec<[u8; 32]>,
+    siblings: PackedHashes,
 }
 #[derive(Deserialize)]
 struct BlockInput {
@@ -351,7 +385,7 @@ struct BlockWitness {
     header: Vec<u8>,            // 80-byte block header
     height: u32,               // block height (for the subsidy schedule)
     coinbase_tx: Vec<u8>,      // the coinbase tx (its outputs = subsidy + fees)
-    txids: Vec<[u8; 32]>,      // all txids in order (internal), for the merkle root
+    txids: PackedHashes,       // all txids in order (internal), for the merkle root
     root_prev: WireStump,
     txs: Vec<PackedBytes>,     // the block's non-coinbase txs, ONE shared blob each (raw bytes)
     tx_prevouts: Vec<PackedBytes>, // parallel to `txs`: each tx's concatenated input prevouts blob
@@ -380,7 +414,7 @@ struct BlockOutput {
 }
 
 fn to_proof(w: &WireProof) -> utreexo::Proof {
-    utreexo::Proof { leaf: w.leaf, position: w.position, siblings: w.siblings.clone() }
+    utreexo::Proof { leaf: w.leaf.0, position: w.position, siblings: w.siblings.0.clone() }
 }
 
 fn normalize(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
@@ -569,10 +603,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     let cb_outputs = (output_leaves.len() - cb_start) as u32;
     cut!(1);   // <- stage 1 boundary: per-tx tx_out_leaves done
     for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
-    if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
+    if w.txids.0.is_empty() || cb_txid != w.txids.0[0] { all_ok = false; }
     // The de-duplicated per-tx blobs: one raw_tx + one prevouts blob per non-coinbase tx. Bind their
     // counts to the merkle-committed tx set so a prover can neither add nor drop a tx.
-    if w.txs.len() + 1 != w.txids.len() || w.tx_prevouts.len() != w.txs.len() { all_ok = false; }
+    if w.txs.len() + 1 != w.txids.0.len() || w.tx_prevouts.len() != w.txs.len() { all_ok = false; }
     let mut tx_pos = 1usize; // 1-based block position (coinbase is position 0 / txids[0])
     for inp in &w.inputs {
         if inp.tx_first == 1 {
@@ -582,11 +616,11 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             let start = output_leaves.len();
             let t = gather(raw_tx, 0, &mut output_leaves);
             for l in &output_leaves[start..] { created_at.entry(*l).or_insert(tx_pos as u32); }
-            if tx_pos >= w.txids.len() || t != w.txids[tx_pos] { all_ok = false; }
+            if tx_pos >= w.txids.0.len() || t != w.txids.0[tx_pos] { all_ok = false; }
             tx_pos += 1;
         }
     }
-    if tx_pos != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
+    if tx_pos != w.txids.0.len() { all_ok = false; } // tx count must match the merkle-committed set
     let mut spent_in_block: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut cur_tx: u32 = 0; // index of the tx currently being processed (increments on each tx_first)
 
@@ -890,14 +924,14 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             if !spent_in_block.insert(leaf) { all_ok = false; }
         } else {
             // EXTERNAL spend: the coin exists in the accumulator — verify inclusion + delete it.
-            if inp.proof_i.leaf != leaf {
+            if inp.proof_i.leaf.0 != leaf {
                 all_ok = false;
             }
             // stage 24: + the created_at lookup and in-block bookkeeping, WITHOUT building the
             // utreexo proofs. The deletion itself measured 1.7%, but that says nothing about the cost
             // of PREPARING its proof: these two lines clone ~28x32 B of siblings per input.
             if stage == 24 { continue; }
-            let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.clone() };
+            let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.0.clone() };
             let pl = to_proof(&inp.proof_last);
             // stage 3 runs this loop WITHOUT the accumulator delete, so (stage 4 - stage 3)
             // isolates utreexo deletion from the per-input `input_bind` hashing that shares it.
@@ -925,7 +959,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
                 if i >= n { all_ok = false; break; }
                 let mut leaf = [0u8; 32];
                 leaf.copy_from_slice(&buf[i * 32..i * 32 + 32]);
-                let pi = utreexo::Proof { leaf, position: d.proof_i.position, siblings: d.proof_i.siblings.clone() };
+                let pi = utreexo::Proof { leaf, position: d.proof_i.position, siblings: d.proof_i.siblings.0.clone() };
                 let pl = to_proof(&d.proof_last);
                 if !stump.delete(d.global_pos, &pi, &pl) { all_ok = false; }
             }
@@ -956,8 +990,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
 
     let mut mroot = [0u8; 32];
     let mut mutated = 0u8;
-    let flat: Vec<u8> = w.txids.iter().flatten().copied().collect();
-    unsafe { merkle_root(flat.as_ptr(), w.txids.len() as u32, mroot.as_mut_ptr(), &mut mutated) };
+    // `Vec<[u8; 32]>` is ALREADY n*32 contiguous bytes, so merkle_root gets a view rather than a
+    // flattened copy. The old line walked ~200 KB byte-at-a-time through an iterator chain and
+    // allocated a second copy of it, to hand over bytes that were already laid out correctly.
+    unsafe { merkle_root(w.txids.0.as_ptr() as *const u8, w.txids.0.len() as u32, mroot.as_mut_ptr(), &mut mutated) };
     // root matches header AND the tree is not malleated (CVE-2012-2459 duplicate-txid mutation).
     let merkle_ok = mroot[..] == w.header[36..68] && mutated == 0; // header 36..68 = hashMerkleRoot
 
@@ -990,7 +1026,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             }
         }
     }
-    let flat_wtx: Vec<u8> = rec_wtxids.iter().flatten().copied().collect();
+    // Same as the merkle preimage above: rec_wtxids is already contiguous, so no flattened copy.
+    let flat_wtx: &[u8] = unsafe {
+        core::slice::from_raw_parts(rec_wtxids.as_ptr() as *const u8, rec_wtxids.len() * 32)
+    };
     // G3: segwit activates at mainnet SegwitHeight 481824 (Core GetBlockScriptFlags / DeploymentActiveAfter).
     // BELOW activation Core never looks for a commitment and REJECTS any block carrying witness data
     // (unexpected-witness) — so witness_ok = "no witness present". FROM activation the BIP141 commitment is
@@ -1032,7 +1071,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // In-block duplicate txids are still rejected: two txs in one block sharing an outpoint is a
     // separate failure from the cross-block one, and cheap to check over the merkle-committed set.
     let ids_distinct = {
-        let mut ids = w.txids.clone();
+        let mut ids = w.txids.0.clone();
         ids.sort_unstable();
         ids.windows(2).all(|w| w[0] != w[1])
     };
@@ -1156,7 +1195,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // Core's GetBlockWeight also weighs the 80-byte header and the tx-count varint (non-witness data, so
     // ×WITNESS_SCALE_FACTOR) — `4*(80 + CompactSize(ntx))` — on top of the per-tx weights. Without it a
     // block could sit up to ~324 WU over the limit while Core rejects it (F2, round-5 audit).
-    let ntx = w.txids.len();
+    let ntx = w.txids.0.len();
     let cs: i64 = if ntx < 0xfd { 1 } else if ntx <= 0xffff { 3 } else if ntx <= 0xffff_ffff { 5 } else { 9 };
     total_weight += 4 * (80 + cs);
     let weight_ok = total_weight <= MAX_BLOCK_WEIGHT;
