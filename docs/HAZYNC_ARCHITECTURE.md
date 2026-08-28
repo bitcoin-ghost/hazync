@@ -407,6 +407,12 @@ RISC0's `k256` crate uses). Options, decreasing faithfulness:
   ⇒ **That is precisely the argument for bigint2 (option C), which amortises one blob over a whole
   scalar multiplication instead of paying conversion per field-mul** — so the right reading of this
   rejection is "per-mul interception is disproven", not "the accelerator cannot pay".
+
+  ✅ **And it since paid.** hazync#139 measured `risc0-crypto`/bigint2 at **138,643 cycles per ECDSA
+  verify against libsecp's 1,909,913 — 13.78x**, on the same 16 signatures through both paths. So the
+  accelerator was never the problem; the per-multiply granularity was. What (A) actually established
+  is that **interception must happen at the scalar-multiplication level, not the field-mul level** —
+  which is (C), and which is why #139 is a fidelity decision rather than a performance question.
 - **(B) Swap only the signature *verify* to RISC0's accelerated `k256`/bigint2** — expose a C
   `verify_ecdsa/verify_schnorr` from the guest, patch Core's `pubkey.cpp` to call it instead of
   libsecp256k1. Bounded, well-tested reimpl surface (only "is this sig valid over this hash");
