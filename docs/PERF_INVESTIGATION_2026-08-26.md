@@ -224,8 +224,19 @@ concluded "19 was a good choice" — a conclusion its own highest untested arm c
 documents then disagreed for two days: `GPU_EXPERIMENT_RUNBOOK.md` §8 lists `ECMULT_WINDOW` as
 "closed — 19 is at the knee" while §9 of the *same file* recommends shipping window **20**.
 
-⇒ Current state of this question, including a later sweep at 21, is in
-**`TOPOLOGY_AND_SETTINGS.md` §4.1**. Do not re-derive it from this section.
+✅ **SETTLED 2026-08-28.** The missing arm was run on the same block, harness and metric:
+
+| window | 19 (control) | 20 | **21** |
+|---|---|---|---|
+| cycles | 376,662,184 | 375,914,975 | **371,971,773** |
+| vs control | — | −0.198% | **−1.245%** |
+
+The control and the window-20 arm reproduce TIER0's figures **exactly**, and the journal digest is
+identical across all three, so this extends the original sweep rather than competing with it.
+**Window 21 is the optimum and is worth ~6x what window 20 was going to buy.**
+
+⇒ Full verdict, consequences and caveats: **`TOPOLOGY_AND_SETTINGS.md` §4.1**. Do not re-derive it
+from this section.
 
 ---
 

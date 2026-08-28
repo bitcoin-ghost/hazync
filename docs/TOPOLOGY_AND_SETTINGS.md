@@ -107,7 +107,7 @@ already paying for a re-baseline.** Do not land any of them alone.
 | Rust `lto` | default | **`"fat"`** | −0.486% | MEASURED |
 | Rust `codegen-units` | 16 | **1** | −0.361% | MEASURED |
 | `NDEBUG` | absent | leave absent | −0.0018% | MEASURED — not worth the fidelity question |
-| `ECMULT_WINDOW_SIZE` | 19 | **see §4.1** | — | contested |
+| `ECMULT_WINDOW_SIZE` | 19 | **21** | **−1.245%** | MEASURED — see §4.1 |
 | `ECMULT_GEN_KB` | 22 | **2** | 0% cycles, frees ~10/11 of the table | MEASURED |
 
 The three codegen arms are **additive to within 0.001%** (naive sum −1.159%, combined arm −1.160%), and
@@ -119,27 +119,58 @@ the combined arm is gate-validated: byte-identical journal digest, `ChunkOut` un
 `pre_g`, sized by `ECMULT_WINDOW_SIZE`, and Hazync only ever verifies. Set it to 2 and reclaim the
 memory for free, during the same re-baseline.
 
-### 4.1 `ECMULT_WINDOW_SIZE` — ⏳ CONTESTED, a decisive sweep is running
+### 4.1 `ECMULT_WINDOW_SIZE` — **21**, settled 2026-08-28
 
-**Two sweeps disagree, and the difference is the workload.**
+**MEASURED on block 140,000, 212 inputs** — the same workload, harness and metric TIER0 used, so the
+arms are directly comparable:
 
-| sweep | block | inputs | 18 | **19** | 20 | 21 |
-|---|---|---|---|---|---|---|
-| TIER0, 2026-08-26 | 140,000 | **212** | +0.102% | — | **−0.198%** | **not run** |
-| E4 re-run, 2026-08-27 | 130,000 | **10** | +0.10% | — | **+0.29%** | **−1.63%** |
+| window | guest cycles | vs shipped 19 |
+|---|---|---|
+| **19 (shipped)** | 376,662,184 | — |
+| 20 | 375,914,975 | −0.198% |
+| **21** | **371,971,773** | **−1.245%** |
 
-The 18 arm agrees to 0.002% across both, so the method is sound and the disagreement is real: **at 212
-inputs window 20 beats 19; at 10 inputs it loses to 19, and 21 wins by 1.63%.** That is consistent with
-the mechanism — EC additions fall as ~`256/(w+1)` while the `pre_g` table grows as `2^(w−2)`, so the
-larger table only pays for itself once there is enough EC work to amortise it. A 10-input chunk is not
-a realistic workload; a production chunk carries **64-180 inputs**.
+✅ **This run reproduces `TIER0_RESULTS_2026-08-26.md` exactly** — its control (376,662,184), its
+window-20 figure (375,914,975) and its journal digest
+`607f4a7e259b5570e0acbd74ff649ed5991f1552fef270faf03b3883e8f15fea` all match bit-for-bit, and the
+digest is identical across all three arms here (`all_valid=1 binds=212`). The new arm is therefore a
+clean extension of the existing sweep, not a separate experiment that happens to agree.
 
-⛔ **Neither sweep tested window 21 at a realistic input count**, which is the one arm that matters —
-TIER0 specified 21 in E4 and did not run it, and the 2026-08-27 re-run tested 21 only at 10 inputs.
+⇒ **Ship window 21.** It is worth **−1.245%**, roughly **6x** the −0.198% that window 20 was going to
+buy, and it is the arm E4 specified and never ran.
 
-⏳ **A 19/20/21 sweep on block 140,000 (212 inputs) is running and will settle this.** Until it lands,
-**ship nothing** — and note that whatever wins, it rides the next re-baseline with the §4 bundle rather
-than landing alone.
+### The "local bump at 20" story was a small-workload artefact
+
+An earlier sweep on block 130,000 with **10 inputs** put window 20 *above* 19 (+0.29%) and read that as
+a local bump that hill-climbing would get stuck behind. At 212 inputs there is **no bump** — the curve
+falls monotonically 19 → 20 → 21. The bump was real at 10 inputs and irrelevant to production, where
+chunks carry **64-180 inputs**.
+
+⚠ **The transferable lesson is about workload size, not about windows.** Ten inputs is too little EC
+work to amortise the `pre_g` table, so a small-workload sweep systematically under-rates larger
+windows. Any guest-codegen arm measured on a toy block should be re-run at a realistic input count
+before it is believed — in either direction.
+
+### Consequences
+
+- **The Tier 0 bundle roughly doubles.** TIER0's combined arm measured **−1.160%** using window 20.
+  Swapping in 21 adds ~1.05 percentage points, for an estimated **~−2.2%** — subject to the additivity
+  TIER0 demonstrated (naive sum −1.159% vs combined −1.160%), which has not been re-verified with 21 in
+  the bundle. ⚠ **Re-run the combined arm before quoting −2.2% as measured.**
+- At `GOALS.md`'s scale that is worth roughly **twice** what the bundle was worth — TIER0 priced 1.16%
+  at ~€1,950 across the chain.
+- ⚠ **The `pre_g` table doubles with each window step** (~16 MB at 19 → ~64 MB at 21). The cycle figure
+  above is *net* of the paging that costs, so the win is real as measured — but the guest's memory
+  footprint grows, and nobody has checked that against segment sizing. Check before landing.
+
+⛔ **Do not land it alone.** It moves `METHOD_ID` like every other row in §4; it rides the next
+re-baseline with the bundle.
+
+⛔ **Windows ≤15 cannot be swept naively.** `build.rs` regenerates `precomputed_ecmult.c` only above
+window 15; at ≤15 it reuses whatever table is on disk, which after any >15 arm is the wrong one.
+⚠ **And any sweep mutates the shared source tree at `$HAZYNC_BASE`** — back up
+`secp256k1/src/precomputed_ecmult.c` and restore it afterwards, or the canonical build inputs are left
+carrying the last arm's table.
 
 ---
 
