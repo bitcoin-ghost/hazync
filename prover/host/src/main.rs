@@ -2323,7 +2323,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
         &cb_spends_from(&inputs, &wtxs));
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids: PackedHashes(txids), root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -2406,7 +2406,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let unbound_smt = smt_witness_standalone(cb.compute_txid().to_byte_array(),
         cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
-        txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
+        txids: PackedHashes(vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()]),
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
         inputs: vec![in0, in1], root_next: wire_stump(&forest), bip30: None,
         in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
@@ -2534,7 +2534,7 @@ fn check_bip30() {
         (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
-        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid],
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: PackedHashes(vec![cb_txid]),
         root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], root_next: root_next.clone(), bip30,
         in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
@@ -2730,7 +2730,7 @@ fn bundle_roundtrip_test() {
     let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
     let w = BlockWitness {
         header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
-        txids: vec![[7u8; 32], [8u8; 32]],
+        txids: PackedHashes(vec![[7u8; 32], [8u8; 32]]),
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
         inputs: vec![],
