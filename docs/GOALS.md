@@ -335,9 +335,20 @@ is served with an empty coinbase scriptSig — the payload genuinely destroyed, 
 Without this G2 is unreachable by definition: a genesis→tip proof is stale the moment it is made, and
 the frontier never converges on a moving tip.
 
-**Status: not met, by a wide margin.** One block measured at **55 minutes** of GPU time against a
+**Status: not met, by a wide margin.** ~~One block measured at **55 minutes** of GPU time against a
 **10-minute** block interval — a single card is **5.5× too slow to stand still**. Roughly six
-L40S-equivalents are needed to hold position before proving one block of history.
+L40S-equivalents are needed to hold position.~~
+
+⚠ **CORRECTED 2026-08-28 — "roughly six" was derived from block 741,000 and is stale by ~5x at
+tip-era input counts.** G2 of this same document measures a near-tip block (962,000, ~7,200 inputs) at
+**17,340 s = 4.8 hours** of L40S time. Against a 600 s interval:
+
+```
+17,340 s per block / 600 s interval  =  28.9  =>  ~29 L40S to hold position
+```
+
+⇒ **~29 cards is BREAK-EVEN.** It matches the chain's growth rate exactly and **burns down none of
+the backlog**. Proving history is a separate purchase on top of it — see "Two operating modes" below.
 
 This constrains only the **proving fleet**. Nodes consuming proofs (G3, G4, G5) are unaffected.
 
@@ -359,6 +370,45 @@ spare at h~182,000 and needs re-checking at tip-era input counts.
   authority of a developer-chosen hash. Hazync replaces that anchor with a proven one.
 - **Proving anything other than mainnet.** The guest compiles `CChainParams::Main()`. A regtest or
   testnet proof requires a different guest and therefore a different image id.
+
+## Two operating modes, and why they are sized differently
+
+The project has **one goal and two workloads**, and they are not variants of each other. G2 is one;
+G6 is the other. Quoting a fleet size, a deadline or a fidelity posture without saying which mode it
+belongs to produces an argument rather than an answer.
+
+| | **Backfill** (G2) | **Tip-following** (G6) |
+|---|---|---|
+| what it is | prove genesis → frontier | prove each new block as it arrives |
+| the work | **138-229 card-years** (1.8-3.0bn inputs at 2.41 card-s/input) | **~29 L40S continuously** |
+| what matters | throughput per pound; calendar | keeping pace |
+| per-block latency | **irrelevant** — 880,000 are queued | the only thing that matters, *eventually* |
+| sized by | budget and how long you will wait | the block interval |
+
+**The two add, they do not overlap.** ~29 cards holds position and closes nothing. Catching up is
+whatever you buy on top:
+
+| cards above break-even | time to backfill |
+|---|---|
+| +100 | ~1.4-2.3 years |
+| +500 | ~0.3-0.5 years |
+
+⚠ **Consequence for planning: tip latency is not a live question yet.** While backfilling you are by
+definition nowhere near the tip, so "is this block proved within 600 s of appearing?" cannot be
+answered until catch-up is in sight — which is years out at any plausible fleet. Until then the fleet
+is sized by **throughput alone**, and a bounded lag behind the tip costs nothing that matters.
+`TOPOLOGY_AND_SETTINGS.md` §1 carries the fleet arithmetic for both.
+
+⚖ **And the two modes do not carry the same fidelity risk — which is the part that is easy to miss.**
+Backfill proves a **closed, enumerable** set of blocks: every signature it will ever see already
+exists and can be differential-tested exhaustively against libsecp. Tip proving cannot be, because
+its inputs have not been written yet.
+
+⇒ **An acceleration that is unacceptable at the tip may be perfectly testable for history.** Since
+backfill is where 138-229 card-years live and tip-following is ~29 cards, that asymmetry points at
+taking a fidelity trade on the expensive workload while keeping full Core semantics on the cheap one.
+hazync#139 (bigint2 ECDSA, 13.78x per verify) is exactly such a decision, and it makes the same
+distinction in its own text. **Nothing here is decided; it is written down so the option is visible.**
 
 ## Dependencies between goals
 
