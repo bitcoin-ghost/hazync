@@ -46,9 +46,58 @@ const KIND_CHAIN: u32 = 0xC4A1_0002;
 const KIND_RANGE: u32 = 0xC4A1_0006;
 const KIND_CHUNK: u32 = 0xC4A1_0004;
 
+// A 32-byte hash, and a vector of them, carried over risc0 serde's PACKED byte path rather than the
+// default one-word-per-byte. MEASURED on block 962,000 (docs/WITNESS_WIRE_PROFILE_2026-08-28.md):
+// `[u8; 32]` and `Vec<[u8; 32]>` amplify 4.00x on the wire, and the two WireProofs alone were 60.0%
+// of the whole witness at 3.73x. Same trick PackedBytes already uses for the tx blobs -- the values
+// on both sides are byte-identical, only the encoding changes.
+//
+// The LEAF matters as much as the siblings here: measured source is ~73 B per proof (32 leaf +
+// 8 position + ~1 sibling), so at 4x the leaf alone is ~2.0 MB of the 4.35 MB the proofs cost.
+// Packing siblings without the leaf would leave most of it on the table.
+#[derive(Clone, Default, PartialEq)]
+struct PackedHash([u8; 32]);
+impl serde::Serialize for PackedHash {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
+}
+impl<'de> serde::Deserialize<'de> for PackedHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() != 32 { return Err(serde::de::Error::custom("PackedHash must be 32 bytes")); }
+        let mut h = [0u8; 32]; h.copy_from_slice(&v); Ok(PackedHash(h))
+    }
+}
+#[derive(Clone, Default)]
+struct PackedHashes(Vec<[u8; 32]>);
+impl serde::Serialize for PackedHashes {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Vec<[u8; 32]> is already n*32 contiguous bytes, so this is a view, not a copy.
+        let flat: &[u8] = unsafe { std::slice::from_raw_parts(self.0.as_ptr() as *const u8, self.0.len() * 32) };
+        s.serialize_bytes(flat)
+    }
+}
+impl<'de> serde::Deserialize<'de> for PackedHashes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() % 32 != 0 { return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32")); }
+        Ok(PackedHashes(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect()))
+    }
+}
+/// The byte-visitor both of the above share.
+fn packed_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+        fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+        fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+    }
+    d.deserialize_byte_buf(V)
+}
+
 // ---- Wire format: MUST match the guest structs field-for-field, in order. ----
 #[derive(Serialize, Deserialize, Clone)]
-struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
+struct WireProof { leaf: PackedHash, position: u64, siblings: PackedHashes }
 #[derive(Serialize, Deserialize)]
 struct BlockInput {
     // flags removed: script flags are guest-derived (block_script_flags), never host-supplied.
@@ -66,7 +115,7 @@ struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
 struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // F3: superseded coinbase deletes
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
-    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>,
+    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: PackedHashes,
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
     inputs: Vec<BlockInput>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
@@ -177,7 +226,7 @@ fn rev(mut v: Vec<u8>) -> Vec<u8> { v.reverse(); v }
 fn arr(v: Vec<u8>) -> [u8; 32] { v.try_into().unwrap() }
 
 fn wire_proof(p: &hazync_utreexo::Proof) -> WireProof {
-    WireProof { leaf: p.leaf, position: p.position, siblings: p.siblings.clone() }
+    WireProof { leaf: PackedHash(p.leaf), position: p.position, siblings: PackedHashes(p.siblings.clone()) }
 }
 fn wire_stump(f: &Forest) -> WireStump { WireStump { roots: f.roots(), num_leaves: f.leaves.len() as u64 } }
 // Strip trailing empty root slots (mirrors the guest `normalize`) so two representations of the same
@@ -302,7 +351,7 @@ fn build_block(
     let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -601,8 +650,8 @@ fn build_full() -> (ChainState, BlockWitness) {
                 inputs.push(BlockInput {
                     tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
-                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
-                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_i: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
+                    proof_last: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
                 });
                 continue;
             }
@@ -630,7 +679,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     let root_next = wire_stump(&forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -747,19 +796,77 @@ fn check_full() {
     use std::time::Instant;
     let (anchor, w) = build_full();
     if std::env::var("HAZYNC_WITNESS_SIZES").is_ok() {
-        let tot = risc0_zkvm::serde::to_vec(&w).unwrap().len() * 4;
+        // MEASURE THE WIRE, NOT THE SOURCE.
+        //
+        // The previous version of this report divided SOURCE byte counts (`t.0.len()`,
+        // `siblings.len() * 32`) by a WIRE total (`to_vec(&w) * 4`). Those are different units, and
+        // the mismatch is not uniform: risc0 serde spends one 32-bit word per byte for a plain
+        // `[u8; 32]` or `Vec<u8>`, so anything going through that path costs 4x on the wire, while a
+        // `PackedBytes` costs 1x. Dividing 1x numerators by a 4x-inflated denominator understates
+        // exactly the structures that pay the penalty -- which is the whole question here.
+        //
+        // Everything below is measured by running the SAME `to_vec` the executor uses, per
+        // sub-structure, so every figure shares one unit and the amplification is visible directly.
+        // TEN_MINUTE_BLOCK.md 7.8 asked for this before anyone writes an encoder; the 3.13x
+        // per-input figure it quotes is arithmetic over a residual, and this replaces it.
+        let wire = |n: usize| n * 4;
+        let tot = wire(risc0_zkvm::serde::to_vec(&w).unwrap().len());
         let n = w.inputs.len();
-        let rawtx: usize = w.txs.iter().map(|t| t.0.len()).sum(); // de-duplicated: one blob per tx
-        let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
-        let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
-        println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
-        // `wtxids` and `new_outputs` were removed from the wire format — the guest recomputes both
-        // and never read either, so they were pure transmission cost.
-        let idlists = w.txids.len() * 32;
         let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
-        println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
-        println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
-        println!("  txids = {}B ({:.1}%)", idlists, pct(idlists));
+
+        let w_txs = wire(risc0_zkvm::serde::to_vec(&w.txs).unwrap().len());
+        let w_prevouts = wire(risc0_zkvm::serde::to_vec(&w.tx_prevouts).unwrap().len());
+        let w_inputs = wire(risc0_zkvm::serde::to_vec(&w.inputs).unwrap().len());
+        let w_txids = wire(risc0_zkvm::serde::to_vec(&w.txids).unwrap().len());
+        let w_header = wire(risc0_zkvm::serde::to_vec(&w.header).unwrap().len());
+        let w_cb = wire(risc0_zkvm::serde::to_vec(&w.coinbase_tx).unwrap().len());
+        let w_stumps = wire(risc0_zkvm::serde::to_vec(&w.root_prev).unwrap().len())
+            + wire(risc0_zkvm::serde::to_vec(&w.root_next).unwrap().len());
+        let w_bip30 = wire(risc0_zkvm::serde::to_vec(&w.bip30).unwrap().len());
+        let w_smt = wire(risc0_zkvm::serde::to_vec(&w.smt).unwrap().len());
+
+        // Inside `inputs`: the two WireProofs against everything else. Each proof is a `[u8; 32]`
+        // leaf plus a `Vec<[u8; 32]>` of siblings, and every one of those bytes is a word on the
+        // wire. This split is what decides whether an encoder is worth writing.
+        let mut w_proofs = 0usize;
+        let mut src_proofs = 0usize;
+        for i in &w.inputs {
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_i).unwrap().len());
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_last).unwrap().len());
+            src_proofs += 32 + i.proof_i.siblings.0.len() * 32 + 8;
+            src_proofs += 32 + i.proof_last.siblings.0.len() * 32 + 8;
+        }
+        let w_scalars = w_inputs.saturating_sub(w_proofs);
+
+        let src_txs: usize = w.txs.iter().map(|t| t.0.len()).sum();
+        let src_prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
+        let src_txids = w.txids.0.len() * 32;
+        let amp = |wire_b: usize, src_b: usize| if src_b > 0 { wire_b as f64 / src_b as f64 } else { 0.0 };
+
+        println!("WITNESS block {} inputs={n} txs(deduped)={} total={tot}B (wire)", w.height, w.txs.len());
+        println!("  field            wire B      %     source B    amplification");
+        println!("  inputs        {w_inputs:>10} {:>6.1}%          --            --", pct(w_inputs));
+        println!("    proofs      {w_proofs:>10} {:>6.1}%  {src_proofs:>10}         {:>5.2}x", pct(w_proofs), amp(w_proofs, src_proofs));
+        println!("    scalars     {w_scalars:>10} {:>6.1}%          --            --", pct(w_scalars));
+        println!("  txs           {w_txs:>10} {:>6.1}%  {src_txs:>10}         {:>5.2}x", pct(w_txs), amp(w_txs, src_txs));
+        println!("  tx_prevouts   {w_prevouts:>10} {:>6.1}%  {src_prevouts:>10}         {:>5.2}x", pct(w_prevouts), amp(w_prevouts, src_prevouts));
+        println!("  txids         {w_txids:>10} {:>6.1}%  {src_txids:>10}         {:>5.2}x", pct(w_txids), amp(w_txids, src_txids));
+        println!("  smt           {w_smt:>10} {:>6.1}%", pct(w_smt));
+        println!("  stumps        {w_stumps:>10} {:>6.1}%", pct(w_stumps));
+        println!("  header+cbtx   {:>10} {:>6.1}%", w_header + w_cb, pct(w_header + w_cb));
+        println!("  bip30         {w_bip30:>10} {:>6.1}%", pct(w_bip30));
+        if n > 0 {
+            println!("  per input: {} wire B, of which {} B is the two proofs", w_inputs / n, w_proofs / n);
+        }
+
+        // What a packed encoding of the proofs would actually buy, on measured numbers rather than
+        // on the residual. Packing takes those bytes from 4 wire bytes each to 1, so the floor is
+        // the source size; everything else on the wire is untouched.
+        let projected = tot - w_proofs + src_proofs;
+        println!("  IF proofs were packed: {projected}B vs {tot}B  =>  {:.3}x on witness bytes",
+            if projected > 0 { tot as f64 / projected as f64 } else { 0.0 });
+        println!("  (witness bytes only -- the cycle win follows only if deserialisation stays at \
+            ~347 cyc/B; that is the next thing to measure, not to assume)");
         return;
     }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
@@ -947,8 +1054,8 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                 inputs.push(BlockInput {
                     tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
-                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
-                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_i: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
+                    proof_last: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
                 });
             } else {
                 // EXTERNAL: prove inclusion in the carried forest, delete.
@@ -1014,7 +1121,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     let root_next = wire_stump(forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -2195,8 +2302,8 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             inputs.push(BlockInput {
                 tx_idx: i as u32, input_idx: 0,
                 global_pos: 0, coin_height: SYNTH_H, coin_is_coinbase: 0, coin_mtp: SYNTH_T, tx_first: 1,
-                proof_i: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
-                proof_last: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
+                proof_i: WireProof { leaf: PackedHash([0u8; 32]), position: 0, siblings: PackedHashes(vec![]) },
+                proof_last: WireProof { leaf: PackedHash([0u8; 32]), position: 0, siblings: PackedHashes(vec![]) },
             });
         } else {
             // external: spends C from the accumulator (real inclusion proof).
@@ -2216,7 +2323,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
         &cb_spends_from(&inputs, &wtxs));
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids: PackedHashes(txids), root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -2299,7 +2406,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let unbound_smt = smt_witness_standalone(cb.compute_txid().to_byte_array(),
         cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
-        txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
+        txids: PackedHashes(vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()]),
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
         inputs: vec![in0, in1], root_next: wire_stump(&forest), bip30: None,
         in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
@@ -2427,7 +2534,7 @@ fn check_bip30() {
         (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
-        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid],
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: PackedHashes(vec![cb_txid]),
         root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], root_next: root_next.clone(), bip30,
         in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
@@ -2623,7 +2730,7 @@ fn bundle_roundtrip_test() {
     let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
     let w = BlockWitness {
         header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
-        txids: vec![[7u8; 32], [8u8; 32]],
+        txids: PackedHashes(vec![[7u8; 32], [8u8; 32]]),
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
         inputs: vec![],
