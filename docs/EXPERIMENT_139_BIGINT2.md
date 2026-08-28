@@ -139,6 +139,45 @@ path. If verification is its only consumer in this guest, the table (~16 MB at w
 21) becomes dead weight, the ECMULT window tuning becomes moot, and the guest shrinks. **Not
 verified — check whether `secp256k1_ecmult` has other callers here before assuming it.**
 
+## ✅ PROVED ON A GPU 2026-08-28 — the win survives, 8.0x
+
+The blocking question was whether execute-mode cycles predict proving cost, since bigint2 runs on a
+**separate coprocessor circuit**. Measured on an L40S (46,068 MiB, driver 595.58.03), block 140,000,
+one chunk, 212 inputs:
+
+| arm | po2 21 | po2 22 | vs stock |
+|---|---|---|---|
+| **stock libsecp** | 446, 446, 446 s (189 seg) | **396, 396 s** (93 seg) | — |
+| **middle path** | 55, 56, 56, 56 s (21 seg) | ~50 s (inferred) | **8.0x** |
+| **wholesale** | 48, 49, 48 s (18 seg) | **43, 44 s** (9 seg) | **9.1x** |
+
+```
+execute-mode cycles   9.19x
+GPU proving wall      8.00x     <- the coprocessor takes ~13%, not the whole win
+segment count 189->21 9.0x      <- independent corroboration
+```
+
+⇒ **#139 is real.** Per-verify ECDSA: **1,723,407 → 140,044 cycles (12.31x)**.
+
+### ⛔ The wholesale arm is 15% faster, not the ~1% predicted
+
+An earlier revision of this document inferred, from backing non-EC overhead out of the middle path
+(140,044 vs #139's wholesale 138,643), that wholesale would buy ~1%. **Measured, it buys 15%**
+(48.3 s vs 55.8 s at po2 21). The inference was wrong; the fidelity trade is a genuine decision, not a
+free lunch. → `HELIX_DUAL_BACKEND.md`
+
+### Guards, because the first attempt was void
+
+The first run of this experiment produced two confident wall times that were **the same binary twice**
+— `cargo` is not on a non-interactive SSH `PATH`, so both builds silently failed and both arms re-timed
+stock. It was caught only by printing `METHOD_ID` per arm. Every arm here therefore asserts: build
+rc=0, `METHOD_ID` **distinct from every other arm**, the expected shim symbol **present in the guest
+ELF**, and the binary linked against `libcuda`. Any failure aborts and restores the shared secp tree.
+
+⚠ `cc::Build` emits no `rerun-if-changed` for **headers**, so editing `ecdsa_impl.h` without an env
+change reuses the cached guest. The wholesale arm hit exactly this and was caught by the id guard.
+Force with `rm -rf target/riscv-guest`.
+
 ## What would decide it
 
 | question | how | status |
