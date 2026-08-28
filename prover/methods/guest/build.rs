@@ -261,8 +261,8 @@ fn main() {
             .arg("-I").arg(format!("{secp}/include"))
             .arg("-I").arg(&secp).arg("-I").arg(format!("{secp}/src"))
             // kept in step with the real build above, so the check compiles what actually ships
-            .args([&format!("-DECMULT_WINDOW_SIZE={ecmult_window}"),
-                   &format!("-DECMULT_GEN_KB={gen_kb}")][..])
+            .arg(format!("-DECMULT_WINDOW_SIZE={ecmult_window}"))
+            .arg(format!("-DECMULT_GEN_KB={gen_kb}"))
             .args(["-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1",
                    "-DUSE_EXTERNAL_DEFAULT_CALLBACKS=1"])
             .args(["-c", src, "-o", &format!("{out}/warncheck.o")]);
