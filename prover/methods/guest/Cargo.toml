@@ -5,6 +5,21 @@ edition = "2021"
 
 [workspace]
 
+# TIER 0 Rust codegen (E2). MEASURED on block 140,000, 212 inputs, execute mode
+# (TIER0_RESULTS_2026-08-26.md 2): lto="fat" is -0.486%, codegen-units=1 is -0.361%, and together
+# they are -0.697% -- close to additive, and additive with the C -O3 and ECMULT arms too (the three
+# best arms sum to -1.159% against a combined measurement of -1.160%).
+#
+# The gate that makes this safe: the combined arm produced a BYTE-IDENTICAL journal digest
+# (607f4a7e...) and identical ChunkOut against control, while the two METHOD_IDs differed -- proving
+# both arms genuinely rebuilt rather than one answering from a stale binary. The guest compiles with
+# -w, so -O3 is exactly where latent UB would have surfaced. None did.
+#
+# This crate declares its own [workspace], so these settings apply to the guest build.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [dependencies]
 # NO coinbase-smt DEPENDENCY — see the note in src/main.rs (hazync#88). A Cargo path dependency bakes
 # its ABSOLUTE path into the guest ELF, making the image id depend on the checkout location. The same

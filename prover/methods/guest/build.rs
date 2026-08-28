@@ -129,9 +129,12 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
+    // TIER 0: default raised 19 -> 21, the measured optimum (-1.245%). This is a re-baselining
+    // change -- it edits the guest image and therefore moves METHOD_ID -- so it ships only in the
+    // batch, never on its own.
     let ecmult_window: u32 = std::env::var("HAZYNC_ECMULT_WINDOW")
         .map(|s| s.parse().expect("HAZYNC_ECMULT_WINDOW must be an integer"))
-        .unwrap_or(19);
+        .unwrap_or(21);
     let gen_kb = std::env::var("HAZYNC_ECMULT_GEN_KB").unwrap_or_else(|_| "22".into());
     let win = ecmult_window.to_string();
     if ecmult_window > 15 {
@@ -167,7 +170,11 @@ fn main() {
     // 1) REAL libsecp256k1 (C) + libc-glue shims.
     cc::Build::new()
         .compiler(&gcc).archiver(&ar)
-        .flag("-march=rv32im").flag("-mabi=ilp32").opt_level(2).warnings(false)
+        // TIER 0: -O3 (E1, -0.264%). Modest, as expected -- libsecp is hand-unrolled C and rv32im
+        // has no vector unit, which is most of what -O3 adds over -O2. C/C++ -flto is NOT here and
+        // is not an oversight: rust-lld cannot read GCC's LTO bytecode, and -ffat-lto-objects links
+        // but performs no cross-TU optimisation. See TIER0_RESULTS_2026-08-26.md 3.
+        .flag("-march=rv32im").flag("-mabi=ilp32").opt_level(3).warnings(false)
         .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
         .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", gen_kb.as_str())
@@ -204,7 +211,7 @@ fn main() {
     let mut b = cc::Build::new();
     b.cpp(true).compiler(&gpp).archiver(&ar)
         .flag("-march=rv32im").flag("-mabi=ilp32").flag("-std=c++20")
-        .flag("-fexceptions").flag("-fno-rtti").opt_level(2).warnings(false)
+        .flag("-fexceptions").flag("-fno-rtti").opt_level(3).warnings(false)  // TIER 0: -O3
         .flag(&fpm)
         // coreshim FIRST: its no-op sync.h/threadsafety.h override Core's pthread-backed versions so
         // the real chain.h CBlockIndex + pow.cpp compile on the single-threaded freestanding guest.
@@ -268,7 +275,7 @@ fn main() {
         (&gcc, "cshims.c", &[][..]),
     ] {
         let mut c = std::process::Command::new(compiler);
-        c.args(["-march=rv32im", "-mabi=ilp32", "-O2"]).args(lang)
+        c.args(["-march=rv32im", "-mabi=ilp32", "-O3"]).args(lang)  // TIER 0: -O3
             // Only the classes that are UB or a silent miscompile, not a style sweep — a warning set
             // this code has never been held to would fail on noise and get switched off within a week.
             .args(["-Werror=return-type", "-Wreturn-type"])
