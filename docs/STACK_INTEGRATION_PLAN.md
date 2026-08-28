@@ -237,6 +237,35 @@ successful build of the stack.
 This is deliberate design -- the fidelity decision is meant to be opt-in -- but it is a silent
 default, and a silent default on the biggest lever is a trap.
 
+### ⛔ THE MIRROR TRAP: turning bigint2 OFF again breaks the build
+
+Found 2026-08-28 by running `cargo test --bin host` after the bigint2 arm, without the flag:
+
+```
+rust-lld: error: undefined symbol: hazync_ecmult_verify
+    >>> referenced by secp256k1.c
+    >>>               …-secp256k1.o:(secp256k1_ecdsa_verify) in archive libsecp256k1.a
+```
+
+**A build with `HAZYNC_BIGINT2_ECDSA=1` leaves a `libsecp256k1.a` whose `secp256k1_ecdsa_verify`
+references `hazync_ecmult_verify`.** The next build WITHOUT the flag drops the Rust side that
+exports that symbol, but reuses the cached C archive -- so the link fails on a symbol nothing
+should be asking for.
+
+⇒ The pair of traps is symmetric and both are silent in their own way:
+- **On:** merging the branch does NOT enable bigint2 — it builds stock libsecp and says nothing.
+- **Off:** having once enabled it, turning it off does NOT cleanly disable it — it fails to LINK,
+  which at least is loud, but the error names a symbol rather than the cause.
+
+**Recovery (verified):** restore `ecdsa_impl.h` from a clean copy. That changes the C input, so
+`cc` rebuilds the archive without the `#ifdef` block and the symbol reference disappears. After
+restoring, `cargo test --bin host` returned **14 passed, 0 failed**.
+
+⇒ **Toggling this flag requires the C archive to be rebuilt, not just the Rust side.** Anyone
+sweeping bigint2 on/off must restore `$HAZYNC_BASE/secp256k1/src/ecdsa_impl.h` between arms —
+clean md5 `308fc36774999286dcc77bf7c7df87b9` — or clear
+`prover/target/riscv-guest/`. A sweep that does neither measures a stale archive or fails to link.
+
 ### ⛔ The gate this has NOT passed
 
 **An identical journal digest against control.** The wire format changed; the computation must not
