@@ -90,19 +90,49 @@ fn main() {
     let gpp = format!("{pfx}riscv32-unknown-elf-g++");
     let ar = format!("{pfx}riscv32-unknown-elf-gcc-ar");
 
-    // ECMULT_WINDOW_SIZE tuning (issue #12): 19 is the measured cycle optimum — ~1.9% fewer guest cycles
-    // than libsecp's default 15 (block 130000), and beyond 19 the resident pre_g table's paging cost
-    // overtakes the wNAF saving. The checked-in precomputed_ecmult.c is generated for windows <=15 and
-    // HARD-ERRORS above that (`#if ECMULT_WINDOW_SIZE > 15 -> #error`), so for a larger window we regenerate
-    // it with libsecp's OWN generator (src/precompute_ecmult.c). That output is deterministic EC math —
-    // byte-identical on any machine — so the guest image id (METHOD_ID) stays reproducible. Regenerate only
-    // when the on-disk table isn't already ours (keeps incremental builds fast; the reproduce container
-    // starts from a fresh <=15 clone and regenerates once).
-    const ECMULT_WINDOW: u32 = 19;
-    let win = ECMULT_WINDOW.to_string();
-    if ECMULT_WINDOW > 15 {
+    // ECMULT_WINDOW_SIZE tuning (issue #12). MEASURED on block 140,000, 212 inputs, execute mode
+    // (2026-08-26 for 19/20 in TIER0_RESULTS_2026-08-26.md, 2026-08-28 for 21; same harness, same
+    // journal digest 607f4a7e... on every arm, so each number prices the same computation):
+    //
+    //     19  376,662,184  (shipped)     20  375,914,975  -0.198%     21  371,971,773  -1.245%
+    //
+    // 21 is the optimum. It is the arm experiment E4 specified and never ran, and it is worth ~6x the
+    // window-20 change that was going to ship instead.
+    //
+    // ⚠ Measure window arms at a REALISTIC input count. A sweep on block 130,000 (10 inputs) put 20
+    // ABOVE 19 and read it as a local bump; at 212 inputs the curve falls monotonically 19 -> 21.
+    // Ten inputs is too little EC work to amortise the pre_g table, so a toy block under-rates larger
+    // windows. Production chunks carry 64-180 inputs.
+    //
+    // ⚠ The pre_g table doubles per step (~16 MB at 19 -> ~64 MB at 21). The cycle figures are net of
+    // the paging that costs, but the guest memory footprint grows; check it against segment sizing.
+    //
+    // 19 remains the DEFAULT deliberately: changing it edits the guest source and therefore moves
+    // METHOD_ID, so it must ride the next re-baselining rather than ship on its own.
+    // Full verdict and consequences: docs/TOPOLOGY_AND_SETTINGS.md 4.1.
+    //
+    // The checked-in precomputed_ecmult.c is generated for windows <=15 and HARD-ERRORS above that
+    // (`#if ECMULT_WINDOW_SIZE > 15 -> #error`), so for a larger window we regenerate it with libsecp's
+    // OWN generator (src/precompute_ecmult.c). That output is deterministic EC math — byte-identical on
+    // any machine — so the guest image id (METHOD_ID) stays reproducible. Regenerate only when the
+    // on-disk table isn't already ours (keeps incremental builds fast; the reproduce container starts
+    // from a fresh <=15 clone and regenerates once).
+    //
+    // ECMULT_GEN_KB is INERT for this workload — 2, 22 and 86 all produce bit-identical guest cycles.
+    // It sizes the ecmult_gen table used to compute k*G when SIGNING; verification goes through
+    // secp256k1_ecmult against pre_g, which ECMULT_WINDOW_SIZE sizes, and Hazync only ever verifies.
+    // Exposed so that stays re-checkable, and so the 22 -> 2 memory saving can be taken for free during
+    // the same re-baselining.
+    println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
+    println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
+    let ecmult_window: u32 = std::env::var("HAZYNC_ECMULT_WINDOW")
+        .map(|s| s.parse().expect("HAZYNC_ECMULT_WINDOW must be an integer"))
+        .unwrap_or(19);
+    let gen_kb = std::env::var("HAZYNC_ECMULT_GEN_KB").unwrap_or_else(|_| "22".into());
+    let win = ecmult_window.to_string();
+    if ecmult_window > 15 {
         let pc = format!("{secp}/src/precomputed_ecmult.c");
-        let want = format!("#if ECMULT_WINDOW_SIZE > {ECMULT_WINDOW}");
+        let want = format!("#if ECMULT_WINDOW_SIZE > {ecmult_window}");
         let up_to_date = std::fs::read_to_string(&pc).map_or(false, |s| s.contains(&want));
         if !up_to_date {
             let out = std::env::var("OUT_DIR").unwrap();
@@ -110,15 +140,24 @@ fn main() {
             let host_cc = std::env::var("HOST_CC").unwrap_or_else(|_| "cc".into());
             let compiled = std::process::Command::new(&host_cc)
                 .current_dir(&secp)
-                .args(["-O2", &format!("-DECMULT_WINDOW_SIZE={ECMULT_WINDOW}"),
+                .args(["-O2", &format!("-DECMULT_WINDOW_SIZE={ecmult_window}"),
                        "-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1", "-DVERIFY",
                        "-I.", "-Isrc", "-Iinclude", "src/precompute_ecmult.c", "-o", &genbin])
                 .status().expect("compile precompute_ecmult (host cc)");
             assert!(compiled.success(), "failed to compile libsecp's ecmult table generator");
             let ran = std::process::Command::new(&genbin).current_dir(&secp).status()
                 .expect("run precompute_ecmult");
-            assert!(ran.success(), "failed to regenerate precomputed_ecmult.c for window {ECMULT_WINDOW}");
+            assert!(ran.success(), "failed to regenerate precomputed_ecmult.c for window {ecmult_window}");
         }
+    } else {
+        // Only the >15 branch above ever rewrites the table, so a previous >15 arm leaves ITS table on
+        // disk and a sweep back down would silently compile against the wrong one — a guest that is
+        // wrong rather than merely slow. Fail loudly instead of measuring a lie.
+        let pc = format!("{secp}/src/precomputed_ecmult.c");
+        let pristine = std::fs::read_to_string(&pc)
+            .map_or(false, |s| s.contains("#if ECMULT_WINDOW_SIZE > 15"));
+        assert!(pristine, "precomputed_ecmult.c has been regenerated for a window >15 and cannot be \
+            reused at window {ecmult_window}; run `git checkout -- {pc}` before building");
     }
 
     // 1) REAL libsecp256k1 (C) + libc-glue shims.
@@ -127,7 +166,7 @@ fn main() {
         .flag("-march=rv32im").flag("-mabi=ilp32").opt_level(2).warnings(false)
         .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
-        .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", "22")
+        .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", gen_kb.as_str())
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))
@@ -226,8 +265,10 @@ fn main() {
             .arg("-I").arg(&shim).arg("-I").arg(&core)
             .arg("-I").arg(format!("{secp}/include"))
             .arg("-I").arg(&secp).arg("-I").arg(format!("{secp}/src"))
-            .args(["-DECMULT_WINDOW_SIZE=19", "-DECMULT_GEN_KB=22",
-                   "-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1",
+            // kept in step with the real build above, so the check compiles what actually ships
+            .arg(format!("-DECMULT_WINDOW_SIZE={ecmult_window}"))
+            .arg(format!("-DECMULT_GEN_KB={gen_kb}"))
+            .args(["-DENABLE_MODULE_SCHNORRSIG=1", "-DENABLE_MODULE_EXTRAKEYS=1",
                    "-DUSE_EXTERNAL_DEFAULT_CALLBACKS=1"])
             .args(["-c", src, "-o", &format!("{out}/warncheck.o")]);
         let st = c.status().expect("run the guest warning check");
