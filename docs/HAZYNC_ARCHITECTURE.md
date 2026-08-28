@@ -385,9 +385,34 @@ bigint2 field-mul backend — see `ACCELERATION.md`.
 RISC0's crypto accelerators: `sys_sha_compress` (SHA, done), `sys_bigint` (one 256-bit
 `x·y mod m`), and `sys_bigint2` (programmable blob — the whole-scalar-mult EC precompile that
 RISC0's `k256` crate uses). Options, decreasing faithfulness:
-- **(A) Route libsecp256k1's field-mul through `sys_bigint`** — keeps the REAL crypto, but its
-  software field-mul is already ~50 instructions and uses 5×52 limbs, so per-mul ecall + limb↔256
-  conversion likely won't beat it. **Probably not a win.**
+- **(A) Route libsecp256k1's field-mul through `sys_bigint`** — keeps the REAL crypto, but per-mul
+  ecall + limb↔256 conversion may not beat the software path. **Probably not a win.**
+
+  ⚠ **The premise stated here was wrong, and the conclusion was right anyway — for a different
+  reason.** This bullet originally read "its software field-mul is already ~50 instructions and uses
+  5×52 limbs". The guest is **rv32im with no `__int128`**, so libsecp selects `SECP256K1_WIDEMUL_INT64`
+  → **`field_10x26`**, which is ~100 limb products plus carry propagation, realistically 200-400
+  instructions rather than ~50 (`ACCELERATION.md` Step 0, resolved 2026-07-15). 10×26 is also the
+  *correct* backend for this target: 5×52 wins on x86-64 only because that hardware has a single
+  `64x64→128` multiply, and forcing it here would emulate 128-bit arithmetic in 32-bit chunks.
+
+  ⇒ On the stated margin — 200-400 instructions against a ~678-cycle ecall — (A) looks much closer
+  than "~50 vs 678" implies. **It was nevertheless settled empirically, not by this estimate:**
+  `ACCELERATION.md`'s prototype measured the intercept at **+10% cycles, byte-correct** (block 170,
+  2,299,144 → 2,539,832). The diagnosis matters more than the verdict — the loss is the **per-multiply
+  conversion overhead** (`get_b32`/`set_b32` repacking on every call), not the ecall and not the
+  instruction-count margin. `sys_bigint` itself is cheap; the removed k256 experiment did an entire
+  verify in ~328K cycles using it.
+
+  ⇒ **That is precisely the argument for bigint2 (option C), which amortises one blob over a whole
+  scalar multiplication instead of paying conversion per field-mul** — so the right reading of this
+  rejection is "per-mul interception is disproven", not "the accelerator cannot pay".
+
+  ✅ **And it since paid.** hazync#139 measured `risc0-crypto`/bigint2 at **138,643 cycles per ECDSA
+  verify against libsecp's 1,909,913 — 13.78x**, on the same 16 signatures through both paths. So the
+  accelerator was never the problem; the per-multiply granularity was. What (A) actually established
+  is that **interception must happen at the scalar-multiplication level, not the field-mul level** —
+  which is (C), and which is why #139 is a fidelity decision rather than a performance question.
 - **(B) Swap only the signature *verify* to RISC0's accelerated `k256`/bigint2** — expose a C
   `verify_ecdsa/verify_schnorr` from the guest, patch Core's `pubkey.cpp` to call it instead of
   libsecp256k1. Bounded, well-tested reimpl surface (only "is this sig valid over this hash");

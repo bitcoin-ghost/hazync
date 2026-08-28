@@ -644,10 +644,12 @@ differential gate, Step 2). Everything above the modmul stays literally libsecp'
 ## Task breakdown
 
 ### Step 0 — recon (determine the unknowns) — ~2 days
-- **Which field backend is active on `riscv32im`?** libsecp picks its limb representation from
-  `SECP256K1_WIDEMUL`. rv32im has 32-bit `MUL`/`MULH` but emulates 64-bit — determine whether the build
-  uses the `5x52` (int128, emulated) or `10x26` backend. This decides where to intercept. Check the
-  guest build (`prover/methods/guest/build.rs`) and the resulting `secp256k1` config.
+- ~~**Which field backend is active on `riscv32im`?**~~ ✅ **RESOLVED 2026-07-15 — `10x26`.** See
+  "Step 0 — recon findings" above: the toolchain has no `__int128`, so libsecp selects
+  `SECP256K1_WIDEMUL_INT64` → `field_10x26_impl.h` and `scalar_8x32_impl.h`. Intercept at
+  `secp256k1_fe_impl_mul` / `_impl_sqr` and `secp256k1_scalar_mul`. Left here only so the task
+  breakdown is not read as an open question — it was answered in the same document, and
+  `HAZYNC_ARCHITECTURE.md` carried the wrong answer (`5×52`) on the strength of it.
 - **bigint2 API surface.** Inspect `risc0-bigint2` (the crate the accelerated `k256` uses): does it
   expose a raw 256-bit modular-multiply (`modmul(a, b, modulus)`), or only higher-level EC ops? Confirm
   it takes an **arbitrary prime modulus** (we need both mod p *and* mod n). Determine the operand format
