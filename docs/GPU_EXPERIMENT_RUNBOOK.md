@@ -162,7 +162,7 @@ either way. Reproduce the simulation with
 | Cheap-card tiers | closed — L4 is 37% more expensive per proof |
 | Wire compression | closed — egress is ~18 Mbps and does not bind |
 | `NDEBUG` | closed — 0.0018% |
-| `ECMULT_WINDOW` | closed — 19 is at the knee |
+| `ECMULT_WINDOW` | ⚠ **NOT closed, and this row contradicted §9 of this file for two days.** §9 recommends shipping window **20** (−0.198%); this row said 19 was optimal. Window **21** was specified in E4 and never run. See `TOPOLOGY_AND_SETTINGS.md` §4.1 |
 | C/C++ LTO | closed — `rust-lld` cannot read GCC LTO bytecode |
 | A newer risc0 | closed — 3.0.6 is a Rust 1.97 fix we do not use; 5.0.0-rc.1 predates our pin |
 

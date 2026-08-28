@@ -337,7 +337,9 @@ the host bytes need not be. Build both in a container so the binary links agains
   artifact (no `sed` step any more). `docker build -t hazync-repro -f reproduce/Dockerfile .`, then copy
   `/hazync-zkvm/prover/target/release/host` out of the image.
 - **CUDA** — the same container plus `--features cuda`, run with `--gpus all`. **Do not build natively if the
-  box has CUDA 13**: risc0-sys 1.5.0's kernels don't compile under CUDA 13 (`nvcc -arch=native` fails). Use
+  box has CUDA 13**: the risc0 circuit kernels don't compile under CUDA 13 (`nvcc -arch=native` fails) —
+  first hit on risc0-sys 1.5.0 and **still true on the current `=3.0.5` pin**, which is why
+  `provision-vps.sh` installs CUDA **12.8** over the stock image's 13.2. Use
   the **CUDA 12** toolchain inside the `ubuntu:22.04` container, and pass multi-arch flags so the binary
   isn't pinned to one GPU:
   `NVCC_APPEND_FLAGS="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90"`.
