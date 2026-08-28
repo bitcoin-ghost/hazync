@@ -65,25 +65,35 @@ taproot by input**, so #139 accelerates essentially the whole block.
 
 ⇒ **With #139, a near-tip block needs ~7-9 cards rather than 32.**
 
-⛔ **But the aggregate does NOT scale past 2 workers, and that decides the fleet.**
+⚠ **The aggregate distributes — 1.81x on TWO CARDS (88-91% efficiency). Beyond two cards is
+UNMEASURED.**
 
-The 16-chunk test settled it: an 8-wide join tree still saturates at N=2 (165 → 94 → **95 s**), and
-the **remote** worker starves worse as workers are added (26% → 36% idle) while the local one does
-not. **`seg_serve_cmd` is single-threaded and caps the aggregate at ~1.76x**, so it floors at
-**897 s — above the whole 600 s budget at any fleet size.**
+⛔ **A "seg-serve is the ceiling" claim was published here and is RETRACTED.** The N=4 arm that
+appeared to show saturation ran **2 worker processes per card on the same two boxes** — no extra
+compute, and GPU concurrency is measured at 0.95-1.03x (rejected three times). It tested nothing.
+→ `TEN_MINUTE_BLOCK.md` §8.14
 
-| fix | fleet |
+| | status |
 |---|---|
-| neither | ⛔ **IMPOSSIBLE at any N** |
-| **`seg-serve` dispatch** (host-side, **no re-baseline**) | **7 cards** |
-| aggregate witness read (§7.5, guest — rides the #139 re-baseline) | 8-15 cards |
-| **both** | **5-6 cards** |
+| does the aggregate distribute at all? | ✅ yes — scenario (c) is dead |
+| does it scale past 2 cards? | ⛔ **UNMEASURED — needs a THIRD box** |
+| is `seg_serve_cmd` a bottleneck? | ⛔ **UNKNOWN** |
 
-⇒ **Do `seg-serve` first.** It is host code: no `METHOD_ID` move, no board reset, no waiting on the
-fidelity decision — and it alone takes the target from unreachable to 7 cards.
+⇒ **The 7-9 card figure stands on the 2-card evidence**, which supports scenario (a) as far as it
+goes. What is not established is whether it holds at fleet scale.
 
-⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the
-win.
+⇒ **The aggregate's witness read is unaffected and remains the largest identified lever** — §7.5
+measured **78.2% of block-validation cycles** as deserialising the witness, and #136's `read_slice`
+fix went to **chunks only**. Worth ~3x on the aggregate, it rides the #139 re-baseline, and it
+shrinks the aggregate rather than needing it to distribute:
+
+| aggregate | cards (a) | if it does NOT distribute |
+|---|---|---|
+| 1,575 s today | 7 | impossible at any N |
+| 767 s | **6** | impossible |
+| 497 s | **5** | **24 — viable** |
+
+⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
 
 ### ⚖ LEANING (not decided) 2026-08-28: the MIDDLE path over wholesale
 
