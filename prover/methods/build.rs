@@ -56,5 +56,22 @@ fn main() {
         println!("cargo:rerun-if-changed={}", inc.display());
     }
 
+    // hazync#139 middle-path experiment (EXPERIMENTAL, opt-in). Unset — the overwhelmingly normal
+    // case — takes the plain embed_methods() path below, byte-for-byte as before, so METHOD_ID is
+    // unmoved. Set to 1 and the guest gains the `bigint2-ecdsa` feature, which compiles
+    // guest/src/bigint2_ecmult.rs and MOVES METHOD_ID. See patches/0005 for the libsecp half.
+    println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
+    if std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1") {
+        use std::collections::HashMap;
+        // GuestOptions is #[non_exhaustive], so it cannot be built with a struct expression from
+        // outside risc0-build; default-then-assign is the supported shape.
+        let mut guest = risc0_build::GuestOptions::default();
+        guest.features = vec!["bigint2-ecdsa".to_string()];
+        let mut opts = HashMap::new();
+        opts.insert("method", guest);
+        risc0_build::embed_methods_with_options(opts);
+        return;
+    }
+
     risc0_build::embed_methods();
 }

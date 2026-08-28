@@ -33,6 +33,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
 mod script_flags;
+// hazync#139 middle-path experiment. Off by default; see the module docs and patches/0005.
+#[cfg(feature = "bigint2-ecdsa")]
+mod bigint2_ecmult;
 use script_flags::block_script_flags;
 
 // A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)
