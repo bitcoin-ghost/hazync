@@ -169,6 +169,19 @@ echo "== 5. apply the target shims (patches 0001 + 0002 — portability only, no
 git -C "$WORK/bitcoin-core" checkout -- src/serialize.h src/crypto/sha256.cpp 2>/dev/null || true
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0001-serialize-ilp32-int-overload.patch"
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0002-sha256-route-through-risc0-accelerator.patch"
+
+# hazync#139 middle-path EXPERIMENT — off unless HAZYNC_BIGINT2_ECDSA=1. Routes ONLY the ECDSA
+# verify group arithmetic through bigint2; see patches/0005 and prover/methods/guest/src/
+# bigint2_ecmult.rs. ⛔ It MOVES METHOD_ID, so a box provisioned with this must never produce a
+# shipped proof. The patch body is #ifdef'd on HAZYNC_BIGINT2_ECDSA, so applying it without the
+# define compiles identically — but it still edits the shared source tree, and libsecp's
+# VERIFY_CHECK embeds __LINE__, so do not assume "applied but undefined" is a no-op for the id.
+if [ "${HAZYNC_BIGINT2_ECDSA:-0}" = 1 ]; then
+    echo "== 5b. ⛔ EXPERIMENT: applying patch 0005 (bigint2 ECDSA group arithmetic) =="
+    git -C "$WORK/secp256k1" checkout -- src/ecdsa_impl.h 2>/dev/null || true
+    git -C "$WORK/secp256k1" apply "$REPO_DIR/patches/0005-ecdsa-verify-group-arith-via-bigint2.patch"
+    echo "   guest METHOD_ID WILL DIFFER from reproduce/METHOD_ID. This box is for benchmarking only."
+fi
 mkdir -p "$WORK/coreshim/config"
 : > "$WORK/coreshim/config/bitcoin-config.h"    # empty config header (SIMD paths #ifdef'd off on riscv)
 # Ship the repo's target shims (sync.h / threadsafety.h — single-threaded no-op locking) into the
