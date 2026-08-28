@@ -57,6 +57,12 @@ SECP_TAG="v0.5.1";  SECP_COMMIT="642c885b6102725e25623738529895a95addc4f4"   # b
 # running the split container build rather than by reading the script.
 GPU_FEATURES=""
 
+# Same reason, same bug, one variable later: phase 7 sets CUDA_VER, phase 8 dereferences it to build
+# CUDA_PATH/PATH/LD_LIBRARY_PATH, and `HAZYNC_PROVISION=build` skips phase 7 — so under `set -u` the
+# build aborted with "CUDA_VER: unbound variable" before compiling anything. Found the same way the
+# GPU_FEATURES one was: by running the split phases on a fresh box, not by reading the script.
+CUDA_VER="${HAZYNC_CUDA_VER:-12.8}"
+
 PHASE="${HAZYNC_PROVISION:-all}"
 case "$PHASE" in
   all|deps|build) ;;
