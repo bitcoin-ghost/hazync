@@ -109,6 +109,14 @@ Bitcoin's history is somewhere around 1.8–3.0 billion inputs, so:
 **Keeping up with the tip** — one block per 600 s — needs about **29 L40S** continuously (~£20k/month),
 or **~41 RTX 4090s** at the lower po2 they can hold (~£3k–9k/month depending on the listing).
 
+⚠ **This is the THROUGHPUT number, and it is not the same question as `FLEET_SIZING.md`'s ~32.** This
+page prices keeping up with the chain at a bounded lag, where consecutive blocks overlap;
+`FLEET_SIZING.md` prices one block start-to-finish inside 600 s. Both are right about their own
+question and they are ~3 cards apart, so quoting either without naming the framing produces an
+argument. `TOPOLOGY_AND_SETTINGS.md` §1 reconciles them and states which risks attach to each — in
+particular, the ~32 figure assumes the aggregate distributes across cards, which has never been
+exercised, and the ~29 figure does not need it.
+
 ⚠ **The card matters, and the constraint is VRAM rather than price.** A full chunk at po2 22 peaks at
 **40.6 GB**, so 24 GB cards (4090, 3090) cannot run it and must drop to po2 20 — measured at **1.42x**
 slower. They need more cards for the same throughput, and are still several times cheaper per unit of
@@ -122,7 +130,8 @@ Two consequences:
 
 - **Guest performance carries enormous leverage.** At this scale the `ECMULT_WINDOW_SIZE` change that
   bought 1.8–2.3% is worth roughly four months of GPU time across the chain. `ACCELERATION.md` is not
-  a nice-to-have.
+  a nice-to-have. (⚠ That 1.8–2.3% is the **15 → 19** move against libsecp's default. What the window
+  is worth *beyond* 19 is a separate and smaller question — see `TOPOLOGY_AND_SETTINGS.md` §4.1.)
 - **This is a fleet problem, not a procurement problem.** It is why the proof party exists.
 
 ### The bridge WAS the binding constraint. It is not any more.

@@ -7,6 +7,23 @@ threshold for tracking the chain rather than falling behind it.
 cycle count. Nobody has run more than TWO workers.** Everything past N=2 is extrapolation, and the
 sections below say which parts are which. Read §4 before spending money on it.
 
+> ## ⚠ STATUS 2026-08-28 — this page is kept for its evidence, not for its conclusions
+>
+> The documentation now has one reference sheet and one evidence trail, and this file is neither:
+>
+> - **What to run** — fleet, card, po2, build flags: **`TOPOLOGY_AND_SETTINGS.md`**.
+> - **How the fleet question was answered, and what was got wrong** — **`TEN_MINUTE_BLOCK.md`**.
+>
+> **What is still live here is §6**, the coordinator-egress measurement, which exists nowhere else.
+>
+> ⛔ **§3's `wall(N)` model is SUPERSEDED.** It divides the entire one-card total — aggregate included —
+> by `N`, leaving only 83 s undivided, which assumes the aggregate distributes across cards. See §4's
+> caveat 5. The live scenarios are in `TEN_MINUTE_BLOCK.md` §8.13 and `TOPOLOGY_AND_SETTINGS.md` §1.
+>
+> ⚠ **This page is still cited by `TEN_MINUTE_BLOCK.md` as an independent source** — its 1,565.9 s
+> aggregate corroborates a later direct measurement of 1,574.9 s, 0.6% apart. That is why the file is
+> demoted rather than deleted: a corroborating document that no longer exists corroborates nothing.
+
 ## 1. The inputs
 
 | quantity | value | status |
@@ -59,6 +76,13 @@ of worker wall, **assembly 55.7 s** of which resolves 4.9 s"*, plus ~27 s of agg
 
 **~32 L40S is the 10-minute number. 28 lands at about 11 minutes.**
 
+⚠ **That is the LATENCY number — one block, start to finish, inside 600 s.** `GOALS.md` quotes
+**~29 L40S** for the same 600 s target and is not in conflict: it prices **throughput** — keeping up
+with the chain at a bounded lag, where consecutive blocks overlap. The two framings differ by more
+than three cards, because under throughput the aggregate never has to distribute (per-block aggregates
+run concurrently on different blocks), so caveat 5 below does not apply to it. **Always say which
+framing, and which po2, a fleet size assumes.**
+
 At ~€1.13/card/hour, 32 cards is ~€36/hour, or **~€6 per block** at six blocks an hour.
 
 ⚠ **Amdahl is the point, not a footnote.** The whole achievement of #148/#153/#156/#157/#158 was
@@ -73,21 +97,39 @@ Four things could each move the answer, in rough order of how much:
 1. ~~**Coordinator egress may bind first.**~~ ✅ **MEASURED 2026-08-26 — RETIRED.** It is **~1.3 GB per
    block, about 18 Mbps** sustained, not the ~26 GB / ~320 Mbps this section estimated. Egress does not
    cap the fleet at any plausible size. See §6.
-2. **The 83 s floor is inferred from a two-worker run**, not measured as a floor. With 32 workers the
-   assembly critical path could shorten (more resolves distributed) or lengthen (more coordination).
-   It is the difference between 28 and 32 cards.
+2. ~~**The 83 s floor is inferred from a two-worker run**~~ ⚠ **PARTLY ANSWERED 2026-08-27, and the
+   shape was wrong.** N=4 and N=8 were run on one box, one card, one binary, with only N moving: the
+   aggregate went **115.8 s → 116.6 s, +0.7%**. It is not a small additive floor that grows with
+   coordination — it is the **whole aggregate**, ~1,575 s on block 962,000, and it is **constant in N**.
+   ⛔ What is still unmeasured is whether that aggregate **distributes across cards** — see the new
+   caveat below, which this page's arithmetic silently assumes.
 3. ~~**14.34 G is modelled**, not measured.~~ ✅ **MEASURED 2026-08-27 — RETIRED.** `HAZYNC_PROFILE_EXEC=1
    chunk-profile` on block 962,000, production cost-packed partition, gives **14.057 G** — the model was
    **+2.0%** high. Chunk work on one L40S is **14,367 s**, not 14,656 s, and the one-card total is
    **15,933 s**. Needed no GPU and no chunk receipts. See `TEN_MINUTE_BLOCK.md` §2.1, which also records
    that the measured straggler is **1.059x** where the packer's own metric — computed from predictions —
    reports 1.00x.
-4. **Nothing above N=2 has ever been run.** Near-linear scaling is plausible -- chunks are independent
-   and every proof is verified separately -- but it is an assumption, not a result.
+4. ~~**Nothing above N=2 has ever been run.**~~ ✅ **N=4 and N=8 RUN 2026-08-27.** Chunk work scales
+   near-perfectly — 1,511 vs 1,525 card-seconds across the two arms, ~1% apart, with a cross-box
+   control. Near-linear scaling is now a result, not an assumption.
 
-**What would settle it:** a real scaling run at N = 2, 4, 8 (E5 is now done — see §6). Three points on the curve
-distinguish "linear" from "saturating" long before anyone commits to a fleet, and the gap between those
-two outcomes is worth far more than the ~€7/hour between 28 and 32 cards.
+~~**What would settle it:** a real scaling run at N = 2, 4, 8~~ ✅ **That run happened on 2026-08-27**
+(E5 was already done — see §6). The curve is linear on the chunk side and flat on the aggregate side.
+
+⛔ **5. THE ONE THIS PAGE DOES NOT LIST, AND IT IS THE LARGEST.** The `wall(N)` model above divides the
+**entire** 16,222 s — aggregate included — by `N`, leaving only 83 s undivided. That assumes the
+aggregate **fully distributes across cards**, which is claimed by #153/#157/#161 and **has never been
+exercised**. It needs >= 2 boxes, not one, so none of the 2026-08-27 work touched it.
+
+If it does not distribute, the same measured inputs give a very different answer:
+
+| | 32 cards | 48 cards |
+|---|---|---|
+| aggregate fully distributes (this page's assumption) | **9.0 min** ✅ | 6.0 min ✅ |
+| only its segments distribute, resolution serial | 12.2 min | **9.2 min** ✅ |
+| nothing distributes | **34 min** ❌ | 31 min ❌ |
+
+⇒ **"~32 L40S" is conditional on an unexercised claim.** Do not quote it without saying so.
 
 ## 5. Which card, and why not the others
 
@@ -136,8 +178,10 @@ that estimate is off by 3x, egress remains under 60 Mbps.
 
 **18 Mbps does not cap anything.** Two consequences:
 
-- Egress is removed as a fleet-planning risk. What remains uncertain about the card count is the
-  **83 s serial floor** (§3) and the fact that **nothing above N=2 has ever been run** — not bandwidth.
+- Egress is removed as a fleet-planning risk. ⚠ **Both items this bullet named as the remaining
+  uncertainty have since been measured** (2026-08-27): N=4 and N=8 were run, and the "83 s floor" turned
+  out to be the whole aggregate and constant in `N`. What actually remains open is whether the aggregate
+  **distributes across cards** — see §4 caveat 5.
 - **Wire compression is pointless.** `PERF_INVESTIGATION_2026-08-26.md` §5.1 proposed it as the lever
   if egress bound. It does not bind, so that closes too.
 
