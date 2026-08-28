@@ -1,8 +1,29 @@
 # Helix — one guest, two verification backends, gated by height
 
-**Status: DESIGN SKETCH, 2026-08-28. Nothing here is built or measured.** Written down so the idea
-is not lost; it is not a recommendation, and the numbers that would justify it (hazync#139's two
-arms) are still being measured.
+> ## ⚖ STATUS 2026-08-28 (end of day): **PROBABLY NOT NEEDED — read this first**
+>
+> Helix exists to run the **wholesale** backend for backfill and **Core's own code** at the tip. Both
+> arms have now been measured, and the operator has chosen **the middle path everywhere**:
+>
+> | arm | proving wall | vs stock |
+> |---|---|---|
+> | middle path (one line swapped) | 55.75 s | **8.00x** |
+> | wholesale (whole predicate) | 48.33 s | **9.10x** |
+>
+> ⇒ **The 15% premium buys at most ONE card** (6 vs 5), and only in the pessimistic aggregate case.
+> One card is a cheap price for keeping Core's DER parsing, low-S handling, r/s checks, inversion and
+> final `r == x(R) mod n` as literal libsecp code.
+>
+> ⇒ **If the middle path runs EVERYWHERE, there is no second backend** — and therefore no height gate,
+> no committed cutover constant, no doubled audit surface, and none of the silent-divergence risk this
+> document spends its longest section warning about.
+>
+> **Kept, not deleted**, because the reasoning is still the right reasoning if a future backend is
+> fast enough to reopen the trade — and because the S1 analysis (why two guests cannot work) is
+> load-bearing for any such proposal. → `TOPOLOGY_AND_SETTINGS.md`
+
+**Status: DESIGN SKETCH, 2026-08-28.** Written down so the idea is not lost; it is not a
+recommendation.
 
 ## The idea
 
