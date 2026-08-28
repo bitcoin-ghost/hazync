@@ -27,6 +27,11 @@ floor      ~83 s does not divide  (INFERRED from a two-worker run)
 wall(N)    83 + (15,933 - 83) / N
 ```
 
+⛔ **This model is SUPERSEDED by §8.12 and §8.13 — read them before using any number in §1 or §2.**
+The 83 s floor was inferred from a two-worker run and is wrong in both size and shape: the aggregate
+is **1,575 s** on block 962,000 and it is **constant in N**, not a small additive floor. The section
+below is kept because the four-column denominator it defines is still the rule; its arithmetic is not.
+
 ✅ **The chunk term is now MEASURED, not modelled** (2026-08-27, §2.1). `FLEET_SIZING.md` §4 lists
 "14.34 G is modelled" as reason #3 not to trust the card count; it measures **14.057 G**, so the model
 was **+2.0%** high and that reason retires. Every figure below divides by a measured number now.
@@ -40,10 +45,18 @@ was **+2.0%** high and that reason retires. Every figure below divides by a meas
 
 Today: `wall(16) = 83 + 15,850/16 = 1,074 s = 17.9 min`.
 
-⚠ **The floor is the hidden multiplier on the difficulty.** At an 83 s floor the bar is 1.95x. If
+⚠ ~~**The floor is the hidden multiplier on the difficulty.** At an 83 s floor the bar is 1.95x. If
 coordination at N=16 pushes the floor to 150 s the bar becomes 2.24x; at 300 s it becomes 3.36x.
 **Nothing above N=2 has ever been run**, so the floor at 16 workers is UNKNOWN and it is worth more
-than any micro-optimisation on this page. Measure it before trusting any row below.
+than any micro-optimisation on this page.~~
+
+✅ **ANSWERED 2026-08-27 (§8.12), and the framing was wrong.** N=4 and N=8 have now both been run, on
+one box, one card, one binary, with only N moving. The floor did not grow with N — it did not move at
+all: **115.8 s → 116.6 s, +0.7% for double the chunks.** It is not a coordination floor that worsens
+as the fleet grows; it is the aggregate, whose cost is a function of the **block** and is constant in
+N. This was the single most load-bearing unknown on the page and it resolved in the favourable
+direction: fan-out is free, and the question moved from "can we afford more cards" to "how many"
+(§8.13).
 
 ### 1.1 The throughput framing is cheaper, and nothing in the design forbids it
 
@@ -56,7 +69,49 @@ overlap with the next block's chunk work. That converts the latency bar into the
 **drops the requirement from 1.95x to 1.69x for free** — at the cost of always being a block or two
 behind the tip, which for a proving system that tracks the chain is a design choice, not a defect.
 
-This has never been written down as an option. It should be priced before anyone buys a card.
+#### PRICED 2026-08-28 — ~29 cards, and it makes the last blocker irrelevant
+
+On the measured block-962,000 figures used throughout §8.13 (14,926 chunk card-seconds, 1.05x
+straggler, 1,575 s aggregate):
+
+```
+per block, all in:  14,926 x 1.05  +  1,575  =  17,247 card-seconds
+sustain one block per 600 s:        17,247 / 600  =  28.7  =>  29 cards
+```
+
+**Why this is not just "a bit cheaper than 32".** In the latency framing, the fleet size depends
+entirely on how much of the aggregate distributes — §8.13's scenarios (a) 32 cards, (b) 48 cards, and
+(c) **fails at any size**, 34 min. In the throughput framing that distinction **disappears**, because
+the concurrency comes from running *different blocks* at once rather than from splitting one block:
+
+- Chunk proving of block h+1 does not wait on block h (`prove_chunk` takes no previous receipt).
+- Per-block aggregates are independent of each other — only the **chain fold** carries
+  `add_assumption(prev)`.
+
+⇒ **Scenario (c), the one that kills the latency framing, costs nothing here.** A fully serial
+1,575 s aggregate is fine if several are in flight on different blocks. That matters because §8.13
+ranks the distributed-aggregate check as the #1 remaining measurement and it needs >= 2 boxes: under
+this framing **it stops being a purchasing blocker** and becomes an optimisation.
+
+**What it costs: lag, and only lag.** Splitting 29 cards by workload share (chunks are 90.9% of
+card-seconds) gives ~26 on chunks and ~3 on aggregates, so one block takes ~603 s of chunk time plus a
+serial ~1,575 s aggregate ⇒ **≈36 min, about 3.5 blocks behind the tip**, in exchange for steady-state
+throughput of one block per 10 min on **29 cards instead of 32-48**.
+
+⚠ **The one term that is NOT priced here is the chain fold.** §1.1's own code reading says the fold is
+the sequential step, and its per-block cost has never been measured. If it exceeds 600 s the whole
+framing fails regardless of fleet size. It is small by construction — one join against the previous
+receipt, not a re-proof of the block — but "small by construction" is exactly the kind of claim this
+document exists to stop people quoting. **Measure it on the next box that is up; it is minutes of work
+once one exists.**
+
+⚠ Coordinator egress is not a new risk here: E5 measured ~18 Mbps against a ~320 Mbps assumption and
+the risk was retired in #189, though that was measured for the latency framing's traffic pattern, not
+for several blocks in flight.
+
+⇒ **Recommendation: price the purchase at 29 cards + bounded lag, not 32-48 + tip latency, unless
+being ~36 min behind the tip is unacceptable to the product.** That is a product decision, not an
+engineering one, and it is now the cheapest question on the board — it needs no GPU and no code.
 
 ---
 
@@ -67,7 +122,7 @@ This has never been written down as an option. It should be priced before anyone
 | Tier 0 guest codegen (`-O3`, rust LTO+CGU=1, window 20) | **1.012x** | — | none | **yes** | MEASURED (`TIER0_RESULTS_2026-08-26.md`) |
 | Worker processes per card (E6) | **≤1.09x** | — | none | no | see §3 — ceiling corrected downward |
 | Preflight overlap (E9, risc0#3201 fork) | **≤1.09x** | — | none | no | see §3 — **should now close** |
-| More cards | — (latency only) | — | none | no | not a cost lever at all |
+| More cards | — (latency only) | — | none | no | not a *cost* lever — but see §8.12/§8.13, it is the live *latency* lever |
 | **#139 middle path** | 5.25x | — | **~85% of Core** | yes | measured execute-derived |
 | **#139 wholesale + type-aware packer** | **6.95x** | — | **~95% of Core** | yes | 7.18x MEASURED at proving time |
 | Bounded-lag pipelining (§1.1) | 1.15x-equivalent (bar 1.92x → 1.66x) | **removes it** | none | no | UNPRICED — free to settle |
@@ -924,12 +979,37 @@ sixteen-card target is not reachable — §8.5's chunk floor alone is 16.3 min �
 roughly twice the fleet. And §1.1's throughput framing, which needs ~28 cards for the same result,
 is still unpriced and cheaper than all of them.
 
-⏰ **The one remaining blocker is scenario (c), and it is the only one that fails.** Whether the
-distributed aggregate works is claimed by #153/#157/#161 and has never been exercised. It needs
->= 2 boxes rather than one, and it is now the cheapest decision-relevant measurement left on the
-board — it separates "buy 32 cards" from "buy 48" from "the fleet cannot get there".
+⏰ **Under the latency framing, the one remaining blocker is scenario (c), and it is the only one that
+fails.** Whether the distributed aggregate works is claimed by #153/#157/#161 and has never been
+exercised. It needs >= 2 boxes rather than one, and it separates "buy 32 cards" from "buy 48" from
+"the fleet cannot get there".
 
-⇒ **Ranked, what is left:** (1) the distributed-aggregate check, (2) price §1.1's throughput framing
-against the latency framing on these numbers, (3) #139 for ~1.1x on chunks, (4) po2 23 on a B200,
-never quantified. The kernel lever is closed (§8.11) and chunk cost is EC verification (§8.6), which
-fidelity rightly protects.
+⚠ **But §1.1, priced 2026-08-28, dissolves scenario (c) rather than solving it.** Under bounded-lag
+throughput the aggregate never needs to distribute — several run concurrently on different blocks —
+and the fleet comes out at **29 cards**. So the distributed-aggregate measurement is decision-critical
+only if the product requires tip latency. **Settle the framing before paying for the measurement.**
+
+⇒ **Ranked, what is left (revised 2026-08-28, after §1.1 was priced):**
+
+1. **Decide the framing — latency or bounded lag.** §1.1 is now priced at **29 cards + ~36 min lag**
+   against 32-48 cards at tip latency. It needs no GPU, no code and no measurement; it is a product
+   decision, and **it determines whether items 2 and 4 matter at all.** Do this first.
+2. **The distributed-aggregate check** (>= 2 boxes). Decision-critical *only* under the latency
+   framing, where it separates "buy 32" from "buy 48" from "the fleet cannot get there". Under
+   bounded lag it is an optimisation, because per-block aggregates run concurrently on different
+   blocks. See §1.1.
+3. **The chain fold's per-block cost** — the one term §1.1 could not price, and the only thing that
+   could invalidate the bounded-lag framing outright. Minutes of work on any box that is up; pair it
+   with item 2.
+4. **#139** for ~1.1x on chunks — a fidelity decision, and §2's note that nobody has asked what the
+   *smallest* concession worth the bar looks like still stands.
+5. **po2 23 on a B200**, never quantified — and note it takes **two changes, not one**: raising
+   `DEFAULT_MAX_PO2` also changes the computed `ALLOWED_CONTROL_ROOT` away from the constant baked
+   into `risc0-circuit-recursion`, which is why the 2026-08-25 B200 run produced invalid proofs. The
+   lift programs for po2 23 exist (`lift_rv32im_v2_23.zkr`, `MAX_CYCLES_PO2 = 24`), so it is a missed
+   second step rather than a wall — but shipping a recomputed root is a compatibility decision, since
+   proofs would stop verifying against stock `risc0-zkvm`. It also OOMs on a 46 GB L40S (79 GB peak),
+   so it is B200-only. Lowest priority: unquantified, paid, and gated on a decision nobody has taken.
+
+The kernel lever is closed (§8.11) and chunk cost is EC verification (§8.6), which fidelity rightly
+protects.
