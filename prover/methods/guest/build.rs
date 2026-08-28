@@ -90,21 +90,26 @@ fn main() {
     let gpp = format!("{pfx}riscv32-unknown-elf-g++");
     let ar = format!("{pfx}riscv32-unknown-elf-gcc-ar");
 
-    // ECMULT_WINDOW_SIZE tuning (issue #12). MEASURED 2026-08-27 (experiment E4, execute mode, block
-    // 130,000, 1 chunk, 10 inputs; the journal digest was identical on every arm, so each number prices
-    // the same computation):
+    // ECMULT_WINDOW_SIZE tuning (issue #12). MEASURED on block 140,000, 212 inputs, execute mode
+    // (2026-08-26 for 19/20 in TIER0_RESULTS_2026-08-26.md, 2026-08-28 for 21; same harness, same
+    // journal digest 607f4a7e... on every arm, so each number prices the same computation):
     //
-    //     16  18,281,206  +1.38%      19  18,033,062  (shipped)
-    //     17  18,209,178  +0.98%      20  18,084,883  +0.29%
-    //     18  18,051,971  +0.10%      21  17,739,133  -1.63%   <- optimum
+    //     19  376,662,184  (shipped)     20  375,914,975  -0.198%     21  371,971,773  -1.245%
     //
-    // 21 is cheaper than the shipped 19, and it sits behind a LOCAL BUMP at 20: hill-climbing from 19
-    // tries 20, sees it get worse and stops. That is exactly what the original two-point (15 vs 19)
-    // measurement did. Smaller windows are monotonically worse, so the paging tension recorded in
-    // docs/PERF_INVESTIGATION_2026-08-26.md 3.5 is real but points the other way.
+    // 21 is the optimum. It is the arm experiment E4 specified and never ran, and it is worth ~6x the
+    // window-20 change that was going to ship instead.
+    //
+    // ⚠ Measure window arms at a REALISTIC input count. A sweep on block 130,000 (10 inputs) put 20
+    // ABOVE 19 and read it as a local bump; at 212 inputs the curve falls monotonically 19 -> 21.
+    // Ten inputs is too little EC work to amortise the pre_g table, so a toy block under-rates larger
+    // windows. Production chunks carry 64-180 inputs.
+    //
+    // ⚠ The pre_g table doubles per step (~16 MB at 19 -> ~64 MB at 21). The cycle figures are net of
+    // the paging that costs, but the guest memory footprint grows; check it against segment sizing.
     //
     // 19 remains the DEFAULT deliberately: changing it edits the guest source and therefore moves
     // METHOD_ID, so it must ride the next re-baselining rather than ship on its own.
+    // Full verdict and consequences: docs/TOPOLOGY_AND_SETTINGS.md 4.1.
     //
     // The checked-in precomputed_ecmult.c is generated for windows <=15 and HARD-ERRORS above that
     // (`#if ECMULT_WINDOW_SIZE > 15 -> #error`), so for a larger window we regenerate it with libsecp's
