@@ -37,6 +37,20 @@ export LD_LIBRARY_PATH="/usr/local/cuda-${CUDA_VER}/lib64:${LD_LIBRARY_PATH:-}"
 # returned 403 from every network tried, aborting the build ~14 minutes in.
 [ -f "$REPO/reproduce/vendor/recursion_zkr.zip" ] && export RECURSION_SRC_PATH="$REPO/reproduce/vendor/recursion_zkr.zip"
 
+# ⛔ This script git-checkouts `main` for arm C, and `main` does not contain this file — so the
+# checkout DELETES the script out from under the running shell. The first run survives only because
+# bash already holds the inode open; any relaunch dies with "No such file or directory" (rc 127),
+# and a box sits idle until somebody notices. Re-exec from a copy outside the repo before doing
+# anything, so the script's own existence never depends on which branch is checked out.
+SELF="$(readlink -f "$0")"
+case "$SELF" in
+  "$(readlink -f "$REPO")"/*)
+    cp -f "$SELF" "$HOME/.gpu-stack-ab.run.sh"
+    chmod +x "$HOME/.gpu-stack-ab.run.sh"
+    exec "$HOME/.gpu-stack-ab.run.sh" "$@"
+    ;;
+esac
+
 mkdir -p "$OUT"
 say() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 die() { say "FATAL: $*"; echo "REAL_EXIT=1" >> "$LOG"; exit 1; }
