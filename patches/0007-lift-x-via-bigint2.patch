@@ -15,15 +15,12 @@ field_10x26. The helper returns the EVEN root; the parity fixup below is unchang
 A failure -- including an x that is not on the curve -- returns 0 and falls through to libsecp's own
 fe_sqrt, which reaches the same verdict. So the accelerator is never load-bearing for correctness.
 
+⚠ Generated with diff, not hand-written. The first draft had a hand-counted hunk header (@@ -316,7)
+that was seven lines off the real one (@@ -323,7) and patch rejected it as malformed.
+
 --- a/src/group_impl.h
 +++ b/src/group_impl.h
-@@ -316,7 +316,26 @@ static int secp256k1_ge_set_xo_var(secp256k1_ge *r, const secp256k1_fe *x, int o
-     secp256k1_fe x2, x3;
-     int ret;
-     SECP256K1_FE_VERIFY(x);
- 
-     r->x = *x;
-     secp256k1_fe_sqr(&x2, x);
+@@ -323,7 +323,26 @@
      secp256k1_fe_mul(&x3, x, &x2);
      r->infinity = 0;
      secp256k1_fe_add_int(&x3, SECP256K1_B);
@@ -50,8 +47,3 @@ fe_sqrt, which reaches the same verdict. So the accelerator is never load-bearin
      secp256k1_fe_normalize_var(&r->y);
      if (secp256k1_fe_is_odd(&r->y) != odd) {
          secp256k1_fe_negate(&r->y, &r->y, 1);
-     }
- 
-     SECP256K1_GE_VERIFY(r);
-     return ret;
- }
