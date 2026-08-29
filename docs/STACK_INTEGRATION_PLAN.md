@@ -5,35 +5,55 @@ these levers was lost to a WSL2 VM death while sitting uncommitted in `/tmp`. Ev
 rebuild each lever is written down here. **Commit early on every branch; do not hold work in a
 worktree under `/tmp`.**
 
-## 1. The target, and what the stack buys
+## 1. What is MEASURED, and what the card count actually is
 
-Baseline is block 962,000, measured: 14,926 chunk card-seconds, 1.05x straggler, 1,575 s aggregate.
+⛔ **THE CARD COUNT IS UNKNOWN.** Not "6 with 17% margin", not "5 with 25%". Unknown.
 
-```
-stack                               wall@6   margin  cards
-  today                              49.3m       —      32
-  + bigint2 middle path              12.1m       —       8
-  + witness read                      9.1m       9%      6   <- target first met
-  + join pipelining                   8.4m      16%      6
-  + Tier 0 (O3/LTO/CGU1/win21)        8.3m      17%      6
-  + wholesale instead of middle       7.5m      25%      6
-```
+Every row of the stack table this document used to lead with was a PROJECTION. The one row that has
+since been measured moved by 40%: bigint2 on block 962,000 was projected at 7.53x and **measures
+4.48x** (execute mode). The projection was built from measured primitives and still under-weighted
+the non-ECDSA residual. → `TIP_BLOCK_BIGINT2_2026-08-28.md` · [[feedback_only_measured_numbers]]
 
-⇒ **The plan is six cards.** With the middle path and all four levers that is **8.3 min, 17% margin**.
-The 25% row swaps the bigint2 *wholesale* arm in for the middle path; it buys 8 points of margin and
-costs the ECDSA equivalence surface. **Middle path is the standing decision** — revisit only if margin
-proves tight in practice.
+⇒ **No fleet size is stated in this document until a proving measurement exists.**
 
-Why margin and not card count is the right criterion:
+### MEASURED — block 962,000, 8,006 inputs, execute mode, 2026-08-29
 
-| block weight | wall at 6 cards, full stack |
+| | result |
 |---|---|
-| 962,000 (measured) | 7.5-8.3m OK |
-| +30% heavier | 9.7m OK |
-| +60% heavier | 12.0m FAILS |
+| control cost | 14.05 G cycles/partition (cross-checks a prior session's 14.06 G to 0.07%) |
+| **Tier 0** | **−2.10%** (predicted 2.206%, fitted on a different block) |
+| **bigint2 middle path** | **4.48x** |
+| **witness encoder** | **7,256,592 → 3,594,208 wire bytes = 2.019x** |
+| digest gate, Tier 0 arm | **32/32 byte-identical to control**, `all_valid=1` |
+| digest gate, bigint2 arm | **32/32 byte-identical to control**, `all_valid=1` |
+| join-tree ordering | **identical across 2,052 leaf counts** (in-crate test, 14 passed) |
 
-`middle + read` alone (9% margin) fails on anything meaningfully above an average block. The stack is
-bought for robustness, not for the card count.
+### MEASURED earlier — block 140,000 (212 inputs, ~100% ECDSA)
+
+| | result |
+|---|---|
+| bigint2 GPU proving wall | **8.00x** |
+| per-verify ECDSA | 1,723,407 → 140,044 cycles |
+
+⚠ Block 140,000 is the most ECDSA-dense block in the set. Its ratios are a ceiling. **Name the block
+beside any figure taken from it.**
+
+### ⛔ NOT MEASURED — and therefore not stated anywhere in this document
+
+- **The proving ratio on a tip block.** Execute cycles are not proving cost; bigint2 is a separate
+  coprocessor circuit. **The fleet size depends on this and on nothing else currently available.**
+- **The witness encoder's cycle effect.** Bytes shrank 2.019x; what that does to cycles is unrun.
+- **The join tree's speedup.** Its ordering is proven; its ~1.4x-at-32-cards claim is not.
+- **The aggregate above N=2.** Needs a third box.
+- ⇒ **The card count.** It is a function of all four.
+
+### ⏰ The three runs that would settle it
+
+1. **One GPU prove of a block 962,000 chunk, `HAZYNC_BIGINT2_ECDSA=1` vs stock.** Gives the proving
+   ratio on a real block. Highest value of anything on this list.
+2. **An aggregate execute (mode 5) before/after the encoder**, for its cycle effect. Needs fresh
+   chunk receipts because the encoder moves `METHOD_ID`.
+3. **An aggregate on a THIRD box**, for the join tree and for scaling above N=2.
 
 ## 2. The four levers
 

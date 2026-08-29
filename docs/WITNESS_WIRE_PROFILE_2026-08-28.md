@@ -51,14 +51,14 @@ It is the same defect as the proofs: a `[u8; 32]` goes through risc0 serde's def
 | proofs only | 4,071,296 | **1.78x** |
 | **proofs + `txids`** | **3,466,108** | **2.09x** |
 
-⚠ **Bytes are measured; cycles are not.** Carrying these through the 78%-of-validation-is-
-deserialisation figure gives roughly **1.52x** on block validation for proofs alone and **1.69x** with
-`txids` — against the 1.54x currently in the plan, which assumed proofs only. So the plan's number was
-about right for the lever it priced, and there is a second lever next to it worth another ~0.17x.
+⛔ **Bytes are measured; the cycle consequence is NOT MEASURED and no figure is given for it.**
+An earlier draft carried validation figures derived by putting these byte ratios through the
+"78% of block validation is deserialisation" number. That is a forecast, not a result, and it is
+removed. → [[feedback_only_measured_numbers]]
 
-⛔ **Do not promote 1.69x to a measurement.** It assumes deserialisation cost scales with wire bytes at
-a constant rate. Packing changes words-per-byte by 4x for the affected structures, which is the right
-shape, but the constant has not been re-measured after packing. **Measure the cycles, then quote them.**
+**The run that would measure it:** an execute-mode aggregate (mode 5) before and after, comparing
+cycles. It needs chunk receipts from the CURRENT guest and the encoder moves `METHOD_ID`, so every
+stored receipt is void — new ones require a GPU.
 
 ## Before writing the encoder
 
@@ -127,13 +127,16 @@ there would have meant the edit reached something it should not have.
 ⇒ The reporter's own projection line now reads **1.037x**, i.e. the lever is spent. What remains is
 prefix overhead, not amplification.
 
-## Inferred, NOT measured
+## What is NOT measured
 
-Carrying 2.019x through the 78%-of-validation-is-deserialisation figure gives roughly **1.65x** on
-block validation (`0.78 x 0.4953 + 0.22 = 0.606`), against the 1.69x the plan projected from the
-2.09x estimate.
+⛔ **The cycle consequence of this is NOT MEASURED, and no figure is given for it here.** Earlier
+drafts of this document carried one, derived by carrying the byte ratio through the
+"78% of block validation is deserialisation" figure. That is a forecast, not a result, and it is
+removed. → [[feedback_only_measured_numbers]]
 
-⛔ **Still inferred.** It assumes deserialisation cost scales with wire bytes at a constant rate.
-And ⛔ **this is a SIZE result, not a CORRECTNESS result** -- it proves the encoder shrinks the
-witness, not that host and guest agree field-for-field. That needs the aggregate path (mode 5) and
-therefore a GPU. See `STACK_INTEGRATION_PLAN.md`.
+**What would measure it:** an execute-mode run of the aggregate path (mode 5) before and after,
+comparing cycles. That needs chunk receipts from the CURRENT guest, and the encoder moves
+`METHOD_ID`, so every stored receipt is void — new ones require a GPU.
+
+⛔ Also unmeasured: whether host and guest agree field-for-field. This document establishes only
+that the witness got smaller, on one block.

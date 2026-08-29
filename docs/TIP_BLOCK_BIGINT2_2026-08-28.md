@@ -52,19 +52,23 @@ it is a different axis and must not be conflated with this one.
 
 ## What it does to the fleet arithmetic
 
-| basis | chunk card-seconds | |
-|---|---|---|
-| projected 7.53x | 1,982–2,278 | the "7 cards" figure |
-| **measured 4.48x** | **3,333** | **+46% to +68%** |
+The "7 cards" figure came from `chunk card-seconds 14,926 → 2,278`, which used the projected 7.53x.
+At the MEASURED 4.48x the same division gives **3,333 card-seconds**.
 
-⇒ **The card count built on 7.53x is optimistic.** How much depends on the aggregate term (1,575 s,
-unchanged by this) and which distribution scenario holds.
+⛔ **No card count is stated here.** Translating card-seconds into a fleet size needs a PROVING
+measurement, and this run is execute mode. Execute cycles are not proving cost — bigint2 is a
+separate coprocessor circuit and linearity must not be assumed.
 
-⛔ **Execute-mode cycles are NOT proving cost** — bigint2 is a separate coprocessor circuit and
-linearity must not be assumed. On block 140,000 execute 9.19x realised 8.00x proving (~87% capture,
-the coprocessor taking ~13%). If that capture rate carries, a 962,000 proving win is near **3.9x**.
-⇒ **One GPU prove of a 962,000 chunk with bigint2 on settles it**, and it is the highest-value GPU
-minute available — the fleet size depends on it directly.
+⇒ **What is measured:** block 962,000 costs **4.48x less in execute-mode cycles** with the middle
+path on, against a projection of 7.53x.
+⇒ **What is NOT measured:** the proving ratio on this block, and therefore the fleet size. An
+earlier draft of this document put a figure on both. It should not have.
+→ [[feedback_only_measured_numbers]]
+
+⏰ **The run that settles it: one GPU prove of a block 962,000 chunk with `HAZYNC_BIGINT2_ECDSA=1`,
+against the stock control.** That is a direct measurement of the thing the fleet size depends on,
+and it is the highest-value GPU minute available. Until it exists, the card count is unknown --
+not "optimistic by roughly X", unknown.
 
 ## ✅ The correctness gate it passed on the way
 
