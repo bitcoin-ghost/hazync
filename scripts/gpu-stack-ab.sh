@@ -230,6 +230,12 @@ for a in $ARMS; do
     # Arm J: arm H + the SHA Transform fast path + the key-reuse packer. Everything found today.
     J) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1 HAZYNC_PACK_KEYS=1; build_arm J feat/liftx-accel 1 ;;
+    # Arm N: arm J WITHOUT the key-reuse packer. J improved the total but worsened the straggler --
+    # the packer clustered reuse successfully (98-99% hit rates on chunks 9-15) but the TRANSITION
+    # chunk got credited reuse it only half received and became the straggler at 169 s. Cards move on
+    # total AND straggler, so J was a net loss. This isolates the SHA fast path from the packer.
+    N) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
+              HAZYNC_SHA_FASTPATH=1; build_arm N feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
