@@ -61,12 +61,27 @@ fn main() {
     // unmoved. Set to 1 and the guest gains the `bigint2-ecdsa` feature, which compiles
     // guest/src/bigint2_ecmult.rs and MOVES METHOD_ID. See patches/0005 for the libsecp half.
     println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
+    // hazync#205 lift_x hint (EXPERIMENTAL, opt-in). Same posture as #139: unset takes the plain
+    // path below and METHOD_ID is unmoved. See patches/0006 for the libsecp half.
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_HINT");
+
+    // Accumulate rather than early-return per flag: the two experiments are independent and the
+    // interesting arm enables BOTH, which the previous shape silently could not express -- it
+    // returned on the first flag and dropped the second without a word.
+    let mut features: Vec<String> = Vec::new();
     if std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1") {
+        features.push("bigint2-ecdsa".to_string());
+    }
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        features.push("liftx-hint".to_string());
+    }
+
+    if !features.is_empty() {
         use std::collections::HashMap;
         // GuestOptions is #[non_exhaustive], so it cannot be built with a struct expression from
         // outside risc0-build; default-then-assign is the supported shape.
         let mut guest = risc0_build::GuestOptions::default();
-        guest.features = vec!["bigint2-ecdsa".to_string()];
+        guest.features = features;
         let mut opts = HashMap::new();
         opts.insert("method", guest);
         risc0_build::embed_methods_with_options(opts);
