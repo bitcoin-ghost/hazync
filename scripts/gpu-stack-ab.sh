@@ -71,13 +71,16 @@ build_arm() {
 
   local freeg; freeg=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
   say "arm $arm: ${freeg}G free before build"
-  if [ "$freeg" -lt 18 ]; then
-    say "arm $arm: under 18G free — running cargo clean to reclaim before building"
+  # 8G, not 18G. At 18G every restart re-triggered a full clean rebuild (~19 min), because a
+  # completed build leaves ~10G free -- so the guard kept firing on a disk that was actually fine.
+  # Both boxes built and proved all the way through at ~10G. Clean only when genuinely cornered.
+  if [ "$freeg" -lt 8 ]; then
+    say "arm $arm: under 8G free — running cargo clean to reclaim before building"
     ( cd "$REPO/prover" && cargo clean ) >>"$LOG" 2>&1
     freeg=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
     say "arm $arm: ${freeg}G free after clean"
   fi
-  [ "$freeg" -ge 10 ] || die "arm $arm: only ${freeg}G free — refusing to start a build that will die mid-way"
+  [ "$freeg" -ge 5 ] || die "arm $arm: only ${freeg}G free — refusing to start a build that will die mid-way"
 
   git -C "$REPO" fetch --all -q
   git -C "$REPO" checkout -q "$branch" || die "checkout $branch failed"
