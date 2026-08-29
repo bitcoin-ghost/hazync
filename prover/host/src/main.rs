@@ -1700,7 +1700,18 @@ fn prove_seg() {
 // EC-only model rates them equal and packs them as if they were.
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
-const COST_PER_EC_OP: u64 = 1_950_000;
+// hazync#190 ARMED. The packer branch shipped this EQUAL to COST_PER_SCHNORR_OP on purpose, so that
+// giving the packer a curve dimension was a provable no-op: same costs, same partition, same chunks.
+// Arming it is the one-line edit that branch's own comment describes.
+//
+// MEASURED 2026-08-29, block 962,000, 16/16 paired chunks on one L40S at po2 22: with bigint2 on,
+// per-chunk speedup runs 2.046x to 4.813x and correlates with TAPROOT SHARE at -0.875 -- a 24.2%
+// taproot chunk gets 2.0x where an all-ECDSA chunk gets 4.8x. The packer, balancing PRE-acceleration
+// cost, predicts all 16 chunks within 1.00x, and bigint2 then takes the real straggler from 1.054 to
+// 2.118. A block's wall-clock is its SLOWEST chunk, so that doubling is worth ~7 cards.
+//
+// Only the RATIO matters -- the packer compares costs and never predicts a wall-clock.
+const COST_PER_EC_OP: u64 = 141_612;
 /// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA even though the two are equal
 /// today. #139 accelerates ECDSA only -- Schnorr keeps running libsecp's BIP340 code -- so after it
 /// lands these diverge by ~13.8x (ECDSA ~141,612, Schnorr 1,950,000). A packer that cannot see that
