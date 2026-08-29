@@ -135,6 +135,9 @@ fn main() {
     // hazync_ecmult_verify, which only the bigint2-ecdsa feature exports.
     println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_SCHNORR");
     let schnorr_accel = std::env::var("HAZYNC_BIGINT2_SCHNORR").as_deref() == Ok("1");
+    // The ECDSA scalar inverse, which patch 0005 left as literal libsecp. 7.0% of the current stack.
+    println!("cargo:rerun-if-env-changed=HAZYNC_SCALAR_INV_ACCEL");
+    let scalar_inv = std::env::var("HAZYNC_SCALAR_INV_ACCEL").as_deref() == Ok("1");
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -203,6 +206,10 @@ fn main() {
         .define(
             "HAZYNC_BIGINT2_SCHNORR",
             if schnorr_accel { Some("1") } else { None },
+        )
+        .define(
+            "HAZYNC_SCALAR_INV_ACCEL",
+            if scalar_inv { Some("1") } else { None },
         )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")

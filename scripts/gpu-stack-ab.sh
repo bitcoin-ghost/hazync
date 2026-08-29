@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_SCALAR_INV_ACCEL:-0}" = "1" ]; then
+      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0008-scalar-inverse-via-bigint2.patch" ) \
+        || die "patch 0008 did not apply"
+      grep -q 'HAZYNC_SCALAR_INV_ACCEL' "$BASE/secp256k1/src/ecdsa_impl.h" \
+        || die "ecdsa_impl.h has no HAZYNC_SCALAR_INV_ACCEL block — 0008 did not land"
+      say "arm $arm: patch 0008 applied, scalar inverse call site present"
+    fi
     if [ "${HAZYNC_BIGINT2_SCHNORR:-0}" = "1" ]; then
       ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0006-schnorr-verify-group-arith-via-bigint2.patch" ) \
         || die "patch 0006 did not apply"
@@ -211,6 +218,8 @@ for a in $ARMS; do
     A) export HAZYNC_LIFTX_ACCEL=1; build_arm A feat/liftx-accel 1 ;;
     # Arm F: FULL Ghost — bigint2 + armed packer + G1 + decompression memo + G3 Schnorr lane.
     F) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1; build_arm F feat/liftx-accel 1 ;;
+    # Arm H: arm F plus the ECDSA scalar inverse on the coprocessor (patch 0008).
+    H) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1; build_arm H feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
