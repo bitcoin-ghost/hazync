@@ -1,6 +1,6 @@
 # hazync#205 — hint the pubkey Y, verify it, and stop computing square roots
 
-**Status: DESIGN + GUEST HALF WRITTEN, NOT BUILT, NOT MEASURED.** Nothing here may be quoted as a
+**Status: COMPLETE BUT NEVER COMPILED, AND NOT MEASURED.** Nothing here may be quoted as a
 speedup until the A/B in §5 has run. → `feedback_only_measured_numbers`
 
 ## 1. The measurement that motivates it
@@ -54,9 +54,10 @@ than #139's. A missing or hostile hint costs only the sqrt already being paid.
 | `patches/0006-lift-x-via-witness-hint.patch` — the libsecp half | written |
 | `prover/methods/guest/src/liftx_hint.rs` — table, binary search, `hazync_lift_x_hint` | written |
 | `HAZYNC_LIFTX_HINT=1` -> `liftx-hint` feature (`build.rs`, `Cargo.toml`, `main.rs`) | written |
-| **witness carries the hints** | **NOT WRITTEN** |
-| **host extracts pubkeys and computes Y** | **NOT WRITTEN** |
-| **guest calls `liftx_hint::install()`** | **NOT WRITTEN** |
+| witness carries the hints (`write_chunk_inputs`) | written |
+| host extracts pubkeys and computes Y (`liftx_hints`) | written |
+| guest reads the block and calls `install()` | written |
+| hit/miss accounting logged from the guest | written |
 | **anything compiled or run** | **NOT DONE** |
 
 ⚠ `build.rs` previously early-returned on the first flag it saw, so it could not have expressed

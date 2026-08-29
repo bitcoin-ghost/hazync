@@ -1627,6 +1627,27 @@ fn chunk_prove() {
     let block_hash: [u8; 32] = env::read(); // real block hash — needed for flag exceptions; a wrong
     let flags = block_script_flags(height, &block_hash); // hash yields wrong flags -> aggregate bind mismatch
     let n_txs: u32 = env::read();
+
+    // hazync#205 — install the pubkey-Y hint table BEFORE any script runs, since verification
+    // happens inside the read loop below. Host writes this block at the same point, gated on the
+    // same HAZYNC_LIFTX_HINT; the two must agree or the stream desynchronises.
+    #[cfg(feature = "liftx-hint")]
+    {
+        let n_hints: u32 = env::read();
+        let mut flat = vec![0u8; n_hints as usize * 64];
+        if n_hints > 0 {
+            env::read_slice(&mut flat);
+        }
+        let mut pairs = Vec::with_capacity(n_hints as usize);
+        for c in flat.chunks_exact(64) {
+            let (mut x, mut y) = ([0u8; 32], [0u8; 32]);
+            x.copy_from_slice(&c[..32]);
+            y.copy_from_slice(&c[32..]);
+            pairs.push((x, y));
+        }
+        liftx_hint::install(pairs);
+    }
+
     let mut binds: Vec<[u8; 32]> = Vec::new();
     let mut tx_wtxids: Vec<(u32, [u8; 32], u32)> = Vec::new();
     let mut leaves_out: Vec<[u8; 32]> = Vec::new();
@@ -1718,6 +1739,13 @@ fn chunk_prove() {
             seqs_out.push(seqbuf[j]);
             vers_out.push(verbuf);
         }
+    }
+    // A silently-empty hint table would reinstate the sqrt while every gate still passed. Print the
+    // accounting so a run with 0 hits reads as a FAILED experiment rather than a null result.
+    #[cfg(feature = "liftx-hint")]
+    {
+        let (hits, misses) = liftx_hint::stats();
+        risc0_zkvm::guest::env::log(&alloc::format!("liftx: hits={} misses={}", hits, misses));
     }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds, tx_wtxids, leaves_out, seqs_out, vers_out });
 }
