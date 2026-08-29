@@ -173,6 +173,12 @@ for a in $ARMS; do
     # chunk, so ONLY the block total and the straggler are comparable to C and S -- a per-chunk
     # comparison would be comparing different work.
     P) build_arm P feat/stack-plus-packer 1 ;;
+    # Arm L: stack + armed packer + the #205 Y hint. Needs HAZYNC_LIFTX_HINT at BUILD and RUN time --
+    # the guest only reads the hint block when built with the feature, so a mismatch desynchronises
+    # the input stream rather than merely losing the optimisation.
+    L) export HAZYNC_LIFTX_HINT=1; build_arm L feat/stack-liftx 1 ;;
+    # Arm K: the CORE model -- every zero-fidelity lever, NO bigint2 substitution.
+    K) build_arm K feat/stack-integration 0 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
