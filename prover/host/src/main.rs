@@ -1722,7 +1722,24 @@ const COST_PER_EC_OP: u64 = 141_612;
 /// Keeping the two constants EQUAL means this change is a no-op today, provably: same costs, same
 /// partition, same chunks. #139 then becomes a one-line edit to COST_PER_EC_OP rather than a packer
 /// project, and the packer work does not have to wait on the fidelity decision.
-const COST_PER_SCHNORR_OP: u64 = 1_950_000;
+// ⚠ RE-DERIVED once G3 (patches/0006) put Schnorr through the SAME bigint2 accelerator as ECDSA.
+// The 13.8x divergence this constant existed to model is a property of accelerating ONE curve; with
+// both accelerated the costs converge again. Leaving it at 1,950,000 makes the packer starve
+// taproot-heavy chunks of inputs for a cost that is no longer there.
+const COST_PER_SCHNORR_OP: u64 = 141_612;
+
+/// What a verify costs when its public key was ALREADY decompressed earlier in the same chunk.
+///
+/// The decompression memo is per-chunk, so key reuse is worth real time — and it is not modelled
+/// anywhere, which is a third axis the packer is blind to after curve and bytes. MEASURED: chunks 8
+/// and 12 of block 962,000 have the same input count, the same EC verify count and the same byte
+/// size, and came in at 45 s against 162 s. That is 3.6x from key reuse alone.
+///
+/// Derived from the post-G1 profile of the chunk work: hazync_ecmult_verify 561 M, hazync_lift_x
+/// 254 M, scalar inverse 147 M ⇒ the decompression a memo hit avoids is 26.4% of per-verify EC work,
+/// so a repeat costs ~0.736 of a fresh key. On block 962,000, 6,913 verifying inputs use only 2,160
+/// distinct keys, so 68.8% of inputs take this discount.
+const COST_PER_EC_OP_REPEAT: u64 = 104_222;
 // An input that verifies no signature still costs something to read, deserialise and hash. Measured at
 // ~34K cycles on block 962,000's anchor spends, against ~1,953K for a P2WPKH.
 const COST_INPUT_BASE: u64 = 34_000;
@@ -1833,6 +1850,49 @@ fn predicted_sig_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> Sig
 }
 
 /// Predicted cost of every input of the block, in the order the block spends them.
+/// The public key each input will make the guest decompress, as an identity for reuse detection.
+///
+/// Only identity matters, not validity: a value that is not really a key simply fails to match
+/// anything and costs nothing. So this does no curve arithmetic — it takes the first plausible
+/// compressed key in the witness or scriptSig, or the x-only key from a P2TR prevout.
+fn input_keys(w: &BlockWitness) -> Vec<Option<[u8; 33]>> {
+    let mut out = Vec::with_capacity(w.inputs.len());
+    for inp in &w.inputs {
+        let raw = &w.txs[inp.tx_idx as usize].0;
+        let mut found: Option<[u8; 33]> = None;
+        if let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw) {
+            if let Some(txin) = tx.input.get(inp.input_idx as usize) {
+                for item in txin.witness.iter() {
+                    if item.len() == 33 && (item[0] == 2 || item[0] == 3) {
+                        let mut k = [0u8; 33]; k.copy_from_slice(item); found = Some(k); break;
+                    }
+                }
+                if found.is_none() {
+                    for ins in txin.script_sig.instructions().flatten() {
+                        if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                            let b = pb.as_bytes();
+                            if b.len() == 33 && (b[0] == 2 || b[0] == 3) {
+                                let mut k = [0u8; 33]; k.copy_from_slice(b); found = Some(k); break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(found);
+    }
+    out
+}
+
+/// How much input `i` gets cheaper when its key has already been decompressed in this chunk.
+fn repeat_savings(w: &BlockWitness) -> Vec<u64> {
+    w.inputs.iter().map(|inp| {
+        let tx = &w.txs[inp.tx_idx as usize].0;
+        let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
+        predicted_sig_ops(tx, inp.input_idx, prevouts).total() * (COST_PER_EC_OP - COST_PER_EC_OP_REPEAT)
+    }).collect()
+}
+
 fn input_costs(w: &BlockWitness) -> Vec<u64> {
     w.inputs
         .iter()
@@ -1848,6 +1908,69 @@ fn input_costs(w: &BlockWitness) -> Vec<u64> {
 
 /// Runs needed to cover `costs` when no run may exceed `cap`. `cap` is always >= max(costs), so every
 /// input fits somewhere and this terminates.
+/// Cost of input `i` given the keys already decompressed in the CURRENT run.
+///
+/// The decompression memo is per-chunk, so the SAME input is cheaper when its key has been seen
+/// earlier in the same chunk than when it opens one. That makes cost position-dependent, which is
+/// why this is a closure over run state rather than a precomputed vector — and why the packer could
+/// not see it before.
+struct KeyWalk<'a> {
+    costs: &'a [u64],
+    savings: &'a [u64],
+    keys: &'a [Option<[u8; 33]>],
+    seen: std::collections::HashSet<[u8; 33]>,
+}
+
+impl<'a> KeyWalk<'a> {
+    fn new(costs: &'a [u64], savings: &'a [u64], keys: &'a [Option<[u8; 33]>]) -> Self {
+        Self { costs, savings, keys, seen: std::collections::HashSet::new() }
+    }
+    fn reset(&mut self) { self.seen.clear(); }
+    /// Cost of `i` in the current run, and record its key as now-seen.
+    fn take(&mut self, i: usize) -> u64 {
+        let mut c = self.costs[i];
+        if let Some(k) = self.keys.get(i).copied().flatten() {
+            if !self.seen.insert(k) {
+                c = c.saturating_sub(self.savings[i]);
+            }
+        }
+        c
+    }
+    /// Cost of `i` if it were to OPEN a new run — no keys seen yet, so never discounted.
+    fn take_fresh(&mut self, i: usize) -> u64 {
+        self.reset();
+        if let Some(k) = self.keys.get(i).copied().flatten() { self.seen.insert(k); }
+        self.costs[i]
+    }
+}
+
+fn runs_at_cap_keyed(costs: &[u64], savings: &[u64], keys: &[Option<[u8; 33]>], cap: u64) -> usize {
+    let mut w = KeyWalk::new(costs, savings, keys);
+    let (mut runs, mut acc) = (1usize, 0u64);
+    for i in 0..costs.len() {
+        let c = w.take(i);
+        if acc + c > cap { runs += 1; acc = w.take_fresh(i) } else { acc += c }
+    }
+    runs
+}
+
+fn split_at_cap_keyed(costs: &[u64], savings: &[u64], keys: &[Option<[u8; 33]>], cap: u64) -> Vec<(usize, usize)> {
+    let mut w = KeyWalk::new(costs, savings, keys);
+    let (mut out, mut lo, mut acc) = (Vec::new(), 0usize, 0u64);
+    for i in 0..costs.len() {
+        let c = w.take(i);
+        if acc + c > cap && i > lo {
+            out.push((lo, i));
+            lo = i;
+            acc = w.take_fresh(i);
+        } else {
+            acc += c;
+        }
+    }
+    out.push((lo, costs.len()));
+    out
+}
+
 fn runs_at_cap(costs: &[u64], cap: u64) -> usize {
     let (mut runs, mut acc) = (1usize, 0u64);
     for &c in costs {
@@ -1877,18 +2000,26 @@ fn split_at_cap(costs: &[u64], cap: u64) -> Vec<(usize, usize)> {
 ///
 /// Guarantees, relied on by `prove_chunk`/`agg_chunks` and asserted in the tests: the runs are ordered,
 /// non-empty, non-overlapping, and cover `0..n` exactly.
-fn pack_chunks(costs: &[u64], nchunks: usize) -> Vec<(usize, usize)> {
+fn pack_chunks(costs: &[u64], nchunks: usize, keys: Option<(&[u64], &[Option<[u8; 33]>])>) -> Vec<(usize, usize)> {
     let n = costs.len();
     if n == 0 { return Vec::new() }
     let k = nchunks.max(1).min(n);
     if k == 1 { return vec![(0, n)] }
 
     let (mut lo, mut hi) = (costs.iter().copied().max().unwrap_or(1), costs.iter().sum::<u64>());
+    let keyed = keys.map(|(sv, ks)| (sv, ks));
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if runs_at_cap(costs, mid) <= k { hi = mid } else { lo = mid + 1 }
+        let r = match keyed {
+            Some((sv, ks)) => runs_at_cap_keyed(costs, sv, ks, mid),
+            None => runs_at_cap(costs, mid),
+        };
+        if r <= k { hi = mid } else { lo = mid + 1 }
     }
-    let mut runs = split_at_cap(costs, lo);
+    let mut runs = match keyed {
+        Some((sv, ks)) => split_at_cap_keyed(costs, sv, ks, lo),
+        None => split_at_cap(costs, lo),
+    };
 
     // The optimal cap may need fewer than k runs. Idle provers help nobody, so keep splitting the widest
     // run until there are k of them — this can only lower the maximum, never raise it.
@@ -1915,7 +2046,13 @@ fn chunk_bounds(w: &BlockWitness, nchunks: usize) -> Vec<(usize, usize)> {
         let sz = n.div_ceil(k);
         return (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect();
     }
-    pack_chunks(&input_costs(w), nchunks)
+    // HAZYNC_PACK_KEYS=1 prices the per-chunk decompression memo. Off by default so the partition
+    // is unchanged unless asked for, which keeps it A/B-able against the arms already measured.
+    if std::env::var("HAZYNC_PACK_KEYS").as_deref() == Ok("1") {
+        let (sv, ks) = (repeat_savings(w), input_keys(w));
+        return pack_chunks(&input_costs(w), nchunks, Some((&sv, &ks)));
+    }
+    pack_chunks(&input_costs(w), nchunks, None)
 }
 
 // `chunk-profile`: report how work is spread across a block's chunks, under both packing strategies.
@@ -1941,7 +2078,7 @@ fn chunk_profile() {
             let sz = n.div_ceil(k.max(1));
             (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect::<Vec<_>>()
         }),
-        ("cost-packed (new)", pack_chunks(&costs, nchunks)),
+        ("cost-packed (new)", pack_chunks(&costs, nchunks, None)),
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
@@ -3912,7 +4049,7 @@ mod chunk_packing_tests {
         ];
         for costs in &shapes {
             for k in [1usize, 2, 3, 8, 16, 64] {
-                assert_partitions(costs, &pack_chunks(costs, k));
+                assert_partitions(costs, &pack_chunks(costs, k, None));
             }
         }
     }
@@ -3921,7 +4058,7 @@ mod chunk_packing_tests {
     fn never_returns_more_runs_than_asked_for() {
         let costs: Vec<u64> = (0..50).map(|i| 1_950_000 + i * 13_000).collect();
         for k in [1usize, 2, 7, 50, 500] {
-            let runs = pack_chunks(&costs, k);
+            let runs = pack_chunks(&costs, k, None);
             assert!(runs.len() <= k.max(1), "asked for {k}, got {}", runs.len());
             assert!(runs.len() <= costs.len(), "more runs than inputs");
         }
@@ -3932,8 +4069,8 @@ mod chunk_packing_tests {
         // An optimal cap can be reached with fewer runs than requested. Leaving provers idle is a real
         // cost, so the packer keeps dividing.
         let costs = vec![1_950_000u64; 32];
-        assert_eq!(pack_chunks(&costs, 8).len(), 8);
-        assert_eq!(pack_chunks(&costs, 32).len(), 32);
+        assert_eq!(pack_chunks(&costs, 8, None).len(), 8);
+        assert_eq!(pack_chunks(&costs, 32, None).len(), 32);
     }
 
     #[test]
@@ -3946,7 +4083,7 @@ mod chunk_packing_tests {
 
         let by_count: Vec<(usize, usize)> =
             (0..k).map(|c| (c * 8, (c + 1) * 8)).collect();
-        let by_cost = pack_chunks(&costs, k);
+        let by_cost = pack_chunks(&costs, k, None);
         assert_partitions(&costs, &by_cost);
 
         assert!(max_run(&costs, &by_cost) < max_run(&costs, &by_count),
@@ -3960,7 +4097,7 @@ mod chunk_packing_tests {
         // runs than we are allowed.
         let costs: Vec<u64> = (0..40).map(|i| 100 + (i * 37) % 900).collect();
         let k = 6;
-        let runs = pack_chunks(&costs, k);
+        let runs = pack_chunks(&costs, k, None);
         let cap = max_run(&costs, &runs);
         assert!(runs.len() <= k);
         assert!(cap >= *costs.iter().max().unwrap(), "a run cannot be lighter than its heaviest input");
@@ -3993,7 +4130,7 @@ mod chunk_packing_tests {
         // depends on the coefficients, and an earlier version of this test hard-coded the answer that
         // was optimal at 182 cycles/byte and broke when the byte term was refitted.
         let costs = vec![lean, lean, fat, fat];
-        let runs = pack_chunks(&costs, 2);
+        let runs = pack_chunks(&costs, 2, None);
         assert_partitions(&costs, &runs);
         let best = (1..costs.len())
             .map(|split| {
@@ -4008,9 +4145,9 @@ mod chunk_packing_tests {
 
     #[test]
     fn single_input_and_single_chunk_degenerate_cleanly() {
-        assert_eq!(pack_chunks(&[1_950_000], 8), vec![(0, 1)]);
-        assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
-        assert!(pack_chunks(&[], 8).is_empty());
+        assert_eq!(pack_chunks(&[1_950_000], 8, None), vec![(0, 1)]);
+        assert_eq!(pack_chunks(&[1_950_000; 5], 1, None), vec![(0, 5)]);
+        assert!(pack_chunks(&[], 8, None).is_empty());
     }
 }
 
@@ -5596,7 +5733,31 @@ mod join_tree_tests {
         }
     }
 
+        /// The key-reuse model must actually MOVE the partition, or it is a no-op wearing a constant.
+    /// Two runs of identical shape where one reuses a key and the other does not: the reusing run
+    /// should be allowed MORE inputs under the same cap.
     #[test]
+    fn key_reuse_lets_a_run_hold_more_inputs() {
+        let n = 40;
+        let costs = vec![COST_INPUT_BASE + COST_PER_EC_OP; n];
+        let savings = vec![COST_PER_EC_OP - COST_PER_EC_OP_REPEAT; n];
+        let same = vec![Some([7u8; 33]); n];          // every input reuses one key
+        let distinct: Vec<Option<[u8; 33]>> =
+            (0..n).map(|i| { let mut k = [0u8; 33]; k[0] = 2; k[1] = i as u8; Some(k) }).collect();
+
+        let cap = (COST_INPUT_BASE + COST_PER_EC_OP) * 10;
+        let r_same = split_at_cap_keyed(&costs, &savings, &same, cap);
+        let r_diff = split_at_cap_keyed(&costs, &savings, &distinct, cap);
+        assert!(
+            r_same.len() < r_diff.len(),
+            "reused keys must pack denser: same={} runs, distinct={} runs",
+            r_same.len(), r_diff.len()
+        );
+        // and the unkeyed walk must agree with the all-distinct case, since nothing is ever reused
+        assert_eq!(split_at_cap(&costs, cap).len(), r_diff.len());
+    }
+
+#[test]
     fn widths_terminate_at_one_and_shrink_monotonically() {
         for n in 1..=1024usize {
             let w = join_tree_widths(n);
