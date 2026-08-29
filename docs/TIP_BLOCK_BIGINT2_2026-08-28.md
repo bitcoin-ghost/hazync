@@ -1,69 +1,76 @@
-# bigint2 on a TIP block — the first measurement, and it halves the headline
+# bigint2 on block 962,000 — MEASURED, and it lands ~40% below the projection
 
 Block 962,000, 8,006 inputs, `HAZYNC_CHUNKS=16`, both partitions, execute mode, no GPU.
-Three arms, same block, same partitions, same machine, in one sitting.
+Three arms, same block, same partitions, same machine, one sitting.
 
-| arm | `METHOD_ID` | total execute cycles | vs control |
-|---|---|---|---|
-| control (`main`) | `916cde9e…` | 28,105,138,490 | — |
-| Tier 0 only | `70fc6484…` | 27,515,818,284 | **−2.10%** |
-| Tier 0 + bigint2 | `3aa6a082…` | 6,276,323,320 | **4.478x** |
+| arm | `METHOD_ID` | execute cycles (2 partitions) | per partition | vs control |
+|---|---|---|---|---|
+| control (`main`) | `916cde9e…` | 28,105,138,490 | **14.05 G** | — |
+| Tier 0 only | `70fc6484…` | 27,515,818,284 | 13.76 G | **−2.10%** |
+| Tier 0 + bigint2 | `3aa6a082…` | 6,276,323,320 | **3.14 G** | **4.48x** |
 
-⇒ **bigint2 alone = 4.384x** (against the Tier 0 arm).
+## ✅ The control cross-checks a prior session to 0.07%
 
-## ✅ Tier 0's additivity holds on a different block
+An earlier session recorded block 962,000's chunk cost as **14.06 G cycles**. This run measures
+**14.05 G** independently. Same block, same work — which is what makes the divergence below
+attributable to the bigint2 arm rather than to a different baseline.
 
-Predicted from `TIER0_RESULTS_2026-08-26`: `-O3` 0.264% + rust LTO/CGU 0.697% + window 21 1.245%
-= **2.206%**. Measured here: **2.10%**.
+## ⛔ The projection said 7.53x; measurement says 4.48x
 
-That prediction was fitted on block **140,000** (212 inputs, 2011, ~100% ECDSA) and holds to within
-0.1 percentage points on block **962,000** (8,006 inputs, tip-era). The three axes really are
-independent and really are additive.
+That session projected `14.06 G → 1.87 G (7.53x)`, and **the fleet arithmetic that produced
+"7 cards" was built on it**:
 
-## ⛔ bigint2's tip figure is roughly HALF its ceiling
+> *per-verify, stock 1,723,407 cycles · middle path 140,044 → 12.31x on the ECDSA primitive*
+> *block 962,000 chunk: 14.06 G → 1.87 G (7.53x) · chunk card-seconds 14,926 → 2,278*
 
-| block | character | execute-mode ratio |
+It was computed from measured primitives, not modelled — but the composition step under-weighted the
+**non-ECDSA residual**. Redone against this block's actual EC verify count:
+
+```
+EC verifies              7,015  (chunk-profile, 0.88 per input)
+ECDSA cycles   7,015 x 1,723,407  = 12.09 G   of the 14.05 G
+non-ECDSA residual                =  1.96 G   <- held ~constant by the accelerator
+after bigint2  7,015 x   140,044  =  0.98 G
+predicted total          0.98 + 1.96 =  2.94 G   => 4.78x
+MEASURED                                3.14 G   => 4.48x
+```
+
+⇒ **A correct Amdahl calculation over the same primitives gives 4.78x, not 7.53x.** The remaining
+gap to 4.48x (~7%) is plausibly the coprocessor's in-situ plumbing — the big-endian limb↔byte
+conversion per verify, which a primitive-level benchmark does not charge.
+
+## ⛔ This is NOT a taproot effect — an earlier draft of this document said it was, and was wrong
+
+`BIGINT2_MIDDLE_PATH.md` records block 962,000 as **1.8% taproot by input** (hazync#190 says 2.7%
+Schnorr). Either way ~98% of the block is ECDSA and DOES benefit. **Schnorr is not the explanation
+here.** The 9.19x/8.00x figures come from block **140,000**, whose cycles are almost entirely ECDSA;
+962,000 carries ~1.96 G of non-ECDSA work that the accelerator cannot touch, and that residual —
+not taproot — is what caps the ratio.
+
+⚠ Taproot sensitivity is real and separately documented (7 cards at 2.7% Schnorr → 16 at 35%), but
+it is a different axis and must not be conflated with this one.
+
+## What it does to the fleet arithmetic
+
+| basis | chunk card-seconds | |
 |---|---|---|
-| 140,000 | 2011, ~100% ECDSA | **9.19x** |
-| **962,000** | **tip-era, taproot present** | **4.384x** |
+| projected 7.53x | 1,982–2,278 | the "7 cards" figure |
+| **measured 4.48x** | **3,333** | **+46% to +68%** |
 
-⇒ tip / ceiling = **0.477**.
+⇒ **The card count built on 7.53x is optimistic.** How much depends on the aggregate term (1,575 s,
+unchanged by this) and which distribution scenario holds.
 
-This is exactly the effect the project anticipated but had never quantified: **risc0-crypto has no
-BIP340**, so Schnorr/taproot inputs get none of the win. Block 962,000 predicts **7,015 EC verifies
-across 8,006 inputs — 0.88 per input**, against block 140,000's ~1.0 of a much more ECDSA-dense mix.
-
-## ⛔⛔ What this does to the six-card arithmetic
-
-**The stack table's "+ bigint2 middle path: 32 -> 8 cards" step uses 8.00x, and that 8.00x is a
-block-140,000 GPU proving figure** (`BIGINT2_MIDDLE_PATH.md`: *"55, 56, 56, 56 s (21 seg) … 8.00x"*,
-*"journal digest identical to stock on all 212 signatures of block 140,000"*).
-
-On that same block, execute 9.19x realised **8.00x** at proving time -- proving captured ~87% of the
-execute ratio, because the coprocessor itself takes ~13%.
-
-⇒ If that relationship carries to tip, a tip-block proving win lands near **3.8-4.0x, not 8.00x**,
-and the 32 -> 8 card step becomes roughly **32 -> 15**.
-
-⚠ **INFERRED, NOT MEASURED, and do not promote it.** Two reasons to be careful:
-
-- **Execute-mode cycles are NOT proving cost.** bigint2 is a separate coprocessor circuit and
-  linearity must not be assumed -- the 87% capture rate is one data point on one block.
-- The 4.384x IS measured, on the real tip block, with an identical journal digest (below). It is the
-  *proving* consequence that is inferred.
-
-⇒ **The six-card conclusion rests on a figure measured on the most favourable block in the set.**
-A GPU prove of one tip-block chunk with bigint2 on would settle it, and it is the single highest-value
-GPU minute available. Until then, treat 6 cards as resting on an untested extrapolation.
-
-⇒ This also raises the stakes on **hazync#190** (type-aware packer), already a prerequisite: if
-Schnorr inputs get no bigint2 win, packing chunks by EC-op *type* matters more, not less.
+⛔ **Execute-mode cycles are NOT proving cost** — bigint2 is a separate coprocessor circuit and
+linearity must not be assumed. On block 140,000 execute 9.19x realised 8.00x proving (~87% capture,
+the coprocessor taking ~13%). If that capture rate carries, a 962,000 proving win is near **3.9x**.
+⇒ **One GPU prove of a 962,000 chunk with bigint2 on settles it**, and it is the highest-value GPU
+minute available — the fleet size depends on it directly.
 
 ## ✅ The correctness gate it passed on the way
 
-All **32 journal digests byte-identical to control**, `all_valid=1` on all 32, with three distinct
-`METHOD_ID`s proving all three arms genuinely rebuilt. `hazync_ecmult_verify` was confirmed present
-in the guest ELF (with a control string, so the check itself could fail).
+All **32 journal digests byte-identical to control**, `all_valid=1` on all 32, three distinct
+`METHOD_ID`s proving each arm genuinely rebuilt, and `hazync_ecmult_verify` confirmed in the guest
+ELF (checked alongside a control string, so the check itself could fail).
 
-⇒ **Substituting the ECDSA group arithmetic changes no committed output on 8,006 tip-era inputs.**
-That is a far broader differential test than the 212 signatures of block 140,000.
+⇒ **Substituting the ECDSA group arithmetic changes no committed output on 8,006 tip-era inputs** —
+a far broader differential test than block 140,000's 212 signatures.
