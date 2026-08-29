@@ -47,3 +47,7 @@ serde = []
 # hazync#139: swap ONLY the group arithmetic under libsecp ECDSA verify. EXPERIMENTAL, opt-in,
 # and it MOVES METHOD_ID — never enable for a shipped build.
 bigint2-ecdsa = ["dep:risc0-crypto"]
+# hazync#205 / GHOST_GAINS G1: recover a pubkey's Y through the bigint2 coprocessor instead of
+# libsecp's software modular sqrt. EXPERIMENTAL, opt-in, MOVES METHOD_ID. See src/liftx_accel.rs
+# and patches/0007. Shares the risc0-crypto dependency with the #139 middle path.
+liftx-accel = ["dep:risc0-crypto"]

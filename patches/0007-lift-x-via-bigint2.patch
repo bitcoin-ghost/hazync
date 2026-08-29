@@ -1,0 +1,57 @@
+hazync#205 / GHOST_GAINS G1 — route the pubkey Y recovery through the bigint2 coprocessor.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_LIFTX_ACCEL=1.
+
+secp256k1_ge_set_xo_var already computes x3 = x^3 + 7, already normalises y, and already flips the
+sign to the requested parity. The ONLY expensive step is secp256k1_fe_sqrt: measured at 264x a field
+multiply by libsecp's own bench_internal, and at 1,415,786,221 cycles on block 962,000 -- 9.83% of
+the block and ~45% of all post-#139 work, which patches/0005 does not touch because it lives outside
+secp256k1_ecmult.
+
+This replaces that one call with risc0-crypto's decompress, whose sqrt is the SAME exponentiation by
+(p+1)/4 that libsecp performs, run over bigint2 field arithmetic instead of the guest's software
+field_10x26. The helper returns the EVEN root; the parity fixup below is unchanged libsecp code.
+
+A failure -- including an x that is not on the curve -- returns 0 and falls through to libsecp's own
+fe_sqrt, which reaches the same verdict. So the accelerator is never load-bearing for correctness.
+
+--- a/src/group_impl.h
++++ b/src/group_impl.h
+@@ -316,7 +316,26 @@ static int secp256k1_ge_set_xo_var(secp256k1_ge *r, const secp256k1_fe *x, int o
+     secp256k1_fe x2, x3;
+     int ret;
+     SECP256K1_FE_VERIFY(x);
+ 
+     r->x = *x;
+     secp256k1_fe_sqr(&x2, x);
+     secp256k1_fe_mul(&x3, x, &x2);
+     r->infinity = 0;
+     secp256k1_fe_add_int(&x3, SECP256K1_B);
++#ifdef HAZYNC_LIFTX_ACCEL
++    ret = 0;
++    {
++        unsigned char bx[32], by[32];
++        secp256k1_fe xn;
++        extern int hazync_lift_x(const unsigned char *xb, unsigned char *out_y);
++        xn = *x;
++        secp256k1_fe_normalize_var(&xn);
++        secp256k1_fe_get_b32(bx, &xn);
++        if (hazync_lift_x(bx, by) && secp256k1_fe_set_b32_limit(&r->y, by)) {
++            ret = 1;
++        }
++    }
++    /* Not on the curve, or the accelerator declined: libsecp decides, exactly as before. */
++    if (!ret) {
++        ret = secp256k1_fe_sqrt(&r->y, &x3);
++    }
++#else
+     ret = secp256k1_fe_sqrt(&r->y, &x3);
++#endif
+     secp256k1_fe_normalize_var(&r->y);
+     if (secp256k1_fe_is_odd(&r->y) != odd) {
+         secp256k1_fe_negate(&r->y, &r->y, 1);
+     }
+ 
+     SECP256K1_GE_VERIFY(r);
+     return ret;
+ }

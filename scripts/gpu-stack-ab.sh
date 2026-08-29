@@ -173,6 +173,9 @@ for a in $ARMS; do
     # chunk, so ONLY the block total and the straggler are comparable to C and S -- a per-chunk
     # comparison would be comparing different work.
     P) build_arm P feat/stack-plus-packer 1 ;;
+    # Arm A: stack + armed packer + G1, the pubkey Y recovered on the coprocessor. HAZYNC_LIFTX_ACCEL
+    # must hold the SAME value at build and run time, like HAZYNC_BIGINT2_ECDSA.
+    A) export HAZYNC_LIFTX_ACCEL=1; build_arm A feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"

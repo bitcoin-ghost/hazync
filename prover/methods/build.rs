@@ -61,12 +61,29 @@ fn main() {
     // unmoved. Set to 1 and the guest gains the `bigint2-ecdsa` feature, which compiles
     // guest/src/bigint2_ecmult.rs and MOVES METHOD_ID. See patches/0005 for the libsecp half.
     println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
+    // hazync#205 / GHOST_GAINS G1: recover a pubkey's Y through the bigint2 coprocessor instead of
+    // libsecp's software sqrt. Independent of the middle path -- it needs no witness plumbing, so it
+    // can be enabled alone or alongside. See patches/0007 for the libsecp half.
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_ACCEL");
+
+    // Accumulate rather than early-return per flag. The previous shape returned on the FIRST flag it
+    // matched, so setting two silently built with only one -- the same class of silent default that
+    // already cost a measurement day: merging #139 without patch 0005 builds stock libsecp and says
+    // nothing, and #190 without its constant edit repacks nothing and says nothing.
+    let mut features: Vec<String> = Vec::new();
     if std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1") {
+        features.push("bigint2-ecdsa".to_string());
+    }
+    if std::env::var("HAZYNC_LIFTX_ACCEL").as_deref() == Ok("1") {
+        features.push("liftx-accel".to_string());
+    }
+
+    if !features.is_empty() {
         use std::collections::HashMap;
         // GuestOptions is #[non_exhaustive], so it cannot be built with a struct expression from
         // outside risc0-build; default-then-assign is the supported shape.
         let mut guest = risc0_build::GuestOptions::default();
-        guest.features = vec!["bigint2-ecdsa".to_string()];
+        guest.features = features;
         let mut opts = HashMap::new();
         opts.insert("method", guest);
         risc0_build::embed_methods_with_options(opts);
