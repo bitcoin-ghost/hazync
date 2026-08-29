@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_BIGINT2_SCHNORR:-0}" = "1" ]; then
+      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0006-schnorr-verify-group-arith-via-bigint2.patch" ) \
+        || die "patch 0006 did not apply"
+      grep -q 'HAZYNC_BIGINT2_SCHNORR' "$BASE/secp256k1/src/modules/schnorrsig/main_impl.h" \
+        || die "schnorrsig main_impl.h has no HAZYNC_BIGINT2_SCHNORR block — 0006 did not land"
+      say "arm $arm: patch 0006 applied, Schnorr call site present"
+    fi
     if [ "${HAZYNC_LIFTX_ACCEL:-0}" = "1" ]; then
       ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0007-lift-x-via-bigint2.patch" ) \
         || die "patch 0007 did not apply — arm would have measured a no-op"
@@ -202,6 +209,8 @@ for a in $ARMS; do
     # Arm A: stack + armed packer + G1, the pubkey Y recovered on the coprocessor. HAZYNC_LIFTX_ACCEL
     # must hold the SAME value at build and run time, like HAZYNC_BIGINT2_ECDSA.
     A) export HAZYNC_LIFTX_ACCEL=1; build_arm A feat/liftx-accel 1 ;;
+    # Arm F: FULL Ghost — bigint2 + armed packer + G1 + decompression memo + G3 Schnorr lane.
+    F) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1; build_arm F feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"

@@ -131,6 +131,10 @@ fn main() {
     // compiles the stock sqrt and says nothing.
     println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_ACCEL");
     let liftx_accel = std::env::var("HAZYNC_LIFTX_ACCEL").as_deref() == Ok("1");
+    // hazync#205 / G3 — Schnorr through the same accelerator. Needs bigint2 too: it reuses
+    // hazync_ecmult_verify, which only the bigint2-ecdsa feature exports.
+    println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_SCHNORR");
+    let schnorr_accel = std::env::var("HAZYNC_BIGINT2_SCHNORR").as_deref() == Ok("1");
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -194,6 +198,11 @@ fn main() {
         .define(
             "HAZYNC_LIFTX_ACCEL",
             if liftx_accel { Some("1") } else { None },
+        )
+        // G3 — enables patch 0006 in modules/schnorrsig/main_impl.h.
+        .define(
+            "HAZYNC_BIGINT2_SCHNORR",
+            if schnorr_accel { Some("1") } else { None },
         )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")

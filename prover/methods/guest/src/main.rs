@@ -1719,6 +1719,13 @@ fn chunk_prove() {
             vers_out.push(verbuf);
         }
     }
+    // A memo that never hits would silently reinstate the full decompression cost while every gate
+    // still passed, so report it: 0 hits is a FAILED experiment, not a null result.
+    #[cfg(feature = "liftx-accel")]
+    {
+        let (h, m) = liftx_accel::memo_stats();
+        risc0_zkvm::guest::env::log(&alloc::format!("liftx memo: hits={h} misses={m}"));
+    }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds, tx_wtxids, leaves_out, seqs_out, vers_out });
 }
 

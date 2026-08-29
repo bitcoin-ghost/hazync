@@ -44,7 +44,27 @@
 //! plumbing obligation, that the big-endian limb <-> byte conversion here is right. That is what a
 //! differential digest gate tests.
 
+use alloc::vec::Vec;
 use risc0_crypto::curves::secp256k1::{Affine, Fq};
+
+/// MEASURED on block 962,000: 6,913 verifying inputs decompress only **2,160 distinct keys** — the
+/// same square root is computed 3.2x over. G1 made each one cheap; it did not stop us doing each one
+/// three times. `hazync_lift_x` is still 12.15% of the post-G1 chunk work, so removing that
+/// redundancy is worth ~8.4% of the block for a lookup.
+///
+/// Memoising a pure function changes nothing observable, so this is the `identical` fidelity class
+/// in docs/MODELS.md -- not even advice-and-verify.
+///
+/// Sorted by `x`; binary search. A 2,160-entry table is ~135 KB, and a hit costs ~11 comparisons of
+/// 32 bytes against ~265 field operations. Guest execution is single-threaded.
+static mut MEMO: Vec<([u8; 32], [u8; 32])> = Vec::new();
+static mut MEMO_HITS: u32 = 0;
+static mut MEMO_MISS: u32 = 0;
+
+/// `(hits, misses)` — printed by the chunk so an empty cache reads as a FAILED experiment rather
+/// than a null result. A cache that silently never hits reinstates the full cost while every gate
+/// still passes.
+pub fn memo_stats() -> (u32, u32) { unsafe { (MEMO_HITS, MEMO_MISS) } }
 
 /// Recover the EVEN Y for the 32-byte big-endian `x`, writing it big-endian to `out_y`.
 ///
@@ -59,6 +79,17 @@ pub unsafe extern "C" fn hazync_lift_x(xb: *const u8, out_y: *mut u8) -> i32 {
     let mut x = [0u8; 32];
     core::ptr::copy_nonoverlapping(xb, x.as_mut_ptr(), 32);
 
+    // Memo first: 3.2x of these calls are repeats of a key already decompressed.
+    let memo = &mut *core::ptr::addr_of_mut!(MEMO);
+    match memo.binary_search_by(|p| p.0.cmp(&x)) {
+        Ok(i) => {
+            core::ptr::copy_nonoverlapping(memo[i].1.as_ptr(), out_y, 32);
+            MEMO_HITS += 1;
+            return 1;
+        }
+        Err(_) => MEMO_MISS += 1,
+    }
+
     // A normalised libsecp field element is always < p, so the reduction is exact rather than lossy.
     let fx = Fq::from_be_bytes_mod_order(&x);
 
@@ -67,6 +98,15 @@ pub unsafe extern "C" fn hazync_lift_x(xb: *const u8, out_y: *mut u8) -> i32 {
     let Some(p) = Affine::decompress(fx, false) else { return 0 };
     let Some((_, y)) = p.xy() else { return 0 };
 
-    y.to_bigint().write_be_bytes(core::slice::from_raw_parts_mut(out_y, 32));
+    let mut yb = [0u8; 32];
+    y.to_bigint().write_be_bytes(&mut yb);
+    core::ptr::copy_nonoverlapping(yb.as_ptr(), out_y, 32);
+
+    // Insert in sorted position so the search above stays valid. Insertion is O(n) memmove on a
+    // 2,160-entry table, paid once per DISTINCT key, against ~265 field ops saved on every repeat.
+    let memo = &mut *core::ptr::addr_of_mut!(MEMO);
+    if let Err(pos) = memo.binary_search_by(|p| p.0.cmp(&x)) {
+        memo.insert(pos, (x, yb));
+    }
     1
 }
