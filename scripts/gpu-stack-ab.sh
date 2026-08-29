@@ -131,6 +131,22 @@ build_arm() {
     || die "arm $arm: host is NOT linked against CUDA — this would prove at CPU speed"
   say "arm $arm: CUDA link confirmed"
 
+  # The guest ELF must actually CONTAIN the accelerator entry points the arm claims to use. A build
+  # can apply a patch, move METHOD_ID and still compile the stock path -- patch 0007 edits guest C
+  # source, so METHOD_ID moves whether or not the macro that gates it was ever defined.
+  # ⚠ nm -D reads zero symbols on these builds (they are static), so grep the binary, and always
+  # against a control that MUST be absent -- a check with no failing case is not a check.
+  local bin="$REPO/prover/target/release/host"
+  grep -qa hazync_NOT_A_REAL_SYMBOL "$bin" \
+    && die "arm $arm: negative control matched — the symbol check is meaningless"
+  grep -qa hazync_ecmult_verify "$bin" \
+    || die "arm $arm: hazync_ecmult_verify ABSENT — bigint2 is not in this binary"
+  if [ "${HAZYNC_LIFTX_ACCEL:-0}" = "1" ]; then
+    grep -qa hazync_lift_x "$bin" \
+      || die "arm $arm: hazync_lift_x ABSENT — G1 compiled the stock sqrt; the arm would measure a no-op"
+    say "arm $arm: G1 entry point confirmed in the binary"
+  fi
+
   # Read METHOD_ID from the binary's own command. NEVER scrape with strings: that returns
   # the Bitcoin genesis hash 000000000019d668…, which is 64 hex chars and entirely plausible.
   local mid; mid=$( cd "$REPO/prover" && ./target/release/host method-id 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1 )

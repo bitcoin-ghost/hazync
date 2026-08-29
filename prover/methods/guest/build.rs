@@ -126,6 +126,11 @@ fn main() {
     // hazync#139 middle path. See prover/methods/guest/src/bigint2_ecmult.rs and patches/0005.
     println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
     let bigint2 = std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1");
+    // hazync#205 / GHOST_GAINS G1. Same two-part shape as the middle path above, and the same trap:
+    // patch 0007 ADDS the #ifdef to group_impl.h, this define is what turns it on. Either alone
+    // compiles the stock sqrt and says nothing.
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_ACCEL");
+    let liftx_accel = std::env::var("HAZYNC_LIFTX_ACCEL").as_deref() == Ok("1");
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -183,6 +188,12 @@ fn main() {
         .define(
             "HAZYNC_BIGINT2_ECDSA",
             if bigint2 { Some("1") } else { None },
+        )
+        // hazync#205 G1 — enables patch 0007's #ifdef'd block in group_impl.h, routing the pubkey Y
+        // recovery to the coprocessor. Unset compiles libsecp's own fe_sqrt and moves nothing.
+        .define(
+            "HAZYNC_LIFTX_ACCEL",
+            if liftx_accel { Some("1") } else { None },
         )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
