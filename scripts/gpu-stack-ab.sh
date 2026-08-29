@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_SHA_FASTPATH:-0}" = "1" ]; then
+      ( cd "$BASE/bitcoin-core" && patch -p1 --forward < "$REPO/patches/0009-sha-transform-fastpath.patch" ) \
+        || die "patch 0009 did not apply"
+      grep -q 'HAZYNC_SHA_FASTPATH' "$BASE/bitcoin-core/src/crypto/sha256.cpp" \
+        || die "sha256.cpp has no HAZYNC_SHA_FASTPATH block — 0009 did not land"
+      say "arm $arm: patch 0009 applied, SHA fast path present"
+    fi
     if [ "${HAZYNC_SCALAR_INV_ACCEL:-0}" = "1" ]; then
       ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0008-scalar-inverse-via-bigint2.patch" ) \
         || die "patch 0008 did not apply"
@@ -220,6 +227,9 @@ for a in $ARMS; do
     F) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1; build_arm F feat/liftx-accel 1 ;;
     # Arm H: arm F plus the ECDSA scalar inverse on the coprocessor (patch 0008).
     H) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1; build_arm H feat/liftx-accel 1 ;;
+    # Arm J: arm H + the SHA Transform fast path + the key-reuse packer. Everything found today.
+    J) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
+              HAZYNC_SHA_FASTPATH=1 HAZYNC_PACK_KEYS=1; build_arm J feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
