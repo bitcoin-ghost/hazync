@@ -132,18 +132,32 @@ prove_arm() {
   local dir="$OUT/receipts.$arm"; mkdir -p "$dir"
   for i in $(seq 0 $((CHUNKS-1))); do
     if [ -s "$dir/chunk_$i.bin" ]; then say "arm $arm chunk $i: already present, skipping"; continue; fi
-    say "arm $arm chunk $i: proving"
-    ( nvidia-smi --query-gpu=memory.used --format=csv,noheader -l 5 > "$dir/vram_$i.log" 2>/dev/null ) &
-    local smi=$!
-    local t0=$SECONDS
-    ( cd "$REPO/prover" && HAZYNC_BLOCK="$BLOCK" HAZYNC_CHUNKS="$CHUNKS" HAZYNC_SEG_PO2="$SEG_PO2" \
-        HAZYNC_OUT="$dir/chunk_$i.bin" ./target/release/host prove-chunk "$i" ) >>"$dir/prove_$i.log" 2>&1
-    local rc=$?                       # capture BEFORE anything else touches $?
-    kill $smi 2>/dev/null
-    local wall=$((SECONDS-t0))
-    local peak; peak=$(sort -n "$dir/vram_$i.log" 2>/dev/null | tail -1)
-    echo "arm=$arm chunk=$i rc=$rc wall_s=$wall peak_vram=$peak" | tee -a "$OUT/results.tsv" | tee -a "$LOG"
-    [ $rc -eq 0 ] || die "arm $arm chunk $i FAILED rc=$rc — see $dir/prove_$i.log"
+    # hazync#119 is a KNOWN intermittent invalid-receipt fault: the same chunk, same binary and same
+    # input can fail on one box and pass on another, and its failure duration varies wildly (562 s
+    # and 30 s were both observed on the same chunk). Dying on it strands a box for hours. Retry,
+    # then move on and record the gap -- an incomplete block total is honest; an idle box is waste.
+    local attempt rc=1
+    for attempt in 1 2 3 4; do
+      say "arm $arm chunk $i: proving (attempt $attempt)"
+      ( nvidia-smi --query-gpu=memory.used --format=csv,noheader -l 5 > "$dir/vram_$i.log" 2>/dev/null ) &
+      local smi=$!
+      local t0=$SECONDS
+      ( cd "$REPO/prover" && HAZYNC_BLOCK="$BLOCK" HAZYNC_CHUNKS="$CHUNKS" HAZYNC_SEG_PO2="$SEG_PO2" \
+          HAZYNC_OUT="$dir/chunk_$i.bin" ./target/release/host prove-chunk "$i" ) >>"$dir/prove_$i.log" 2>&1
+      rc=$?                           # capture BEFORE anything else touches $?
+      kill $smi 2>/dev/null
+      local wall=$((SECONDS-t0))
+      local peak; peak=$(sort -n "$dir/vram_$i.log" 2>/dev/null | tail -1)
+      echo "arm=$arm chunk=$i rc=$rc wall_s=$wall peak_vram=$peak attempt=$attempt" \
+        | tee -a "$OUT/results.tsv" | tee -a "$LOG"
+      [ $rc -eq 0 ] && break
+      say "arm $arm chunk $i: attempt $attempt FAILED rc=$rc (hazync#119?) — see $dir/prove_$i.log"
+      rm -f "$dir/chunk_$i.bin"       # a partial receipt must not look banked to the resume check
+    done
+    if [ $rc -ne 0 ]; then
+      say "⛔ arm $arm chunk $i UNPROVEN after 4 attempts — CONTINUING; the block total will be short"
+      echo "arm=$arm chunk=$i UNPROVEN" >> "$OUT/results.tsv"
+    fi
   done
 }
 
