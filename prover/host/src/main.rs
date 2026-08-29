@@ -2004,6 +2004,85 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
 /// a contiguous chunk groups into consecutive transaction runs with no reordering. The aggregation
 /// concatenates chunk binds and indexes them by the block's own input index — emit them in any other
 /// order and it compares the wrong input, silently.
+/// hazync#205 — collect `(x, y)` for every public key the guest is about to decompress, so
+/// `secp256k1_ge_set_xo_var` can VERIFY `y^2 == x^3 + 7` instead of computing a modular square root.
+///
+/// Measured motivation: that sqrt is 1,415,786,221 cycles on block 962,000 — 9.83% of the block and
+/// ~45% of all post-#139 work — and `patches/0005` does not touch it, because it lives outside
+/// `secp256k1_ecmult`. libsecp's own `bench_internal` prices `field_sqrt` at 264x a `field_mul`.
+///
+/// ⚠ COMPLETENESS IS AN OPTIMISATION, NOT A CORRECTNESS CONDITION. A key we fail to find here simply
+/// pays the sqrt it pays today; a key we get WRONG fails the guest's check and also falls back. So
+/// this may be as approximate as it likes, and must never be trusted.
+///
+/// Returns pairs sorted ascending by `x` (BTreeMap ordering), which is the order the guest's binary
+/// search expects. Only the EVEN root is stored: `ge_set_xo_var` flips the sign itself to match the
+/// requested parity, so one entry per `x` serves both.
+fn liftx_hints(w: &BlockWitness, lo: usize, hi: usize) -> Vec<([u8; 32], [u8; 32])> {
+    use bitcoin::secp256k1::PublicKey;
+    use std::collections::BTreeMap;
+
+    let mut out: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+    let mut add_x = |x: &[u8]| {
+        if x.len() != 32 {
+            return;
+        }
+        // Ask for the even root; the guest negates when the caller wanted the odd one.
+        let mut comp = [0u8; 33];
+        comp[0] = 2;
+        comp[1..].copy_from_slice(x);
+        if let Ok(pk) = PublicKey::from_slice(&comp) {
+            let u = pk.serialize_uncompressed(); // 0x04 || X || Y
+            let (mut xa, mut ya) = ([0u8; 32], [0u8; 32]);
+            xa.copy_from_slice(&u[1..33]);
+            ya.copy_from_slice(&u[33..65]);
+            out.insert(xa, ya);
+        }
+    };
+    // A 33-byte compressed key contributes its x; a 32-byte value is taken as an x-only key.
+    let mut add_push = |b: &[u8]| match b.len() {
+        33 if b[0] == 2 || b[0] == 3 => add_x(&b[1..]),
+        32 => add_x(b),
+        _ => {}
+    };
+
+    let mut seen_tx: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for inp in &w.inputs[lo..hi] {
+        if !seen_tx.insert(inp.tx_idx) {
+            continue;
+        }
+        let raw = &w.txs[inp.tx_idx as usize].0;
+        let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw) else { continue };
+        for txin in &tx.input {
+            // Witness items: the key itself for P2WPKH, and the redeem/tapscript for the rest --
+            // walk those as scripts too, which is where multisig keys live.
+            for item in txin.witness.iter() {
+                add_push(item);
+                if item.len() > 33 {
+                    for ins in bitcoin::Script::from_bytes(item).instructions().flatten() {
+                        if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                            add_push(pb.as_bytes());
+                        }
+                    }
+                }
+            }
+            for ins in txin.script_sig.instructions().flatten() {
+                if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                    add_push(pb.as_bytes());
+                    if pb.as_bytes().len() > 33 {
+                        for i2 in bitcoin::Script::from_bytes(pb.as_bytes()).instructions().flatten() {
+                            if let bitcoin::script::Instruction::PushBytes(p2) = i2 {
+                                add_push(p2.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, lo: usize, hi: usize) {
     fn padded(v: &[u8]) -> Vec<u8> {
         let mut p = v.to_vec();
@@ -2027,6 +2106,25 @@ fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, 
     );
 
     b.write(&(groups.len() as u32)).unwrap();
+
+    // hazync#205 pubkey-Y hints, written BEFORE the groups because the guest verifies scripts as it
+    // reads them -- the table must be installed before the first VerifyScript call.
+    //
+    // ⛔ HAZYNC_LIFTX_HINT must hold the SAME value at BUILD time and at RUN time. The guest only
+    // reads this block when built with the `liftx-hint` feature, so a mismatch desynchronises the
+    // stream rather than merely losing the optimisation. Same discipline as HAZYNC_BIGINT2_ECDSA.
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        let hints = liftx_hints(w, lo, hi);
+        b.write(&(hints.len() as u32)).unwrap();
+        let mut flat = Vec::with_capacity(hints.len() * 64);
+        for (x, y) in &hints {
+            flat.extend_from_slice(x);
+            flat.extend_from_slice(y);
+        }
+        b.write_slice(&flat);
+        eprintln!("  liftx: {} pubkey hints for inputs {}..{}", hints.len(), lo, hi);
+    }
+
     for (tx_idx, gs, ge) in groups {
         let tx = &w.txs[tx_idx as usize].0;
         let prevouts = &w.tx_prevouts[tx_idx as usize].0;

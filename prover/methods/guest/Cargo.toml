@@ -47,3 +47,7 @@ serde = []
 # hazync#139: swap ONLY the group arithmetic under libsecp ECDSA verify. EXPERIMENTAL, opt-in,
 # and it MOVES METHOD_ID — never enable for a shipped build.
 bigint2-ecdsa = ["dep:risc0-crypto"]
+# hazync#205: take a pubkey's Y from a witness hint and VERIFY it rather than computing a modular
+# square root. EXPERIMENTAL, opt-in, and it MOVES METHOD_ID. Needs no extra dependency -- the check
+# is libsecp's own field arithmetic. See src/liftx_hint.rs and patches/0006.
+liftx-hint = []
