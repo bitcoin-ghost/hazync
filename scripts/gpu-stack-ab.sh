@@ -169,6 +169,10 @@ for a in $ARMS; do
   case "$a" in
     C) build_arm C main 0 ;;
     S) build_arm S feat/stack-integration 1 ;;
+    # Arm P: the stack PLUS the type-aware packer (#190). It changes which inputs land in which
+    # chunk, so ONLY the block total and the straggler are comparable to C and S -- a per-chunk
+    # comparison would be comparing different work.
+    P) build_arm P feat/stack-plus-packer 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
