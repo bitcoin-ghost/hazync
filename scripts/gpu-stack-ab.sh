@@ -98,6 +98,16 @@ build_arm() {
     ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0005-ecdsa-verify-group-arith-via-bigint2.patch" ) \
       || die "patch 0005 did not apply"
     export HAZYNC_BIGINT2_ECDSA=1
+    # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
+    # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
+    # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_LIFTX_ACCEL:-0}" = "1" ]; then
+      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0007-lift-x-via-bigint2.patch" ) \
+        || die "patch 0007 did not apply — arm would have measured a no-op"
+      grep -q 'HAZYNC_LIFTX_ACCEL' "$BASE/secp256k1/src/group_impl.h" \
+        || die "group_impl.h has no HAZYNC_LIFTX_ACCEL block — 0007 did not land"
+      say "arm $arm: patch 0007 applied, lift_x call site present"
+    fi
   else
     unset HAZYNC_BIGINT2_ECDSA
   fi
