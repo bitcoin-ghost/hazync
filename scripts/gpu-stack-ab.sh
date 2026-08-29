@@ -24,6 +24,18 @@ SEG_PO2="${SEG_PO2:-22}"
 CLEAN_MD5="308fc36774999286dcc77bf7c7df87b9"   # ecdsa_impl.h with patch 0005 NOT applied
 ECDSA_H="$BASE/secp256k1/src/ecdsa_impl.h"
 LOG="$OUT/run.log"
+CUDA_VER="${HAZYNC_CUDA_VER:-12.8}"
+
+# Mirror what provision-vps.sh phase 8 exports. A non-interactive ssh does not read .bashrc,
+# so none of this is set for us. HAZYNC_BASE is how the guest build.rs finds the Core source.
+export HAZYNC_BASE="$BASE"
+export RISC0_HOME="$HOME/.risc0"
+export CUDA_PATH="/usr/local/cuda-${CUDA_VER}"
+export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:/usr/local/cuda-${CUDA_VER}/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda-${CUDA_VER}/lib64:${LD_LIBRARY_PATH:-}"
+# VENDORED zkr: risc0-circuit-recursion's build.rs otherwise fetches a 57 MB blob that has
+# returned 403 from every network tried, aborting the build ~14 minutes in.
+[ -f "$REPO/reproduce/vendor/recursion_zkr.zip" ] && export RECURSION_SRC_PATH="$REPO/reproduce/vendor/recursion_zkr.zip"
 
 mkdir -p "$OUT"
 say() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
@@ -42,6 +54,16 @@ cp -n "$ECDSA_H" "$OUT/ecdsa_impl.h.clean" 2>/dev/null || true
 build_arm() {
   local arm="$1" branch="$2" want_bigint2="$3"
   say "=== ARM $arm: $branch  bigint2=$want_bigint2 ==="
+
+  local freeg; freeg=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
+  say "arm $arm: ${freeg}G free before build"
+  if [ "$freeg" -lt 18 ]; then
+    say "arm $arm: under 18G free — running cargo clean to reclaim before building"
+    ( cd "$REPO/prover" && cargo clean ) >>"$LOG" 2>&1
+    freeg=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
+    say "arm $arm: ${freeg}G free after clean"
+  fi
+  [ "$freeg" -ge 10 ] || die "arm $arm: only ${freeg}G free — refusing to start a build that will die mid-way"
 
   git -C "$REPO" fetch --all -q
   git -C "$REPO" checkout -q "$branch" || die "checkout $branch failed"
@@ -71,8 +93,16 @@ build_arm() {
     [ "$md5" = "$CLEAN_MD5" ] || die "arm $arm wanted stock but header is PATCHED"
   fi
 
-  ( cd "$REPO/prover" && cargo build --release --features cuda ) >>"$LOG" 2>&1 \
-    || die "arm $arm build failed"
+  # Build via provision-vps.sh phase 8, NOT a raw `cargo build --features cuda`. Phase 7 is the
+  # only place that sets GPU_FEATURES, so a hand-rolled build can accept --features cuda and still
+  # emit a CPU binary: nothing fails, nothing warns, and the "GPU" prover just runs at CPU speed.
+  ( cd "$REPO" && GPU=1 HAZYNC_PROVISION=build ./provision-vps.sh ) >>"$LOG" 2>&1 \
+    || die "arm $arm build failed — see $LOG"
+
+  # ...and then prove it actually linked CUDA, rather than trusting the flag.
+  ldd "$REPO/prover/target/release/host" 2>/dev/null | grep -qi cuda \
+    || die "arm $arm: host is NOT linked against CUDA — this would prove at CPU speed"
+  say "arm $arm: CUDA link confirmed"
 
   # Read METHOD_ID from the binary's own command. NEVER scrape with strings: that returns
   # the Bitcoin genesis hash 000000000019d668…, which is 64 hex chars and entirely plausible.
