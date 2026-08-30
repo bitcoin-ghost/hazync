@@ -82,6 +82,10 @@ fn main() {
     if std::env::var("HAZYNC_AGG_READSLICE").as_deref() == Ok("1") {
         features.push("agg-readslice".to_string());
     }
+    println!("cargo:rerun-if-env-changed=HAZYNC_MSM");
+    if std::env::var("HAZYNC_MSM").as_deref() == Ok("1") {
+        features.push("msm".to_string());
+    }
 
     if !features.is_empty() {
         use std::collections::HashMap;

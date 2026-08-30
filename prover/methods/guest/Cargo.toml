@@ -54,3 +54,5 @@ liftx-accel = ["dep:risc0-crypto"]
 # #136's read_slice fix for the AGGREGATE: 29.31% of it is serde Vec<u8> deserialisation of the chunk
 # journals. Host and guest must agree -- see HAZYNC_AGG_READSLICE.
 agg-readslice = []
+# Pippenger MSM over the coprocessor. Primitive only; see src/msm.rs and docs/MSM_BATCH_VERIFY.md.
+msm = ["dep:risc0-crypto"]

@@ -39,6 +39,9 @@ mod bigint2_ecmult;
 // hazync#205 / G1 — recover a pubkey's Y through the bigint2 coprocessor.
 #[cfg(feature = "liftx-accel")]
 mod liftx_accel;
+// Pippenger MSM over the bigint2 coprocessor. PRIMITIVE ONLY — not wired into verification.
+#[cfg(feature = "msm")]
+mod msm;
 use script_flags::block_script_flags;
 
 // A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)
@@ -1840,6 +1843,20 @@ fn main() {
         8 => test_locks(),
         9 => test_merkle(),
         12 => validate_block_stages(),
+        // Mode 13: MSM self-test. Reports the positive comparison AND a negative control, because a
+        // check that can only ever pass is not a check.
+        #[cfg(feature = "msm")]
+        13 => {
+            let n: u32 = env::read();
+            let window: u32 = env::read();
+            let (pos, neg) = msm::selftest(n as usize, window as usize);
+            env::log(&alloc::format!(
+                "msm selftest n={n} window={window}: matches_reference={pos} perturbed_differs={neg}"
+            ));
+            assert!(pos, "MSM DISAGREES WITH REFERENCE");
+            assert!(neg, "MSM NEGATIVE CONTROL FAILED — a perturbed scalar produced the same result");
+            env::commit(&(pos && neg));
+        }
         _ => panic!("unknown guest mode {mode}"),
     }
 }
