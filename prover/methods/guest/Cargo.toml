@@ -51,3 +51,6 @@ bigint2-ecdsa = ["dep:risc0-crypto"]
 # libsecp's software modular sqrt. EXPERIMENTAL, opt-in, MOVES METHOD_ID. See src/liftx_accel.rs
 # and patches/0007. Shares the risc0-crypto dependency with the #139 middle path.
 liftx-accel = ["dep:risc0-crypto"]
+# #136's read_slice fix for the AGGREGATE: 29.31% of it is serde Vec<u8> deserialisation of the chunk
+# journals. Host and guest must agree -- see HAZYNC_AGG_READSLICE.
+agg-readslice = []

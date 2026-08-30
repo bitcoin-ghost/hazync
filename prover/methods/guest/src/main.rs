@@ -1741,7 +1741,24 @@ fn aggregate() {
     let mut chunk_seqs: Vec<u32> = Vec::new();
     let mut chunk_vers: Vec<i32> = Vec::new();
     let mut chunks_ok = true;
+    // #136's fix, finally applied to the AGGREGATE. Chunks have read byte blobs via read_slice since
+    // #135; the aggregate still walked serde's word stream a byte at a time for every chunk journal.
+    // MEASURED on the production aggregate (HAZYNC_AGG_EXECUTE, not vb-stages): `Vec<u8> as
+    // Deserialize` is 336.1 M cycles, 29.31% of the whole aggregate -- its single largest term.
+    //
+    // ⚠ The witness ENCODER is a different win and was already taken: it cut the BYTES 2.019x. This
+    // changes the READ METHOD. Packing and read_slice are independent.
+    #[cfg(feature = "agg-readslice")]
+    fn read_bytes_agg(len: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (len as usize).div_ceil(4) * 4];
+        env::read_slice(&mut v);
+        v.truncate(len as usize);
+        v
+    }
     for _ in 0..k {
+        #[cfg(feature = "agg-readslice")]
+        let cj: Vec<u8> = { let n: u32 = env::read(); read_bytes_agg(n) };
+        #[cfg(not(feature = "agg-readslice"))]
         let cj: Vec<u8> = env::read();
         env::verify(self_id, &cj).expect("chunk proof invalid");
         let words: Vec<u32> = cj.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
@@ -1757,6 +1774,9 @@ fn aggregate() {
         chunk_vers.extend(out.vers_out);
         all_binds.extend(out.binds);
     }
+    #[cfg(feature = "agg-readslice")]
+    let prev_journal: Vec<u8> = { let n: u32 = env::read(); read_bytes_agg(n) };
+    #[cfg(not(feature = "agg-readslice"))]
     let prev_journal: Vec<u8> = env::read();
     let w: BlockWitness = env::read();
     let is_base: u32 = env::read();

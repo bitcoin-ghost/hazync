@@ -2321,8 +2321,28 @@ fn write_aggregate_env(
     b.write(&5u32).unwrap();
     b.write(&METHOD_ID).unwrap();
     b.write(&(receipts.len() as u32)).unwrap();
-    for r in receipts { b.write(&r.journal.bytes).unwrap(); }
-    b.write(&state_journal_bytes(anchor)).unwrap();
+    // #136's fix for the AGGREGATE. Guest reads these with read_slice when built with
+    // `agg-readslice`; a length prefix then a 4-byte-padded slice, exactly as write_chunk_inputs does.
+    // ⛔ HAZYNC_AGG_READSLICE must hold the SAME value at BUILD and RUN time -- the guest only reads
+    // this shape when compiled for it, so a mismatch desynchronises the stream rather than merely
+    // losing the optimisation. Same discipline as HAZYNC_BIGINT2_ECDSA.
+    if std::env::var("HAZYNC_AGG_READSLICE").as_deref() == Ok("1") {
+        fn padded(v: &[u8]) -> Vec<u8> {
+            let mut p = v.to_vec();
+            p.resize(v.len().div_ceil(4) * 4, 0);
+            p
+        }
+        for r in receipts {
+            b.write(&(r.journal.bytes.len() as u32)).unwrap();
+            b.write_slice(&padded(&r.journal.bytes));
+        }
+        let sj = state_journal_bytes(anchor);
+        b.write(&(sj.len() as u32)).unwrap();
+        b.write_slice(&padded(&sj));
+    } else {
+        for r in receipts { b.write(&r.journal.bytes).unwrap(); }
+        b.write(&state_journal_bytes(anchor)).unwrap();
+    }
     b.write(w).unwrap();
     b.write(&1u32).unwrap();
 }

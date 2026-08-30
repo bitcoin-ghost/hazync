@@ -77,6 +77,11 @@ fn main() {
     if std::env::var("HAZYNC_LIFTX_ACCEL").as_deref() == Ok("1") {
         features.push("liftx-accel".to_string());
     }
+    // #136's read_slice fix for the aggregate. Host side is runtime-gated on the SAME variable.
+    println!("cargo:rerun-if-env-changed=HAZYNC_AGG_READSLICE");
+    if std::env::var("HAZYNC_AGG_READSLICE").as_deref() == Ok("1") {
+        features.push("agg-readslice".to_string());
+    }
 
     if !features.is_empty() {
         use std::collections::HashMap;
