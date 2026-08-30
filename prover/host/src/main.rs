@@ -3679,6 +3679,30 @@ fn main() {
         verify_range_cmd(args.get(p + 1).expect("verify-range <bin>"));
         return;
     }
+    // `msm-selftest [n] [window]` — guest mode 13, EXECUTE only. Checks the Pippenger MSM against an
+    // independently written naive reference AND a negative control, and reports the cycle count so
+    // the op-count model behind the 8.6x claim can be checked rather than assumed.
+    if let Some(p) = args.iter().position(|a| a == "msm-selftest") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(64);
+        let w: u32 = args.get(p + 2).and_then(|s| s.parse().ok()).unwrap_or(10);
+        let mut b = ExecutorEnv::builder();
+        b.write(&13u32).unwrap();
+        b.write(&n).unwrap();
+        b.write(&w).unwrap();
+        let t = std::time::Instant::now();
+        let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+            .unwrap()
+            .run()
+            .expect("msm selftest FAILED — see the guest assertion above");
+        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2).sum();
+        println!("=== MSM SELFTEST n={n} window={w} ===");
+        println!("  total cycles (segment-rounded) {cycles}");
+        println!("  executed in {:.1}s", t.elapsed().as_secs_f64());
+        println!("  per point: {:.0} cycles", cycles as f64 / n as f64);
+        return;
+    }
+
     if args.iter().any(|a| a == "method-id") {
         // Print THIS host's guest image id so a contributor can check it matches a proof's guest.
         println!("METHOD_ID {}", method_id_hex());
