@@ -56,3 +56,5 @@ liftx-accel = ["dep:risc0-crypto"]
 agg-readslice = []
 # Pippenger MSM over the coprocessor. Primitive only; see src/msm.rs and docs/MSM_BATCH_VERIFY.md.
 msm = ["dep:risc0-crypto"]
+# Field-op benchmark (mode 15). Needs patches/0011 for the libsecp half.
+field-bench = []

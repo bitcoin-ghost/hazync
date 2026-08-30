@@ -3682,6 +3682,19 @@ fn main() {
     // `msm-selftest [n] [window]` — guest mode 13, EXECUTE only. Checks the Pippenger MSM against an
     // independently written naive reference AND a negative control, and reports the cycle count so
     // the op-count model behind the 8.6x claim can be checked rather than assumed.
+    // `field-bench [n]` — guest mode 15, execute only. libsecp software field ops vs the bigint2
+    // coprocessor, same op count, same run.
+    if let Some(p) = args.iter().position(|a| a == "field-bench") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(20000);
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&15u32).unwrap();
+        b.write(&n).unwrap();
+        ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+        return;
+    }
+
     // `msm-bench <n> <window>` — guest mode 14, execute only, MSM alone at production scale.
     if let Some(p) = args.iter().position(|a| a == "msm-bench") {
         use risc0_zkvm::ExecutorImpl;

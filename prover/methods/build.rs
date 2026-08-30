@@ -86,6 +86,10 @@ fn main() {
     if std::env::var("HAZYNC_MSM").as_deref() == Ok("1") {
         features.push("msm".to_string());
     }
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BENCH");
+    if std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1") {
+        features.push("field-bench".to_string());
+    }
 
     if !features.is_empty() {
         use std::collections::HashMap;

@@ -1,0 +1,51 @@
+Expose libsecp's own software field multiply and square, for benchmarking ONLY.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_FIELD_BENCH=1.
+⚠ Adds two functions and changes NO existing code path. Nothing in consensus calls them.
+
+The question this answers: `fe_mul_inner` + `fe_sqr_inner` are a MEASURED 86.4% of the stock block,
+and routing them to the bigint2 coprocessor would keep every Core algorithm intact -- same wNAF, same
+GLV, same ECDSA logic -- changing only the modular multiply. That is the posture of patches/0002,
+which is already accepted in both modes at 3.4% of guest compute, and arguably a SMALLER concession
+than #139, which replaces the scalar-multiplication strategy itself.
+
+Whether it is worth taking depends entirely on how a coprocessor field multiply compares with
+libsecp's software field_10x26, and that has never been measured. Benchmarking against a
+reimplementation would prove nothing, so this exposes libsecp's real functions.
+
+Both loops chain their result into the next iteration so nothing hoists, and return a byte of the
+final value so nothing is discarded as dead.
+
+--- a/src/secp256k1.c
++++ b/src/secp256k1.c
+@@ -833,3 +833,30 @@
+ #ifdef ENABLE_MODULE_ELLSWIFT
+ # include "modules/ellswift/main_impl.h"
+ #endif
++
++#ifdef HAZYNC_FIELD_BENCH
++/* Time libsecp's OWN software field multiply and square, so the coprocessor can be compared against
++ * the real thing rather than against a reimplementation. Chained so nothing can be hoisted out of
++ * the loop, and the result is returned so it cannot be discarded as dead. */
++int hazync_bench_fe_mul(unsigned int n) {
++    secp256k1_fe a, b, r;
++    unsigned char o[32];
++    unsigned int i;
++    secp256k1_fe_set_int(&a, 3);
++    secp256k1_fe_set_int(&b, 5);
++    for (i = 0; i < n; i++) { secp256k1_fe_mul(&r, &a, &b); a = r; }
++    secp256k1_fe_normalize_var(&a);
++    secp256k1_fe_get_b32(o, &a);
++    return (int)o[0];
++}
++int hazync_bench_fe_sqr(unsigned int n) {
++    secp256k1_fe a, r;
++    unsigned char o[32];
++    unsigned int i;
++    secp256k1_fe_set_int(&a, 7);
++    for (i = 0; i < n; i++) { secp256k1_fe_sqr(&r, &a); a = r; }
++    secp256k1_fe_normalize_var(&a);
++    secp256k1_fe_get_b32(o, &a);
++    return (int)o[0];
++}
++#endif

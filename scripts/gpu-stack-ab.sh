@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_FIELD_BENCH:-0}" = "1" ]; then
+      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0011-field-bench-shim.patch" ) \
+        || die "patch 0011 did not apply"
+      grep -q 'HAZYNC_FIELD_BENCH' "$BASE/secp256k1/src/secp256k1.c" \
+        || die "secp256k1.c has no HAZYNC_FIELD_BENCH block — 0011 did not land"
+      say "arm $arm: patch 0011 applied, field bench shim present"
+    fi
     if [ "${HAZYNC_SHA_D64_ACCEL:-0}" = "1" ]; then
       ( cd "$BASE/bitcoin-core" && patch -p1 --forward < "$REPO/patches/0010-transformd64-via-accelerator.patch" ) \
         || die "patch 0010 did not apply"

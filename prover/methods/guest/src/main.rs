@@ -1845,6 +1845,35 @@ fn main() {
         12 => validate_block_stages(),
         // Mode 13: MSM self-test. Reports the positive comparison AND a negative control, because a
         // check that can only ever pass is not a check.
+        // Mode 15: field-op benchmark. libsecp's software field_10x26 against the bigint2
+        // coprocessor, same operation count, same run — the ratio decides whether Core mode can have
+        // field-level acceleration without conceding an algorithm.
+        #[cfg(all(feature = "msm", feature = "field-bench"))]
+        15 => {
+            use risc0_crypto::curves::secp256k1::Fq;
+            extern "C" { fn hazync_bench_fe_mul(n: u32) -> i32; fn hazync_bench_fe_sqr(n: u32) -> i32; }
+            let n: u32 = env::read();
+            let t0 = env::cycle_count();
+            let s1 = unsafe { hazync_bench_fe_mul(n) };
+            let t1 = env::cycle_count();
+            let s2 = unsafe { hazync_bench_fe_sqr(n) };
+            let t2 = env::cycle_count();
+            // Coprocessor: same chaining so the comparison is like for like.
+            let mut a = Fq::from_be_bytes_mod_order(&[3u8; 32]);
+            let b = Fq::from_be_bytes_mod_order(&[5u8; 32]);
+            let t3 = env::cycle_count();
+            for _ in 0..n { a = &a * &b; }
+            let t4 = env::cycle_count();
+            let mut c = Fq::from_be_bytes_mod_order(&[7u8; 32]);
+            let t5 = env::cycle_count();
+            for _ in 0..n { c = &c * &c; }
+            let t6 = env::cycle_count();
+            env::log(&alloc::format!(
+                "FIELD BENCH n={n}\n  sw_mul={} sw_sqr={}\n  hw_mul={} hw_sqr={}\n  guard={} {} {} {}",
+                t1 - t0, t2 - t1, t4 - t3, t6 - t5, s1, s2,
+                a.to_bigint().as_le_bytes()[0], c.to_bigint().as_le_bytes()[0]));
+            env::commit(&((t1 - t0) as u64));
+        }
         // Mode 14: MSM benchmark at scale. Timing only — mode 13 is the correctness check.
         #[cfg(feature = "msm")]
         14 => {

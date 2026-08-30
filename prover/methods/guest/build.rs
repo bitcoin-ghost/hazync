@@ -145,6 +145,10 @@ fn main() {
     // patches/0002 never touched it. See patches/0010.
     println!("cargo:rerun-if-env-changed=HAZYNC_SHA_D64_ACCEL");
     let sha_d64 = std::env::var("HAZYNC_SHA_D64_ACCEL").as_deref() == Ok("1");
+    // Field-op benchmark shim. Patches secp256k1.c, so this define goes on the SECP build below --
+    // NOT the Core build. Getting that backwards is what left patches 0009/0010 inert for four arms.
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BENCH");
+    let field_bench = std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1");
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -218,6 +222,7 @@ fn main() {
             "HAZYNC_SCALAR_INV_ACCEL",
             if scalar_inv { Some("1") } else { None },
         )
+        .define("HAZYNC_FIELD_BENCH", if field_bench { Some("1") } else { None })
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))
