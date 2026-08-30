@@ -58,3 +58,5 @@ agg-readslice = []
 msm = ["dep:risc0-crypto"]
 # Field-op benchmark (mode 15). Needs patches/0011 for the libsecp half.
 field-bench = []
+# libsecp field backend on the coprocessor. Canonical 8x32 limbs, no conversion. patches/0012.
+field-bigint2 = ["dep:risc0-crypto"]

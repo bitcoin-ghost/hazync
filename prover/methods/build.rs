@@ -90,6 +90,10 @@ fn main() {
     if std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1") {
         features.push("field-bench".to_string());
     }
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BIGINT2");
+    if std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1") {
+        features.push("field-bigint2".to_string());
+    }
 
     if !features.is_empty() {
         use std::collections::HashMap;

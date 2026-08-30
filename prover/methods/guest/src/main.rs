@@ -42,6 +42,9 @@ mod liftx_accel;
 // Pippenger MSM over the bigint2 coprocessor. PRIMITIVE ONLY — not wired into verification.
 #[cfg(feature = "msm")]
 mod msm;
+// Coprocessor half of libsecp's field_bigint2 backend. See docs/FIELD_BIGINT2_BACKEND.md.
+#[cfg(feature = "field-bigint2")]
+mod field_bigint2;
 use script_flags::block_script_flags;
 
 // A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)

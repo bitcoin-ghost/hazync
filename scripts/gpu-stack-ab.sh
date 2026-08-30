@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_FIELD_BIGINT2:-0}" = "1" ]; then
+      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0012-select-field-bigint2-backend.patch" ) \
+        || die "patch 0012 did not apply"
+      grep -q 'HAZYNC_FIELD_BIGINT2' "$BASE/secp256k1/src/field.h" \
+        || die "field.h has no HAZYNC_FIELD_BIGINT2 branch — 0012 did not land"
+      say "arm $arm: patch 0012 applied, field_bigint2 backend selected"
+    fi
     if [ "${HAZYNC_FIELD_BENCH:-0}" = "1" ]; then
       ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0011-field-bench-shim.patch" ) \
         || die "patch 0011 did not apply"
@@ -286,6 +293,9 @@ for a in $ARMS; do
     # identical-class and belong to both models. No bigint2, no G1 accel, no Schnorr lane, no
     # scalar-inverse substitution.
     K) build_arm K feat/liftx-accel 0 ;;
+    # Arm C2: CORE mode + the coprocessor field backend. No substitution of any ALGORITHM -- libsecp
+    # keeps wNAF, GLV and every check; only the field representation and its five primitives move.
+    C2) export HAZYNC_FIELD_BIGINT2=1; build_arm C2 feat/liftx-accel 0 ;;
     Q) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1; build_arm Q feat/liftx-accel 1 ;;
     # Arm R: arm Q + #136 read_slice for the AGGREGATE. Chunk times should match Q exactly -- the

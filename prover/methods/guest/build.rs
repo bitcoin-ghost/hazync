@@ -149,6 +149,18 @@ fn main() {
     // NOT the Core build. Getting that backwards is what left patches 0009/0010 inert for four arms.
     println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BENCH");
     let field_bench = std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1");
+    // field_bigint2 backend: canonical 8x32 limbs backed by the coprocessor. The two headers are
+    // copied into the secp tree and selected by patches/0012, which edits field.h's backend switch.
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BIGINT2");
+    println!("cargo:rerun-if-changed=field_bigint2.h");
+    println!("cargo:rerun-if-changed=field_bigint2_impl.h");
+    let field_bigint2 = std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1");
+    if field_bigint2 {
+        for f in ["field_bigint2.h", "field_bigint2_impl.h"] {
+            std::fs::copy(f, format!("{secp}/src/{f}"))
+                .unwrap_or_else(|e| panic!("copying {f} into the secp tree: {e}"));
+        }
+    }
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -223,6 +235,7 @@ fn main() {
             if scalar_inv { Some("1") } else { None },
         )
         .define("HAZYNC_FIELD_BENCH", if field_bench { Some("1") } else { None })
+        .define("HAZYNC_FIELD_BIGINT2", if field_bigint2 { Some("1") } else { None })
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))
