@@ -38,6 +38,29 @@ final value so nothing is discarded as dead.
 +    secp256k1_fe_get_b32(o, &a);
 +    return (int)o[0];
 +}
++/* The REALISTIC cost of a bolt-on: what libsecp would pay per multiply if fe_mul routed to the
++ * coprocessor while keeping the 10x26 representation -- normalize, to bytes, call, from bytes.
++ * Comparing the coprocessor in its NATIVE form against libsecp's 10x26 flatters it; this does not. */
++extern void hazync_fq_mul(const unsigned char *a, const unsigned char *b, unsigned char *out);
++int hazync_bench_fe_mul_hw(unsigned int n) {
++    secp256k1_fe a, b, r;
++    unsigned char ab[32], bb[32], rb[32];
++    unsigned int i;
++    secp256k1_fe_set_int(&a, 3);
++    secp256k1_fe_set_int(&b, 5);
++    for (i = 0; i < n; i++) {
++        secp256k1_fe_normalize_var(&a);
++        secp256k1_fe_normalize_var(&b);
++        secp256k1_fe_get_b32(ab, &a);
++        secp256k1_fe_get_b32(bb, &b);
++        hazync_fq_mul(ab, bb, rb);
++        (void)secp256k1_fe_set_b32_limit(&r, rb);
++        a = r;
++    }
++    secp256k1_fe_normalize_var(&a);
++    secp256k1_fe_get_b32(rb, &a);
++    return (int)rb[0];
++}
 +int hazync_bench_fe_sqr(unsigned int n) {
 +    secp256k1_fe a, r;
 +    unsigned char o[32];

@@ -220,3 +220,22 @@ pub fn bench(n: usize, window: usize) -> ([u8; 32], [u8; 32]) {
         None => ([0u8; 32], [0u8; 32]),
     }
 }
+
+/// Coprocessor field multiply over 32-byte big-endian values, callable from C.
+///
+/// Exists so `patches/0011`'s bench can time the REALISTIC cost of routing libsecp's `fe_mul`
+/// through the coprocessor — normalize, `fe_get_b32`, this, `fe_set_b32` — rather than the
+/// native-form cost, which flatters it. libsecp's field element is 10 limbs x 26 bits with a
+/// magnitude, so those conversions are what a bolt-on would actually pay.
+///
+/// # Safety
+/// All three pointers must be valid for 32 bytes. Benchmark only; nothing in consensus calls this.
+#[no_mangle]
+pub unsafe extern "C" fn hazync_fq_mul(a: *const u8, b: *const u8, out: *mut u8) {
+    use risc0_crypto::curves::secp256k1::Fq;
+    let (mut ab, mut bb) = ([0u8; 32], [0u8; 32]);
+    core::ptr::copy_nonoverlapping(a, ab.as_mut_ptr(), 32);
+    core::ptr::copy_nonoverlapping(b, bb.as_mut_ptr(), 32);
+    let r = &Fq::from_be_bytes_mod_order(&ab) * &Fq::from_be_bytes_mod_order(&bb);
+    r.to_bigint().write_be_bytes(core::slice::from_raw_parts_mut(out, 32));
+}
