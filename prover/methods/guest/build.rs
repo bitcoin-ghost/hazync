@@ -141,6 +141,10 @@ fn main() {
     // SHA Transform fast path: inline byte swap, and no staging copy when already aligned.
     println!("cargo:rerun-if-env-changed=HAZYNC_SHA_FASTPATH");
     let sha_fast = std::env::var("HAZYNC_SHA_FASTPATH").as_deref() == Ok("1");
+    // Merkle-node double-SHA through the accelerated Transform. Different function from Transform;
+    // patches/0002 never touched it. See patches/0010.
+    println!("cargo:rerun-if-env-changed=HAZYNC_SHA_D64_ACCEL");
+    let sha_d64 = std::env::var("HAZYNC_SHA_D64_ACCEL").as_deref() == Ok("1");
 
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_WINDOW");
     println!("cargo:rerun-if-env-changed=HAZYNC_ECMULT_GEN_KB");
@@ -217,6 +221,10 @@ fn main() {
         .define(
             "HAZYNC_SHA_FASTPATH",
             if sha_fast { Some("1") } else { None },
+        )
+        .define(
+            "HAZYNC_SHA_D64_ACCEL",
+            if sha_d64 { Some("1") } else { None },
         )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")

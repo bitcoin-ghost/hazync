@@ -101,6 +101,13 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
+    if [ "${HAZYNC_SHA_D64_ACCEL:-0}" = "1" ]; then
+      ( cd "$BASE/bitcoin-core" && patch -p1 --forward < "$REPO/patches/0010-transformd64-via-accelerator.patch" ) \
+        || die "patch 0010 did not apply"
+      grep -q 'HAZYNC_SHA_D64_ACCEL' "$BASE/bitcoin-core/src/crypto/sha256.cpp" \
+        || die "sha256.cpp has no HAZYNC_SHA_D64_ACCEL block — 0010 did not land"
+      say "arm $arm: patch 0010 applied, TransformD64 routed to the accelerator"
+    fi
     if [ "${HAZYNC_SHA_FASTPATH:-0}" = "1" ]; then
       ( cd "$BASE/bitcoin-core" && patch -p1 --forward < "$REPO/patches/0009-sha-transform-fastpath.patch" ) \
         || die "patch 0009 did not apply"
@@ -243,6 +250,11 @@ for a in $ARMS; do
     # change is aggregate-only -- so a difference there means something unintended moved.
     R) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1 HAZYNC_AGG_READSLICE=1; build_arm R feat/liftx-accel 1 ;;
+    # Arm T: arm R + TransformD64 on the accelerator (patch 0010). Merkle nodes, 15.41% of the
+    # aggregate after read_slice.
+    T) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
+              HAZYNC_SHA_FASTPATH=1 HAZYNC_AGG_READSLICE=1 HAZYNC_SHA_D64_ACCEL=1; \
+              build_arm T feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
