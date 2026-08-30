@@ -218,14 +218,6 @@ fn main() {
             "HAZYNC_SCALAR_INV_ACCEL",
             if scalar_inv { Some("1") } else { None },
         )
-        .define(
-            "HAZYNC_SHA_FASTPATH",
-            if sha_fast { Some("1") } else { None },
-        )
-        .define(
-            "HAZYNC_SHA_D64_ACCEL",
-            if sha_d64 { Some("1") } else { None },
-        )
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))
@@ -257,7 +249,15 @@ fn main() {
         .flag(&fpm)
         // coreshim FIRST: its no-op sync.h/threadsafety.h override Core's pthread-backed versions so
         // the real chain.h CBlockIndex + pow.cpp compile on the single-threaded freestanding guest.
-        .include(&shim).include(&core).include(format!("{secp}/include"));
+        .include(&shim).include(&core).include(format!("{secp}/include"))
+        // ⛔ THESE BELONG HERE, NOT ON THE secp256k1 BUILD ABOVE. patches/0009 and 0010 edit
+        // crypto/sha256.cpp, which is a CORE translation unit compiled by THIS cc::Build. I first
+        // added both defines to the secp block, which never sees that file, so both patches applied
+        // to the source, moved METHOD_ID and did absolutely nothing -- for four consecutive arms.
+        // The comment immediately below this block already warned about exactly this: "a new id
+        // looked like proof the guest had been rebuilt, and it is not."
+        .define("HAZYNC_SHA_FASTPATH", if sha_fast { Some("1") } else { None })
+        .define("HAZYNC_SHA_D64_ACCEL", if sha_d64 { Some("1") } else { None });
     for tu in core_tus { b.file(format!("{core}/{tu}")); }
     b.file("verify_input.cpp");
 

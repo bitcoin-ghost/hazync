@@ -169,6 +169,15 @@ build_arm() {
     && die "arm $arm: negative control matched — the symbol check is meaningless"
   grep -qa hazync_ecmult_verify "$bin" \
     || die "arm $arm: hazync_ecmult_verify ABSENT — bigint2 is not in this binary"
+  # ⛔ A patch applying to the SOURCE is not evidence the MACRO was defined for the compile, and
+  # METHOD_ID moves either way because the file is guest source. patches/0009 and 0010 sat in
+  # crypto/sha256.cpp for four arms with their defines wired to the WRONG cc::Build, doing nothing.
+  # TransformD64Wrapper<sha256::Transform> is only instantiated when 0010 is really compiled in.
+  if [ "${HAZYNC_SHA_D64_ACCEL:-0}" = "1" ]; then
+    grep -qa TransformD64Wrapper "$bin" \
+      || die "arm $arm: TransformD64Wrapper ABSENT — patch 0010 applied but was NOT compiled in"
+    say "arm $arm: TransformD64Wrapper instantiation confirmed in the binary"
+  fi
   if [ "${HAZYNC_LIFTX_ACCEL:-0}" = "1" ]; then
     grep -qa hazync_lift_x "$bin" \
       || die "arm $arm: hazync_lift_x ABSENT — G1 compiled the stock sqrt; the arm would measure a no-op"
