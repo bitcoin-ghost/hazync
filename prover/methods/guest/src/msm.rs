@@ -183,3 +183,40 @@ pub fn selftest(n: usize, window: usize) -> (bool, bool) {
 
     (positive, negative)
 }
+
+/// Time `msm` ALONE at scale — no reference, no negative control.
+///
+/// `selftest` runs `msm_reference` too, which is 512 ops per point and would take hours at the
+/// 14,031 points a real block needs. This exists purely to measure the fast path at production size.
+///
+/// ⚠ It proves NOTHING about correctness. `selftest` is the check; this is the stopwatch. Keeping
+/// them separate is deliberate: a benchmark that also claimed to verify would be a check that cannot
+/// fail, which this tree has produced six times in one session.
+pub fn bench(n: usize, window: usize) -> ([u8; 32], [u8; 32]) {
+    let mut pts = Vec::with_capacity(n);
+    let mut scs = Vec::with_capacity(n);
+    let mut seed = [0u8; 32];
+    seed[31] = 3;
+    let mut p = Affine::GENERATOR;
+    for i in 0..n {
+        seed[0] = (i & 0xff) as u8;
+        seed[1] = ((i >> 8) & 0xff) as u8;
+        seed[2] = ((i >> 16) & 0xff) as u8;
+        scs.push(Fr::from_be_bytes_mod_order(&seed));
+        // Walk the generator so the points differ without paying a decompression each time.
+        let q = p;
+        p.add_into(&q, &Affine::GENERATOR);
+        pts.push(p);
+    }
+    let r = msm(&pts, &scs, window);
+    // Commit the coordinates so nothing above can be optimised away as dead.
+    match r.xy() {
+        Some((x, y)) => {
+            let (mut xb, mut yb) = ([0u8; 32], [0u8; 32]);
+            x.to_bigint().write_be_bytes(&mut xb);
+            y.to_bigint().write_be_bytes(&mut yb);
+            (xb, yb)
+        }
+        None => ([0u8; 32], [0u8; 32]),
+    }
+}

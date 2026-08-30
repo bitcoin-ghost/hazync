@@ -1845,6 +1845,14 @@ fn main() {
         12 => validate_block_stages(),
         // Mode 13: MSM self-test. Reports the positive comparison AND a negative control, because a
         // check that can only ever pass is not a check.
+        // Mode 14: MSM benchmark at scale. Timing only — mode 13 is the correctness check.
+        #[cfg(feature = "msm")]
+        14 => {
+            let n: u32 = env::read();
+            let window: u32 = env::read();
+            let (x, _y) = msm::bench(n as usize, window as usize);
+            env::commit(&x);
+        }
         #[cfg(feature = "msm")]
         13 => {
             let n: u32 = env::read();

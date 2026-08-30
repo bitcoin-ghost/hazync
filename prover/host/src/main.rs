@@ -3682,6 +3682,27 @@ fn main() {
     // `msm-selftest [n] [window]` — guest mode 13, EXECUTE only. Checks the Pippenger MSM against an
     // independently written naive reference AND a negative control, and reports the cycle count so
     // the op-count model behind the 8.6x claim can be checked rather than assumed.
+    // `msm-bench <n> <window>` — guest mode 14, execute only, MSM alone at production scale.
+    if let Some(p) = args.iter().position(|a| a == "msm-bench") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(14031);
+        let w: u32 = args.get(p + 2).and_then(|s| s.parse().ok()).unwrap_or(10);
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&14u32).unwrap();
+        b.write(&n).unwrap();
+        b.write(&w).unwrap();
+        let t = std::time::Instant::now();
+        let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2()).sum();
+        println!("=== MSM BENCH n={n} window={w} ===");
+        println!("  cycles {cycles}   ({:.1} M)", cycles as f64 / 1e6);
+        println!("  executed in {:.1}s", t.elapsed().as_secs_f64());
+        println!("  NAIVE equivalent for {} sigs: {:.0} M (7,015 x 79,971 measured = 561 M)",
+                 (n - 1) / 2, ((n as f64 - 1.0) / 2.0) * 79_971.0 / 1e6);
+        return;
+    }
+
     if let Some(p) = args.iter().position(|a| a == "msm-selftest") {
         use risc0_zkvm::ExecutorImpl;
         let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(64);
