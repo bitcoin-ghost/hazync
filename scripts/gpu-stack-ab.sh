@@ -174,8 +174,16 @@ build_arm() {
   local bin="$REPO/prover/target/release/host"
   grep -qa hazync_NOT_A_REAL_SYMBOL "$bin" \
     && die "arm $arm: negative control matched — the symbol check is meaningless"
-  grep -qa hazync_ecmult_verify "$bin" \
-    || die "arm $arm: hazync_ecmult_verify ABSENT — bigint2 is not in this binary"
+  # ⚠ Only assert this when the arm ASKED for bigint2. Arm K is Core mode and deliberately has no
+  # substitution, so the symbol is correctly absent there — the first arm for which that is true.
+  if [ "$want_bigint2" = "1" ]; then
+    grep -qa hazync_ecmult_verify "$bin" \
+      || die "arm $arm: hazync_ecmult_verify ABSENT — bigint2 was requested and is not in this binary"
+  else
+    grep -qa hazync_ecmult_verify "$bin" \
+      && die "arm $arm: hazync_ecmult_verify PRESENT — bigint2 was NOT requested; this is not a Core build"
+    say "arm $arm: no bigint2 symbol, as expected for a Core-model arm"
+  fi
   # ⛔ A patch applying to the SOURCE is not evidence the MACRO was defined for the compile, and
   # METHOD_ID moves either way because the file is guest source. patches/0009 and 0010 sat in
   # crypto/sha256.cpp for four arms with their defines wired to the WRONG cc::Build, doing nothing.
