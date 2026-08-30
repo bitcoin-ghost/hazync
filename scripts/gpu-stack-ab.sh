@@ -239,6 +239,10 @@ for a in $ARMS; do
     # Arm Q: arm N with the Schnorr packer constant reverted -- arm H packing plus the SHA fast path.
     Q) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1; build_arm Q feat/liftx-accel 1 ;;
+    # Arm R: arm Q + #136 read_slice for the AGGREGATE. Chunk times should match Q exactly -- the
+    # change is aggregate-only -- so a difference there means something unintended moved.
+    R) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
+              HAZYNC_SHA_FASTPATH=1 HAZYNC_AGG_READSLICE=1; build_arm R feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
