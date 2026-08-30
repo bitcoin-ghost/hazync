@@ -3695,7 +3695,7 @@ fn main() {
             .unwrap()
             .run()
             .expect("msm selftest FAILED — see the guest assertion above");
-        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2).sum();
+        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2()).sum();
         println!("=== MSM SELFTEST n={n} window={w} ===");
         println!("  total cycles (segment-rounded) {cycles}");
         println!("  executed in {:.1}s", t.elapsed().as_secs_f64());
