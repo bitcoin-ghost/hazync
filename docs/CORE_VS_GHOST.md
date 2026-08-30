@@ -12,11 +12,18 @@ Not "did we touch Core's source" — that misclassifies. The line is **who decid
 |---|---|---|---|
 | **identical** | untouched | ✅ | Tier 0 codegen, witness encoder, join-tree pipelining, #190 packer, `read_slice`, SHA fast path, `TransformD64`, decompression memo |
 | **advice-and-verify** | untouched — Core's own arithmetic still decides | ✅ | #205 liftx **hint** (`y² = x³+7` checked with libsecp's `fe_sqr`) |
-| **substitution** | replaced; needs an equivalence argument | ❌ Ghost only | #139 bigint2, G1 liftx **accel**, G3 Schnorr lane, scalar inverse |
+| **substitution (narrow)** | one primitive replaced at a backend interface libsecp already parameterises; every algorithm above it is untouched | ⚖ **a choice** | `patches/0002` SHA-256 accelerator (already in both), **`patches/0012` field backend** |
+| **substitution (broad)** | the *algorithm* is replaced; needs an equivalence argument | ❌ Ghost only | #139 bigint2, G1 liftx **accel**, G3 Schnorr lane, scalar inverse |
 
 ⚠ `patches/0002` (SHA-256 → risc0 accelerator) is substitution and is **already shipped in both**, at
 **3.4%** of guest compute. So Core mode is *maximal-Core*, not *pure* Core, and that precedent is what
 every later substitution has been argued from.
+
+⏰ **2026-08-30: the narrow/broad split is new, and it is the whole decision.** `patches/0012` replaces
+libsecp's field *backend* — the thing `field_5x52` and `field_10x26` already are — and leaves wNAF,
+GLV, the ECDSA logic and every check exactly as they are. #139 replaces the scalar-multiplication
+*strategy*. Both are substitutions; they are not the same size of claim, and §3 shows they are not
+remotely the same size of win per unit of concession.
 
 ## 2. What each contains
 
@@ -32,8 +39,14 @@ middle path · G1 liftx via coprocessor · G3 Schnorr lane · scalar inverse via
 | | chunk work | straggler | aggregate | **cards @600 s** |
 |---|---|---|---|---|
 | stock `main` | 14,720 s | 1.054 | 1,131.8 s | **28** |
-| **CORE** *(derived)* | **~12,709 s** | 1.054 | 627 s | **~24** |
+| **CORE, pure** *(derived)* | **~12,709 s** | 1.054 | 627 s | **~24** |
+| **CORE + field backend** *(derived)* | **~4,014 s** | 1.054 | 627 s | **~9** |
 | **GHOST** *(measured)* | **1,683 s** | 1.312 | **627 s** | **5** |
+
+⏰ **The "Core costs 5x the hardware" headline is an artefact of not having the field backend.** With
+it the gap is ~1.8x, not ~5x, and with the levers still open on each side (§7) it is ~6–7 vs 5. That
+changes the trade this document exists to frame. ⛔ **The Core rows remain derived — arm K and arm C2
+have both never been run.**
 
 **Chunk speedup vs stock: Core ~1.16x · Ghost 8.75x.** Ghost needs **7.55x fewer chunk-seconds**.
 
@@ -58,12 +71,13 @@ substitution decision dominates; the rest is refinement.
 
 ## 4. Pros and cons
 
-### CORE — ~24 cards
+### CORE, pure — ~24 cards
 ✅ *"This is Bitcoin Core's validation logic, proven."* Defensible to anyone without qualification.
 ✅ No equivalence argument to maintain, review, or re-argue when libsecp changes.
 ✅ Every lever is plumbing or scheduling; a bug costs performance, never correctness.
 ✅ #205's hint is **advice-and-verify**: a wrong or hostile hint makes it slower, never wrong.
-❌ **~24 cards.** Roughly 5x the hardware for the same block.
+❌ **~24 cards.** Roughly 5x the hardware for the same block — but see §7: one narrow
+substitution takes this to ~9, and the pure position's own floor is ~20.
 ❌ The zero-fidelity levers are nearly exhausted — Tier 0 is 1.02x, the SHA fast path 1.02x, and the
 packer is worth **nothing** here because without bigint2 the block is already balanced (1.054).
 ⚠ Its one large untaken lever is the liftx **hint**, worth ~1.11x — written (PR #206) but never built.
@@ -104,3 +118,49 @@ combination has never been run.
 ⚠ **This session composed measured parts wrongly four times** — a 7.53x projection that measured
 4.48x, a txid lever off by 36x, an "obviously correct" Schnorr constant that cost a card, and an MSM
 sized at the wrong scale. **Treat §3's Core row as a hypothesis, not a result.**
+
+## 7. ⏰ The three positions, and each one's floor
+
+Added 2026-08-30, when the field backend made the two-way comparison the wrong shape.
+
+| position | what it concedes | levers still open | **floor** |
+|---|---|---|---|
+| **Core, pure** | nothing beyond `patches/0002` | liftx hint (#206, never compiled) · worker processes · paging | **~20** |
+| **Core + field backend** | libsecp's field *representation* and five primitives | lazy adds ✅ · cheaper `mul_int` ✅ · scalar-inverse hint · liftx hint + memo · paging + `WINDOW_A` re-sweep · worker processes | **~6–7** |
+| **Ghost** | the scalar-multiplication strategy, four ways | MSM ⛔ rejected on measured grounds (one card) | **5** *(measured today)* |
+
+⛔ **Every floor above except Ghost's is modelled.** They compose measured components; the composition
+has not been run. This document has been wrong that way before — §6.
+
+### Why Core cannot go below ~6, whatever else is done
+
+Both halves of this are measured:
+
+```
+Ghost:  double_scalar_mul, one fused coprocessor primitive =  79,971 cy/verify
+Core:   ~1,780 field ops composed at 83 cy each            = 147,740 cy/verify
+                                                     ratio    1.85x
+```
+
+Accelerating every field operation still leaves Core *composing* them under libsecp's wNAF/GLV. Closing
+the last 1.85x means replacing the scalar-multiplication strategy — which is precisely what #139 does,
+and precisely what Core mode is defined by not doing. **~6 cards is a structural floor, not a backlog.**
+
+### What the field backend has actually passed, as of 2026-08-30
+
+✅ **libsecp256k1's own test suite**, `-DVERIFY`, counts 2 / 8 / 32 — `no problems found`, with a stock
+`field_10x26` control passing on the same command line. It found **two real bugs** first:
+`fe_get_bounds(0)` must be zero, not the maximum; and its low limb must be **even**, because
+`run_field_half` decrements it to build a worst-case odd input.
+✅ **A standalone mod-p harness**: 2,880 checks against Python arbitrary precision across `0`, `1`,
+`p−2`, `p−1`, **`p`, `p+1`, `p+2`** (the lazy invariant admits these), `2^255`, `2^256−1`,
+`2^256−(2^32+977)` and 60 random values — 0 failures.
+✅ **Mutation controls on both harnesses.** ⚠ The first attempt at the libsecp one was **void**: the
+quoted `#include` resolved to the good copy in `secp/src/`, so no mutant ever reached the compiler and
+all three "controls" passed. Each mutant now gets its own tree and is `cmp`-checked against the source
+before it counts.
+
+⛔ **Not yet passed: the journal-digest gate.** No guest build, no `METHOD_ID`, no block. The host
+reference in `testsupport/field_bigint2_native.c` stands in for the coprocessor and is deliberately
+the dumbest possible schoolbook code, so the *glue* is what these tests exercise. **Until arm C2 runs
+block 962,000 to a byte-identical digest, the ~9 in §3 is a projection.**

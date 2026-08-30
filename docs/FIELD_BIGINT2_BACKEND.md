@@ -37,6 +37,9 @@ normalised — so conversion never happens.
 magnitude grows instead, and it costs ~10 cycles. A canonical representation cannot do that; every add
 must reduce. **Adds get more expensive, and there are more of them than multiplies.**
 
+⏰ **2026-08-30: the trap is smaller than this section assumed — see §3b.** Adds do not have to reduce,
+and the reduction was never the expensive part anyway.
+
 | design | mul | add | block | cards |
 |---|---|---|---|---|
 | (a) canonical, adds via coprocessor | 83 | 83 | 3.18x | 10 |
@@ -51,6 +54,42 @@ cheap operations.
 ⚠ **My first estimate said 7 cards. It counted only mul/sqr getting cheaper and ignored that adds get
 worse.** ~1.5 adds per multiply at +40 cycles each is ~750 M cycles back. **9, not 7.**
 
+## 3b. ⏰ Two corrections to §3, found 2026-08-30
+
+The first implementation took §3 literally: canonical after every operation, and constant-time
+throughout. Both were wrong, and the second was the expensive one.
+
+**(i) The reduction in `fe_add` is redundant.** `Fq::reduce_from_bigint` accepts any 256-bit value,
+and because `p` has its MSB set it takes the `msb_set()` fast path — a *single* conditional subtract.
+The coprocessor therefore reduces on load whether or not `fe_add` did. So elements are now **lazy**:
+any value in `[0, 2^256)` congruent to the element. Adds fold the `2^256` carry with
+`2^256 = 2^32 + 977` and leave it there; only `normalize` canonicalises. This is what libsecp's own
+backends do, for the same reason.
+
+**(ii) ⛔ Constant-time buys nothing inside a zkVM, and it cost more than the arithmetic.** The
+branchless conditional subtract was 8 subtract-with-borrow plus 8 three-instruction selects — **24 of
+the 72 instructions in `fe_add` were the select alone.** There is no timing side channel in a proven
+execution trace, and the guest only ever *verifies* public data; it holds no secret scalar. libsecp's
+own `_var` functions already branch throughout the verification path this backend serves. `fe_cmov`
+and `fe_storage_cmov` stay branchless anyway — they are table-lookup primitives and cheap either way.
+
+MEASURED, static rv32im instruction counts (`riscv32-unknown-elf-gcc -O3 -march=rv32im`, per function):
+
+| function | canonical + constant-time | lazy + branching | |
+|---|---|---|---|
+| `fe_add` | 155 | **74** | **2.09x** |
+| `negate` | 61 | **28** | **2.18x** |
+| `normalize` | 1 | 21 | now real work — the cost of laziness |
+| `mul_int` | 50 *(a loop)* | 56 *(straight line)* | see below |
+
+⚠ **`mul_int`'s static count is misleading and I nearly quoted it as a regression.** The old one was a
+double-and-add **loop**; libsecp calls it with 2, 3, 4, 5 and `SECP256K1_B`, so it ran 3–5 inlined
+`addmod`s per call. The new one is a single 8-limb multiply-accumulate pass with an overflow fold —
+one straight line, executed once. Static size says 0.89x; dynamic work is several times better.
+
+⛔ **These are static instruction counts, not cycles, and not a block-level number.** They justify the
+change; they do not size it. The block figure comes from the run in §5.
+
 ## 4. What has to be written
 
 27 functions (`grep -oE 'secp256k1_fe_impl_[a-z_0-9]+' field.h`). Since the representation is always
@@ -64,8 +103,16 @@ canonical and magnitude is always 1, a good many collapse to almost nothing:
 | **byte I/O** | `set_b32_mod`, `set_b32_limit`, `get_b32` | endianness only; the representation is already canonical |
 | **coprocessor** | `mul`, `sqr`, `inv`, `inv_var`, `is_square_var` | via `Fq` |
 
-⚠ `half` needs care: halving mod `p` is `x/2` if even, `(x+p)/2` if odd. Must stay constant-time.
-⚠ `cmov` must stay branch-free — it is used in scalar-multiplication ladders.
+⚠ `half` needs care: halving mod `p` is `x/2` if even, `(x+p)/2` if odd. Both stay correct for a lazy
+input, since `2·((x+p)/2) = x+p = x (mod p)` and `x+p < 2^257`.
+⚠ `cmov` stays branch-free — it is a table-lookup primitive and cheap either way.
+
+⛔ **"27 functions" was wrong: there are 30.** The three the count missed are not optional, and the
+link failed without them — `fe_storage_cmov`, `fe_to_signed30`, `fe_from_signed30`. The last two
+convert to and from `modinv32`'s nine signed 30-bit limbs; neither is on the hot path, because
+`fe_inv` and `fe_inv_var` both go to the coprocessor, but `modinv32_impl.h` is still compiled in and
+libsecp's tests call them directly. **`grep`ping `field.h` for `secp256k1_fe_impl_*` does not
+enumerate a backend's obligations — the compiler does.**
 
 ## 5. How it gets validated
 
@@ -82,7 +129,56 @@ canonical and magnitude is always 1, a good many collapse to almost nothing:
 levers that compiled green and did nothing; a field backend that compiles green and is *wrong* is the
 same failure with far worse consequences.
 
+## 5b. ⏰ What has actually passed, 2026-08-30
+
+Gates 0 and 1 both run on a workstation with no GPU and no guest build: `scripts/field-backend-tests.sh`.
+
+| gate | result |
+|---|---|
+| **0. mod-p harness vs arbitrary precision** | ✅ **2,992 checks, 0 failures** |
+| **1. libsecp256k1's own suite, `-DVERIFY`, counts 2 / 8 / 32** | ✅ **`no problems found`**, with a stock `field_10x26` control passing on the same command line |
+| **2. mutation controls** | ✅ every mutant caught by at least one gate |
+| 3. journal digest on block 962,000 | ⛔ **NOT RUN** — needs a guest build |
+| 4. corrupt-signature negative control | ⛔ **NOT RUN** |
+
+### Gate 1 found two real bugs
+
+Both in `fe_get_bounds`, and neither would have been found by reasoning about the backend in
+isolation: **magnitude 0 means the bound is zero**, not the maximum; and **the low limb must be even**,
+because `run_field_half` decrements it to build a worst-case odd input. `fe_get_bounds` is called from
+`tests.c` and nowhere else, so both fixes are free.
+
+### ⛔ Gate 1 is necessary and NOT sufficient
+
+Two deliberately broken backends **pass libsecp's full suite at count 32** and are caught only by
+gate 0:
+
+- `hz_neg` skipping `hz_canon` — wrong for every input `>= p`
+- `fe_to_signed30` skipping `hz_canon` — hands `modinv32` a value outside its contract
+
+The reason is structural: **the lazy invariant creates states libsecp cannot express.** An element
+`>= p` does not exist under `field_5x52` or `field_10x26`, so no test generator in `tests.c` ever
+produces one. Any future lazy backend inherits this gap. Keep both gates.
+
+### ⚠ The first mutation run was void
+
+Three "controls" passed and I nearly recorded that as coverage. The quoted `#include` in
+`field_impl.h` resolves relative to the **including file's** directory first, so it read the good copy
+already sitting in `secp/src/` and no mutant ever reached the compiler. Each mutant now gets its own
+tree and is `cmp`-checked against the source before its result counts. → `gotcha_checks_that_cannot_fail`
+
 ## 6. Status
 
-⛔ **NOT WRITTEN.** This is the design and the cost case. The measurements in §1 are real; everything
-in §3's table is derived from them. **~9 cards is a projection until a build passes §5's digest gate.**
+⏰ **WRITTEN, and validated as far as a workstation can take it.** `patches/0012` plus
+`field_bigint2{,_impl}.h`, `field_bigint2.rs`, and `testsupport/`. Gates 0-2 pass.
+
+⛔ **The block number is still a projection.** No guest build, no `METHOD_ID`, no digest. The host
+reference stands in for the coprocessor, so what is proven is the *glue* — representation, lazy
+invariant, libsecp's contracts — not the coprocessor and not the block. **~9 cards holds only if arm
+C2 reproduces the control's journal digest byte for byte on block 962,000.**
+
+⚠ **Arm C2 would have measured nothing until today.** `patches/0012` was applied inside the
+`want_bigint2 = 1` branch of `scripts/gpu-stack-ab.sh`, and arm C2 passes `0` — Core mode has no #139.
+It exported the macro, never applied the patch, and would have built stock libsecp while reporting a
+moved `METHOD_ID`. That is the seventh silent no-op of this exact shape, and the first inside the code
+written to catch them. Fixed, with a two-sided binary assertion on `hazync_fq_mul_limbs`.

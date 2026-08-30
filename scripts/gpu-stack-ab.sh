@@ -92,6 +92,20 @@ build_arm() {
   cp -f "$OUT/ecdsa_impl.h.clean" "$ECDSA_H"
   rm -rf "$REPO/prover/target/riscv-guest"
 
+  # ⛔ The field backend is INDEPENDENT of $want_bigint2 and must be applied outside it. Arm C2 is
+  # Core mode -- want_bigint2=0, no #139 -- yet it needs 0012. This block lived inside the
+  # want_bigint2 branch until 2026-08-30, which meant arm C2 exported HAZYNC_FIELD_BIGINT2=1, never
+  # applied the patch, and would have silently measured STOCK libsecp as though it were the backend.
+  # The seventh silent no-op of this shape, and the first one inside the code written to catch them.
+  if [ "${HAZYNC_FIELD_BIGINT2:-0}" = "1" ]; then
+    ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0012-select-field-bigint2-backend.patch" ) \
+      || die "patch 0012 did not apply"
+    grep -q 'HAZYNC_FIELD_BIGINT2' "$BASE/secp256k1/src/field.h" \
+      || die "field.h has no HAZYNC_FIELD_BIGINT2 branch — 0012 did not land"
+    [ -f "$BASE/secp256k1/src/field_bigint2_impl.h" ] || say "arm $arm: (build.rs copies the backend headers in)"
+    say "arm $arm: patch 0012 applied, field_bigint2 backend selected"
+  fi
+
   if [ "$want_bigint2" = "1" ]; then
     # TRAP (on): merging the branch does NOT enable bigint2. The PATCH adds the #ifdef;
     # the ENV VAR defines the macro it tests. Either alone silently builds stock libsecp.
@@ -101,13 +115,6 @@ build_arm() {
     # G1 (#205): the env var alone compiles hazync_lift_x and NEVER CALLS IT -- patch 0007 is what
     # adds the call site in ge_set_xo_var. Same silent-no-op shape as #139 without 0005 and #190
     # without its constant, both of which have already cost a measurement.
-    if [ "${HAZYNC_FIELD_BIGINT2:-0}" = "1" ]; then
-      ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0012-select-field-bigint2-backend.patch" ) \
-        || die "patch 0012 did not apply"
-      grep -q 'HAZYNC_FIELD_BIGINT2' "$BASE/secp256k1/src/field.h" \
-        || die "field.h has no HAZYNC_FIELD_BIGINT2 branch — 0012 did not land"
-      say "arm $arm: patch 0012 applied, field_bigint2 backend selected"
-    fi
     if [ "${HAZYNC_FIELD_BENCH:-0}" = "1" ]; then
       ( cd "$BASE/secp256k1" && patch -p1 --forward < "$REPO/patches/0011-field-bench-shim.patch" ) \
         || die "patch 0011 did not apply"
@@ -204,6 +211,18 @@ build_arm() {
     grep -qa hazync_lift_x "$bin" \
       || die "arm $arm: hazync_lift_x ABSENT — G1 compiled the stock sqrt; the arm would measure a no-op"
     say "arm $arm: G1 entry point confirmed in the binary"
+  fi
+  # ⛔ Two-sided, for the same reason as the bigint2 check above. The field backend leaves NO trace in
+  # ecdsa_impl.h -- its md5 stays CLEAN on arm C2 -- so the header md5 test above cannot see it, and
+  # patch 0012 landing in field.h only proves the #ifdef exists, not that the macro was defined for
+  # the compile. hazync_fq_mul_limbs is the FFI symbol the backend calls and nothing else does.
+  if [ "${HAZYNC_FIELD_BIGINT2:-0}" = "1" ]; then
+    grep -qa hazync_fq_mul_limbs "$bin" \
+      || die "arm $arm: hazync_fq_mul_limbs ABSENT — the field backend was requested and is not in this binary"
+    say "arm $arm: field_bigint2 backend confirmed in the binary"
+  else
+    grep -qa hazync_fq_mul_limbs "$bin" \
+      && die "arm $arm: hazync_fq_mul_limbs PRESENT — the field backend was NOT requested for this arm"
   fi
 
   # Read METHOD_ID from the binary's own command. NEVER scrape with strings: that returns
