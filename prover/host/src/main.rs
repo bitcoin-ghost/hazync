@@ -1726,7 +1726,20 @@ const COST_PER_EC_OP: u64 = 141_612;
 // The 13.8x divergence this constant existed to model is a property of accelerating ONE curve; with
 // both accelerated the costs converge again. Leaving it at 1,950,000 makes the packer starve
 // taproot-heavy chunks of inputs for a cost that is no longer there.
-const COST_PER_SCHNORR_OP: u64 = 141_612;
+// ⛔ REVERTED to 1,950,000 after measurement. Setting it equal to COST_PER_EC_OP was the obvious
+// inference once G3 put Schnorr through the same accelerator -- and it is WRONG on the only evidence
+// available. Measured on block 962,000: identical builds, this constant the only difference,
+// straggler 1.361 -> 1.539 and the block total barely moved, which costs a whole card.
+//
+// The likely reason is that Schnorr is NOT at ECDSA parity even accelerated: it still pays lift_x
+// through xonly_pubkey_load and the tagged challenge hash on top of the shared double-scalar-mul.
+// 93 of the block's 145 Schnorr inputs sit in one chunk, so repricing them 1.95 M -> 141 k drops that
+// chunk's predicted cost by ~168 M and the packer over-loads it.
+//
+// ⚠ 1,950,000 is not RIGHT either -- it is the pre-#139 stock ECDSA cost, and it now happens to pack
+// better. The honest value needs a profile of a G3 build, which does not exist yet. Do not read this
+// constant as a measurement of anything.
+const COST_PER_SCHNORR_OP: u64 = 1_950_000;
 
 /// What a verify costs when its public key was ALREADY decompressed earlier in the same chunk.
 ///

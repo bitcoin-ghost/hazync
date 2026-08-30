@@ -236,6 +236,9 @@ for a in $ARMS; do
     # total AND straggler, so J was a net loss. This isolates the SHA fast path from the packer.
     N) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1; build_arm N feat/liftx-accel 1 ;;
+    # Arm Q: arm N with the Schnorr packer constant reverted -- arm H packing plus the SHA fast path.
+    Q) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
+              HAZYNC_SHA_FASTPATH=1; build_arm Q feat/liftx-accel 1 ;;
     *) die "unknown arm $a" ;;
   esac
   prove_arm "$a"
