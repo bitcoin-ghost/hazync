@@ -273,6 +273,11 @@ for a in $ARMS; do
     N) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1; build_arm N feat/liftx-accel 1 ;;
     # Arm Q: arm N with the Schnorr packer constant reverted -- arm H packing plus the SHA fast path.
+    # Arm K: CORE MODE — every identical- and advice-and-verify-class lever, NO substitution.
+    # Keeps the aggregate wins (read_slice, SHA fast path, TransformD64) because those are
+    # identical-class and belong to both models. No bigint2, no G1 accel, no Schnorr lane, no
+    # scalar-inverse substitution.
+    K) build_arm K feat/liftx-accel 0 ;;
     Q) export HAZYNC_LIFTX_ACCEL=1 HAZYNC_BIGINT2_SCHNORR=1 HAZYNC_SCALAR_INV_ACCEL=1 \
               HAZYNC_SHA_FASTPATH=1; build_arm Q feat/liftx-accel 1 ;;
     # Arm R: arm Q + #136 read_slice for the AGGREGATE. Chunk times should match Q exactly -- the
