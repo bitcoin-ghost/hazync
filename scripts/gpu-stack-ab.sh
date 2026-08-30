@@ -196,6 +196,19 @@ build_arm() {
 prove_arm() {
   local arm="$1"
   local dir="$OUT/receipts.$arm"; mkdir -p "$dir"
+
+  # ⛔ The resume check below keys on FILE EXISTENCE. A receipt proved by a DIFFERENT guest still
+  # exists, so a rebuild that moves METHOD_ID silently reuses stale receipts and re-proves nothing --
+  # the arm then reports the PREVIOUS build's timings as if they were new, and the aggregate later
+  # fails with "claim digest does not match". That is exactly what arm T did after its rebuild.
+  # Stamp the id beside the receipts and wipe them when it moves.
+  local idfile="$dir/.method_id"
+  local now; now=$(cat "$OUT/method_id.$arm" 2>/dev/null)
+  if [ -n "$now" ] && [ -f "$idfile" ] && [ "$(cat "$idfile")" != "$now" ]; then
+    say "arm $arm: METHOD_ID changed ($(cut -c1-16 "$idfile") -> $(echo "$now" | cut -c1-16)) — discarding stale receipts"
+    rm -f "$dir"/chunk_*.bin
+  fi
+  [ -n "$now" ] && echo "$now" > "$idfile"
   for i in $(seq 0 $((CHUNKS-1))); do
     if [ -s "$dir/chunk_$i.bin" ]; then say "arm $arm chunk $i: already present, skipping"; continue; fi
     # hazync#119 is a KNOWN intermittent invalid-receipt fault: the same chunk, same binary and same
