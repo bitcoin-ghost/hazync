@@ -40,7 +40,7 @@ middle path · G1 liftx via coprocessor · G3 Schnorr lane · scalar inverse via
 |---|---|---|---|---|
 | stock `main` | 14,720 s | 1.054 | 1,131.8 s | **28** |
 | **CORE, pure** *(derived)* | **~12,709 s** | 1.054 | 627 s | **~24** |
-| **CORE + field backend** *(derived)* | **~4,014 s** | 1.054 | 627 s | **~9** |
+| **CORE + field backend** *(MEASURED cycles)* | **~6,056 s** | ⛔ unmeasured | 627 s | **~12-15** |
 | **GHOST** *(measured)* | **1,683 s** | 1.312 | **627 s** | **5** |
 
 ⏰ **The "Core costs 5x the hardware" headline is an artefact of not having the field backend.** With
@@ -164,3 +164,38 @@ before it counts.
 reference in `testsupport/field_bigint2_native.c` stands in for the coprocessor and is deliberately
 the dumbest possible schoolbook code, so the *glue* is what these tests exercise. **Until arm C2 runs
 block 962,000 to a byte-identical digest, the ~9 in §3 is a projection.**
+
+## 8. ⏰ The profile, 2026-08-31 — the gap is the FFI boundary, not the design
+
+`RISC0_PPROF_OUT`, execute mode, block 962,000, same run as §3's cycle count.
+
+| function | cycles | share | |
+|---|---|---|---|
+| `hazync_fq_mul_limbs` | 1,938 M | 30.98% | **296 cy/call** — the coprocessor op is **83** |
+| `hazync_fq_sqr_limbs` | 1,356 M | 21.68% | **208 cy/call** — likewise 83 |
+| `memcpy` | 790 M | 12.62% | control: 178 M → **4.4x** |
+| `secp256k1_ecmult_strauss_wnaf` | 440 M | 7.04% | point-arithmetic control flow |
+| `[PageIn]` | 427 M | 6.83% | control: 441 M — unchanged |
+| **`hz_add`** | **197 M** | **3.14%** | **modelled at ~937 M** |
+
+**13.07 M coprocessor calls. At 83 cy the real work is 1,085 M; we spent 4,085 M. Overhead ~3,000 M —
+48% of the block.**
+
+### ✅ §3's trap was wrong, and in our favour
+
+§3 predicted canonical adds would cost ~750 M and drop the result from 7 cards to 9. **The lazy +
+branching rewrite made adds a non-issue: 197 M, and all four C helpers together are 428 M (6.8%).**
+The concern that shaped the whole design was real in principle and small in practice.
+
+### ⛔ What actually cost the block: three copies where zero are needed
+
+`BigInt<N>` is `#[repr(transparent)]` over `[u32; N]`; secp256k1's `fe` is `uint32_t[8]`. They are the
+same eight little-endian words. The first wrapper copied into a `[u8; 32]` staging buffer, then
+`BigInt::from_le_bytes` copied **again** (a `bytemuck` `copy_from_slice` plus a length assert), and
+`store` copied a third time — 13.07 M times each.
+
+Now a raw `ptr::read`/`write` of `[u32; 8]`. ⚠ **Keep it that way.** Anything routed through a byte
+slice reintroduces the staging copy, and it fails no test — it just costs a third of the block.
+
+⛔ **`memcpy`'s excess alone is +612 M, worth ~1.12x. How much of the remaining ~2,400 M of per-call
+overhead goes with it is NOT known** and is being measured; no number here until it is.

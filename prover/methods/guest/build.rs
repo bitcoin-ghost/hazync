@@ -37,6 +37,24 @@ fn find_riscv_bin() -> String {
     String::new() // fall back to PATH
 }
 
+/// Define a C macro ONLY when the lever is on.
+///
+/// ⛔ `cc::Build::define(name, None)` does NOT skip the macro -- it emits a BARE `-Dname`, which
+/// makes `#if defined(name)` TRUE. Every lever in this file was written as
+/// `.define(X, if flag { Some("1") } else { None })`, so all eight were defined unconditionally and
+/// no lever could be turned off by unsetting its env var. `scripts/gpu-stack-ab.sh` only restores
+/// `ecdsa_impl.h`, so for patches 0006, 0007, 0009, 0010, 0011 and 0012 -- whose files it does NOT
+/// revert -- a box that had ever run an accelerated arm kept that lever ON for every later arm.
+/// Arms C and the monotonic ladder are unaffected (each adds a lever), but arm K (Core mode) and
+/// arm C2 would have silently carried G1, G3 and the SHA levers into the baseline they exist to
+/// establish. Found 2026-08-30 when a control build with the env var UNSET still received
+/// `-DHAZYNC_FIELD_BIGINT2`.
+fn define_if(b: &mut cc::Build, name: &str, on: bool) {
+    if on {
+        b.define(name, "1");
+    }
+}
+
 // dirname of `gcc -march=rv32im -mabi=ilp32 <query>` (matches the multilib we build against)
 fn lib_dir(gcc: &str, query: &[&str]) -> String {
     let out = Command::new(gcc)
@@ -155,10 +173,24 @@ fn main() {
     println!("cargo:rerun-if-changed=field_bigint2.h");
     println!("cargo:rerun-if-changed=field_bigint2_impl.h");
     let field_bigint2 = std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1");
-    if field_bigint2 {
-        for f in ["field_bigint2.h", "field_bigint2_impl.h"] {
-            std::fs::copy(f, format!("{secp}/src/{f}"))
-                .unwrap_or_else(|e| panic!("copying {f} into the secp tree: {e}"));
+    for f in ["field_bigint2.h", "field_bigint2_impl.h"] {
+        let dst = format!("{secp}/src/{f}");
+        if field_bigint2 {
+            std::fs::copy(f, &dst).unwrap_or_else(|e| panic!("copying {f} into the secp tree: {e}"));
+        } else {
+            // ⛔ REMOVE them when the backend is off, do not merely stop copying. patches/0012 stays
+            // applied in the tree -- its #ifdef is inert without the macro -- so if these headers are
+            // left behind, cc-rs sees byte-identical inputs and REUSES libsecp256k1.a from the
+            // previous bigint2 build. Its objects still call hazync_fq_mul_limbs while field.h has
+            // reverted to 10x26. That is a link error when you are lucky (it cost two control runs on
+            // 2026-08-30) and a silently stale measurement when you are not: a "stock" arm reporting
+            // the backend's cycle count. Same shape as the ecdsa_impl.h.clean restore in
+            // scripts/gpu-stack-ab.sh, and the reason that one exists.
+            match std::fs::remove_file(&dst) {
+                Ok(()) => println!("cargo:warning=removed stale {f} from the secp tree"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("removing stale {dst}: {e}"),
+            }
         }
     }
 
@@ -203,7 +235,8 @@ fn main() {
     }
 
     // 1) REAL libsecp256k1 (C) + libc-glue shims.
-    cc::Build::new()
+    let mut secp_build = cc::Build::new();
+    secp_build
         .compiler(&gcc).archiver(&ar)
         // TIER 0: -O3 (E1, -0.264%). Modest, as expected -- libsecp is hand-unrolled C and rv32im
         // has no vector unit, which is most of what -O3 adds over -O2. C/C++ -flto is NOT here and
@@ -213,36 +246,27 @@ fn main() {
         .flag(&fpm)
         .include(&secp).include(format!("{secp}/src"))
         .define("ECMULT_WINDOW_SIZE", win.as_str()).define("ECMULT_GEN_KB", gen_kb.as_str())
-        // hazync#139 middle-path EXPERIMENT — enables patch 0005's #ifdef'd block in ecdsa_impl.h.
-        // Unset (the normal case) compiles the stock secp256k1_ecmult path and moves nothing.
-        .define(
-            "HAZYNC_BIGINT2_ECDSA",
-            if bigint2 { Some("1") } else { None },
-        )
-        // hazync#205 G1 — enables patch 0007's #ifdef'd block in group_impl.h, routing the pubkey Y
-        // recovery to the coprocessor. Unset compiles libsecp's own fe_sqrt and moves nothing.
-        .define(
-            "HAZYNC_LIFTX_ACCEL",
-            if liftx_accel { Some("1") } else { None },
-        )
-        // G3 — enables patch 0006 in modules/schnorrsig/main_impl.h.
-        .define(
-            "HAZYNC_BIGINT2_SCHNORR",
-            if schnorr_accel { Some("1") } else { None },
-        )
-        .define(
-            "HAZYNC_SCALAR_INV_ACCEL",
-            if scalar_inv { Some("1") } else { None },
-        )
-        .define("HAZYNC_FIELD_BENCH", if field_bench { Some("1") } else { None })
-        .define("HAZYNC_FIELD_BIGINT2", if field_bigint2 { Some("1") } else { None })
         .define("ENABLE_MODULE_SCHNORRSIG", "1").define("ENABLE_MODULE_EXTRAKEYS", "1")
         .define("USE_EXTERNAL_DEFAULT_CALLBACKS", "1")
         .file(format!("{secp}/src/secp256k1.c"))
         .file(format!("{secp}/src/precomputed_ecmult.c"))
         .file(format!("{secp}/src/precomputed_ecmult_gen.c"))
-        .file("cshims.c")
-        .compile("secp256k1");
+        .file("cshims.c");
+    // ⛔ Every one of these must go through define_if. See its doc comment: passing None to
+    // cc::Build::define defines the macro anyway, which silently welds each lever ON.
+    // hazync#139 middle path — patch 0005's block in ecdsa_impl.h. Off compiles stock secp256k1_ecmult.
+    define_if(&mut secp_build, "HAZYNC_BIGINT2_ECDSA", bigint2);
+    // hazync#205 G1 — patch 0007 in group_impl.h, pubkey Y recovery to the coprocessor.
+    define_if(&mut secp_build, "HAZYNC_LIFTX_ACCEL", liftx_accel);
+    // G3 — patch 0006 in modules/schnorrsig/main_impl.h.
+    define_if(&mut secp_build, "HAZYNC_BIGINT2_SCHNORR", schnorr_accel);
+    define_if(&mut secp_build, "HAZYNC_SCALAR_INV_ACCEL", scalar_inv);
+    define_if(&mut secp_build, "HAZYNC_FIELD_BENCH", field_bench);
+    // patch 0012 — the coprocessor field backend. field.h #includes field_bigint2.h under this
+    // macro, and build.rs removes that header when the backend is off, so a stale bare -D here is a
+    // hard compile error rather than a wrong measurement. That is deliberate.
+    define_if(&mut secp_build, "HAZYNC_FIELD_BIGINT2", field_bigint2);
+    secp_build.compile("secp256k1");
 
     // 2) REAL Bitcoin Core consensus C++ (interpreter + sighash + deps) + our wrapper.
     let core_tus = [
@@ -274,8 +298,12 @@ fn main() {
         // to the source, moved METHOD_ID and did absolutely nothing -- for four consecutive arms.
         // The comment immediately below this block already warned about exactly this: "a new id
         // looked like proof the guest had been rebuilt, and it is not."
-        .define("HAZYNC_SHA_FASTPATH", if sha_fast { Some("1") } else { None })
-        .define("HAZYNC_SHA_D64_ACCEL", if sha_d64 { Some("1") } else { None });
+        ;
+    // ⛔ Same trap as the secp build: passing None DEFINES the macro. patches/0009 and 0010 both
+    // live in crypto/sha256.cpp, which gpu-stack-ab.sh does not revert, so a bare -D here welded
+    // both SHA levers on for every arm after the first that applied them.
+    define_if(&mut b, "HAZYNC_SHA_FASTPATH", sha_fast);
+    define_if(&mut b, "HAZYNC_SHA_D64_ACCEL", sha_d64);
     for tu in core_tus { b.file(format!("{core}/{tu}")); }
     b.file("verify_input.cpp");
 

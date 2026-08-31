@@ -138,8 +138,14 @@ Gates 0 and 1 both run on a workstation with no GPU and no guest build: `scripts
 | **0. mod-p harness vs arbitrary precision** | ✅ **2,992 checks, 0 failures** |
 | **1. libsecp256k1's own suite, `-DVERIFY`, counts 2 / 8 / 32** | ✅ **`no problems found`**, with a stock `field_10x26` control passing on the same command line |
 | **2. mutation controls** | ✅ every mutant caught by at least one gate |
-| 3. journal digest on block 962,000 | ⛔ **NOT RUN** — needs a guest build |
+| **3. journal digest on block 962,000** | ✅ **PASS** — `4fb3e3c5…4656d`, byte-identical to control AND to the recorded value, `all_valid=1`, `binds=8006` |
 | 4. corrupt-signature negative control | ⛔ **NOT RUN** |
+
+⏰ **Gate 3 needed no GPU.** `RISC0_PPROF_ENABLE_INLINE_FUNCTIONS=1 HAZYNC_CHUNKS=1
+HAZYNC_PROFILE_EXEC=1 host chunk-profile` executes the block on CPU in ~4 min (backend) / ~9 min
+(control) on an 8 GB laptop, peak RSS 526 MB, and prints the digest and the cycle count. **A GPU is
+only needed for wall-clock → cards.** ⚠ `chunk-profile` executes the block TWICE (count-packed and
+cost-packed), so budget double.
 
 ### Gate 1 found two real bugs
 
@@ -172,7 +178,15 @@ tree and is `cmp`-checked against the source before its result counts. → `gotc
 ⏰ **WRITTEN, and validated as far as a workstation can take it.** `patches/0012` plus
 `field_bigint2{,_impl}.h`, `field_bigint2.rs`, and `testsupport/`. Gates 0-2 pass.
 
-⛔ **The block number is still a projection.** No guest build, no `METHOD_ID`, no digest. The host
+⏰ **2026-08-31 — MEASURED: 2.381x** (13,748,003,793 → 5,775,098,109 cycles). The projection was
+3.67x. Cards land at **~12-15** depending on the straggler, which is unmeasured for this arm.
+
+⛔ **The profile says 48% of the block was the FFI boundary, not the design** — 13.07 M coprocessor
+calls at 296/208 cy against an 83 cy operation, and `memcpy` at 4.4x the control. §3's feared
+expensive adds came in at **197 M against ~937 M modelled**. Zero-copy `load`/`store` written; being
+re-measured. → `CORE_VS_GHOST.md` §8
+
+⛔ **The earlier block number was a projection.** No guest build, no `METHOD_ID`, no digest. The host
 reference stands in for the coprocessor, so what is proven is the *glue* — representation, lazy
 invariant, libsecp's contracts — not the coprocessor and not the block. **~9 cards holds only if arm
 C2 reproduces the control's journal digest byte for byte on block 962,000.**

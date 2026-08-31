@@ -18,19 +18,33 @@
 //! not conversions. If either side ever changes representation this silently produces wrong field
 //! elements — which is a consensus break, not a slowdown.
 
+use risc0_crypto::bigint::BigInt;
 use risc0_crypto::curves::secp256k1::Fq;
 
+/// ⛔ **This boundary was 48% of the block before it was written this way.** MEASURED on block
+/// 962,000 (`RISC0_PPROF_OUT`, execute mode): 13.07 M coprocessor calls costing 296 cy/call for
+/// multiply and 208 for square, against a coprocessor operation measured at **83**. `memcpy` alone
+/// went from 178 M cycles in the control to **790 M** — 4.4x — and essentially all of it was here.
+///
+/// The cause was three 32-byte copies per call where zero are needed. `BigInt<N>` is
+/// `#[repr(transparent)]` over `[u32; N]` and secp256k1's `fe` is `uint32_t[8]`, so the two are the
+/// same eight little-endian words: the limbs can be read and written straight through. The old code
+/// copied into a `[u8; 32]` staging buffer, then `BigInt::from_le_bytes` copied *again* (it is a
+/// `bytemuck` `copy_from_slice`, plus a length assert), and `store` copied a third time.
+///
+/// ⚠ Keep these as raw `read`/`write` of `[u32; 8]`. Anything that routes through a byte slice
+/// reintroduces the staging copy, and it does not show up as a correctness failure — only as a
+/// third of the block.
 #[inline]
 unsafe fn load(p: *const u32) -> Fq {
-    let mut b = [0u8; 32];
-    core::ptr::copy_nonoverlapping(p as *const u8, b.as_mut_ptr(), 32);
-    Fq::reduce_from_bigint(risc0_crypto::bigint::BigInt::from_le_bytes(&b))
+    // The lazy invariant admits values in [0, 2^256), so the reduction is required, not optional.
+    // It is cheap: p has its MSB set, so reduce_from_bigint takes the msb_set() single-subtract path.
+    Fq::reduce_from_bigint(BigInt::new(core::ptr::read(p as *const [u32; 8])))
 }
 
 #[inline]
 unsafe fn store(v: &Fq, out: *mut u32) {
-    let b = v.to_bigint();
-    core::ptr::copy_nonoverlapping(b.as_le_bytes().as_ptr(), out as *mut u8, 32);
+    core::ptr::write(out as *mut [u32; 8], v.as_bigint().0);
 }
 
 /// `out = a * b mod p`. Inputs and output are 8 little-endian `u32` limbs, canonical.
