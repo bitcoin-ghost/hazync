@@ -80,17 +80,15 @@ pub unsafe extern "C" fn hazync_fq_inv_limbs(a: *const u32, out: *mut u32) {
     store(&x.inverse(), out);
 }
 
-/// Square root. Returns 1 and writes a root when `a` is a quadratic residue, 0 otherwise.
-///
-/// Used for `is_square_var` and by `fe_sqrt`; the caller decides which root it wants by parity, as
-/// it already does with the software backend.
-///
-/// # Safety
-/// Both pointers must be valid for 32 bytes.
-#[no_mangle]
-pub unsafe extern "C" fn hazync_fq_sqrt_limbs(a: *const u32, out: *mut u32) -> i32 {
-    match load(a).sqrt() {
-        Some(r) => { store(&r, out); 1 }
-        None => 0,
-    }
-}
+// ⛔ There is deliberately NO `hazync_fq_sqrt_limbs`.
+//
+// It existed, and `secp256k1_fe_impl_is_square_var` called it. That was a REGRESSION:
+// risc0-crypto's `Fq::sqrt()` is `pow((p+1)/4)` by plain square-and-multiply, and `(p+1)/4` is 254
+// bits with 247 set -- 253 squarings + 246 multiplies = **499 coprocessor operations**. libsecp's
+// own `fe_sqrt` is a hand-tuned addition chain at ~270 ops, and `is_square_var` does not need a root
+// at all: a Jacobi symbol via `modinv32` answers the question far more cheaply. The backend now does
+// what every stock backend does.
+//
+// The reflex to avoid: "the coprocessor primitive exists, so call it." A precompile is only a win
+// where it replaces something MORE expensive than itself. Here it replaced something 1.85x cheaper.
+// → docs/FIELD_BIGINT2_BACKEND.md §7

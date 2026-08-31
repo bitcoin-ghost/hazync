@@ -224,10 +224,21 @@ libsecp fe_sqrt    ~255 squarings + ~15 muls =  ~270 ops        -> 1.85x worse
 over the *same* coprocessor multiplies libsecp is already issuing. My ~224 M estimate assumed a
 one-call primitive that does not exist.
 
-⚠ **This makes `secp256k1_fe_impl_is_square_var` a real (if currently free) defect of this backend**:
-it routes to that 499-op path where stock computes a **Jacobi symbol** via `modinv32`. It is absent
-from the profile, so it costs nothing measurable today, but it is strictly worse than the code it
-replaced.
+✅ **FIXED 2026-08-31.** `secp256k1_fe_impl_is_square_var` routed to that 499-op path where stock
+computes a **Jacobi symbol** via `modinv32` -- strictly worse than the code it replaced. It now uses
+libsecp's own implementation, `modinfo` constant included verbatim. `hazync_fq_sqrt_limbs` was deleted
+outright, C extern and Rust function both, and **verified absent from the guest binary** -- a
+`#[no_mangle]` function survives being unused, so "I deleted it" is a claim about source, not about
+what shipped.
+
+Verified: digest `4fb3e3c5…4656d` PASS, cycles **3,583,757,161 — bit-for-bit identical**, +0. That is
+the expected result and the reason it is worth stating: `is_square_var` does not appear in the
+block-962,000 profile at all, so a change here MUST be cycle-neutral. Had it moved, the understanding
+of where it is called from would have been wrong.
+
+⛔ **The reflex to avoid: "the coprocessor primitive exists, so call it."** A precompile is a win only
+where it replaces something MORE expensive than itself. Here it replaced something 1.85x cheaper. The
+same reflex produced the `fe_sqrt` proposal above.
 
 ### Canonical representation to skip `reduce_from_bigint`: incompatible with libsecp's `fe`
 

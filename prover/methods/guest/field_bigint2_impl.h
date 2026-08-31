@@ -47,7 +47,9 @@ static const uint32_t HZ_P[8] = {
 extern void hazync_fq_mul_limbs(const uint32_t *a, const uint32_t *b, uint32_t *out);
 extern void hazync_fq_sqr_limbs(const uint32_t *a, uint32_t *out);
 extern void hazync_fq_inv_limbs(const uint32_t *a, uint32_t *out);
-extern int  hazync_fq_sqrt_limbs(const uint32_t *a, uint32_t *out);
+/* ⛔ There is deliberately NO hazync_fq_sqrt_limbs. It existed, is_square_var called it, and that
+ * was a regression: risc0-crypto's sqrt is a 499-operation software exponentiation. libsecp's own
+ * fe_sqrt chain is ~270 ops and its Jacobi symbol is cheaper still. Do not re-add it. */
 
 /* ---- helpers ---- */
 
@@ -312,10 +314,6 @@ static void secp256k1_fe_impl_inv_var(secp256k1_fe *r, const secp256k1_fe *x) {
     hazync_fq_inv_limbs(x->n, r->n);
 }
 
-static int secp256k1_fe_impl_is_square_var(const secp256k1_fe *x) {
-    uint32_t tmp[8];
-    return hazync_fq_sqrt_limbs(x->n, tmp);
-}
 
 /* ---- storage and modinv32 interop ---- */
 
@@ -357,6 +355,47 @@ static void secp256k1_fe_from_signed30(secp256k1_fe *r, const secp256k1_modinv32
     /* modinv32's output is in [0, p), so the 2^256 word is zero and the low eight limbs are exact. */
     VERIFY_CHECK(out[8] == 0);
     for (i = 0; i < 8; i++) r->n[i] = out[i];
+}
+
+/* p in modinv32's nine signed-30-bit limbs, plus its inverse constant. Copied verbatim from
+ * field_10x26_impl.h -- these are libsecp's own constants, not a re-derivation. */
+static const secp256k1_modinv32_modinfo secp256k1_const_modinfo_fe = {
+    {{-0x3D1, -4, 0, 0, 0, 0, 0, 0, 65536}},
+    0x2DDACACFL
+};
+
+/* ⛔ This is libsecp's own implementation, deliberately, and it does NOT use the coprocessor.
+ *
+ * The obvious version -- `return hazync_fq_sqrt_limbs(x->n, tmp);` -- shipped first and was a
+ * REGRESSION. risc0-crypto's sqrt is `pow((p+1)/4)` by plain square-and-multiply, and `(p+1)/4` is
+ * 254 bits with 247 set: 253 squarings + 246 multiplies = 499 coprocessor operations. A Jacobi
+ * symbol via modinv32 is far cheaper, and it is what every stock backend does. The fallback path
+ * calls libsecp's `fe_sqrt`, whose hand-tuned addition chain is ~270 operations -- itself 1.85x
+ * better than the coprocessor route.
+ *
+ * It cost nothing measurable (is_square_var is absent from the block-962,000 profile entirely), but
+ * "the coprocessor primitive exists, so call it" was the wrong reflex: the primitive is only a win
+ * where it replaces something MORE expensive. → docs/FIELD_BIGINT2_BACKEND.md §7 */
+static int secp256k1_fe_impl_is_square_var(const secp256k1_fe *x) {
+    secp256k1_fe tmp;
+    secp256k1_modinv32_signed30 s;
+    int jac, ret;
+
+    tmp = *x;
+    secp256k1_fe_normalize_var(&tmp);
+    /* secp256k1_jacobi32_maybe_var cannot deal with input 0. */
+    if (secp256k1_fe_is_zero(&tmp)) return 1;
+    secp256k1_fe_to_signed30(&s, &tmp);
+    jac = secp256k1_jacobi32_maybe_var(&s, &secp256k1_const_modinfo_fe);
+    if (jac == 0) {
+        /* jacobi32_maybe_var gave up on its iteration bound. Rare with random input, less rare
+         * under VERIFY where the bound is lower. Fall back to a real square root. */
+        secp256k1_fe dummy;
+        ret = secp256k1_fe_sqrt(&dummy, &tmp);
+    } else {
+        ret = jac >= 0;
+    }
+    return ret;
 }
 
 #ifdef VERIFY
