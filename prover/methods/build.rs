@@ -90,9 +90,16 @@ fn main() {
     if std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1") {
         features.push("field-bench".to_string());
     }
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_HINT");
     println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BIGINT2");
     if std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1") {
         features.push("field-bigint2".to_string());
+    }
+    // ⚠ HAZYNC_LIFTX_HINT must hold the SAME value at build time and at run time. The guest only
+    // reads the hint block when built with the feature, so a mismatch desynchronises the input
+    // stream rather than merely losing the optimisation.
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        features.push("liftx-hint".to_string());
     }
 
     if !features.is_empty() {

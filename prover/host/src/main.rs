@@ -1711,6 +1711,29 @@ fn prove_seg() {
 // 2.118. A block's wall-clock is its SLOWEST chunk, so that doubling is worth ~7 cards.
 //
 // Only the RATIO matters -- the packer compares costs and never predicts a wall-clock.
+
+/// Runtime override for a packing constant.
+///
+/// ⛔ These constants are CALIBRATED PER BUILD MODE and the defaults are #139's. `COST_PER_EC_OP`
+/// (141,612) prices an ECDSA verify that #139 has accelerated, and `COST_PER_SCHNORR_OP` is 13.8x
+/// higher because #139 does not touch Schnorr. **Core mode has no #139**: the coprocessor field
+/// backend accelerates both curves equally, so that split is wrong there, and so is the absolute
+/// scale. MEASURED on block 962,000 with the field backend, least squares over 32 chunk executions:
+///
+/// ```text
+/// cycles = 450,020*ec + 1.27*bytes + 37,946*inputs + 3,292,850     mean |error| 5.0%
+/// ```
+///
+/// against defaults of 141,612 / 6 / 34,000 -- EC 3.2x too low, bytes 4.7x too high. The packer
+/// balances its own predictor perfectly, so a wrong predictor does not show up as a bad straggler
+/// number, it shows up as a bad BLOCK: real chunk cycles spanned 33.6 M to 352 M across chunks the
+/// model priced identically at 125.4 M, a straggler of 1.563x -- WORSE than not packing at all.
+///
+/// Host-side only. Nothing here reaches the guest, so none of it moves METHOD_ID.
+fn cost_const(var: &str, default: u64) -> u64 {
+    std::env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
 const COST_PER_EC_OP: u64 = 141_612;
 /// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA even though the two are equal
 /// today. #139 accelerates ECDSA only -- Schnorr keeps running libsecp's BIP340 code -- so after it
@@ -1770,7 +1793,10 @@ impl SigOps {
     fn ecdsa(n: u64) -> Self { Self { ecdsa: n, schnorr: 0 } }
     fn schnorr(n: u64) -> Self { Self { ecdsa: 0, schnorr: n } }
     fn total(&self) -> u64 { self.ecdsa + self.schnorr }
-    fn cost(&self) -> u64 { self.cost_with(COST_PER_EC_OP, COST_PER_SCHNORR_OP) }
+    fn cost(&self) -> u64 {
+        self.cost_with(cost_const("HAZYNC_COST_EC_OP", COST_PER_EC_OP),
+                       cost_const("HAZYNC_COST_SCHNORR_OP", COST_PER_SCHNORR_OP))
+    }
     /// Split out so a test can price the curves apart without editing a constant. A no-op test alone
     /// would pass for a refit that does nothing at all; this is what lets one prove it bites.
     fn cost_with(&self, ec: u64, schnorr: u64) -> u64 { ec * self.ecdsa + schnorr * self.schnorr }
@@ -1914,7 +1940,9 @@ fn input_costs(w: &BlockWitness) -> Vec<u64> {
             let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
             let ops = predicted_sig_ops(tx, inp.input_idx, prevouts);
             let bytes = (tx.len() + prevouts.len()) as u64;
-            COST_INPUT_BASE + ops.cost() + COST_PER_INPUT_BYTE * bytes
+            cost_const("HAZYNC_COST_INPUT_BASE", COST_INPUT_BASE)
+                + ops.cost()
+                + cost_const("HAZYNC_COST_INPUT_BYTE", COST_PER_INPUT_BYTE) * bytes
         })
         .collect()
 }
@@ -2095,6 +2123,7 @@ fn chunk_profile() {
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
+        let mut measured: Vec<u64> = Vec::new();
         for (i, &(lo, hi)) in bounds.iter().enumerate() {
             let c: u64 = costs[lo..hi].iter().sum();
             predicted.push(c);
@@ -2103,6 +2132,7 @@ fn chunk_profile() {
             let ec: u64 = w.inputs[lo..hi].iter().map(|inp| predicted_ec_ops(
                 &w.txs[inp.tx_idx as usize].0, inp.input_idx, &w.tx_prevouts[inp.tx_idx as usize].0)).sum();
             let cycles = if exec { Some(exec_chunk_cycles(&w, lo, hi)) } else { None };
+            if let Some(cy) = cycles { measured.push(cy); }
             match cycles {
                 Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, bytes, c, cy),
                 None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, bytes, c),
@@ -2110,9 +2140,30 @@ fn chunk_profile() {
         }
         // The straggler ratio is the number that matters: a block's wall-clock is its slowest chunk, so
         // this is the factor by which fan-out falls short of the work being evenly shared.
-        let max = predicted.iter().copied().max().unwrap_or(0);
-        let mean = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
-        println!("  straggler: max {} vs mean {:.0} = {:.2}x", max, mean, max as f64 / mean.max(1.0));
+        //
+        // ⛔ REPORT IT ON MEASURED CYCLES WHENEVER WE HAVE THEM. Computed on PREDICTED cost this is a
+        // check that cannot fail: the cost packer balances the predictor by construction, so it
+        // reports a perfect 1.00x however wrong the predictor is -- it measures the packer against
+        // itself. On block 962,000 with the field backend it reported 1.00x while real chunk cycles
+        // spanned 33.6 M to 352 M, an actual straggler of 1.563x, WORSE than the naive count packer.
+        let strag = |v: &[u64], what: &str| {
+            let max = v.iter().copied().max().unwrap_or(0);
+            let mean = v.iter().sum::<u64>() as f64 / v.len().max(1) as f64;
+            let min = v.iter().copied().min().unwrap_or(0);
+            println!("  straggler ({what}): max {} vs mean {:.0} = {:.3}x   [spread {:.1}x]",
+                     max, mean, max as f64 / mean.max(1.0), max as f64 / min.max(1) as f64);
+        };
+        strag(&predicted, "predicted");
+        if !measured.is_empty() {
+            strag(&measured, "MEASURED");
+            // A packer is only as good as its cost model; this is the number that says whether it is.
+            let pm: f64 = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
+            let mm: f64 = measured.iter().sum::<u64>() as f64 / measured.len().max(1) as f64;
+            let worst = predicted.iter().zip(&measured)
+                .map(|(p, m)| ((*m as f64 / mm) / (*p as f64 / pm)))
+                .fold(0.0f64, |a, b| a.max(b));
+            println!("  cost-model error: worst chunk is {:.2}x its predicted share of the block", worst);
+        }
     }
 }
 
@@ -2154,6 +2205,85 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
 /// a contiguous chunk groups into consecutive transaction runs with no reordering. The aggregation
 /// concatenates chunk binds and indexes them by the block's own input index — emit them in any other
 /// order and it compares the wrong input, silently.
+/// hazync#205 — collect `(x, y)` for every public key the guest is about to decompress, so
+/// `secp256k1_ge_set_xo_var` can VERIFY `y^2 == x^3 + 7` instead of computing a modular square root.
+///
+/// Measured motivation: that sqrt is 1,415,786,221 cycles on block 962,000 — 9.83% of the block and
+/// ~45% of all post-#139 work — and `patches/0005` does not touch it, because it lives outside
+/// `secp256k1_ecmult`. libsecp's own `bench_internal` prices `field_sqrt` at 264x a `field_mul`.
+///
+/// ⚠ COMPLETENESS IS AN OPTIMISATION, NOT A CORRECTNESS CONDITION. A key we fail to find here simply
+/// pays the sqrt it pays today; a key we get WRONG fails the guest's check and also falls back. So
+/// this may be as approximate as it likes, and must never be trusted.
+///
+/// Returns pairs sorted ascending by `x` (BTreeMap ordering), which is the order the guest's binary
+/// search expects. Only the EVEN root is stored: `ge_set_xo_var` flips the sign itself to match the
+/// requested parity, so one entry per `x` serves both.
+fn liftx_hints(w: &BlockWitness, lo: usize, hi: usize) -> Vec<([u8; 32], [u8; 32])> {
+    use bitcoin::secp256k1::PublicKey;
+    use std::collections::BTreeMap;
+
+    let mut out: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+    let mut add_x = |x: &[u8]| {
+        if x.len() != 32 {
+            return;
+        }
+        // Ask for the even root; the guest negates when the caller wanted the odd one.
+        let mut comp = [0u8; 33];
+        comp[0] = 2;
+        comp[1..].copy_from_slice(x);
+        if let Ok(pk) = PublicKey::from_slice(&comp) {
+            let u = pk.serialize_uncompressed(); // 0x04 || X || Y
+            let (mut xa, mut ya) = ([0u8; 32], [0u8; 32]);
+            xa.copy_from_slice(&u[1..33]);
+            ya.copy_from_slice(&u[33..65]);
+            out.insert(xa, ya);
+        }
+    };
+    // A 33-byte compressed key contributes its x; a 32-byte value is taken as an x-only key.
+    let mut add_push = |b: &[u8]| match b.len() {
+        33 if b[0] == 2 || b[0] == 3 => add_x(&b[1..]),
+        32 => add_x(b),
+        _ => {}
+    };
+
+    let mut seen_tx: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for inp in &w.inputs[lo..hi] {
+        if !seen_tx.insert(inp.tx_idx) {
+            continue;
+        }
+        let raw = &w.txs[inp.tx_idx as usize].0;
+        let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw) else { continue };
+        for txin in &tx.input {
+            // Witness items: the key itself for P2WPKH, and the redeem/tapscript for the rest --
+            // walk those as scripts too, which is where multisig keys live.
+            for item in txin.witness.iter() {
+                add_push(item);
+                if item.len() > 33 {
+                    for ins in bitcoin::Script::from_bytes(item).instructions().flatten() {
+                        if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                            add_push(pb.as_bytes());
+                        }
+                    }
+                }
+            }
+            for ins in txin.script_sig.instructions().flatten() {
+                if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                    add_push(pb.as_bytes());
+                    if pb.as_bytes().len() > 33 {
+                        for i2 in bitcoin::Script::from_bytes(pb.as_bytes()).instructions().flatten() {
+                            if let bitcoin::script::Instruction::PushBytes(p2) = i2 {
+                                add_push(p2.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, lo: usize, hi: usize) {
     fn padded(v: &[u8]) -> Vec<u8> {
         let mut p = v.to_vec();
@@ -2177,6 +2307,25 @@ fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, 
     );
 
     b.write(&(groups.len() as u32)).unwrap();
+
+    // hazync#205 pubkey-Y hints, written BEFORE the groups because the guest verifies scripts as it
+    // reads them -- the table must be installed before the first VerifyScript call.
+    //
+    // ⛔ HAZYNC_LIFTX_HINT must hold the SAME value at BUILD time and at RUN time. The guest only
+    // reads this block when built with the `liftx-hint` feature, so a mismatch desynchronises the
+    // stream rather than merely losing the optimisation. Same discipline as HAZYNC_BIGINT2_ECDSA.
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        let hints = liftx_hints(w, lo, hi);
+        b.write(&(hints.len() as u32)).unwrap();
+        let mut flat = Vec::with_capacity(hints.len() * 64);
+        for (x, y) in &hints {
+            flat.extend_from_slice(x);
+            flat.extend_from_slice(y);
+        }
+        b.write_slice(&flat);
+        eprintln!("  liftx: {} pubkey hints for inputs {}..{}", hints.len(), lo, hi);
+    }
+
     for (tx_idx, gs, ge) in groups {
         let tx = &w.txs[tx_idx as usize].0;
         let prevouts = &w.tx_prevouts[tx_idx as usize].0;

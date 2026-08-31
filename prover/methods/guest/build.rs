@@ -170,6 +170,11 @@ fn main() {
     // field_bigint2 backend: canonical 8x32 limbs backed by the coprocessor. The two headers are
     // copied into the secp tree and selected by patches/0012, which edits field.h's backend switch.
     println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BIGINT2");
+    // hazync#205 — patches/0013's #ifdef in group_impl.h. The Rust half (liftx_hint.rs) exports
+    // hazync_lift_x_hint under the `liftx-hint` cargo feature; THIS is what makes the C half call it.
+    // Wiring only the cargo feature builds a guest that exports the symbol and never references it.
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_HINT");
+    let liftx_hint = std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1");
     println!("cargo:rerun-if-changed=field_bigint2.h");
     println!("cargo:rerun-if-changed=field_bigint2_impl.h");
     let field_bigint2 = std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1");
@@ -266,6 +271,7 @@ fn main() {
     // macro, and build.rs removes that header when the backend is off, so a stale bare -D here is a
     // hard compile error rather than a wrong measurement. That is deliberate.
     define_if(&mut secp_build, "HAZYNC_FIELD_BIGINT2", field_bigint2);
+    define_if(&mut secp_build, "HAZYNC_LIFTX_HINT", liftx_hint);
     secp_build.compile("secp256k1");
 
     // 2) REAL Bitcoin Core consensus C++ (interpreter + sighash + deps) + our wrapper.

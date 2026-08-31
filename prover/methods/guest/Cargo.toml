@@ -60,3 +60,7 @@ msm = ["dep:risc0-crypto"]
 field-bench = []
 # libsecp field backend on the coprocessor. Canonical 8x32 limbs, no conversion. patches/0012.
 field-bigint2 = ["dep:risc0-crypto"]
+# hazync#205 — recover a pubkey's Y from a host HINT and VERIFY it with y^2 == x^3+7. Advice-and-
+# verify: libsecp's own arithmetic decides, and a missing or wrong hint falls back to its sqrt.
+# Core-legal, unlike liftx-accel which substitutes the sqrt. See src/liftx_hint.rs and patches/0013.
+liftx-hint = []
