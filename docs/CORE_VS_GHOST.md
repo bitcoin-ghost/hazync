@@ -40,7 +40,7 @@ middle path · G1 liftx via coprocessor · G3 Schnorr lane · scalar inverse via
 |---|---|---|---|---|
 | stock `main` | 14,720 s | 1.054 | 1,131.8 s | **28** |
 | **CORE, pure** *(derived)* | **~12,709 s** | 1.054 | 627 s | **~24** |
-| **CORE + field backend** *(MEASURED cycles)* | **~6,056 s** | ⛔ unmeasured | 627 s | **~12-15** |
+| **CORE + field backend** *(MEASURED cycles)* | **~3,758 s** | ⛔ unmeasured | 627 s | **~8-10** |
 | **GHOST** *(measured)* | **1,683 s** | 1.312 | **627 s** | **5** |
 
 ⏰ **The "Core costs 5x the hardware" headline is an artefact of not having the field backend.** With
@@ -197,5 +197,31 @@ same eight little-endian words. The first wrapper copied into a `[u8; 32]` stagi
 Now a raw `ptr::read`/`write` of `[u32; 8]`. ⚠ **Keep it that way.** Anything routed through a byte
 slice reintroduces the staging copy, and it fails no test — it just costs a third of the block.
 
-⛔ **`memcpy`'s excess alone is +612 M, worth ~1.12x. How much of the remaining ~2,400 M of per-call
-overhead goes with it is NOT known** and is being measured; no number here until it is.
+### ✅ MEASURED: the fix was worth 2,191 M cycles — 38% of the block
+
+```
+backend, copying wrapper   5,775,098,109   2.381x
+backend, zero-copy         3,583,757,161   3.836x
+per-call: mul 296 -> 138 cy,  sqr 208 -> 123 cy      (the operation itself is 83)
+```
+
+⚠ **The flat profile under-reported this 3.3x.** It attributed only 663 M to `memcpy`; the rest was
+inlined into the wrappers and showed up as `hazync_fq_mul_limbs` costing 296 cy against an 83 cy
+operation. **Reading a flat profile's `memcpy` line as the cost of copying will understate it** --
+the per-call arithmetic (296 vs 83) was the honest signal, not the `memcpy` row.
+
+### What is left, and why it is a harder squeeze
+
+| function | cycles | share | |
+|---|---|---|---|
+| `hazync_fq_mul_limbs` | 903 M | 23.10% | 138 cy/call vs an 83 cy op |
+| `hazync_fq_sqr_limbs` | 799 M | 20.44% | 123 cy/call |
+| **`secp256k1_ecmult_strauss_wnaf`** | **441 M** | **11.27%** | **libsecp's own point arithmetic** |
+| `[PageIn]` | 287 M | 7.35% | control: 599 M |
+| `hz_add` | 197 M | 5.03% | |
+| `memcpy` | 191 M | 4.89% | control: 127 M |
+
+The residual ~50 cy/call is `reduce_from_bigint`'s modulus compare plus call overhead -- real, but
+nothing like three redundant copies. **The next-largest single item is now `ecmult_strauss_wnaf`:
+libsecp's wNAF/GLV control flow, which Core mode cannot touch by definition.** That is 7's structural
+floor showing up in a profile.

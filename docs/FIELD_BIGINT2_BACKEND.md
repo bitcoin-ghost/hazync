@@ -178,13 +178,19 @@ tree and is `cmp`-checked against the source before its result counts. → `gotc
 ⏰ **WRITTEN, and validated as far as a workstation can take it.** `patches/0012` plus
 `field_bigint2{,_impl}.h`, `field_bigint2.rs`, and `testsupport/`. Gates 0-2 pass.
 
-⏰ **2026-08-31 — MEASURED: 2.381x** (13,748,003,793 → 5,775,098,109 cycles). The projection was
-3.67x. Cards land at **~12-15** depending on the straggler, which is unmeasured for this arm.
+⏰ **2026-08-31 — MEASURED: 3.836x** (13,748,003,793 → 3,583,757,161 cycles), past the 3.67x
+projected. Cards land at **~8-10** depending on the straggler, which is unmeasured for this arm and is
+now the only figure here that needs a GPU.
 
-⛔ **The profile says 48% of the block was the FFI boundary, not the design** — 13.07 M coprocessor
-calls at 296/208 cy against an 83 cy operation, and `memcpy` at 4.4x the control. §3's feared
-expensive adds came in at **197 M against ~937 M modelled**. Zero-copy `load`/`store` written; being
-re-measured. → `CORE_VS_GHOST.md` §8
+✅ **§3's central worry did not materialise.** Canonical adds were projected to cost ~750 M and to be
+the reason for 9 cards rather than 7. The lazy + branching rewrite put `hz_add` at **197 M**, and all
+four C helpers together at **428 M (6.8%)**.
+
+⛔ **What actually cost the block was the FFI wrapper: three redundant 32-byte copies per call, worth
+2,191 M cycles — 38% of the block.** A first measurement of 2.381x was entirely this. Per-call cost
+fell 296→138 cy (mul) and 208→123 (sqr) against an 83 cy operation. ⚠ The flat profile attributed only
+663 M to `memcpy` and under-reported the true cost 3.3x, because the rest was inlined into the
+wrappers. → `CORE_VS_GHOST.md` §8
 
 ⛔ **The earlier block number was a projection.** No guest build, no `METHOD_ID`, no digest. The host
 reference stands in for the coprocessor, so what is proven is the *glue* — representation, lazy
