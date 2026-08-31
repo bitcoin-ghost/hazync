@@ -20,6 +20,7 @@ GUEST="$HERE/prover/methods/guest"
 BASE=${HAZYNC_BASE:-$HOME/hazync-build}
 SECP="$BASE/secp256k1"
 WORK=${WORK:-$(mktemp -d)}
+mkdir -p "$WORK" || { echo "FATAL: cannot create WORK=$WORK" >&2; exit 1; }
 COUNT=${COUNT:-8}
 CC=${CC:-gcc}
 
@@ -37,9 +38,17 @@ DEFS=(-DECMULT_WINDOW_SIZE=15 -DECMULT_GEN_KB=22 -DUSE_FIELD_INV_BUILTIN=1 -DUSE
 say "staging $SECP -> $WORK/secp"
 rm -rf "$WORK/secp"; cp -r "$SECP" "$WORK/secp"
 cp "$GUEST/field_bigint2.h" "$GUEST/field_bigint2_impl.h" "$WORK/secp/src/"
-patch -s -p1 -d "$WORK/secp" --batch < "$HERE/patches/0012-select-field-bigint2-backend.patch" \
-    || die "patch 0012 did not apply"
+# ⛔ Idempotent on purpose. $HAZYNC_BASE/secp256k1 is a SHARED tree and a local guest build may have
+# left 0012 applied in it. Plain `patch` then detects a reversed hunk, helpfully un-applies it, and
+# the switch vanishes -- which the grep below catches, but only after the damage.
+if grep -q HAZYNC_FIELD_BIGINT2 "$WORK/secp/src/field.h"; then
+    say "patch 0012 already present in the staged tree (source was pre-patched) -- not re-applying"
+else
+    patch -s -p1 -d "$WORK/secp" --batch < "$HERE/patches/0012-select-field-bigint2-backend.patch" \
+        || die "patch 0012 did not apply"
+fi
 grep -q HAZYNC_FIELD_BIGINT2 "$WORK/secp/src/field.h" || die "patch 0012 applied but the switch is absent"
+grep -q HAZYNC_FIELD_BIGINT2 "$WORK/secp/src/field_impl.h" || die "field_impl.h has no HAZYNC_FIELD_BIGINT2 branch"
 
 build () {  # $1=tree  $2=output  $3...=extra flags/sources
     local tree="$1" out="$2"; shift 2

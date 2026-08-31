@@ -202,3 +202,60 @@ C2 reproduces the control's journal digest byte for byte on block 962,000.**
 It exported the macro, never applied the patch, and would have built stock libsecp while reporting a
 moved `METHOD_ID`. That is the seventh silent no-op of this exact shape, and the first inside the code
 written to catch them. Fixed, with a two-sided binary assertion on `hazync_fq_mul_limbs`.
+
+## 7. ⛔ Two levers investigated and REJECTED, 2026-08-31
+
+Both were sized optimistically from the profile and both died on inspection of what they'd replace.
+Neither was built.
+
+### `fe_sqrt` → the coprocessor: 1.85x WORSE
+
+`secp256k1_fe_sqrt` is a hand-tuned addition chain, ~255 squarings + ~15 multiplies = **~270 ops**.
+The obvious move is to route it to `hazync_fq_sqrt_limbs`, which this backend already provides and
+which already passed libsecp's suite. But risc0-crypto's `Fq::sqrt()` is `pow((p+1)/4)` by plain
+**square-and-multiply with no windowing**, and `(p+1)/4` is 254 bits with **247 set**:
+
+```
+risc0 Fq::sqrt()   253 squarings + 246 muls  =  499 ops
+libsecp fe_sqrt    ~255 squarings + ~15 muls =  ~270 ops        -> 1.85x worse
+```
+
+⛔ **There is no hardware sqrt.** `sqrt` and `inverse` in risc0-crypto are software exponentiation
+over the *same* coprocessor multiplies libsecp is already issuing. My ~224 M estimate assumed a
+one-call primitive that does not exist.
+
+⚠ **This makes `secp256k1_fe_impl_is_square_var` a real (if currently free) defect of this backend**:
+it routes to that 499-op path where stock computes a **Jacobi symbol** via `modinv32`. It is absent
+from the profile, so it costs nothing measurable today, but it is strictly worse than the code it
+replaced.
+
+### Canonical representation to skip `reduce_from_bigint`: incompatible with libsecp's `fe`
+
+`load` pays a modulus comparison **19.6 M times** per block (two per multiply, one per square), while
+the C producers that can create a non-canonical value run only ~6 M times. Reducing at the *producer*
+would let `load` use `from_bigint_unchecked` with no comparison at all -- worth an estimated 5-8%.
+
+⛔ **It fails libsecp's own test suite, and for a reason no patch fixes.** `fe_cmov_test` constructs
+an **all-ones bit pattern** (`2^256-1`) to check that `fe_cmov` copies every bit. That is legal: a
+libsecp `fe` is by design a *magnitude-carrying, possibly-unnormalised* type, and both `field_5x52`
+and `field_10x26` can represent values ≥ p -- that is what magnitude means. **A backend that requires
+canonical-at-all-times is fighting libsecp's design, not implementing it.**
+
+⚠ The escape hatch does not work either. `UnverifiedFp::from_bigint` is a free `const` constructor
+with no check, and `sys_mul` takes the modulus, so lazy limbs could in principle go straight to the
+coprocessor. But feeding a non-canonical value to the bigint2 precompile is **outside what
+risc0-crypto's own types permit** -- `Fp`'s invariant, and the `assert_canonical!` in `check()`, exist
+precisely to stop that. Trading a documented reduction path for an unvalidated one, to save ~10-15
+cycles a call, is the wrong trade.
+
+✅ `reduce_from_bigint` stays. For secp256k1's `p` it takes the `msb_set()` single-subtract fast path,
+which is the supported way to accept `[0, 2^256)`, and the comparison usually resolves on the first
+limb.
+
+### What this leaves
+
+The residual ~55 cy/call beyond the 83 cy operation is mostly the C↔Rust boundary itself: 16 limb
+loads and 8 stores per multiply, plus call overhead. **Removing that means doing the point arithmetic
+in Rust rather than C -- which is #139, i.e. Ghost.** Core + this backend is close to its practical
+ceiling at 3.836x; what is left that is genuinely Core-legal is configuration: `ECMULT_GEN_KB`,
+an `ECMULT_WINDOW` re-sweep, and worker processes.
