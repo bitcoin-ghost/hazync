@@ -82,9 +82,21 @@ mkdir -p "$OUT/receipts"
 for i in $(seq 0 15); do
   ( nvidia-smi --query-gpu=memory.used --format=csv,noheader -l 5 >"$OUT/vram_$i.log" 2>/dev/null ) & SMI=$!
   T0=$SECONDS
-  ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_OUT="$OUT/receipts/chunk_$i.bin" $COSTS
-    "$BIN" prove-chunk "$i" ) >"$OUT/prove_$i.log" 2>&1
-  RC=$?; kill $SMI 2>/dev/null
+  # ⛔ RETRY #119. The CUDA prover intermittently emits a succinct receipt that fails its own
+  # verify() -- "verification indicates proof is invalid". It is transient and recovers on retry
+  # (5 in 293 proves, every one recovering). Without a retry one occurrence loses a chunk, and then
+  # agg-chunks cannot run at all. Retry ONLY that fault: an OOM or a malformed segment fails
+  # identically every time and retrying wastes the card for three times as long.
+  RC=1
+  for ATT in 1 2 3 4; do
+    ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_OUT="$OUT/receipts/chunk_$i.bin" $COSTS
+      "$BIN" prove-chunk "$i" ) >"$OUT/prove_$i.log" 2>&1
+    RC=$?
+    [ $RC -eq 0 ] && { [ $ATT -gt 1 ] && { echo "  [#119] chunk $i: succeeded on attempt $ATT" | tee -a "$OUT/run.log"; echo "$i $ATT" >>"$OUT/119_retries.tsv"; }; break; }
+    grep -q "verification indicates proof is invalid" "$OUT/prove_$i.log" || break
+    echo "  [#119] chunk $i: invalid receipt on attempt $ATT, retrying" | tee -a "$OUT/run.log"
+  done
+  kill $SMI 2>/dev/null
   WALL=$((SECONDS-T0)); PEAK=$(sort -n "$OUT/vram_$i.log" 2>/dev/null | tail -1)
   echo "chunk=$i rc=$RC wall_s=$WALL peak_vram=$PEAK" | tee -a "$OUT/results.tsv" | tee -a "$OUT/run.log"
   [ $RC -eq 0 ] || say "  ⚠ chunk $i FAILED rc=$RC — see $OUT/prove_$i.log"
