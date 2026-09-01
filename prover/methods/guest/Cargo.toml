@@ -64,3 +64,8 @@ field-bigint2 = ["dep:risc0-crypto"]
 # verify: libsecp's own arithmetic decides, and a missing or wrong hint falls back to its sqrt.
 # Core-legal, unlike liftx-accel which substitutes the sqrt. See src/liftx_hint.rs and patches/0013.
 liftx-hint = []
+# patches/0008 — the ECDSA scalar inverse via the coprocessor. ⛔ Its Rust half lived inside the
+# `liftx-accel` module, so the two levers shared ONE gate and could not be composed: an arm wanting
+# the scalar inverse WITHOUT G1 failed to link with `undefined symbol: hazync_scalar_inverse`.
+# They are independent patches (0008 vs 0007) and now have independent features.
+scalar-inv-accel = []

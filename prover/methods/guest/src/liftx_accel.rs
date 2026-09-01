@@ -57,13 +57,17 @@ use risc0_crypto::curves::secp256k1::{Affine, Fq};
 ///
 /// Sorted by `x`; binary search. A 2,160-entry table is ~135 KB, and a hit costs ~11 comparisons of
 /// 32 bytes against ~265 field operations. Guest execution is single-threaded.
+#[cfg(feature = "liftx-accel")]
 static mut MEMO: Vec<([u8; 32], [u8; 32])> = Vec::new();
+#[cfg(feature = "liftx-accel")]
 static mut MEMO_HITS: u32 = 0;
+#[cfg(feature = "liftx-accel")]
 static mut MEMO_MISS: u32 = 0;
 
 /// `(hits, misses)` — printed by the chunk so an empty cache reads as a FAILED experiment rather
 /// than a null result. A cache that silently never hits reinstates the full cost while every gate
 /// still passes.
+#[cfg(feature = "liftx-accel")]
 pub fn memo_stats() -> (u32, u32) { unsafe { (MEMO_HITS, MEMO_MISS) } }
 
 /// Recover the EVEN Y for the 32-byte big-endian `x`, writing it big-endian to `out_y`.
@@ -74,6 +78,7 @@ pub fn memo_stats() -> (u32, u32) { unsafe { (MEMO_HITS, MEMO_MISS) } }
 /// # Safety
 /// `xb` must be valid for 32 bytes and `out_y` writable for 32. Called only from
 /// `secp256k1_ge_set_xo_var` under `patches/0007`.
+#[cfg(feature = "liftx-accel")]
 #[no_mangle]
 pub unsafe extern "C" fn hazync_lift_x(xb: *const u8, out_y: *mut u8) -> i32 {
     let mut x = [0u8; 32];
@@ -125,6 +130,7 @@ pub unsafe extern "C" fn hazync_lift_x(xb: *const u8, out_y: *mut u8) -> i32 {
 /// # Safety
 /// `inb` valid for 32 bytes, `outb` writable for 32. Called only from `secp256k1_ecdsa_sig_verify`
 /// under `patches/0008`.
+#[cfg(feature = "scalar-inv-accel")]
 #[no_mangle]
 pub unsafe extern "C" fn hazync_scalar_inverse(inb: *const u8, outb: *mut u8) -> i32 {
     use risc0_crypto::curves::secp256k1::Fr;

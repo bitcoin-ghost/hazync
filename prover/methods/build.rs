@@ -101,6 +101,10 @@ fn main() {
     if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
         features.push("liftx-hint".to_string());
     }
+    println!("cargo:rerun-if-env-changed=HAZYNC_SCALAR_INV_ACCEL");
+    if std::env::var("HAZYNC_SCALAR_INV_ACCEL").as_deref() == Ok("1") {
+        features.push("scalar-inv-accel".to_string());
+    }
 
     if !features.is_empty() {
         use std::collections::HashMap;

@@ -36,8 +36,9 @@ mod script_flags;
 // hazync#139 middle-path experiment. Off by default; see the module docs and patches/0005.
 #[cfg(feature = "bigint2-ecdsa")]
 mod bigint2_ecmult;
-// hazync#205 / G1 — recover a pubkey's Y through the bigint2 coprocessor.
-#[cfg(feature = "liftx-accel")]
+// hazync#205 / G1 — recover a pubkey's Y through the bigint2 coprocessor. The module also carries
+// patches/0008's scalar inverse, which is an INDEPENDENT lever, so it compiles for either feature.
+#[cfg(any(feature = "liftx-accel", feature = "scalar-inv-accel"))]
 mod liftx_accel;
 // hazync#205 — the same recovery as a HOST HINT that libsecp then verifies. Core-legal, unlike
 // liftx_accel above, which substitutes the sqrt outright.
