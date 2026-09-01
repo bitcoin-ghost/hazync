@@ -193,7 +193,7 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
 - Why those numbers, and what we got wrong reaching them:
-  [`docs/TEN_MINUTE_BLOCK.md`](docs/TEN_MINUTE_BLOCK.md)
+  [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md)
 - How it's built: [`docs/`](docs/)
 
 ## Prior art and credit
