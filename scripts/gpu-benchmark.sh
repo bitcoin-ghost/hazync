@@ -74,18 +74,31 @@ say "digest PASS; cycles $C"
 
 say "=== 2. sixteen chunks, PROVING — the wall-clock the card count actually needs ==="
 say "    ⏰ this is the number docs/BUILDS.md 4 says is derived rather than measured"
-( export HAZYNC_CHUNKS=16 $COSTS; "$BIN" prove-chunks ) >"$OUT/prove16.log" 2>&1 &
-PROVE=$!
-while kill -0 $PROVE 2>/dev/null; do
-  nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader >>"$OUT/gpu.csv" 2>/dev/null
-  sleep 20
+# ⛔ `prove-chunk` is SINGULAR and takes an index; there is no `prove-chunks`. An unrecognised
+# argument does not error -- it falls through to a demo path and exits 0 in twenty seconds, which
+# looks exactly like a successful run. Loop the indices explicitly, as scripts/gpu-stack-ab.sh does.
+mkdir -p "$OUT/receipts"
+: > "$OUT/results.tsv"
+for i in $(seq 0 15); do
+  ( nvidia-smi --query-gpu=memory.used --format=csv,noheader -l 5 >"$OUT/vram_$i.log" 2>/dev/null ) & SMI=$!
+  T0=$SECONDS
+  ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_OUT="$OUT/receipts/chunk_$i.bin" $COSTS
+    "$BIN" prove-chunk "$i" ) >"$OUT/prove_$i.log" 2>&1
+  RC=$?; kill $SMI 2>/dev/null
+  WALL=$((SECONDS-T0)); PEAK=$(sort -n "$OUT/vram_$i.log" 2>/dev/null | tail -1)
+  echo "chunk=$i rc=$RC wall_s=$WALL peak_vram=$PEAK" | tee -a "$OUT/results.tsv" | tee -a "$OUT/run.log"
+  [ $RC -eq 0 ] || say "  ⚠ chunk $i FAILED rc=$RC — see $OUT/prove_$i.log"
 done
-wait $PROVE; say "prove REAL_EXIT=$?"
-grep -E "wall_s|chunk .* rc=" "$OUT/prove16.log" | tail -20 | tee -a "$OUT/run.log"
+# the straggler, from WALL-CLOCK rather than cycles -- the whole point of running on a GPU
+awk -F'wall_s=' '/wall_s=/{split($2,a," ");w[n++]=a[1];s+=a[1];if(a[1]>m)m=a[1]}
+  END{if(n)printf "  MEASURED straggler: max %d vs mean %.0f = %.3fx over %d chunks\n",m,s/n,m/(s/n),n}'   "$OUT/results.tsv" | tee -a "$OUT/run.log"
 
+# ⛔ agg-chunks needs the chunk receipts to exist. Without proving they do not, and it dies with
+# "chunk receipt chunk_0.bin: No such file or directory" -- which is what happened first time.
+ls "$OUT/receipts"/chunk_*.bin >/dev/null 2>&1 || die "no chunk receipts — proving did not produce them"
 say "=== 3. aggregate — the term worth 25% of Ghost's budget and 12% of Core's ==="
 say "    ⏰ issue #207: does it still saturate at N=2? That ceiling has never been re-measured"
-( "$BIN" agg-chunks ) >"$OUT/agg.log" 2>&1; say "agg REAL_EXIT=$?"
+( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_RECEIPTS="$OUT/receipts"; "$BIN" agg-chunks ) >"$OUT/agg.log" 2>&1; say "agg REAL_EXIT=$?"
 grep -iE "aggregate|wall|seconds" "$OUT/agg.log" | tail -10 | tee -a "$OUT/run.log"
 
 say "DONE — $OUT"
