@@ -136,8 +136,6 @@ struct ChainState {
     self_id: [u32; 8],  // S1: image id recursed against; verifier asserts == METHOD_ID
 }
 #[derive(Serialize, Deserialize)]
-struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
-#[derive(Serialize, Deserialize)]
 struct SpendCheck { raw_tx: Vec<u8>, prevouts: Vec<u8>, block_height: u32 }
 #[derive(Serialize, Deserialize)]
 struct SpendResult { script: i32, sigops: i64, tx_check: i32, flags: u32 }
@@ -348,7 +346,6 @@ fn build_block(
         }
     }
     let root_next = wire_stump(forest);
-    let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
     BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
@@ -2160,7 +2157,7 @@ fn chunk_profile() {
             let pm: f64 = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
             let mm: f64 = measured.iter().sum::<u64>() as f64 / measured.len().max(1) as f64;
             let worst = predicted.iter().zip(&measured)
-                .map(|(p, m)| ((*m as f64 / mm) / (*p as f64 / pm)))
+                .map(|(p, m)| (*m as f64 / mm) / (*p as f64 / pm))
                 .fold(0.0f64, |a, b| a.max(b));
             println!("  cost-model error: worst chunk is {:.2}x its predicted share of the block", worst);
         }
@@ -2183,6 +2180,10 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
     let d = <sha2::Sha256 as sha2::Digest>::digest(&s.journal.bytes);
     let j = &s.journal.bytes;
     let w = |i: usize| u32::from_le_bytes([j[i], j[i + 1], j[i + 2], j[i + 3]]);
+    // The guest tags this journal KIND_CHUNK and the aggregate asserts it (H8). The host printed the
+    // tag and never checked it, so a payload-format change would have shown up as a plausible-looking
+    // cycle count rather than an error. Check it here too: this is the other end of the same contract.
+    assert_eq!(w(0), KIND_CHUNK, "chunk journal is not a ChunkOut (domain tag {:#x})", w(0));
     println!("        journal sha256 {}  kind={:#x} all_valid={} binds={}", hex(&d), w(0), w(4), w(8));
     s.cycles()
 }
@@ -3652,6 +3653,7 @@ fn script_flags_test() {
 }
 
 fn main() {
+    let _report_119_on_exit = Report119OnExit;
     // Prove IN-PROCESS unless the operator asked for something else.
     //
     // risc0's default backend shells out to `r0vm`, a separate ~109 MB binary that is not part of this
@@ -4950,13 +4952,12 @@ fn receipt_digest_cmd(path: &str) {
 // An odd receipt at the end of a level carries forward untouched. It keeps its position, so
 // adjacency is preserved and the final claim is unchanged.
 fn seg_join_cmd() {
-    use risc0_zkvm::{VerifierContext, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::{SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
     let dir = seg_workdir();
     let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "j0".into());
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
-    let ctx = VerifierContext::default();
     let mut done = 0usize;
     let t0 = Instant::now();
 
@@ -5476,7 +5477,6 @@ fn seg_serve_cmd() {
     listener.set_nonblocking(true).ok();
 
     let t_work = Instant::now();
-    let ctx = VerifierContext::default();
 
     // NO thread::scope HERE, and that is the fix for a deadlock I introduced. The scope's implicit
     // join waited for the connection threads; the connection threads waited for join work; and the
@@ -5490,11 +5490,12 @@ fn seg_serve_cmd() {
     let acc_alldone = alldone.clone();
     let (aq, ao, aw, aj, ajo, alo) =
         (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone());
-    let acceptor = std::thread::spawn(move || {
+    // Detached on purpose -- see the deadlock note above; nothing joins this handle.
+    let _acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
         while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
-                Ok((mut s, peer)) => {
+                Ok((s, peer)) => {
                     println!("  worker connected from {peer}");
                     let (queue, out, wire, jobs, jout, alldone, last_out) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(), alo.clone());
@@ -5909,6 +5910,20 @@ fn report_119_retries() {
     if n > 0 {
         println!("  [#119] {n} segment(s) needed a retry this run — the rate is worth recording on the issue");
     }
+}
+
+/// Reports the #119 retry total however `main` exits.
+///
+/// ⛔ `prove_segment_resilient`'s own comment says the total "is reported at the end of a run, so the
+/// rate stays measurable" — and it never was: `report_119_retries` had no caller, so every retry was
+/// counted and then discarded. #119 is still open and still unexplained, and the retry RATE is the
+/// number it actually needs.
+///
+/// A call at the end of `main` would not have worked: `main` dispatches a dozen commands with early
+/// `return`s, so it would fire for almost none of them. A drop guard fires on every normal exit path.
+struct Report119OnExit;
+impl Drop for Report119OnExit {
+    fn drop(&mut self) { report_119_retries(); }
 }
 
 #[cfg(test)]
