@@ -2102,6 +2102,7 @@ fn chunk_profile() {
     let n = w.inputs.len();
     let nchunks = nchunks_env();
     let costs = input_costs(&w);
+    let keys = input_keys(&w);   // for the per-chunk repeat count reported below
     let exec = std::env::var("HAZYNC_PROFILE_EXEC").is_ok();
 
     println!("=== CHUNK PROFILE block {}: {} inputs → {} chunks ===", w.height, n, nchunks);
@@ -2128,11 +2129,35 @@ fn chunk_profile() {
                 (w.txs[inp.tx_idx as usize].0.len() + w.tx_prevouts[inp.tx_idx as usize].0.len()) as u64).sum();
             let ec: u64 = w.inputs[lo..hi].iter().map(|inp| predicted_ec_ops(
                 &w.txs[inp.tx_idx as usize].0, inp.input_idx, &w.tx_prevouts[inp.tx_idx as usize].0)).sum();
+            // ⛔ Report the two curves SEPARATELY, not just their total. Fitting a cost model against
+            // the combined count cannot separate them, so a refit has to reuse whatever ECDSA:Schnorr
+            // ratio it started with -- and that ratio is build-dependent. Rescaling Ghost's stale
+            // 13.77x ratio is exactly what made its straggler WORSE (1.407 -> 1.884). The two columns
+            // below are what a per-curve fit needs.
+            let (ecdsa_n, schnorr_n) = w.inputs[lo..hi].iter().fold((0u64, 0u64), |(e, s), inp| {
+                let o = predicted_sig_ops(&w.txs[inp.tx_idx as usize].0, inp.input_idx,
+                                          &w.tx_prevouts[inp.tx_idx as usize].0);
+                (e + o.ecdsa, s + o.schnorr)
+            });
+            // ⛔ The dimension a static (ecdsa, schnorr, bytes, inputs) fit CANNOT capture. Cost is
+            // position-dependent inside a chunk: an input whose pubkey was already decompressed
+            // earlier in the SAME chunk is cheaper, which is what COST_PER_EC_OP_REPEAT prices and
+            // what KeyWalk walks. On block 962,000 two chunks with near-identical ecdsa counts (210
+            // vs 205) and byte sizes (14.7 M vs 14.9 M) measured 28.5 M against 80.4 M cycles -- 2.8x
+            // apart, and no model over those four columns can fit both. `repeats` is that term.
+            let repeats = {
+                let mut seen = std::collections::HashSet::new();
+                let mut n = 0u64;
+                for k in keys[lo..hi].iter().flatten() {
+                    if !seen.insert(*k) { n += 1; }
+                }
+                n
+            };
             let cycles = if exec { Some(exec_chunk_cycles(&w, lo, hi)) } else { None };
             if let Some(cy) = cycles { measured.push(cy); }
             match cycles {
-                Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, bytes, c, cy),
-                None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, bytes, c),
+                Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  ecdsa {:>5}  schnorr {:>5}  repeats {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, ecdsa_n, schnorr_n, repeats, bytes, c, cy),
+                None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  ecdsa {:>5}  schnorr {:>5}  repeats {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, ecdsa_n, schnorr_n, repeats, bytes, c),
             }
         }
         // The straggler ratio is the number that matters: a block's wall-clock is its slowest chunk, so

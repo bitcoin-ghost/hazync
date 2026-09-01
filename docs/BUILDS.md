@@ -10,7 +10,7 @@ says exactly what a GPU run would settle.
 | build | cycles | vs stock | chunk | straggler | cards |
 |---|---|---|---|---|---|
 | stock control | 13,748,003,793 | 1.000x | 14,417 s | 1.054 | 28 |
-| **CORE** | **3,357,576,338** | **4.095x** | 3,521 s | **1.311** | **9** |
+| **CORE** | **3,357,576,338** | **4.095x** | 3,521 s | **1.210** | **9** *(8.28)* |
 | GHOST (no field backend) | 1,287,797,844 | 10.676x | 1,350 s | 1.407 | 5 |
 | **GHOST** | **1,198,904,653** | **11.467x** | 1,257 s | ⚠ 1.407 *(assumed)* | **5** |
 
@@ -27,9 +27,18 @@ consensus output moves in either mode.
 # build
 HAZYNC_FIELD_BIGINT2=1 HAZYNC_LIFTX_HINT=1 HAZYNC_ECMULT_WINDOW=21 cargo build --release
 # packing constants -- REFITTED, and they matter: 1.557 -> 1.311 straggler
-HAZYNC_COST_EC_OP=450020 HAZYNC_COST_SCHNORR_OP=450020
-HAZYNC_COST_INPUT_BYTE=1 HAZYNC_COST_INPUT_BASE=37946
+HAZYNC_COST_EC_OP=417798 HAZYNC_COST_SCHNORR_OP=462435
+HAZYNC_COST_INPUT_BYTE=2 HAZYNC_COST_INPUT_BASE=41387
 ```
+
+⏰ **The constants above are the PER-CURVE fit (2026-09-01), not the earlier curve-blind one.**
+Separating ECDSA from Schnorr measured a ratio of **1.11x** where the earlier constants assumed
+exactly 1.00x, and took the straggler **1.311 -> 1.210** — 8.89 to 8.28 cards. Eight cards needs
+1.163; this is 3.4% over that line.
+
+⚠ Core's cost model fits its own data at **6.6%** mean error against Ghost's **15.2%**. That is why
+the same refit helps Core and hurts Ghost: Core's cost really is close to linear in
+`(ecdsa, schnorr, bytes, inputs)`, and Ghost's is not.
 
 libsecp keeps its wNAF, its GLV, its ECDSA logic and every check. Two changes beneath it: the field
 *backend* (an interface libsecp already parameterises for its own use) and a pubkey-Y hint that
@@ -64,6 +73,11 @@ different things — #139 replaces `secp256k1_ecmult`; the field backend replace
 
 ## 4 · ⛔ What is NOT measured
 
+0. ⏰ **How many GPUs.** **Two** measures both builds' 16-chunk proving in parallel and turns every
+   derived card count into a measured one. **Four** is required for the aggregate: issue #207's
+   ceiling is a table at 1, 2 and 4 workers, and an N=2 saturation cannot be reproduced or fixed with
+   two boxes. The aggregate is 25% of Ghost's budget and 12% of Core's — it is where the remaining
+   cards are. `scripts/gpu-benchmark.sh core|ghost` runs it.
 1. **Wall-clock, on a GPU.** Every card count here converts cycles at a fixed ratio. Proving time is
    quantised by segment (`ceil(cycles / 2^po2)`), so the real straggler can differ from the cycle
    straggler. **This is the one thing that needs hardware.**
