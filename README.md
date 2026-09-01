@@ -14,6 +14,28 @@ that are *not* covered. Adversarial review is what this needs most; see
 
 ---
 
+## Two modes, and the difference is how much of Core's code actually runs
+
+Both prove the same block. Both commit the **same 32 bytes** — every accepted change in either mode
+produces a journal digest byte-identical to stock Bitcoin Core. Neither is "less correct".
+
+| | 🛡 **CORE** — what ships | ⚡ **GHOST** — experimental |
+|---|---|---|
+| **libsecp's wNAF, GLV, ECDSA logic, every check** | untouched | scalar-multiplication strategy replaced |
+| **Cycles running Core's own code** | ~all of it | ~22% |
+| **Concession** | the field *backend* beneath libsecp — an interface it already parameterises for its own use — plus a pubkey hint Core's own arithmetic verifies before accepting | whatever is fastest |
+| **Hardware for a block in 10 minutes** | see [`docs/BUILDS.md`](docs/BUILDS.md) | fewer cards, larger claim |
+
+**Core is the project.** Ghost is an experiment in how much speed is available if fidelity stops
+being the constraint — it exists to price that trade honestly, not to replace Core.
+
+⛔ **Every performance figure in this repository should say what was measured, on what, and what
+remains unmeasured.** This project has repeatedly been wrong by believing a projection; the
+corrections are recorded rather than edited out. If a figure does not say how it was obtained, treat
+it as a projection. → [`docs/BUILDS.md`](docs/BUILDS.md) is the authority on what each mode costs.
+
+---
+
 ### Check one yourself. It takes about thirty seconds.
 
 ```bash
@@ -194,7 +216,29 @@ commissioned audit. Trying to break it is the most useful thing you can do,
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
 - Why those numbers, and what we got wrong reaching them:
   [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md)
-- How it's built: [`docs/`](docs/)
+- How it's built: [`docs/`](docs/) — current only. The development record is in
+  [`docs/history/`](docs/history/README.md), which names its own stale figures.
+
+## Finding your way around
+
+| | |
+|---|---|
+| [`docs/`](docs/README.md) | **start here** — current documentation, indexed |
+| [`docs/BUILDS.md`](docs/BUILDS.md) | the two modes: exact patches, env, constants, and what is *not* measured |
+| `prover/` | the guest (Core's consensus code, compiled to RISC-V) and the host that drives it |
+| `verifier/`, `verifier-ffi/`, `verifier-wasm/` | checking a proof — CLI, C ABI, and browser |
+| `patches/` | **every modification to Core or libsecp, numbered and individually justified** |
+| `coreshim/` | headers that let Core build for the guest |
+| `scripts/` | provisioning, benchmarks, correctness gates |
+| `reproduce/` | reproducing the canonical `METHOD_ID` from source |
+| `coordinator/` | the board and work distribution |
+| `accumulator/`, `coinbase-smt/`, `rangestate/` | supporting crates |
+| `audit-fuzz/`, `guest-pure-fuzz/`, `leaf-differential/` | adversarial testing harnesses |
+| [`docs/history/`](docs/history/README.md), `experimental/`, `tasks/` | **the development record — superseded, kept for provenance** |
+
+⚠ If you are reading a number, check it came from `docs/` and not `docs/history/`. The latter is kept
+because *how* a conclusion was reached is often the only defence against reaching a wrong one twice —
+several levers here were proposed, rejected on measurement, and proposed again.
 
 ## Prior art and credit
 
