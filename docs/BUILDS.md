@@ -5,18 +5,62 @@ on one laptop** — CPU only, no GPU — on block 962,000, single chunk, against
 from the same tree. ⛔ **Wall-clock and therefore card counts are DERIVED, not measured.** Section 4
 says exactly what a GPU run would settle.
 
-## 1 · Results
+## 1 · Results — MEASURED ON HARDWARE, 2026-09-02
 
-| build | cycles | vs stock | chunk | straggler | cards |
-|---|---|---|---|---|---|
-| stock control | 13,748,003,793 | 1.000x | 14,417 s | 1.054 | 28 |
-| **CORE** | **3,357,576,338** | **4.095x** | 3,521 s | **1.210** | **9** *(8.28)* |
-| GHOST (no field backend) | 1,287,797,844 | 10.676x | 1,350 s | 1.407 | 5 |
-| **GHOST** | **1,198,904,653** | **11.467x** | 1,257 s | ⚠ 1.407 *(assumed)* | **5** |
+Two NVIDIA L40S. Block 962,000, 16 chunks, real proving. **Every card count below is measured, not
+derived**, which is what §4 of the previous revision said was outstanding.
+
+| build | chunk work | straggler | aggregate | **cards** |
+|---|---|---|---|---|
+| **CORE** | 4,029 s | **1.295** | 473 s | **10** |
+| **GHOST** | 1,713 s | **1.438** | 473 s | **5** |
 
 **Every build commits `4fb3e3c5e80417c87584a617d23b53d8c49940348c0e8d455f66299b4bd4656d`** with
-`all_valid=1`, `binds=8006` — byte-identical to the stock control and to the recorded value. No
-consensus output moves in either mode.
+`all_valid=1`, `binds=8006` — byte-identical to stock on both boxes, and the whole-block cycle counts
+reproduced the laptop's figures exactly (GHOST 1,198,904,653 to the cycle).
+
+### ⛔ Every derived figure moved the WRONG way when measured
+
+| | derived | measured | |
+|---|---|---|---|
+| CORE cards | 9 | **10** | chunk work 3,521 → 4,029 s (+14%) |
+| GHOST cards | 5 | **5** | chunk work 1,257 → 1,713 s (+36%) |
+| CORE straggler | 1.210 | 1.295 | predicted well |
+| GHOST straggler | 1.469 | 1.438 | predicted well |
+| aggregate | 616 s *(fitted)* | 473 s | moved TOWARD us |
+
+**The stragglers predicted within a few percent. The cycles→wall-clock conversion did not** — it was
+optimistic by 14% for Core and 36% for Ghost. Cycle ratios are a good proxy for the SHAPE of a
+distribution and a poor one for its absolute cost.
+
+### ⏰ The aggregate: run a worker on the coordinator
+
+```
+1 remote worker, coordinator IDLE            772.4 s
+1 remote worker + coordinator ALSO working   473.1 s   <- 1.63x, ZERO extra hardware
+2 remote workers, coordinator idle           405.6 s   <- 1.90x
+```
+
+**`seg-serve` distributes but does not prove.** With one worker the coordinator's GPU sits at **0%
+while a whole card does nothing.** Attaching a worker to it is free and is worth **a card on both
+builds**. This required no code change.
+
+⏰ **hazync#207 should be closed as ALREADY FIXED, not implemented.** Its case is that workers idle
+through a serial execute it estimates at ~107 s; measured, that phase is **13.2 s**, almost certainly
+fixed by `read_slice` (#136) landing after the N=2 ceiling was measured. The aggregate now scales
+**1.90x on two workers**. Implementing its `run_with_callback` restructure would have rewritten a
+function that has already caused two deadlocks, to fix something that is not broken.
+
+⚠ **CORE's aggregate is ASSUMED equal to GHOST's**, not measured. The aggregate is receipt recursion
+— 16 receipts, 323 segments at po2 21 — and that work is the same shape whichever build produced the
+receipts; GHOST measured 12.9–13.2 s execute and 323 segments across three runs. Worth confirming if
+Core's number ever becomes load-bearing.
+
+### #119, on an L40S
+
+**1 occurrence in 16 proves**, recovered on the first retry (81 s). Against 5-in-293 previously. Small
+sample, but it is the first L40S data on an open, unexplained fault, and without a retry that single
+occurrence costs the whole aggregate — `agg-chunks` needs all 16 receipts.
 
 ## 2 · CORE — *Core's own code decides*
 

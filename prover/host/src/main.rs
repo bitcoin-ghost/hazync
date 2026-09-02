@@ -4224,7 +4224,9 @@ mod smt_bridge {
 
 #[cfg(test)]
 mod chunk_packing_tests {
-    use super::{pack_chunks, runs_at_cap, SigOps, predicted_sig_ops};
+    use super::{pack_chunks, runs_at_cap, SigOps, predicted_sig_ops,
+                split_at_cap, split_at_cap_keyed,
+                COST_INPUT_BASE, COST_PER_EC_OP, COST_PER_EC_OP_REPEAT};
 
     // ---- #139: the packer must be able to see the curve, not just the count ----
 
@@ -4416,6 +4418,30 @@ mod chunk_packing_tests {
         assert_eq!(pack_chunks(&[1_950_000; 5], 1, None), vec![(0, 5)]);
         assert!(pack_chunks(&[], 8, None).is_empty());
     }
+    /// The key-reuse model must actually MOVE the partition, or it is a no-op wearing a constant.
+    /// Two runs of identical shape where one reuses a key and the other does not: the reusing run
+    /// should be allowed MORE inputs under the same cap.
+    #[test]
+    fn key_reuse_lets_a_run_hold_more_inputs() {
+        let n = 40;
+        let costs = vec![COST_INPUT_BASE + COST_PER_EC_OP; n];
+        let savings = vec![COST_PER_EC_OP - COST_PER_EC_OP_REPEAT; n];
+        let same = vec![Some([7u8; 33]); n];          // every input reuses one key
+        let distinct: Vec<Option<[u8; 33]>> =
+            (0..n).map(|i| { let mut k = [0u8; 33]; k[0] = 2; k[1] = i as u8; Some(k) }).collect();
+
+        let cap = (COST_INPUT_BASE + COST_PER_EC_OP) * 10;
+        let r_same = split_at_cap_keyed(&costs, &savings, &same, cap);
+        let r_diff = split_at_cap_keyed(&costs, &savings, &distinct, cap);
+        assert!(
+            r_same.len() < r_diff.len(),
+            "reused keys must pack denser: same={} runs, distinct={} runs",
+            r_same.len(), r_diff.len()
+        );
+        // and the unkeyed walk must agree with the all-distinct case, since nothing is ever reused
+        assert_eq!(split_at_cap(&costs, cap).len(), r_diff.len());
+    }
+
 }
 
 /// `vb-stages` — hazync: cost each phase of the aggregate's `validate_block` by subtraction.
@@ -6013,31 +6039,7 @@ mod join_tree_tests {
         }
     }
 
-        /// The key-reuse model must actually MOVE the partition, or it is a no-op wearing a constant.
-    /// Two runs of identical shape where one reuses a key and the other does not: the reusing run
-    /// should be allowed MORE inputs under the same cap.
     #[test]
-    fn key_reuse_lets_a_run_hold_more_inputs() {
-        let n = 40;
-        let costs = vec![COST_INPUT_BASE + COST_PER_EC_OP; n];
-        let savings = vec![COST_PER_EC_OP - COST_PER_EC_OP_REPEAT; n];
-        let same = vec![Some([7u8; 33]); n];          // every input reuses one key
-        let distinct: Vec<Option<[u8; 33]>> =
-            (0..n).map(|i| { let mut k = [0u8; 33]; k[0] = 2; k[1] = i as u8; Some(k) }).collect();
-
-        let cap = (COST_INPUT_BASE + COST_PER_EC_OP) * 10;
-        let r_same = split_at_cap_keyed(&costs, &savings, &same, cap);
-        let r_diff = split_at_cap_keyed(&costs, &savings, &distinct, cap);
-        assert!(
-            r_same.len() < r_diff.len(),
-            "reused keys must pack denser: same={} runs, distinct={} runs",
-            r_same.len(), r_diff.len()
-        );
-        // and the unkeyed walk must agree with the all-distinct case, since nothing is ever reused
-        assert_eq!(split_at_cap(&costs, cap).len(), r_diff.len());
-    }
-
-#[test]
     fn widths_terminate_at_one_and_shrink_monotonically() {
         for n in 1..=1024usize {
             let w = join_tree_widths(n);
