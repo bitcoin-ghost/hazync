@@ -3,15 +3,27 @@
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
 push (#23).
 
-Last regenerated 2026-08-24 under `1d6c3792…` (the parallel-block-validation re-baseline — see
-`reproduce/METHOD_ID`), which superseded `b62d2a60…` (2026-08-04, audit #5 guest guards), which
-superseded `b161735a…`.
+Last regenerated 2026-09-05 under `3867611d…` (the coprocessor-field-backend re-baseline — see
+`reproduce/METHOD_ID`), which superseded `1d6c3792…` (2026-08-24, parallel block validation), which
+superseded `b62d2a60…` (2026-08-04, audit #5 guest guards), which superseded `b161735a…`.
 
 A proof carries its guest id inside it, so a re-baseline cannot be absorbed by editing anything: the
 pair has to be re-proved and re-wrapped. Until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and
 `verifier-wasm/test-parity.sh` fail — as they should, since a verifier pinned to the new id
-genuinely cannot accept a proof made by the old one. Both earlier regenerations were forced the same
+genuinely cannot accept a proof made by the old one. Every earlier regeneration was forced the same
 way.
+
+⛔ The 2026-09-05 regeneration was blocked before it could prove a single block: `prove-range-bridge`
+panicked with `invalid type: sequence, expected bytes`. That is NOT a bundle problem — it was a host
+bug. `PackedHash`/`PackedHashes` (the 2026-08-28 witness packing) shipped a second byte-visitor that
+omitted the `visit_seq` arm `PackedBytes` already had, so the host could not parse any JSON bundle
+carrying `txids`, including one it had written itself. Fixed in `packed_bytes`; if this signature
+returns, check that helper before suspecting the coordinator or the bundles.
+
+⚠ Also on 2026-09-05: the coordinator's `/api/witness/<h>` still serves the PRE-packing shape, with
+`txids` and `WireProof.siblings` as nested lists rather than one flat `n*32` blob. Bundles fetched
+from it must be flattened before `prove-range-bridge` will read them. `leaf`, `txs`, `tx_prevouts`
+and every SMT field were always flat and must be left alone.
 
 ⚠ On the 2026-08-23 re-baseline that produced `1d6c3792…`, the stale pair failed **two** CI jobs, not
 one: `accumulator-tests` at the standalone-verifier step and `reproducible-image-id` at the Groth16
