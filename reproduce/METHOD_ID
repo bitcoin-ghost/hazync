@@ -381,7 +381,36 @@
 #
 # Superseded the earlier id 4722cec8…
 
-1d6c3792e5aefec398bfb03e176934f6876f423ec6f54c3d3d8f0c79ce5000c5
+# ── 3867611d99044e24dd5fe8753e6158f1d7f7d86c24bacc4ce968c621faed4b15 ─ 2026-09-04 ────────────────
+#
+# THE WITNESS ENCODER, A COPROCESSOR FIELD BACKEND, AND A VERIFIED PUBKEY HINT.
+#
+# ⛔ WHAT MOVED THE ID: the packed witness encoder (419bf68) alone. `PackedHash`, `PackedHashes` and
+# `packed_bytes` are UNGATED guest code and compile into every build. The field backend
+# (patches/0012) and the liftx hint (patches/0013) are opt-in behind HAZYNC_FIELD_BIGINT2 and
+# HAZYNC_LIFTX_HINT, their modules are #[cfg]-gated, and provision-vps.sh does not apply either
+# patch — a default build does not contain them.
+#
+# WHAT DID NOT CHANGE: what is proven. Block 962,000 commits journal
+# 4fb3e3c5e80417c87584a617d23b53d8c49940348c0e8d455f66299b4bd4656d with all_valid=1 and binds=8006,
+# byte-identical to the superseded guest, and identical again on two L40S boxes. No consensus rule,
+# no line of Core, no accumulator or BIP30 commitment moved. The ELF changed; what it attests did not.
+#
+# REPRODUCIBILITY, CHECKED RATHER THAN ASSUMED: this id was produced independently by a GitHub runner
+# and by a local `docker build -f reproduce/Dockerfile .`, and the two agree. That is the property
+# this container exists to provide, so taking the id from a single CI log would have used the
+# artefact while ignoring the guarantee.
+#
+# ⛔ COST — NOT YET PAID. As every re-baseline does, this resets the board. At the time of writing the
+# live coordinator serves the SUPERSEDED id and 1,879 blocks are proven against it, including the
+# 939-block spine. The release, the coordinator swap, the wasm deploy and the board reset are ONE
+# cutover and happen together. Until then the scheduled `deployed-verifier` job is EXPECTED to fail,
+# because the browser verifier the site serves is pinned to the superseded id — that is the gate
+# working, not drift.
+#
+# Superseded the earlier id 1d6c3792…
+
+3867611d99044e24dd5fe8753e6158f1d7f7d86c24bacc4ce968c621faed4b15
 
 # ── 1d6c3792e5aefec398bfb03e176934f6876f423ec6f54c3d3d8f0c79ce5000c5 ─ 2026-08-23 ────────────────
 #
