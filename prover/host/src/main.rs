@@ -21,23 +21,11 @@ impl serde::Serialize for PackedBytes {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
 }
 impl<'de> serde::Deserialize<'de> for PackedBytes {
+    // Delegates to the shared `packed_bytes` visitor. This used to carry its own copy, and when
+    // PackedHash/PackedHashes were added they got a *second* visitor that silently omitted `visit_seq`
+    // -- reintroducing the v0.9.0 JSON parse bug for every bundle carrying `txids`. One visitor only.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = Vec<u8>;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
-            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
-            // JSON (serde_json) has no native bytes type: `serialize_bytes` emits a sequence of u8, so the
-            // bundle round-trip (bridge writes bundle_<n>.json, prove-range-bridge reads it) lands here.
-            // risc0's binary serde still hits visit_bytes/visit_byte_buf above; both paths yield Vec<u8>.
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
-                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(b) = seq.next_element::<u8>()? { out.push(b); }
-                Ok(out)
-            }
-        }
-        Ok(PackedBytes(d.deserialize_byte_buf(V)?))
+        Ok(PackedBytes(packed_bytes(d)?))
     }
 }
 
@@ -91,6 +79,14 @@ fn packed_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Er
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
         fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
         fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+        // JSON (serde_json) has no native bytes type: `serialize_bytes` emits a sequence of u8, so the
+        // bundle round-trip (bridge writes bundle_<n>.json, prove-range-bridge reads it) lands here.
+        // risc0's binary serde still hits visit_bytes/visit_byte_buf above; both paths yield Vec<u8>.
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? { out.push(b); }
+            Ok(out)
+        }
     }
     d.deserialize_byte_buf(V)
 }
@@ -3145,7 +3141,28 @@ fn bundle_roundtrip_test() {
     if back.witness.tx_prevouts.first().map(|p| &p.0) != Some(&prevouts) {
         println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.tx_prevouts mismatch"); fails += 1;
     }
-    if fails == 0 { println!(">>> BUNDLE-ROUNDTRIP: PASS — PackedBytes + full spend-block Bundle JSON round-trip"); }
+    // 3) The packed HASH types. These were added by the 2026-08-28 wire-packing change with their own
+    //    byte-visitor that omitted `visit_seq`, so every bundle carrying `txids` failed to parse -- the
+    //    v0.9.0 bug, reintroduced. Parsing the Bundle above already exercises it, but assert the VALUES
+    //    too: `PackedHashes` serialises as one flat n*32 blob, so a flat/nested or chunking mixup would
+    //    still parse while yielding the wrong hashes.
+    if back.witness.txids.0 != vec![[7u8; 32], [8u8; 32]] {
+        println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.txids mismatch"); fails += 1;
+    }
+    for case in [Vec::new(), vec![[3u8; 32]], (0u8..9).map(|i| [i; 32]).collect::<Vec<_>>()] {
+        let j = serde_json::to_vec(&PackedHashes(case.clone())).expect("serialise PackedHashes");
+        let back: PackedHashes = serde_json::from_slice(&j)
+            .expect("PackedHashes JSON round-trip must parse (regression: missing visit_seq)");
+        if back.0 != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedHashes {} hashes", case.len()); fails += 1; }
+    }
+    {
+        let case = PackedHash([0xABu8; 32]);
+        let j = serde_json::to_vec(&case).expect("serialise PackedHash");
+        let back: PackedHash = serde_json::from_slice(&j)
+            .expect("PackedHash JSON round-trip must parse (regression: missing visit_seq)");
+        if back != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedHash mismatch"); fails += 1; }
+    }
+    if fails == 0 { println!(">>> BUNDLE-ROUNDTRIP: PASS — PackedBytes + PackedHash(es) + full spend-block Bundle JSON round-trip"); }
     else { std::process::exit(1); }
 }
 
