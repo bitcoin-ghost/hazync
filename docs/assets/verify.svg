@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="266" viewBox="0 0 980 266" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<style>
+  .bg{fill:#0d1117} .bar{fill:#161b22}
+  text{fill:#c9d1d9;white-space:pre}
+  .p{fill:#58a6ff} .cmd{fill:#e6edf3} .dim{fill:#8b949e} .ok{fill:#3fb950;font-weight:600}
+  .r{opacity:0;animation:a 9.75s steps(1,end) infinite}
+  @keyframes a{0%{opacity:0}2%{opacity:1}92%{opacity:1}100%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){.r{opacity:1;animation:none}}
+</style>
+<rect class="bg" width="980" height="266" rx="8"/>
+<rect class="bar" width="980" height="30" rx="8"/><rect class="bar" y="22" width="980" height="8"/>
+<circle cx="20" cy="15" r="5.5" fill="#ff5f57"/><circle cx="39" cy="15" r="5.5" fill="#febc2e"/><circle cx="58" cy="15" r="5.5" fill="#28c840"/>
+<text x="490" y="19" text-anchor="middle" class="dim" font-size="11">verify a Bitcoin validity proof — about thirty seconds</text>
+<text x="18" y="56" class="cmd r" style="animation-delay:0.00s"><tspan class="p">$ </tspan>curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu</text>
+<text x="18" y="78" class="cmd r" style="animation-delay:0.75s"><tspan class="p">$ </tspan>chmod +x hazync-verify-x86_64-linux-gnu</text>
+<text x="18" y="100" class="cmd r" style="animation-delay:1.50s"><tspan class="p">$ </tspan>curl -f https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin</text>
+<text x="18" y="122" class="dim r" style="animation-delay:2.25s">  222K   proof.bin</text>
+<text x="18" y="144" class="cmd r" style="animation-delay:3.00s"><tspan class="p">$ </tspan>./hazync-verify-x86_64-linux-gnu proof.bin</text>
+<text x="18" y="166" class="ok r" style="animation-delay:3.75s">&gt;&gt;&gt; SNARK RANGE PROOF [1..939] VERIFIED - genesis-anchored, 226682 bytes.</text>
+<text x="18" y="188" class="dim r" style="animation-delay:4.50s">    out_tip_hash 12ba142e7bd52fe3398593f98da6386b0e4c86a59d04c130e90b3e16...</text>
+<text x="18" y="210" class="dim r" style="animation-delay:5.25s">    range_work 4033035830187   UTXO leaves 939</text>
+<text x="18" y="232" class="dim r" style="animation-delay:6.00s">    guest image id 1d6c3792e5aefec398bfb03e176934f6876f423ec6f54c3d3d8f0c7...</text>
+</svg>

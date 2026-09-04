@@ -1,5 +1,11 @@
 # Hazync
 
+[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
+[![verify it yourself](https://img.shields.io/badge/verify%20it%20yourself-30%20seconds-3fb950?style=flat-square)](#check-one-yourself-it-takes-about-thirty-seconds)
+
 **Bitcoin's consensus rules, proven with Bitcoin Core's own code, inside a zero-knowledge VM.**
 
 Not a reimplementation of the rules. The actual `interpreter.cpp`, the actual `SignatureHash`, the
@@ -13,6 +19,33 @@ that are *not* covered. Adversarial review is what this needs most; see
 [`docs/EXTERNAL_REVIEW.md`](docs/EXTERNAL_REVIEW.md) for where it is worth spending an hour.
 
 ---
+
+## How a block becomes a proof
+
+```mermaid
+flowchart LR
+  B["block 962,000<br/>8,006 inputs"] --> P{{"cost packer<br/>16 chunks"}}
+  P --> C0["chunk 0"]
+  P --> C1["chunk 1"]
+  P --> CN["chunk 15"]
+  C0 --> R0["receipt"]
+  C1 --> R1["receipt"]
+  CN --> RN["receipt"]
+  R0 --> A["aggregate<br/>323 segments, join tree"]
+  R1 --> A
+  RN --> A
+  A --> J["journal digest<br/>4fb3e3c5…4656d"]
+  A --> S["recursion into the spine<br/>genesis-anchored"]
+  S --> K["SNARK wrap<br/>222 KB, verifies in ~1s"]
+  style B fill:#161b22,stroke:#30363d,color:#c9d1d9
+  style A fill:#1f2937,stroke:#58a6ff,color:#c9d1d9
+  style J fill:#132e1a,stroke:#3fb950,color:#c9d1d9
+  style K fill:#132e1a,stroke:#3fb950,color:#c9d1d9
+```
+
+**Every chunk is independent**, so the block fans out across cards; the aggregate joins them and
+recurses into a chain that reaches genesis. The digest is what makes an A/B trustworthy — a change
+that alters what was proven changes those 32 bytes.
 
 ## Two modes, and the difference is how much of Core's code actually runs
 
@@ -29,14 +62,18 @@ produces a journal digest byte-identical to stock Bitcoin Core. Neither is "less
 **Core is the project.** Ghost is an experiment in how much speed is available if fidelity stops
 being the constraint — it exists to price that trade honestly, not to replace Core.
 
-⛔ **Every performance figure in this repository should say what was measured, on what, and what
-remains unmeasured.** This project has repeatedly been wrong by believing a projection; the
-corrections are recorded rather than edited out. If a figure does not say how it was obtained, treat
-it as a projection. → [`docs/BUILDS.md`](docs/BUILDS.md) is the authority on what each mode costs.
+> [!IMPORTANT]
+> **Every performance figure here says what was measured, on what, and what remains unmeasured.**
+> This project has repeatedly been wrong by believing a projection, and the corrections are recorded
+> rather than edited out. **If a figure does not say how it was obtained, treat it as a projection.**
+> [`docs/BUILDS.md`](docs/BUILDS.md) is the authority on what each mode costs.
 
 ---
 
 ### Check one yourself. It takes about thirty seconds.
+
+![verifying a Bitcoin validity proof](docs/assets/verify.svg)
+
 
 ```bash
 curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
@@ -236,9 +273,10 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 | `audit-fuzz/`, `guest-pure-fuzz/`, `leaf-differential/` | adversarial testing harnesses |
 | [`docs/history/`](docs/history/README.md), `experimental/`, `tasks/` | **the development record — superseded, kept for provenance** |
 
-⚠ If you are reading a number, check it came from `docs/` and not `docs/history/`. The latter is kept
-because *how* a conclusion was reached is often the only defence against reaching a wrong one twice —
-several levers here were proposed, rejected on measurement, and proposed again.
+> [!NOTE]
+> If you are reading a number, check it came from `docs/` and not `docs/history/`. History is kept
+> because *how* a conclusion was reached is often the only defence against reaching a wrong one
+> twice — several levers here were proposed, rejected on measurement, and proposed again.
 
 ## Prior art and credit
 
