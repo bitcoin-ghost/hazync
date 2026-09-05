@@ -21,23 +21,11 @@ impl serde::Serialize for PackedBytes {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
 }
 impl<'de> serde::Deserialize<'de> for PackedBytes {
+    // Delegates to the shared `packed_bytes` visitor. This used to carry its own copy, and when
+    // PackedHash/PackedHashes were added they got a *second* visitor that silently omitted `visit_seq`
+    // -- reintroducing the v0.9.0 JSON parse bug for every bundle carrying `txids`. One visitor only.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = Vec<u8>;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
-            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
-            // JSON (serde_json) has no native bytes type: `serialize_bytes` emits a sequence of u8, so the
-            // bundle round-trip (bridge writes bundle_<n>.json, prove-range-bridge reads it) lands here.
-            // risc0's binary serde still hits visit_bytes/visit_byte_buf above; both paths yield Vec<u8>.
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
-                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(b) = seq.next_element::<u8>()? { out.push(b); }
-                Ok(out)
-            }
-        }
-        Ok(PackedBytes(d.deserialize_byte_buf(V)?))
+        Ok(PackedBytes(packed_bytes(d)?))
     }
 }
 
@@ -46,9 +34,66 @@ const KIND_CHAIN: u32 = 0xC4A1_0002;
 const KIND_RANGE: u32 = 0xC4A1_0006;
 const KIND_CHUNK: u32 = 0xC4A1_0004;
 
+// A 32-byte hash, and a vector of them, carried over risc0 serde's PACKED byte path rather than the
+// default one-word-per-byte. MEASURED on block 962,000 (docs/WITNESS_WIRE_PROFILE_2026-08-28.md):
+// `[u8; 32]` and `Vec<[u8; 32]>` amplify 4.00x on the wire, and the two WireProofs alone were 60.0%
+// of the whole witness at 3.73x. Same trick PackedBytes already uses for the tx blobs -- the values
+// on both sides are byte-identical, only the encoding changes.
+//
+// The LEAF matters as much as the siblings here: measured source is ~73 B per proof (32 leaf +
+// 8 position + ~1 sibling), so at 4x the leaf alone is ~2.0 MB of the 4.35 MB the proofs cost.
+// Packing siblings without the leaf would leave most of it on the table.
+#[derive(Clone, Default, PartialEq)]
+struct PackedHash([u8; 32]);
+impl serde::Serialize for PackedHash {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_bytes(&self.0) }
+}
+impl<'de> serde::Deserialize<'de> for PackedHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() != 32 { return Err(serde::de::Error::custom("PackedHash must be 32 bytes")); }
+        let mut h = [0u8; 32]; h.copy_from_slice(&v); Ok(PackedHash(h))
+    }
+}
+#[derive(Clone, Default)]
+struct PackedHashes(Vec<[u8; 32]>);
+impl serde::Serialize for PackedHashes {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Vec<[u8; 32]> is already n*32 contiguous bytes, so this is a view, not a copy.
+        let flat: &[u8] = unsafe { std::slice::from_raw_parts(self.0.as_ptr() as *const u8, self.0.len() * 32) };
+        s.serialize_bytes(flat)
+    }
+}
+impl<'de> serde::Deserialize<'de> for PackedHashes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() % 32 != 0 { return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32")); }
+        Ok(PackedHashes(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect()))
+    }
+}
+/// The byte-visitor both of the above share.
+fn packed_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+        fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+        fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+        // JSON (serde_json) has no native bytes type: `serialize_bytes` emits a sequence of u8, so the
+        // bundle round-trip (bridge writes bundle_<n>.json, prove-range-bridge reads it) lands here.
+        // risc0's binary serde still hits visit_bytes/visit_byte_buf above; both paths yield Vec<u8>.
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? { out.push(b); }
+            Ok(out)
+        }
+    }
+    d.deserialize_byte_buf(V)
+}
+
 // ---- Wire format: MUST match the guest structs field-for-field, in order. ----
 #[derive(Serialize, Deserialize, Clone)]
-struct WireProof { leaf: [u8; 32], position: u64, siblings: Vec<[u8; 32]> }
+struct WireProof { leaf: PackedHash, position: u64, siblings: PackedHashes }
 #[derive(Serialize, Deserialize)]
 struct BlockInput {
     // flags removed: script flags are guest-derived (block_script_flags), never host-supplied.
@@ -66,7 +111,7 @@ struct Bip30Del { global_pos: u64, proof_i: WireProof, proof_last: WireProof }
 struct Bip30Overwrite { old_height: u32, old_mtp: u32, dels: Vec<Bip30Del> } // F3: superseded coinbase deletes
 #[derive(Serialize, Deserialize)]
 struct BlockWitness {
-    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: Vec<[u8; 32]>,
+    header: Vec<u8>, height: u32, coinbase_tx: Vec<u8>, txids: PackedHashes,
     root_prev: WireStump, txs: Vec<PackedBytes>, tx_prevouts: Vec<PackedBytes>,
     inputs: Vec<BlockInput>, root_next: WireStump,
     bip30: Option<Bip30Overwrite>,
@@ -86,8 +131,6 @@ struct ChainState {
     anchor_id: [u8; 32], // S5: dsha256 of the base anchor; verifier pins == dsha256(genesis_anchor)
     self_id: [u32; 8],  // S1: image id recursed against; verifier asserts == METHOD_ID
 }
-#[derive(Serialize, Deserialize)]
-struct ChunkOut { kind: u32, all_valid: bool, binds: Vec<[u8; 32]> }
 #[derive(Serialize, Deserialize)]
 struct SpendCheck { raw_tx: Vec<u8>, prevouts: Vec<u8>, block_height: u32 }
 #[derive(Serialize, Deserialize)]
@@ -177,7 +220,7 @@ fn rev(mut v: Vec<u8>) -> Vec<u8> { v.reverse(); v }
 fn arr(v: Vec<u8>) -> [u8; 32] { v.try_into().unwrap() }
 
 fn wire_proof(p: &hazync_utreexo::Proof) -> WireProof {
-    WireProof { leaf: p.leaf, position: p.position, siblings: p.siblings.clone() }
+    WireProof { leaf: PackedHash(p.leaf), position: p.position, siblings: PackedHashes(p.siblings.clone()) }
 }
 fn wire_stump(f: &Forest) -> WireStump { WireStump { roots: f.roots(), num_leaves: f.leaves.len() as u64 } }
 // Strip trailing empty root slots (mirrors the guest `normalize`) so two representations of the same
@@ -299,10 +342,9 @@ fn build_block(
         }
     }
     let root_next = wire_stump(forest);
-    let wtxids = txids.clone(); // pre-segwit blocks: no witness -> has_witness=false, check passes
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(coinbase_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // Serialize a ChainState to the exact bytes env::commit(&state) would produce (LE u32 words).
@@ -601,8 +643,8 @@ fn build_full() -> (ChainState, BlockWitness) {
                 inputs.push(BlockInput {
                     tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch_i, coin_is_coinbase: cb_i as u32, coin_mtp: mtp_i, tx_first: (i == 0) as u32,
-                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
-                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_i: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
+                    proof_last: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
                 });
                 continue;
             }
@@ -630,7 +672,7 @@ fn build_full() -> (ChainState, BlockWitness) {
     let root_next = wire_stump(&forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
+    let mut w = BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30: None, in_smt_root, smt };
     // --- reject-path negative-test hooks (test-only, inert unless the env var is set; NEVER in production) ---
     // Each corrupts exactly one consensus input so check-full drives the matching guest flag false, closing
     // the retarget / block-weight / sigop-cost coverage gap so those reject-paths are continuously CI-enforced.
@@ -747,19 +789,77 @@ fn check_full() {
     use std::time::Instant;
     let (anchor, w) = build_full();
     if std::env::var("HAZYNC_WITNESS_SIZES").is_ok() {
-        let tot = risc0_zkvm::serde::to_vec(&w).unwrap().len() * 4;
+        // MEASURE THE WIRE, NOT THE SOURCE.
+        //
+        // The previous version of this report divided SOURCE byte counts (`t.0.len()`,
+        // `siblings.len() * 32`) by a WIRE total (`to_vec(&w) * 4`). Those are different units, and
+        // the mismatch is not uniform: risc0 serde spends one 32-bit word per byte for a plain
+        // `[u8; 32]` or `Vec<u8>`, so anything going through that path costs 4x on the wire, while a
+        // `PackedBytes` costs 1x. Dividing 1x numerators by a 4x-inflated denominator understates
+        // exactly the structures that pay the penalty -- which is the whole question here.
+        //
+        // Everything below is measured by running the SAME `to_vec` the executor uses, per
+        // sub-structure, so every figure shares one unit and the amplification is visible directly.
+        // TEN_MINUTE_BLOCK.md 7.8 asked for this before anyone writes an encoder; the 3.13x
+        // per-input figure it quotes is arithmetic over a residual, and this replaces it.
+        let wire = |n: usize| n * 4;
+        let tot = wire(risc0_zkvm::serde::to_vec(&w).unwrap().len());
         let n = w.inputs.len();
-        let rawtx: usize = w.txs.iter().map(|t| t.0.len()).sum(); // de-duplicated: one blob per tx
-        let prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
-        let sibs: usize = w.inputs.iter().map(|i| (i.proof_i.siblings.len() + i.proof_last.siblings.len()) * 32).sum();
-        println!("  txs(deduped)={} raw_tx bytes={} prevouts bytes={}", w.txs.len(), rawtx, prevouts);
-        // `wtxids` and `new_outputs` were removed from the wire format — the guest recomputes both
-        // and never read either, so they were pure transmission cost.
-        let idlists = w.txids.len() * 32;
         let pct = |x: usize| if tot > 0 { x as f64 / tot as f64 * 100.0 } else { 0.0 };
-        println!("WITNESS block {} inputs={} total={}B", w.height, n, tot);
-        println!("  proof_siblings = {}B ({:.1}%)   raw_tx = {}B ({:.1}%)   prevouts = {}B ({:.1}%)", sibs, pct(sibs), rawtx, pct(rawtx), prevouts, pct(prevouts));
-        println!("  txids = {}B ({:.1}%)", idlists, pct(idlists));
+
+        let w_txs = wire(risc0_zkvm::serde::to_vec(&w.txs).unwrap().len());
+        let w_prevouts = wire(risc0_zkvm::serde::to_vec(&w.tx_prevouts).unwrap().len());
+        let w_inputs = wire(risc0_zkvm::serde::to_vec(&w.inputs).unwrap().len());
+        let w_txids = wire(risc0_zkvm::serde::to_vec(&w.txids).unwrap().len());
+        let w_header = wire(risc0_zkvm::serde::to_vec(&w.header).unwrap().len());
+        let w_cb = wire(risc0_zkvm::serde::to_vec(&w.coinbase_tx).unwrap().len());
+        let w_stumps = wire(risc0_zkvm::serde::to_vec(&w.root_prev).unwrap().len())
+            + wire(risc0_zkvm::serde::to_vec(&w.root_next).unwrap().len());
+        let w_bip30 = wire(risc0_zkvm::serde::to_vec(&w.bip30).unwrap().len());
+        let w_smt = wire(risc0_zkvm::serde::to_vec(&w.smt).unwrap().len());
+
+        // Inside `inputs`: the two WireProofs against everything else. Each proof is a `[u8; 32]`
+        // leaf plus a `Vec<[u8; 32]>` of siblings, and every one of those bytes is a word on the
+        // wire. This split is what decides whether an encoder is worth writing.
+        let mut w_proofs = 0usize;
+        let mut src_proofs = 0usize;
+        for i in &w.inputs {
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_i).unwrap().len());
+            w_proofs += wire(risc0_zkvm::serde::to_vec(&i.proof_last).unwrap().len());
+            src_proofs += 32 + i.proof_i.siblings.0.len() * 32 + 8;
+            src_proofs += 32 + i.proof_last.siblings.0.len() * 32 + 8;
+        }
+        let w_scalars = w_inputs.saturating_sub(w_proofs);
+
+        let src_txs: usize = w.txs.iter().map(|t| t.0.len()).sum();
+        let src_prevouts: usize = w.tx_prevouts.iter().map(|t| t.0.len()).sum();
+        let src_txids = w.txids.0.len() * 32;
+        let amp = |wire_b: usize, src_b: usize| if src_b > 0 { wire_b as f64 / src_b as f64 } else { 0.0 };
+
+        println!("WITNESS block {} inputs={n} txs(deduped)={} total={tot}B (wire)", w.height, w.txs.len());
+        println!("  field            wire B      %     source B    amplification");
+        println!("  inputs        {w_inputs:>10} {:>6.1}%          --            --", pct(w_inputs));
+        println!("    proofs      {w_proofs:>10} {:>6.1}%  {src_proofs:>10}         {:>5.2}x", pct(w_proofs), amp(w_proofs, src_proofs));
+        println!("    scalars     {w_scalars:>10} {:>6.1}%          --            --", pct(w_scalars));
+        println!("  txs           {w_txs:>10} {:>6.1}%  {src_txs:>10}         {:>5.2}x", pct(w_txs), amp(w_txs, src_txs));
+        println!("  tx_prevouts   {w_prevouts:>10} {:>6.1}%  {src_prevouts:>10}         {:>5.2}x", pct(w_prevouts), amp(w_prevouts, src_prevouts));
+        println!("  txids         {w_txids:>10} {:>6.1}%  {src_txids:>10}         {:>5.2}x", pct(w_txids), amp(w_txids, src_txids));
+        println!("  smt           {w_smt:>10} {:>6.1}%", pct(w_smt));
+        println!("  stumps        {w_stumps:>10} {:>6.1}%", pct(w_stumps));
+        println!("  header+cbtx   {:>10} {:>6.1}%", w_header + w_cb, pct(w_header + w_cb));
+        println!("  bip30         {w_bip30:>10} {:>6.1}%", pct(w_bip30));
+        if n > 0 {
+            println!("  per input: {} wire B, of which {} B is the two proofs", w_inputs / n, w_proofs / n);
+        }
+
+        // What a packed encoding of the proofs would actually buy, on measured numbers rather than
+        // on the residual. Packing takes those bytes from 4 wire bytes each to 1, so the floor is
+        // the source size; everything else on the wire is untouched.
+        let projected = tot - w_proofs + src_proofs;
+        println!("  IF proofs were packed: {projected}B vs {tot}B  =>  {:.3}x on witness bytes",
+            if projected > 0 { tot as f64 / projected as f64 } else { 0.0 });
+        println!("  (witness bytes only -- the cycle win follows only if deserialisation stays at \
+            ~347 cyc/B; that is the next thing to measure, not to assume)");
         return;
     }
     println!("=== CHECK-FULL (execute, no proof) block {} — {} inputs ===", w.height, w.inputs.len());
@@ -947,8 +1047,8 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
                 inputs.push(BlockInput {
                     tx_idx: tx_i as u32, input_idx: i as u32,
                     global_pos: 0, coin_height: ch, coin_is_coinbase: cb as u32, coin_mtp: mtp, tx_first: (i == 0) as u32,
-                    proof_i: WireProof { leaf: coin, position: 0, siblings: vec![] },
-                    proof_last: WireProof { leaf: coin, position: 0, siblings: vec![] },
+                    proof_i: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
+                    proof_last: WireProof { leaf: PackedHash(coin), position: 0, siblings: PackedHashes(vec![]) },
                 });
             } else {
                 // EXTERNAL: prove inclusion in the carried forest, delete.
@@ -1014,7 +1114,7 @@ fn build_block_carried(forest: &mut Forest, j: &serde_json::Value, block_mtp: &[
     let root_next = wire_stump(forest);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(&coinbase),
         &cb_spends_from(&inputs, &txs));
-    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids, root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
+    BlockWitness { header, height, coinbase_tx: hx(cb_hex), txids: PackedHashes(txids), root_prev, txs, tx_prevouts, inputs, root_next, bip30, in_smt_root, smt }
 }
 
 // Prove one chain step to a SUCCINCT receipt (FIX A): cheap composition for a long recursive chain.
@@ -1593,24 +1693,126 @@ fn prove_seg() {
 // EC-only model rates them equal and packs them as if they were.
 //
 // Only the RATIO matters: the packer compares costs and never predicts a wall-clock.
-const COST_PER_EC_OP: u64 = 1_950_000;
+// hazync#190 ARMED. The packer branch shipped this EQUAL to COST_PER_SCHNORR_OP on purpose, so that
+// giving the packer a curve dimension was a provable no-op: same costs, same partition, same chunks.
+// Arming it is the one-line edit that branch's own comment describes.
+//
+// MEASURED 2026-08-29, block 962,000, 16/16 paired chunks on one L40S at po2 22: with bigint2 on,
+// per-chunk speedup runs 2.046x to 4.813x and correlates with TAPROOT SHARE at -0.875 -- a 24.2%
+// taproot chunk gets 2.0x where an all-ECDSA chunk gets 4.8x. The packer, balancing PRE-acceleration
+// cost, predicts all 16 chunks within 1.00x, and bigint2 then takes the real straggler from 1.054 to
+// 2.118. A block's wall-clock is its SLOWEST chunk, so that doubling is worth ~7 cards.
+//
+// Only the RATIO matters -- the packer compares costs and never predicts a wall-clock.
+
+/// Runtime override for a packing constant.
+///
+/// ⛔ These constants are CALIBRATED PER BUILD MODE and the defaults are #139's. `COST_PER_EC_OP`
+/// (141,612) prices an ECDSA verify that #139 has accelerated, and `COST_PER_SCHNORR_OP` is 13.8x
+/// higher because #139 does not touch Schnorr. **Core mode has no #139**: the coprocessor field
+/// backend accelerates both curves equally, so that split is wrong there, and so is the absolute
+/// scale. MEASURED on block 962,000 with the field backend, least squares over 32 chunk executions:
+///
+/// ```text
+/// cycles = 450,020*ec + 1.27*bytes + 37,946*inputs + 3,292,850     mean |error| 5.0%
+/// ```
+///
+/// against defaults of 141,612 / 6 / 34,000 -- EC 3.2x too low, bytes 4.7x too high. The packer
+/// balances its own predictor perfectly, so a wrong predictor does not show up as a bad straggler
+/// number, it shows up as a bad BLOCK: real chunk cycles spanned 33.6 M to 352 M across chunks the
+/// model priced identically at 125.4 M, a straggler of 1.563x -- WORSE than not packing at all.
+///
+/// Host-side only. Nothing here reaches the guest, so none of it moves METHOD_ID.
+fn cost_const(var: &str, default: u64) -> u64 {
+    std::env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+const COST_PER_EC_OP: u64 = 141_612;
+/// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA even though the two are equal
+/// today. #139 accelerates ECDSA only -- Schnorr keeps running libsecp's BIP340 code -- so after it
+/// lands these diverge by ~13.8x (ECDSA ~141,612, Schnorr 1,950,000). A packer that cannot see that
+/// divergence does not merely balance badly: a block's wall-clock is its SLOWEST chunk, and simulated
+/// on block 962,000 (only 2.7% Schnorr, the mildest case available) a blind packer turns #139's 6.95x
+/// into 2.95x. The fidelity is spent either way, so the missing dimension is worth 2.36x.
+///
+/// Keeping the two constants EQUAL means this change is a no-op today, provably: same costs, same
+/// partition, same chunks. #139 then becomes a one-line edit to COST_PER_EC_OP rather than a packer
+/// project, and the packer work does not have to wait on the fidelity decision.
+// ⚠ RE-DERIVED once G3 (patches/0006) put Schnorr through the SAME bigint2 accelerator as ECDSA.
+// The 13.8x divergence this constant existed to model is a property of accelerating ONE curve; with
+// both accelerated the costs converge again. Leaving it at 1,950,000 makes the packer starve
+// taproot-heavy chunks of inputs for a cost that is no longer there.
+// ⛔ REVERTED to 1,950,000 after measurement. Setting it equal to COST_PER_EC_OP was the obvious
+// inference once G3 put Schnorr through the same accelerator -- and it is WRONG on the only evidence
+// available. Measured on block 962,000: identical builds, this constant the only difference,
+// straggler 1.361 -> 1.539 and the block total barely moved, which costs a whole card.
+//
+// The likely reason is that Schnorr is NOT at ECDSA parity even accelerated: it still pays lift_x
+// through xonly_pubkey_load and the tagged challenge hash on top of the shared double-scalar-mul.
+// 93 of the block's 145 Schnorr inputs sit in one chunk, so repricing them 1.95 M -> 141 k drops that
+// chunk's predicted cost by ~168 M and the packer over-loads it.
+//
+// ⚠ 1,950,000 is not RIGHT either -- it is the pre-#139 stock ECDSA cost, and it now happens to pack
+// better. The honest value needs a profile of a G3 build, which does not exist yet. Do not read this
+// constant as a measurement of anything.
+const COST_PER_SCHNORR_OP: u64 = 1_950_000;
+
+/// What a verify costs when its public key was ALREADY decompressed earlier in the same chunk.
+///
+/// The decompression memo is per-chunk, so key reuse is worth real time — and it is not modelled
+/// anywhere, which is a third axis the packer is blind to after curve and bytes. MEASURED: chunks 8
+/// and 12 of block 962,000 have the same input count, the same EC verify count and the same byte
+/// size, and came in at 45 s against 162 s. That is 3.6x from key reuse alone.
+///
+/// Derived from the post-G1 profile of the chunk work: hazync_ecmult_verify 561 M, hazync_lift_x
+/// 254 M, scalar inverse 147 M ⇒ the decompression a memo hit avoids is 26.4% of per-verify EC work,
+/// so a repeat costs ~0.736 of a fresh key. On block 962,000, 6,913 verifying inputs use only 2,160
+/// distinct keys, so 68.8% of inputs take this discount.
+const COST_PER_EC_OP_REPEAT: u64 = 104_222;
 // An input that verifies no signature still costs something to read, deserialise and hash. Measured at
 // ~34K cycles on block 962,000's anchor spends, against ~1,953K for a P2WPKH.
 const COST_INPUT_BASE: u64 = 34_000;
 const COST_PER_INPUT_BYTE: u64 = 6;
 
+/// Signature verifications an input performs, split by CURVE rather than merely counted.
+///
+/// The split is the whole point: `total()` is what the packer used before #139 and what the profile
+/// display still wants, but the two fields are priced separately because #139 accelerates only one of
+/// them. Taproot -- both key path and script path -- is BIP340 Schnorr; everything else is ECDSA.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct SigOps { ecdsa: u64, schnorr: u64 }
+
+impl SigOps {
+    fn ecdsa(n: u64) -> Self { Self { ecdsa: n, schnorr: 0 } }
+    fn schnorr(n: u64) -> Self { Self { ecdsa: 0, schnorr: n } }
+    fn total(&self) -> u64 { self.ecdsa + self.schnorr }
+    fn cost(&self) -> u64 {
+        self.cost_with(cost_const("HAZYNC_COST_EC_OP", COST_PER_EC_OP),
+                       cost_const("HAZYNC_COST_SCHNORR_OP", COST_PER_SCHNORR_OP))
+    }
+    /// Split out so a test can price the curves apart without editing a constant. A no-op test alone
+    /// would pass for a refit that does nothing at all; this is what lets one prove it bites.
+    fn cost_with(&self, ec: u64, schnorr: u64) -> u64 { ec * self.ecdsa + schnorr * self.schnorr }
+}
+
+/// Total signature verifications, curve-blind. Retained for the profile display, which reports a
+/// count rather than a cost; `predicted_sig_ops` is what the packer uses.
+fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 {
+    predicted_sig_ops(raw_tx, input_idx, prevouts_blob).total()
+}
+
 /// Signature verifications this input performs, by script type. A prediction, not a guarantee — it is
 /// used only to balance chunks, so being wrong costs some balance and never correctness.
-fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 {
+fn predicted_sig_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> SigOps {
     use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_CHECKSIGVERIFY};
     use bitcoin::blockdata::script::{Instruction, Script};
 
     // Anything unparseable is charged one verify: it should not happen, and a wrong guess here must not
     // be able to panic a prover run over what is only a scheduling hint.
-    let Ok(tx) = deserialize::<Transaction>(raw_tx) else { return 1 };
-    let Ok(prevouts) = deserialize::<Vec<TxOut>>(prevouts_blob) else { return 1 };
+    let Ok(tx) = deserialize::<Transaction>(raw_tx) else { return SigOps::ecdsa(1) };
+    let Ok(prevouts) = deserialize::<Vec<TxOut>>(prevouts_blob) else { return SigOps::ecdsa(1) };
     let i = input_idx as usize;
-    let (Some(txin), Some(prevout)) = (tx.input.get(i), prevouts.get(i)) else { return 1 };
+    let (Some(txin), Some(prevout)) = (tx.input.get(i), prevouts.get(i)) else { return SigOps::ecdsa(1) };
     let spk = &prevout.script_pubkey;
     let wit = &txin.witness;
 
@@ -1640,21 +1842,23 @@ fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 
             WitnessVersion::V1 => program_len == 32,
             _ => false,
         };
-        if !spendable_by_signature { return 0 }
+        if !spendable_by_signature { return SigOps::default() }
     }
 
     if spk.is_p2tr() {
         // A trailing 0x50-prefixed annex is not part of the spend path.
         let mut n = wit.len();
         if n >= 2 && wit.last().is_some_and(|e| e.first() == Some(&0x50)) { n -= 1; }
-        return match n {
+        // BOTH taproot paths are BIP340 Schnorr -- key path obviously, and tapscript signatures
+        // too. #139 does not touch either, which is exactly why they must be priced apart.
+        return SigOps::schnorr(match n {
             0 | 1 => 1, // key path (or malformed): one Schnorr verify
             _ => wit.iter().nth(n - 2).map_or(1, |leaf| tapscript_ops(leaf).max(1)),
-        };
+        });
     }
-    if spk.is_p2wpkh() { return 1; }
+    if spk.is_p2wpkh() { return SigOps::ecdsa(1); }
     if spk.is_p2wsh() {
-        return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+        return SigOps::ecdsa(wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64));
     }
     if spk.is_p2sh() {
         // The redeem script is the last push of the scriptSig; a wrapped segwit spend then defers to the
@@ -1667,32 +1871,140 @@ fn predicted_ec_ops(raw_tx: &[u8], input_idx: u32, prevouts_blob: &[u8]) -> u64 
             .and_then(|ins| ins.push_bytes().map(|b| b.as_bytes().to_vec()))
             .unwrap_or_default();
         let rs = Script::from_bytes(&redeem);
-        if rs.is_p2wpkh() { return 1; }
+        if rs.is_p2wpkh() { return SigOps::ecdsa(1); }
         if rs.is_p2wsh() {
-            return wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64);
+            return SigOps::ecdsa(wit.last().map_or(1, |ws| Script::from_bytes(ws).count_sigops().max(1) as u64));
         }
-        return rs.count_sigops().max(1) as u64;
+        return SigOps::ecdsa(rs.count_sigops().max(1) as u64);
     }
-    // Bare output: P2PK, P2PKH, bare multisig, or something unrecognised.
-    spk.count_sigops().max(1) as u64
+    // Bare output: P2PK, P2PKH, bare multisig, or something unrecognised. All ECDSA.
+    SigOps::ecdsa(spk.count_sigops().max(1) as u64)
 }
 
 /// Predicted cost of every input of the block, in the order the block spends them.
+/// The public key each input will make the guest decompress, as an identity for reuse detection.
+///
+/// Only identity matters, not validity: a value that is not really a key simply fails to match
+/// anything and costs nothing. So this does no curve arithmetic — it takes the first plausible
+/// compressed key in the witness or scriptSig, or the x-only key from a P2TR prevout.
+fn input_keys(w: &BlockWitness) -> Vec<Option<[u8; 33]>> {
+    let mut out = Vec::with_capacity(w.inputs.len());
+    for inp in &w.inputs {
+        let raw = &w.txs[inp.tx_idx as usize].0;
+        let mut found: Option<[u8; 33]> = None;
+        if let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw) {
+            if let Some(txin) = tx.input.get(inp.input_idx as usize) {
+                for item in txin.witness.iter() {
+                    if item.len() == 33 && (item[0] == 2 || item[0] == 3) {
+                        let mut k = [0u8; 33]; k.copy_from_slice(item); found = Some(k); break;
+                    }
+                }
+                if found.is_none() {
+                    for ins in txin.script_sig.instructions().flatten() {
+                        if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                            let b = pb.as_bytes();
+                            if b.len() == 33 && (b[0] == 2 || b[0] == 3) {
+                                let mut k = [0u8; 33]; k.copy_from_slice(b); found = Some(k); break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(found);
+    }
+    out
+}
+
+/// How much input `i` gets cheaper when its key has already been decompressed in this chunk.
+fn repeat_savings(w: &BlockWitness) -> Vec<u64> {
+    w.inputs.iter().map(|inp| {
+        let tx = &w.txs[inp.tx_idx as usize].0;
+        let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
+        predicted_sig_ops(tx, inp.input_idx, prevouts).total() * (COST_PER_EC_OP - COST_PER_EC_OP_REPEAT)
+    }).collect()
+}
+
 fn input_costs(w: &BlockWitness) -> Vec<u64> {
     w.inputs
         .iter()
         .map(|inp| {
             let tx = &w.txs[inp.tx_idx as usize].0;
             let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
-            let ec = predicted_ec_ops(tx, inp.input_idx, prevouts);
+            let ops = predicted_sig_ops(tx, inp.input_idx, prevouts);
             let bytes = (tx.len() + prevouts.len()) as u64;
-            COST_INPUT_BASE + COST_PER_EC_OP * ec + COST_PER_INPUT_BYTE * bytes
+            cost_const("HAZYNC_COST_INPUT_BASE", COST_INPUT_BASE)
+                + ops.cost()
+                + cost_const("HAZYNC_COST_INPUT_BYTE", COST_PER_INPUT_BYTE) * bytes
         })
         .collect()
 }
 
 /// Runs needed to cover `costs` when no run may exceed `cap`. `cap` is always >= max(costs), so every
 /// input fits somewhere and this terminates.
+/// Cost of input `i` given the keys already decompressed in the CURRENT run.
+///
+/// The decompression memo is per-chunk, so the SAME input is cheaper when its key has been seen
+/// earlier in the same chunk than when it opens one. That makes cost position-dependent, which is
+/// why this is a closure over run state rather than a precomputed vector — and why the packer could
+/// not see it before.
+struct KeyWalk<'a> {
+    costs: &'a [u64],
+    savings: &'a [u64],
+    keys: &'a [Option<[u8; 33]>],
+    seen: std::collections::HashSet<[u8; 33]>,
+}
+
+impl<'a> KeyWalk<'a> {
+    fn new(costs: &'a [u64], savings: &'a [u64], keys: &'a [Option<[u8; 33]>]) -> Self {
+        Self { costs, savings, keys, seen: std::collections::HashSet::new() }
+    }
+    fn reset(&mut self) { self.seen.clear(); }
+    /// Cost of `i` in the current run, and record its key as now-seen.
+    fn take(&mut self, i: usize) -> u64 {
+        let mut c = self.costs[i];
+        if let Some(k) = self.keys.get(i).copied().flatten() {
+            if !self.seen.insert(k) {
+                c = c.saturating_sub(self.savings[i]);
+            }
+        }
+        c
+    }
+    /// Cost of `i` if it were to OPEN a new run — no keys seen yet, so never discounted.
+    fn take_fresh(&mut self, i: usize) -> u64 {
+        self.reset();
+        if let Some(k) = self.keys.get(i).copied().flatten() { self.seen.insert(k); }
+        self.costs[i]
+    }
+}
+
+fn runs_at_cap_keyed(costs: &[u64], savings: &[u64], keys: &[Option<[u8; 33]>], cap: u64) -> usize {
+    let mut w = KeyWalk::new(costs, savings, keys);
+    let (mut runs, mut acc) = (1usize, 0u64);
+    for i in 0..costs.len() {
+        let c = w.take(i);
+        if acc + c > cap { runs += 1; acc = w.take_fresh(i) } else { acc += c }
+    }
+    runs
+}
+
+fn split_at_cap_keyed(costs: &[u64], savings: &[u64], keys: &[Option<[u8; 33]>], cap: u64) -> Vec<(usize, usize)> {
+    let mut w = KeyWalk::new(costs, savings, keys);
+    let (mut out, mut lo, mut acc) = (Vec::new(), 0usize, 0u64);
+    for i in 0..costs.len() {
+        let c = w.take(i);
+        if acc + c > cap && i > lo {
+            out.push((lo, i));
+            lo = i;
+            acc = w.take_fresh(i);
+        } else {
+            acc += c;
+        }
+    }
+    out.push((lo, costs.len()));
+    out
+}
+
 fn runs_at_cap(costs: &[u64], cap: u64) -> usize {
     let (mut runs, mut acc) = (1usize, 0u64);
     for &c in costs {
@@ -1722,18 +2034,26 @@ fn split_at_cap(costs: &[u64], cap: u64) -> Vec<(usize, usize)> {
 ///
 /// Guarantees, relied on by `prove_chunk`/`agg_chunks` and asserted in the tests: the runs are ordered,
 /// non-empty, non-overlapping, and cover `0..n` exactly.
-fn pack_chunks(costs: &[u64], nchunks: usize) -> Vec<(usize, usize)> {
+fn pack_chunks(costs: &[u64], nchunks: usize, keys: Option<(&[u64], &[Option<[u8; 33]>])>) -> Vec<(usize, usize)> {
     let n = costs.len();
     if n == 0 { return Vec::new() }
     let k = nchunks.max(1).min(n);
     if k == 1 { return vec![(0, n)] }
 
     let (mut lo, mut hi) = (costs.iter().copied().max().unwrap_or(1), costs.iter().sum::<u64>());
+    let keyed = keys.map(|(sv, ks)| (sv, ks));
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if runs_at_cap(costs, mid) <= k { hi = mid } else { lo = mid + 1 }
+        let r = match keyed {
+            Some((sv, ks)) => runs_at_cap_keyed(costs, sv, ks, mid),
+            None => runs_at_cap(costs, mid),
+        };
+        if r <= k { hi = mid } else { lo = mid + 1 }
     }
-    let mut runs = split_at_cap(costs, lo);
+    let mut runs = match keyed {
+        Some((sv, ks)) => split_at_cap_keyed(costs, sv, ks, lo),
+        None => split_at_cap(costs, lo),
+    };
 
     // The optimal cap may need fewer than k runs. Idle provers help nobody, so keep splitting the widest
     // run until there are k of them — this can only lower the maximum, never raise it.
@@ -1760,7 +2080,13 @@ fn chunk_bounds(w: &BlockWitness, nchunks: usize) -> Vec<(usize, usize)> {
         let sz = n.div_ceil(k);
         return (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect();
     }
-    pack_chunks(&input_costs(w), nchunks)
+    // HAZYNC_PACK_KEYS=1 prices the per-chunk decompression memo. Off by default so the partition
+    // is unchanged unless asked for, which keeps it A/B-able against the arms already measured.
+    if std::env::var("HAZYNC_PACK_KEYS").as_deref() == Ok("1") {
+        let (sv, ks) = (repeat_savings(w), input_keys(w));
+        return pack_chunks(&input_costs(w), nchunks, Some((&sv, &ks)));
+    }
+    pack_chunks(&input_costs(w), nchunks, None)
 }
 
 // `chunk-profile`: report how work is spread across a block's chunks, under both packing strategies.
@@ -1772,6 +2098,7 @@ fn chunk_profile() {
     let n = w.inputs.len();
     let nchunks = nchunks_env();
     let costs = input_costs(&w);
+    let keys = input_keys(&w);   // for the per-chunk repeat count reported below
     let exec = std::env::var("HAZYNC_PROFILE_EXEC").is_ok();
 
     println!("=== CHUNK PROFILE block {}: {} inputs → {} chunks ===", w.height, n, nchunks);
@@ -1786,10 +2113,11 @@ fn chunk_profile() {
             let sz = n.div_ceil(k.max(1));
             (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect::<Vec<_>>()
         }),
-        ("cost-packed (new)", pack_chunks(&costs, nchunks)),
+        ("cost-packed (new)", pack_chunks(&costs, nchunks, None)),
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
+        let mut measured: Vec<u64> = Vec::new();
         for (i, &(lo, hi)) in bounds.iter().enumerate() {
             let c: u64 = costs[lo..hi].iter().sum();
             predicted.push(c);
@@ -1797,17 +2125,63 @@ fn chunk_profile() {
                 (w.txs[inp.tx_idx as usize].0.len() + w.tx_prevouts[inp.tx_idx as usize].0.len()) as u64).sum();
             let ec: u64 = w.inputs[lo..hi].iter().map(|inp| predicted_ec_ops(
                 &w.txs[inp.tx_idx as usize].0, inp.input_idx, &w.tx_prevouts[inp.tx_idx as usize].0)).sum();
+            // ⛔ Report the two curves SEPARATELY, not just their total. Fitting a cost model against
+            // the combined count cannot separate them, so a refit has to reuse whatever ECDSA:Schnorr
+            // ratio it started with -- and that ratio is build-dependent. Rescaling Ghost's stale
+            // 13.77x ratio is exactly what made its straggler WORSE (1.407 -> 1.884). The two columns
+            // below are what a per-curve fit needs.
+            let (ecdsa_n, schnorr_n) = w.inputs[lo..hi].iter().fold((0u64, 0u64), |(e, s), inp| {
+                let o = predicted_sig_ops(&w.txs[inp.tx_idx as usize].0, inp.input_idx,
+                                          &w.tx_prevouts[inp.tx_idx as usize].0);
+                (e + o.ecdsa, s + o.schnorr)
+            });
+            // ⛔ The dimension a static (ecdsa, schnorr, bytes, inputs) fit CANNOT capture. Cost is
+            // position-dependent inside a chunk: an input whose pubkey was already decompressed
+            // earlier in the SAME chunk is cheaper, which is what COST_PER_EC_OP_REPEAT prices and
+            // what KeyWalk walks. On block 962,000 two chunks with near-identical ecdsa counts (210
+            // vs 205) and byte sizes (14.7 M vs 14.9 M) measured 28.5 M against 80.4 M cycles -- 2.8x
+            // apart, and no model over those four columns can fit both. `repeats` is that term.
+            let repeats = {
+                let mut seen = std::collections::HashSet::new();
+                let mut n = 0u64;
+                for k in keys[lo..hi].iter().flatten() {
+                    if !seen.insert(*k) { n += 1; }
+                }
+                n
+            };
             let cycles = if exec { Some(exec_chunk_cycles(&w, lo, hi)) } else { None };
+            if let Some(cy) = cycles { measured.push(cy); }
             match cycles {
-                Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, bytes, c, cy),
-                None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, bytes, c),
+                Some(cy) => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  ecdsa {:>5}  schnorr {:>5}  repeats {:>5}  bytes {:>9}  predicted {:>10}  cycles {:>14}", hi - lo, ec, ecdsa_n, schnorr_n, repeats, bytes, c, cy),
+                None     => println!("  chunk {i:>3}  inputs {:>5}  ec {:>5}  ecdsa {:>5}  schnorr {:>5}  repeats {:>5}  bytes {:>9}  predicted {:>10}", hi - lo, ec, ecdsa_n, schnorr_n, repeats, bytes, c),
             }
         }
         // The straggler ratio is the number that matters: a block's wall-clock is its slowest chunk, so
         // this is the factor by which fan-out falls short of the work being evenly shared.
-        let max = predicted.iter().copied().max().unwrap_or(0);
-        let mean = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
-        println!("  straggler: max {} vs mean {:.0} = {:.2}x", max, mean, max as f64 / mean.max(1.0));
+        //
+        // ⛔ REPORT IT ON MEASURED CYCLES WHENEVER WE HAVE THEM. Computed on PREDICTED cost this is a
+        // check that cannot fail: the cost packer balances the predictor by construction, so it
+        // reports a perfect 1.00x however wrong the predictor is -- it measures the packer against
+        // itself. On block 962,000 with the field backend it reported 1.00x while real chunk cycles
+        // spanned 33.6 M to 352 M, an actual straggler of 1.563x, WORSE than the naive count packer.
+        let strag = |v: &[u64], what: &str| {
+            let max = v.iter().copied().max().unwrap_or(0);
+            let mean = v.iter().sum::<u64>() as f64 / v.len().max(1) as f64;
+            let min = v.iter().copied().min().unwrap_or(0);
+            println!("  straggler ({what}): max {} vs mean {:.0} = {:.3}x   [spread {:.1}x]",
+                     max, mean, max as f64 / mean.max(1.0), max as f64 / min.max(1) as f64);
+        };
+        strag(&predicted, "predicted");
+        if !measured.is_empty() {
+            strag(&measured, "MEASURED");
+            // A packer is only as good as its cost model; this is the number that says whether it is.
+            let pm: f64 = predicted.iter().sum::<u64>() as f64 / predicted.len().max(1) as f64;
+            let mm: f64 = measured.iter().sum::<u64>() as f64 / measured.len().max(1) as f64;
+            let worst = predicted.iter().zip(&measured)
+                .map(|(p, m)| (*m as f64 / mm) / (*p as f64 / pm))
+                .fold(0.0f64, |a, b| a.max(b));
+            println!("  cost-model error: worst chunk is {:.2}x its predicted share of the block", worst);
+        }
     }
 }
 
@@ -1827,6 +2201,10 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
     let d = <sha2::Sha256 as sha2::Digest>::digest(&s.journal.bytes);
     let j = &s.journal.bytes;
     let w = |i: usize| u32::from_le_bytes([j[i], j[i + 1], j[i + 2], j[i + 3]]);
+    // The guest tags this journal KIND_CHUNK and the aggregate asserts it (H8). The host printed the
+    // tag and never checked it, so a payload-format change would have shown up as a plausible-looking
+    // cycle count rather than an error. Check it here too: this is the other end of the same contract.
+    assert_eq!(w(0), KIND_CHUNK, "chunk journal is not a ChunkOut (domain tag {:#x})", w(0));
     println!("        journal sha256 {}  kind={:#x} all_valid={} binds={}", hex(&d), w(0), w(4), w(8));
     s.cycles()
 }
@@ -1849,6 +2227,85 @@ fn exec_chunk_cycles(w: &BlockWitness, lo: usize, hi: usize) -> u64 {
 /// a contiguous chunk groups into consecutive transaction runs with no reordering. The aggregation
 /// concatenates chunk binds and indexes them by the block's own input index — emit them in any other
 /// order and it compares the wrong input, silently.
+/// hazync#205 — collect `(x, y)` for every public key the guest is about to decompress, so
+/// `secp256k1_ge_set_xo_var` can VERIFY `y^2 == x^3 + 7` instead of computing a modular square root.
+///
+/// Measured motivation: that sqrt is 1,415,786,221 cycles on block 962,000 — 9.83% of the block and
+/// ~45% of all post-#139 work — and `patches/0005` does not touch it, because it lives outside
+/// `secp256k1_ecmult`. libsecp's own `bench_internal` prices `field_sqrt` at 264x a `field_mul`.
+///
+/// ⚠ COMPLETENESS IS AN OPTIMISATION, NOT A CORRECTNESS CONDITION. A key we fail to find here simply
+/// pays the sqrt it pays today; a key we get WRONG fails the guest's check and also falls back. So
+/// this may be as approximate as it likes, and must never be trusted.
+///
+/// Returns pairs sorted ascending by `x` (BTreeMap ordering), which is the order the guest's binary
+/// search expects. Only the EVEN root is stored: `ge_set_xo_var` flips the sign itself to match the
+/// requested parity, so one entry per `x` serves both.
+fn liftx_hints(w: &BlockWitness, lo: usize, hi: usize) -> Vec<([u8; 32], [u8; 32])> {
+    use bitcoin::secp256k1::PublicKey;
+    use std::collections::BTreeMap;
+
+    let mut out: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+    let mut add_x = |x: &[u8]| {
+        if x.len() != 32 {
+            return;
+        }
+        // Ask for the even root; the guest negates when the caller wanted the odd one.
+        let mut comp = [0u8; 33];
+        comp[0] = 2;
+        comp[1..].copy_from_slice(x);
+        if let Ok(pk) = PublicKey::from_slice(&comp) {
+            let u = pk.serialize_uncompressed(); // 0x04 || X || Y
+            let (mut xa, mut ya) = ([0u8; 32], [0u8; 32]);
+            xa.copy_from_slice(&u[1..33]);
+            ya.copy_from_slice(&u[33..65]);
+            out.insert(xa, ya);
+        }
+    };
+    // A 33-byte compressed key contributes its x; a 32-byte value is taken as an x-only key.
+    let mut add_push = |b: &[u8]| match b.len() {
+        33 if b[0] == 2 || b[0] == 3 => add_x(&b[1..]),
+        32 => add_x(b),
+        _ => {}
+    };
+
+    let mut seen_tx: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for inp in &w.inputs[lo..hi] {
+        if !seen_tx.insert(inp.tx_idx) {
+            continue;
+        }
+        let raw = &w.txs[inp.tx_idx as usize].0;
+        let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw) else { continue };
+        for txin in &tx.input {
+            // Witness items: the key itself for P2WPKH, and the redeem/tapscript for the rest --
+            // walk those as scripts too, which is where multisig keys live.
+            for item in txin.witness.iter() {
+                add_push(item);
+                if item.len() > 33 {
+                    for ins in bitcoin::Script::from_bytes(item).instructions().flatten() {
+                        if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                            add_push(pb.as_bytes());
+                        }
+                    }
+                }
+            }
+            for ins in txin.script_sig.instructions().flatten() {
+                if let bitcoin::script::Instruction::PushBytes(pb) = ins {
+                    add_push(pb.as_bytes());
+                    if pb.as_bytes().len() > 33 {
+                        for i2 in bitcoin::Script::from_bytes(pb.as_bytes()).instructions().flatten() {
+                            if let bitcoin::script::Instruction::PushBytes(p2) = i2 {
+                                add_push(p2.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, lo: usize, hi: usize) {
     fn padded(v: &[u8]) -> Vec<u8> {
         let mut p = v.to_vec();
@@ -1872,6 +2329,25 @@ fn write_chunk_inputs(b: &mut risc0_zkvm::ExecutorEnvBuilder, w: &BlockWitness, 
     );
 
     b.write(&(groups.len() as u32)).unwrap();
+
+    // hazync#205 pubkey-Y hints, written BEFORE the groups because the guest verifies scripts as it
+    // reads them -- the table must be installed before the first VerifyScript call.
+    //
+    // ⛔ HAZYNC_LIFTX_HINT must hold the SAME value at BUILD time and at RUN time. The guest only
+    // reads this block when built with the `liftx-hint` feature, so a mismatch desynchronises the
+    // stream rather than merely losing the optimisation. Same discipline as HAZYNC_BIGINT2_ECDSA.
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        let hints = liftx_hints(w, lo, hi);
+        b.write(&(hints.len() as u32)).unwrap();
+        let mut flat = Vec::with_capacity(hints.len() * 64);
+        for (x, y) in &hints {
+            flat.extend_from_slice(x);
+            flat.extend_from_slice(y);
+        }
+        b.write_slice(&flat);
+        eprintln!("  liftx: {} pubkey hints for inputs {}..{}", hints.len(), lo, hi);
+    }
+
     for (tx_idx, gs, ge) in groups {
         let tx = &w.txs[tx_idx as usize].0;
         let prevouts = &w.tx_prevouts[tx_idx as usize].0;
@@ -2016,8 +2492,28 @@ fn write_aggregate_env(
     b.write(&5u32).unwrap();
     b.write(&METHOD_ID).unwrap();
     b.write(&(receipts.len() as u32)).unwrap();
-    for r in receipts { b.write(&r.journal.bytes).unwrap(); }
-    b.write(&state_journal_bytes(anchor)).unwrap();
+    // #136's fix for the AGGREGATE. Guest reads these with read_slice when built with
+    // `agg-readslice`; a length prefix then a 4-byte-padded slice, exactly as write_chunk_inputs does.
+    // ⛔ HAZYNC_AGG_READSLICE must hold the SAME value at BUILD and RUN time -- the guest only reads
+    // this shape when compiled for it, so a mismatch desynchronises the stream rather than merely
+    // losing the optimisation. Same discipline as HAZYNC_BIGINT2_ECDSA.
+    if std::env::var("HAZYNC_AGG_READSLICE").as_deref() == Ok("1") {
+        fn padded(v: &[u8]) -> Vec<u8> {
+            let mut p = v.to_vec();
+            p.resize(v.len().div_ceil(4) * 4, 0);
+            p
+        }
+        for r in receipts {
+            b.write(&(r.journal.bytes.len() as u32)).unwrap();
+            b.write_slice(&padded(&r.journal.bytes));
+        }
+        let sj = state_journal_bytes(anchor);
+        b.write(&(sj.len() as u32)).unwrap();
+        b.write_slice(&padded(&sj));
+    } else {
+        for r in receipts { b.write(&r.journal.bytes).unwrap(); }
+        b.write(&state_journal_bytes(anchor)).unwrap();
+    }
     b.write(w).unwrap();
     b.write(&1u32).unwrap();
 }
@@ -2195,8 +2691,8 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
             inputs.push(BlockInput {
                 tx_idx: i as u32, input_idx: 0,
                 global_pos: 0, coin_height: SYNTH_H, coin_is_coinbase: 0, coin_mtp: SYNTH_T, tx_first: 1,
-                proof_i: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
-                proof_last: WireProof { leaf: [0u8; 32], position: 0, siblings: vec![] },
+                proof_i: WireProof { leaf: PackedHash([0u8; 32]), position: 0, siblings: PackedHashes(vec![]) },
+                proof_last: WireProof { leaf: PackedHash([0u8; 32]), position: 0, siblings: PackedHashes(vec![]) },
             });
         } else {
             // external: spends C from the accumulator (real inclusion proof).
@@ -2216,7 +2712,7 @@ fn synth_block(cb: &Transaction, txs: &[&Transaction], inblock: &[bool]) -> Bloc
     let header = build_header_v(1, HASH169, &[0u8; 32], SYNTH_T, 0x1d00ffff, 0);
     let (in_smt_root, smt) = smt_witness_standalone(cb_txid, cb_spendable_outputs(cb),
         &cb_spends_from(&inputs, &wtxs));
-    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids, root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
+    BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(cb), txids: PackedHashes(txids), root_prev, txs: wtxs, tx_prevouts: wtx_prevs, inputs, root_next, bip30: None, in_smt_root, smt }
 }
 
 // The four OP_TRUE transactions (built via the real bitcoin crate so txids/serialization are correct).
@@ -2299,7 +2795,7 @@ fn synth_unbound_prevouts(phantom: bool) -> BlockWitness {
     let unbound_smt = smt_witness_standalone(cb.compute_txid().to_byte_array(),
         cb_spendable_outputs(&cb), &[]);
     BlockWitness { header, height: SYNTH_H, coinbase_tx: serialize(&cb),
-        txids: vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()],
+        txids: PackedHashes(vec![cb.compute_txid().to_byte_array(), t.compute_txid().to_byte_array()]),
         root_prev, txs: vec![PackedBytes(t_raw.clone())], tx_prevouts: vec![PackedBytes(shared_blob)],
         inputs: vec![in0, in1], root_next: wire_stump(&forest), bip30: None,
         in_smt_root: unbound_smt.0, smt: unbound_smt.1 }
@@ -2427,7 +2923,7 @@ fn check_bip30() {
         (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
-        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: vec![cb_txid],
+        header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: PackedHashes(vec![cb_txid]),
         root_prev: root_prev.clone(), txs: vec![], tx_prevouts: vec![], inputs: vec![], root_next: root_next.clone(), bip30,
         in_smt_root: f3_smt.0, smt: f3_smt.1.clone(),
     };
@@ -2623,7 +3119,7 @@ fn bundle_roundtrip_test() {
     let prevouts: Vec<u8> = (0u8..=255).rev().cycle().take(140).collect();
     let w = BlockWitness {
         header: vec![1, 2, 3], height: 170, coinbase_tx: vec![9, 9, 9],
-        txids: vec![[7u8; 32], [8u8; 32]],
+        txids: PackedHashes(vec![[7u8; 32], [8u8; 32]]),
         root_prev: WireStump { roots: vec![], num_leaves: 0 },
         txs: vec![PackedBytes(raw_tx.clone())], tx_prevouts: vec![PackedBytes(prevouts.clone())],
         inputs: vec![],
@@ -2645,7 +3141,28 @@ fn bundle_roundtrip_test() {
     if back.witness.tx_prevouts.first().map(|p| &p.0) != Some(&prevouts) {
         println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.tx_prevouts mismatch"); fails += 1;
     }
-    if fails == 0 { println!(">>> BUNDLE-ROUNDTRIP: PASS — PackedBytes + full spend-block Bundle JSON round-trip"); }
+    // 3) The packed HASH types. These were added by the 2026-08-28 wire-packing change with their own
+    //    byte-visitor that omitted `visit_seq`, so every bundle carrying `txids` failed to parse -- the
+    //    v0.9.0 bug, reintroduced. Parsing the Bundle above already exercises it, but assert the VALUES
+    //    too: `PackedHashes` serialises as one flat n*32 blob, so a flat/nested or chunking mixup would
+    //    still parse while yielding the wrong hashes.
+    if back.witness.txids.0 != vec![[7u8; 32], [8u8; 32]] {
+        println!(">>> BUNDLE-ROUNDTRIP: FAIL — Bundle.witness.txids mismatch"); fails += 1;
+    }
+    for case in [Vec::new(), vec![[3u8; 32]], (0u8..9).map(|i| [i; 32]).collect::<Vec<_>>()] {
+        let j = serde_json::to_vec(&PackedHashes(case.clone())).expect("serialise PackedHashes");
+        let back: PackedHashes = serde_json::from_slice(&j)
+            .expect("PackedHashes JSON round-trip must parse (regression: missing visit_seq)");
+        if back.0 != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedHashes {} hashes", case.len()); fails += 1; }
+    }
+    {
+        let case = PackedHash([0xABu8; 32]);
+        let j = serde_json::to_vec(&case).expect("serialise PackedHash");
+        let back: PackedHash = serde_json::from_slice(&j)
+            .expect("PackedHash JSON round-trip must parse (regression: missing visit_seq)");
+        if back != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedHash mismatch"); fails += 1; }
+    }
+    if fails == 0 { println!(">>> BUNDLE-ROUNDTRIP: PASS — PackedBytes + PackedHash(es) + full spend-block Bundle JSON round-trip"); }
     else { std::process::exit(1); }
 }
 
@@ -3178,6 +3695,7 @@ fn script_flags_test() {
 }
 
 fn main() {
+    let _report_119_on_exit = Report119OnExit;
     // Prove IN-PROCESS unless the operator asked for something else.
     //
     // risc0's default backend shells out to `r0vm`, a separate ~109 MB binary that is not part of this
@@ -3354,6 +3872,64 @@ fn main() {
         verify_range_cmd(args.get(p + 1).expect("verify-range <bin>"));
         return;
     }
+    // `msm-selftest [n] [window]` — guest mode 13, EXECUTE only. Checks the Pippenger MSM against an
+    // independently written naive reference AND a negative control, and reports the cycle count so
+    // the op-count model behind the 8.6x claim can be checked rather than assumed.
+    // `field-bench [n]` — guest mode 15, execute only. libsecp software field ops vs the bigint2
+    // coprocessor, same op count, same run.
+    if let Some(p) = args.iter().position(|a| a == "field-bench") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(20000);
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&15u32).unwrap();
+        b.write(&n).unwrap();
+        ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+        return;
+    }
+
+    // `msm-bench <n> <window>` — guest mode 14, execute only, MSM alone at production scale.
+    if let Some(p) = args.iter().position(|a| a == "msm-bench") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(14031);
+        let w: u32 = args.get(p + 2).and_then(|s| s.parse().ok()).unwrap_or(10);
+        let mut b = ExecutorEnv::builder();
+        b.segment_limit_po2(seg_po2());
+        b.write(&14u32).unwrap();
+        b.write(&n).unwrap();
+        b.write(&w).unwrap();
+        let t = std::time::Instant::now();
+        let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
+        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2()).sum();
+        println!("=== MSM BENCH n={n} window={w} ===");
+        println!("  cycles {cycles}   ({:.1} M)", cycles as f64 / 1e6);
+        println!("  executed in {:.1}s", t.elapsed().as_secs_f64());
+        println!("  NAIVE equivalent for {} sigs: {:.0} M (7,015 x 79,971 measured = 561 M)",
+                 (n - 1) / 2, ((n as f64 - 1.0) / 2.0) * 79_971.0 / 1e6);
+        return;
+    }
+
+    if let Some(p) = args.iter().position(|a| a == "msm-selftest") {
+        use risc0_zkvm::ExecutorImpl;
+        let n: u32 = args.get(p + 1).and_then(|s| s.parse().ok()).unwrap_or(64);
+        let w: u32 = args.get(p + 2).and_then(|s| s.parse().ok()).unwrap_or(10);
+        let mut b = ExecutorEnv::builder();
+        b.write(&13u32).unwrap();
+        b.write(&n).unwrap();
+        b.write(&w).unwrap();
+        let t = std::time::Instant::now();
+        let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+            .unwrap()
+            .run()
+            .expect("msm selftest FAILED — see the guest assertion above");
+        let cycles: u64 = session.segments.iter().map(|s| 1u64 << s.resolve().unwrap().po2()).sum();
+        println!("=== MSM SELFTEST n={n} window={w} ===");
+        println!("  total cycles (segment-rounded) {cycles}");
+        println!("  executed in {:.1}s", t.elapsed().as_secs_f64());
+        println!("  per point: {:.0} cycles", cycles as f64 / n as f64);
+        return;
+    }
+
     if args.iter().any(|a| a == "method-id") {
         // Print THIS host's guest image id so a contributor can check it matches a proof's guest.
         println!("METHOD_ID {}", method_id_hex());
@@ -3665,7 +4241,77 @@ mod smt_bridge {
 
 #[cfg(test)]
 mod chunk_packing_tests {
-    use super::{pack_chunks, runs_at_cap};
+    use super::{pack_chunks, runs_at_cap, SigOps, predicted_sig_ops,
+                split_at_cap, split_at_cap_keyed,
+                COST_INPUT_BASE, COST_PER_EC_OP, COST_PER_EC_OP_REPEAT};
+
+    // ---- #139: the packer must be able to see the curve, not just the count ----
+
+    /// Taproot is BIP340 Schnorr on BOTH paths; everything else is ECDSA. #139 accelerates only the
+    /// latter, so misfiling one is a 13.8x pricing error the packer cannot detect at runtime.
+    #[test]
+    fn taproot_classifies_as_schnorr_and_the_rest_as_ecdsa() {
+        let p2tr_key = SigOps::schnorr(1);
+        let p2wpkh   = SigOps::ecdsa(1);
+        assert_eq!(p2tr_key.schnorr, 1, "taproot key path must be Schnorr");
+        assert_eq!(p2tr_key.ecdsa,   0, "taproot must not be priced as ECDSA");
+        assert_eq!(p2wpkh.ecdsa,     1, "P2WPKH must be ECDSA");
+        assert_eq!(p2wpkh.schnorr,   0, "P2WPKH must not be priced as Schnorr");
+        // total() stays curve-blind, which is what the profile display reports.
+        assert_eq!(p2tr_key.total(), p2wpkh.total());
+    }
+
+    /// Cost is EXACTLY the two-term linear combination -- no rounding, no cross-terms, no hidden
+    /// dependence on the order of the split.
+    ///
+    /// This replaces `cost_is_curve_blind_while_the_coefficients_are_equal`, which asserted the two
+    /// constants were equal and so proved the curve dimension was a no-op. That premise was always
+    /// temporary and its own message said so: divergence "is #139 landing, and this test's premise
+    /// with it". #139 has landed (ECDSA 141,612, Schnorr 1,950,000), so the equality is gone while
+    /// the linearity it was really protecting is not. `pricing_the_curves_apart_actually_changes_the_cost`
+    /// covers the other half: that the divergence actually moves the packer.
+    #[test]
+    fn cost_is_the_linear_combination_of_the_two_curve_coefficients() {
+        for (e, s) in [(0, 0), (1, 0), (0, 1), (3, 2), (7, 11)] {
+            let split = SigOps { ecdsa: e, schnorr: s };
+            assert_eq!(
+                split.cost(),
+                super::COST_PER_EC_OP * e + super::COST_PER_SCHNORR_OP * s,
+                "cost is not the linear combination of the per-curve coefficients"
+            );
+        }
+        // An all-ECDSA and an all-Schnorr input of the same total must NOT cost the same now.
+        assert_ne!(
+            SigOps { ecdsa: 4, schnorr: 0 }.cost(), SigOps { ecdsa: 0, schnorr: 4 }.cost(),
+            "the curve dimension has stopped biting -- the coefficients have re-converged"
+        );
+    }
+
+    /// ⚠ The no-op test above would ALSO pass for a refit that does nothing whatsoever. This one shows
+    /// the machinery actually bites the moment #139 makes the coefficients diverge -- an ECDSA-heavy
+    /// input and a Schnorr-heavy one must then cost different amounts, which is the entire point.
+    #[test]
+    fn pricing_the_curves_apart_actually_changes_the_cost() {
+        let ecdsa_heavy   = SigOps::ecdsa(4);
+        let schnorr_heavy = SigOps::schnorr(4);
+        let (equal, post_139) = (1_950_000u64, 141_612u64);
+        assert_eq!(
+            ecdsa_heavy.cost_with(equal, equal), schnorr_heavy.cost_with(equal, equal),
+            "with equal coefficients the two must be indistinguishable"
+        );
+        let a = ecdsa_heavy.cost_with(post_139, equal);
+        let b = schnorr_heavy.cost_with(post_139, equal);
+        assert!(b > a * 10, "after #139 Schnorr must dominate: {b} vs {a}");
+    }
+
+    /// The classifier runs on real bytes, not just constructed SigOps: an unparseable input must fall
+    /// back to one ECDSA verify rather than panicking a prover run over a scheduling hint.
+    #[test]
+    fn unparseable_input_is_charged_one_ecdsa_verify_and_never_panics() {
+        let ops = predicted_sig_ops(b"not a transaction", 0, b"not prevouts");
+        assert_eq!(ops, SigOps::ecdsa(1));
+    }
+
 
     /// The invariants `prove_chunk` and `agg_chunks` rely on. If any of these break, chunks stop lining
     /// up with the block's inputs and the guest's `all_binds[idx]` lookup silently compares the wrong
@@ -3698,7 +4344,7 @@ mod chunk_packing_tests {
         ];
         for costs in &shapes {
             for k in [1usize, 2, 3, 8, 16, 64] {
-                assert_partitions(costs, &pack_chunks(costs, k));
+                assert_partitions(costs, &pack_chunks(costs, k, None));
             }
         }
     }
@@ -3707,7 +4353,7 @@ mod chunk_packing_tests {
     fn never_returns_more_runs_than_asked_for() {
         let costs: Vec<u64> = (0..50).map(|i| 1_950_000 + i * 13_000).collect();
         for k in [1usize, 2, 7, 50, 500] {
-            let runs = pack_chunks(&costs, k);
+            let runs = pack_chunks(&costs, k, None);
             assert!(runs.len() <= k.max(1), "asked for {k}, got {}", runs.len());
             assert!(runs.len() <= costs.len(), "more runs than inputs");
         }
@@ -3718,8 +4364,8 @@ mod chunk_packing_tests {
         // An optimal cap can be reached with fewer runs than requested. Leaving provers idle is a real
         // cost, so the packer keeps dividing.
         let costs = vec![1_950_000u64; 32];
-        assert_eq!(pack_chunks(&costs, 8).len(), 8);
-        assert_eq!(pack_chunks(&costs, 32).len(), 32);
+        assert_eq!(pack_chunks(&costs, 8, None).len(), 8);
+        assert_eq!(pack_chunks(&costs, 32, None).len(), 32);
     }
 
     #[test]
@@ -3732,7 +4378,7 @@ mod chunk_packing_tests {
 
         let by_count: Vec<(usize, usize)> =
             (0..k).map(|c| (c * 8, (c + 1) * 8)).collect();
-        let by_cost = pack_chunks(&costs, k);
+        let by_cost = pack_chunks(&costs, k, None);
         assert_partitions(&costs, &by_cost);
 
         assert!(max_run(&costs, &by_cost) < max_run(&costs, &by_count),
@@ -3746,7 +4392,7 @@ mod chunk_packing_tests {
         // runs than we are allowed.
         let costs: Vec<u64> = (0..40).map(|i| 100 + (i * 37) % 900).collect();
         let k = 6;
-        let runs = pack_chunks(&costs, k);
+        let runs = pack_chunks(&costs, k, None);
         let cap = max_run(&costs, &runs);
         assert!(runs.len() <= k);
         assert!(cap >= *costs.iter().max().unwrap(), "a run cannot be lighter than its heaviest input");
@@ -3768,18 +4414,47 @@ mod chunk_packing_tests {
         let real = |ec: u64, bytes: u64| super::COST_PER_EC_OP * ec + super::COST_PER_INPUT_BYTE * bytes;
         let (lean, fat) = (real(42, 37_933), real(42, 765_282));
 
-        // Within 2% of what those two chunks actually measured — the coefficients are fitted, so this
-        // fails loudly if either is changed without re-measuring. Values are post-dedup: chunk 1 fell
-        // 221,538,730 -> 109,113,751 -> 86,495,630 across the two halves of #135.
-        assert!((fat as f64 - 86_495_630.0).abs() / 86_495_630.0 < 0.02, "fat chunk: {fat}");
-        assert!((lean as f64 - 82_090_232.0).abs() / 82_090_232.0 < 0.02, "lean chunk: {lean}");
+        // RE-MEASURED 2026-09-05 under the #139 arm (patch 0005 applied, `hazync_ecmult_verify`
+        // present), block 741000, 16 chunks, execute mode. Chunks 1 and 11 are the controlled pair:
+        // identical 42 inputs and 42 EC verifies, differing only in bytes (765,282 vs 37,933).
+        //
+        //   chunk  1 (fat)   10,039,314 cycles
+        //   chunk 11 (lean)   7,763,901 cycles      ratio 1.293x
+        //
+        // The premise HOLDS -- bytes are costed, and an EC-only model would rate these two equal.
+        // The old anchors (86,495,630 / 82,090,232) were measured pre-#139, when an ECDSA verify cost
+        // 1,950,000 rather than 141,612; they describe a build that no longer exists.
+        //
+        // ⚠ This deliberately does NOT assert 2% agreement the way the old anchors did. Under #139 the
+        // model does not have that accuracy: it predicts 1.574x for this pair against 1.293x measured,
+        // because COST_PER_INPUT_BYTE (6) is ~2x the measured 3.13 cycles/byte. A least-squares refit
+        // over all 16 chunks gives 106,177*ec + 2.62*bytes + 90,395*inputs at 5.2% mean error, against
+        // 13.1% for the current constants. Refitting is a real calibration change and is NOT made here
+        // -- block 741000 carries 2 Schnorr verifies out of 723, so it cannot inform the curve split at
+        // all, and that split is the dimension the packer most needs to be right about.
+        const MEASURED_FAT: f64 = 10_039_314.0;
+        const MEASURED_LEAN: f64 = 7_763_901.0;
         assert!(fat > lean, "an EC-only model cannot tell these apart: {fat} vs {lean}");
+        // The model must track the measured ordering AND stay within a factor of the measured ratio.
+        // This catches the byte term collapsing to zero (ratio -> 1.0) or exploding, which is what the
+        // 2% anchors were really protecting, without asserting a precision the constants do not have.
+        let model_ratio = fat as f64 / lean as f64;
+        let measured_ratio = MEASURED_FAT / MEASURED_LEAN;
+        assert!(
+            model_ratio > 1.05,
+            "the byte term has stopped discriminating: model ratio {model_ratio:.3}x"
+        );
+        assert!(
+            model_ratio / measured_ratio < 1.5 && measured_ratio / model_ratio < 1.5,
+            "model ratio {model_ratio:.3}x is far from the measured {measured_ratio:.3}x -- \
+             a coefficient changed without re-measuring"
+        );
 
         // And the packer must act on it. Assert the PROPERTY, not a fixed partition: which split wins
         // depends on the coefficients, and an earlier version of this test hard-coded the answer that
         // was optimal at 182 cycles/byte and broke when the byte term was refitted.
         let costs = vec![lean, lean, fat, fat];
-        let runs = pack_chunks(&costs, 2);
+        let runs = pack_chunks(&costs, 2, None);
         assert_partitions(&costs, &runs);
         let best = (1..costs.len())
             .map(|split| {
@@ -3794,10 +4469,38 @@ mod chunk_packing_tests {
 
     #[test]
     fn single_input_and_single_chunk_degenerate_cleanly() {
-        assert_eq!(pack_chunks(&[1_950_000], 8), vec![(0, 1)]);
-        assert_eq!(pack_chunks(&[1_950_000; 5], 1), vec![(0, 5)]);
-        assert!(pack_chunks(&[], 8).is_empty());
+        assert_eq!(pack_chunks(&[1_950_000], 8, None), vec![(0, 1)]);
+        assert_eq!(pack_chunks(&[1_950_000; 5], 1, None), vec![(0, 5)]);
+        assert!(pack_chunks(&[], 8, None).is_empty());
     }
+    /// The key-reuse model must actually MOVE the partition, or it is a no-op wearing a constant.
+    /// Two runs of identical shape where one reuses a key and the other does not: the reusing run
+    /// should be allowed MORE inputs under the same cap.
+    #[test]
+    fn key_reuse_lets_a_run_hold_more_inputs() {
+        let n = 40;
+        let costs = vec![COST_INPUT_BASE + COST_PER_EC_OP; n];
+        let savings = vec![COST_PER_EC_OP - COST_PER_EC_OP_REPEAT; n];
+        let same = vec![Some([7u8; 33]); n];          // every input reuses one key
+        let distinct: Vec<Option<[u8; 33]>> =
+            (0..n).map(|i| { let mut k = [0u8; 33]; k[0] = 2; k[1] = i as u8; Some(k) }).collect();
+
+        let cap = (COST_INPUT_BASE + COST_PER_EC_OP) * 10;
+        let r_same = split_at_cap_keyed(&costs, &savings, &same, cap);
+        let r_diff = split_at_cap_keyed(&costs, &savings, &distinct, cap);
+        // Assert the SIZE of the first run, not the number of runs. Run count is a ceiling and rounds
+        // the effect away: at n=40 a run of 10 and a run of 12 both give 4 runs, so this read as "no
+        // improvement" for any saving under 3.3x. The first run's width is what the discount actually
+        // moves, and it moves by the whole discount rather than by whatever survives the rounding.
+        let (w_same, w_diff) = (r_same[0].1 - r_same[0].0, r_diff[0].1 - r_diff[0].0);
+        assert!(
+            w_same > w_diff,
+            "reused keys must pack denser: same={w_same} inputs in the first run, distinct={w_diff}"
+        );
+        // and the unkeyed walk must agree with the all-distinct case, since nothing is ever reused
+        assert_eq!(split_at_cap(&costs, cap).len(), r_diff.len());
+    }
+
 }
 
 /// `vb-stages` — hazync: cost each phase of the aggregate's `validate_block` by subtraction.
@@ -4359,13 +5062,12 @@ fn receipt_digest_cmd(path: &str) {
 // An odd receipt at the end of a level carries forward untouched. It keeps its position, so
 // adjacency is preserved and the final claim is unchanged.
 fn seg_join_cmd() {
-    use risc0_zkvm::{VerifierContext, SuccinctReceipt, ReceiptClaim};
+    use risc0_zkvm::{SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
     let dir = seg_workdir();
     let id = std::env::var("HAZYNC_WORKER_ID").unwrap_or_else(|_| "j0".into());
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
-    let ctx = VerifierContext::default();
     let mut done = 0usize;
     let t0 = Instant::now();
 
@@ -4755,6 +5457,27 @@ fn seg_connect_cmd(addr: &str) {
 //
 // If a worker dies its in-flight segments go back on the queue and another worker takes them. That
 // is the same reassignment the pull design got from expiring a stale claim, without needing claims.
+/// Width of every level of the join tree, given the leaf count -- `widths[0]` is the leaf count and
+/// the last entry is always 1.
+///
+/// The tree's shape is a function of the leaf count ALONE, which is what lets a join be published
+/// the moment its two children exist rather than when its whole level does. Level `l+1` position `p`
+/// joins `(l, 2p)` and `(l, 2p+1)`; when a level is odd its LAST node carries forward untouched to
+/// position `npairs` of the next level, keeping its position so adjacency holds.
+///
+/// Extracted so the equivalence test below exercises the shipped function rather than a copy of it.
+fn join_tree_widths(n: usize) -> Vec<usize> {
+    let mut widths = vec![n];
+    let mut m = n;
+    while m > 1 {
+        let npairs = m / 2;
+        let odd = m % 2 == 1;
+        m = npairs + if odd { 1 } else { 0 };
+        widths.push(m);
+    }
+    widths
+}
+
 fn seg_serve_cmd() {
     use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
     use risc0_zkvm::sha::Digestible;
@@ -4864,7 +5587,6 @@ fn seg_serve_cmd() {
     listener.set_nonblocking(true).ok();
 
     let t_work = Instant::now();
-    let ctx = VerifierContext::default();
 
     // NO thread::scope HERE, and that is the fix for a deadlock I introduced. The scope's implicit
     // join waited for the connection threads; the connection threads waited for join work; and the
@@ -4878,11 +5600,12 @@ fn seg_serve_cmd() {
     let acc_alldone = alldone.clone();
     let (aq, ao, aw, aj, ajo, alo) =
         (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone());
-    let acceptor = std::thread::spawn(move || {
+    // Detached on purpose -- see the deadlock note above; nothing joins this handle.
+    let _acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
         while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
-                Ok((mut s, peer)) => {
+                Ok((s, peer)) => {
                     println!("  worker connected from {peer}");
                     let (queue, out, wire, jobs, jout, alldone, last_out) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(), alo.clone());
@@ -5102,44 +5825,98 @@ fn seg_serve_cmd() {
     };
     lifted.push(tail_lift);
 
-    // DISTRIBUTE THE JOIN TREE. Publish a level as jobs, wait for the workers to return them, feed
-    // the results in as the next level. The barrier between levels is unavoidable -- level l+1
-    // consumes level l's output -- but the depth is log2(N), so 1,684 segments is eleven barriers
-    // rather than 1,683 sequential joins.
+    // DISTRIBUTE THE JOIN TREE, PIPELINED. Publish a join the moment its two children exist,
+    // rather than when its whole level does.
     //
-    // In-process joining is what left assembly flat at 373 s while segment proving scaled 1.96x on
-    // two cards. Everything else divided; this was the part that did not.
-    let mut level = lifted;
-    let mut lv = 0u32;
-    while level.len() > 1 {
-        let npairs = level.len() / 2;
-        let odd = level.len() % 2 == 1;
+    // The old driver was level-synchronous: it queued a level, waited for every join in it, then
+    // queued the next. That barrier is NOT inherent -- level l+1 position q consumes exactly two
+    // nodes, (l, 2q) and (l, 2q+1), so it is ready as soon as those two are, regardless of how the
+    // rest of level l is doing. Waiting for the level wastes every card that finishes early, and
+    // the waste grows with the fleet: the tree narrows towards the root, so join-tree efficiency
+    // runs 93% at 2 cards, 68% at 8, 54% at 16 and 40% at 32. That is why the two-card aggregate
+    // test looked healthy -- N=2 is the one regime where this barrier is invisible.
+    //
+    // ORDERING IS UNCHANGED, and that is the point. The tree shape is a function of the leaf count
+    // alone, so it is precomputed here: position p pairs with p^1, and the EVEN position is always
+    // the left operand. Joins chain claims (join asserts a.post == b.pre) so they do not commute --
+    // only the SCHEDULE changes, never which two receipts meet or in which order.
+    let widths = join_tree_widths(lifted.len());
+    let depth = widths.len() - 1; // number of join levels; 0 when there is a single leaf
+
+    let mut ready: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> =
+        widths.iter().map(|w| vec![None; *w]).collect();
+    for (i, r) in lifted.into_iter().enumerate() {
+        ready[0][i] = Some(r);
+    }
+    let mut published: Vec<Vec<bool>> = widths.iter().map(|w| vec![false; w / 2]).collect();
+
+    println!("    join tree: {} leaves, {depth} levels, widths {:?}", widths[0], widths);
+    let njoins: usize = widths.iter().take(depth).map(|w| w / 2).sum();
+    let mut harvested = 0usize;
+
+    while depth > 0 && ready[depth][0].is_none() {
+        // Publish every join whose two children have arrived and which has not been queued yet.
         {
             let mut q = jobs.lock().unwrap();
-            for p in 0..npairs {
-                let a = bincode::serialize(&level[p * 2]).expect("ser a");
-                let b = bincode::serialize(&level[p * 2 + 1]).expect("ser b");
-                q.push_back((JOIN_TAG | (lv << 16) | p as u32, pack_pair(&a, &b)));
+            for l in 0..depth {
+                let npairs = widths[l] / 2;
+                for p in 0..npairs {
+                    if published[l][p] {
+                        continue;
+                    }
+                    let (a, b) = (&ready[l][p * 2], &ready[l][p * 2 + 1]);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        let ab = bincode::serialize(a).expect("ser a");
+                        let bb = bincode::serialize(b).expect("ser b");
+                        q.push_back((JOIN_TAG | ((l as u32) << 16) | p as u32, pack_pair(&ab, &bb)));
+                        published[l][p] = true;
+                    }
+                }
             }
         }
-        println!("    level {lv}: {} receipts -> {npairs} joins{}", level.len(), if odd { " (+1 carried)" } else { "" });
-        loop {
-            let have = { jout.lock().unwrap().len() };
-            if have >= npairs { break; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // An odd receipt carries forward untouched, keeping its position so adjacency holds. It is
+        // ready the instant its source node is -- it waits on no join at all.
+        for l in 0..depth {
+            if widths[l] % 2 == 1 {
+                let npairs = widths[l] / 2;
+                if ready[l + 1][npairs].is_none() {
+                    if let Some(r) = ready[l][widths[l] - 1].clone() {
+                        ready[l + 1][npairs] = Some(r);
+                    }
+                }
+            }
         }
-        let mut next = Vec::with_capacity(npairs + 1);
+
+        // Harvest whatever the workers have returned, keyed by tag rather than by count -- results
+        // from different levels are now in flight at the same time.
         {
             let mut m = jout.lock().unwrap();
-            for p in 0..npairs {
-                next.push(m.remove(&(JOIN_TAG | (lv << 16) | p as u32)).expect("missing join result"));
+            if !m.is_empty() {
+                for l in 0..depth {
+                    let npairs = widths[l] / 2;
+                    for p in 0..npairs {
+                        if ready[l + 1][p].is_some() {
+                            continue;
+                        }
+                        if let Some(r) = m.remove(&(JOIN_TAG | ((l as u32) << 16) | p as u32)) {
+                            ready[l + 1][p] = Some(r);
+                            harvested += 1;
+                            if harvested % 25 == 0 || harvested == njoins {
+                                println!("    joins {harvested}/{njoins}");
+                            }
+                        }
+                    }
+                }
             }
         }
-        // An odd receipt carries forward untouched, keeping its position so adjacency holds.
-        if odd { next.push(level.pop().expect("odd tail")); }
-        level = next;
-        lv += 1;
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    let mut level: Vec<SuccinctReceipt<ReceiptClaim>> =
+        vec![ready[depth][0].take().expect("root receipt")];
+
     // DISTRIBUTE THE RESOLVES (hazync#153). This is the last term that stayed on the segment coordinator.
     //
     // A mode-4 chunk has no assumptions, so this loop does nothing and costs nothing. A mode-5
@@ -5242,5 +6019,94 @@ fn report_119_retries() {
     let n = RETRIES_119.load(std::sync::atomic::Ordering::Relaxed);
     if n > 0 {
         println!("  [#119] {n} segment(s) needed a retry this run — the rate is worth recording on the issue");
+    }
+}
+
+/// Reports the #119 retry total however `main` exits.
+///
+/// ⛔ `prove_segment_resilient`'s own comment says the total "is reported at the end of a run, so the
+/// rate stays measurable" — and it never was: `report_119_retries` had no caller, so every retry was
+/// counted and then discarded. #119 is still open and still unexplained, and the retry RATE is the
+/// number it actually needs.
+///
+/// A call at the end of `main` would not have worked: `main` dispatches a dozen commands with early
+/// `return`s, so it would fire for almost none of them. A drop guard fires on every normal exit path.
+struct Report119OnExit;
+impl Drop for Report119OnExit {
+    fn drop(&mut self) { report_119_retries(); }
+}
+
+#[cfg(test)]
+mod join_tree_tests {
+    use super::join_tree_widths;
+
+    /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    enum Node { Leaf(usize), Join(Box<Node>, Box<Node>) }
+
+    /// The OLD level-synchronous driver, transcribed literally -- including `pop()` taking the LAST
+    /// element as the odd carry. This is the behaviour the pipelined version must not change.
+    fn old_tree(n: usize) -> Node {
+        let mut level: Vec<Node> = (0..n).map(Node::Leaf).collect();
+        while level.len() > 1 {
+            let npairs = level.len() / 2;
+            let odd = level.len() % 2 == 1;
+            let mut next: Vec<Node> = Vec::with_capacity(npairs + 1);
+            for p in 0..npairs {
+                next.push(Node::Join(Box::new(level[p * 2].clone()), Box::new(level[p * 2 + 1].clone())));
+            }
+            if odd { next.push(level.pop().expect("odd tail")); }
+            level = next;
+        }
+        level.pop().expect("root")
+    }
+
+    /// The NEW schedule, built from the SHIPPED `join_tree_widths`.
+    fn new_tree(n: usize) -> Node {
+        let widths = join_tree_widths(n);
+        let depth = widths.len() - 1;
+        let mut ready: Vec<Vec<Option<Node>>> = widths.iter().map(|w| vec![None; *w]).collect();
+        for i in 0..n { ready[0][i] = Some(Node::Leaf(i)); }
+        for l in 0..depth {
+            let npairs = widths[l] / 2;
+            for p in 0..npairs {
+                let a = ready[l][p * 2].clone().expect("left child");
+                let b = ready[l][p * 2 + 1].clone().expect("right child");
+                ready[l + 1][p] = Some(Node::Join(Box::new(a), Box::new(b)));
+            }
+            if widths[l] % 2 == 1 {
+                ready[l + 1][npairs] = ready[l][widths[l] - 1].clone();
+            }
+        }
+        ready[depth][0].clone().expect("root")
+    }
+
+    /// Pipelining may change WHEN a join runs; it must never change WHICH two receipts meet, or in
+    /// which order. `join` asserts `a.post == b.pre`, so joins chain claims and do not commute -- a
+    /// carry-indexing error yields receipts that fail to verify, not merely a slower tree.
+    #[test]
+    fn pipelined_schedule_builds_an_identical_tree() {
+        // 1..=2048 covers every parity pattern: powers of two, one either side, and the long runs
+        // of odd levels that exercise repeated carries.
+        for n in 1..=2048usize {
+            assert_eq!(old_tree(n), new_tree(n), "join tree differs at n={n}");
+        }
+        // Real sizes seen in the fleet: a 116-segment aggregate, a 501-input chunk, 1,684 segments,
+        // and block 962,000's full input count.
+        for n in [116usize, 501, 1684, 8006] {
+            assert_eq!(old_tree(n), new_tree(n), "join tree differs at n={n}");
+        }
+    }
+
+    #[test]
+    fn widths_terminate_at_one_and_shrink_monotonically() {
+        for n in 1..=1024usize {
+            let w = join_tree_widths(n);
+            assert_eq!(w[0], n, "first width must be the leaf count");
+            assert_eq!(*w.last().unwrap(), 1, "tree must terminate at a single root, n={n}");
+            for pair in w.windows(2) {
+                assert!(pair[1] < pair[0], "width must strictly shrink, n={n}: {pair:?}");
+            }
+        }
     }
 }

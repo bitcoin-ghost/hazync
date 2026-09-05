@@ -1,0 +1,78 @@
+GHOST_GAINS — remove two costs from the accelerated SHA-256 Transform: the byte-swap libcall and the
+per-block staging copy.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_SHA_FASTPATH=1.
+⚠ Applies ON TOP of patches/0002, which is what introduces the Transform this edits.
+
+Neither change alters a single hash. Both are plumbing that only became visible once the
+cryptography stopped dominating.
+
+1. __builtin_bswap32 -> inline shifts. rv32im has no byte-reverse instruction -- that is the Zbb
+   extension -- so the builtin lowers to a LIBCALL to __bswapsi2, and the call frame costs more than
+   the four shifts it performs. A profile of the current stack puts __bswapsi2 at 78 M cycles in the
+   chunk work and 256 M in the aggregate: 334 M spent on byte order between two little-endian ends.
+
+2. Skip the 64-byte staging copy when the chunk is already 4-byte aligned. That copy runs PER BLOCK
+   and exists only to guarantee alignment for the uint32_t* the accelerator takes. memcpy is the
+   largest single line in the aggregate profile at 656 M, with CSHA256::Write as its dominant
+   caller. Core's internal buffers are aligned, so the common path takes no copy at all; the
+   unaligned path is unchanged.
+
+⚠ The alignment test is a real test, not an assumption -- an unaligned chunk still takes the copy.
+Passing an unaligned pointer to the accelerator would be undefined behaviour, and this tree already
+learned that guest C++ builds with -w and UB ships silently.
+
+--- a/src/crypto/sha256.cpp
++++ b/src/crypto/sha256.cpp
+@@ -103,18 +103,51 @@
+  *  RISC0 stores state big-endian (SHA256_INIT uses .to_be) and takes the raw message bytes as the
+  *  block; Core keeps native-endian state and reads the chunk big-endian, so we byte-swap the state
+  *  in/out and pass the raw 64-byte chunk. */
++#ifdef HAZYNC_SHA_FASTPATH
++/* Inline byte reverse. Deliberately NOT __builtin_bswap32: without Zbb that lowers to a call to
++ * __bswapsi2, and the call dominates the work. Same value, no libcall. */
++#define HZ_BSWAP32(x) ((uint32_t)((((uint32_t)(x)) >> 24) | ((((uint32_t)(x)) >> 8) & 0x0000FF00u) \
++                                | ((((uint32_t)(x)) << 8) & 0x00FF0000u) | (((uint32_t)(x)) << 24)))
++#endif
+ extern "C" void sys_sha_compress(uint32_t*, const uint32_t*, const uint32_t*, const uint32_t*);
+ void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks)
+ {
+     uint32_t st[8];
++#ifdef HAZYNC_SHA_FASTPATH
++    /* rv32im has no byte-reverse instruction (that is Zbb), so __builtin_bswap32 lowers to a LIBCALL
++     * to __bswapsi2 and the call frame costs more than the four shifts it performs. A profile of the
++     * current stack puts __bswapsi2 at 78 M cycles in the chunk work and 256 M in the aggregate --
++     * 334 M total, on byte order, between two little-endian ends. Written as shifts it inlines. */
++    for (int i = 0; i < 8; ++i) st[i] = HZ_BSWAP32(s[i]);
++#else
+     for (int i = 0; i < 8; ++i) st[i] = __builtin_bswap32(s[i]);
++#endif
+     uint32_t blk[16];
+     while (blocks--) {
++#ifdef HAZYNC_SHA_FASTPATH
++        /* The 64-byte staging copy runs PER BLOCK, and memcpy is the largest single line in the
++         * aggregate profile (656 M) with CSHA256::Write as its dominant caller. The copy exists only
++         * to guarantee 4-byte alignment for the uint32_t* the accelerator takes; when `chunk` is
++         * already aligned -- which Core's internal buffers are -- it can be passed straight through.
++         * Byte content is identical either way, so this changes no hash. */
++        if ((((uintptr_t)chunk) & 3u) == 0u) {
++            const uint32_t* w = (const uint32_t*)(const void*)chunk;
++            sys_sha_compress(st, st, w, w + 8);
++        } else {
++            __builtin_memcpy(blk, chunk, 64);
++            sys_sha_compress(st, st, blk, blk + 8);
++        }
++#else
+         __builtin_memcpy(blk, chunk, 64);
+         sys_sha_compress(st, st, blk, blk + 8);
++#endif
+         chunk += 64;
+     }
++#ifdef HAZYNC_SHA_FASTPATH
++    for (int i = 0; i < 8; ++i) s[i] = HZ_BSWAP32(st[i]);
++#else
+     for (int i = 0; i < 8; ++i) s[i] = __builtin_bswap32(st[i]);
++#endif
+ }
+ 
+ void TransformD64(unsigned char* out, const unsigned char* in)

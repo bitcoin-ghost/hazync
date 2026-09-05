@@ -1,0 +1,74 @@
+hazync#139 WHOLESALE arm — replace the entire ECDSA verification predicate.
+
+⛔ EXPERIMENTAL, OPT-IN, GHOST ONLY, AND IT MOVES METHOD_ID. Applied only when
+HAZYNC_BIGINT2_ECDSA_FULL=1.
+
+⛔ THIS ARM HAD NEVER BEEN RUNNABLE. `hazync_ecdsa_verify_full` has existed in
+prover/methods/guest/src/bigint2_ecmult.rs since 3615a8d (2026-08-28), and NOTHING HAS EVER CALLED
+IT — no patch on any branch adds a call site, and build.rs only ever defined the middle path's macro.
+The recorded figure "wholesale is 15% faster, but buys at most ONE card" was therefore never produced
+by a run. This patch is the missing half.
+
+⚠ It also very likely DOUBLE-COUNTS work Ghost has since banked separately. Wholesale subsumes the
+modular inversion, which patches/0008 now accelerates on its own and which MEASURED 12.61% on
+2026-09-01. What is left for wholesale over middle+0008 is roughly 15% - 12.61% = ~2.4%, not 15%.
+
+## What moves, and what does not
+
+Where patches/0005 swaps ONE line inside secp256k1_ecdsa_sig_verify and keeps every libsecp check
+around it, this replaces the predicate outright: the r/s zero checks, secp256k1_scalar_inverse_var,
+both scalar multiplications, the group arithmetic and the final r == x(R) mod n comparison all become
+risc0-crypto's.
+
+STILL Core's / libsecp's: DER parsing, low-S enforcement (a script-flag policy decision Core makes
+separately), pubkey parsing, and the sighash that produced `message`.
+
+⇒ This is a strictly LARGER equivalence surface than the middle path. It belongs in Ghost, whose
+posture is "fastest wins", and not in Core.
+
+## Two correctness details the call site handles
+
+- `secp256k1_ge` coordinates carry a MAGNITUDE. `secp256k1_fe_get_b32` requires normalised input, so
+  the call site normalises a local copy rather than the caller's pubkey.
+- An infinite pubkey has no affine coordinates to serialise. libsecp rejects it downstream, so this
+  returns 0 rather than handing the accelerator garbage.
+
+--- a/src/ecdsa_impl.h
++++ b/src/ecdsa_impl.h
+@@ -201,6 +201,36 @@
+     secp256k1_gej pubkeyj;
+     secp256k1_gej pr;
+ 
++#ifdef HAZYNC_BIGINT2_ECDSA_FULL
++    /* hazync#139 WHOLESALE arm. Replaces the ENTIRE predicate: the r/s zero checks, the modular
++     * inversion, both scalar multiplications, the group arithmetic AND the final r == x(R) mod n
++     * comparison all become risc0-crypto's.
++     *
++     * ⛔ This is a strictly larger equivalence surface than the middle path, which swaps one line
++     * and keeps every libsecp check around it. Ghost only.
++     *
++     * Still Core's / libsecp's: DER parsing, low-S enforcement, pubkey parsing, and the sighash
++     * that produced `message`. */
++    {
++        unsigned char br[32], bs[32], bqx[32], bqy[32], bmsg[32];
++        secp256k1_ge q = *pubkey;
++        extern int hazync_ecdsa_verify_full(const unsigned char *sigr, const unsigned char *sigs,
++                                            const unsigned char *qx, const unsigned char *qy,
++                                            const unsigned char *msg);
++        /* An infinite pubkey has no affine coordinates to hand over; libsecp rejects it downstream
++         * anyway, so refuse here rather than serialise garbage. */
++        if (q.infinity) { return 0; }
++        /* ge coordinates carry a magnitude; get_b32 requires normalised input. */
++        secp256k1_fe_normalize_var(&q.x);
++        secp256k1_fe_normalize_var(&q.y);
++        secp256k1_scalar_get_b32(br, sigr);
++        secp256k1_scalar_get_b32(bs, sigs);
++        secp256k1_fe_get_b32(bqx, &q.x);
++        secp256k1_fe_get_b32(bqy, &q.y);
++        secp256k1_scalar_get_b32(bmsg, message);
++        return hazync_ecdsa_verify_full(br, bs, bqx, bqy, bmsg);
++    }
++#endif
+     if (secp256k1_scalar_is_zero(sigr) || secp256k1_scalar_is_zero(sigs)) {
+         return 0;
+     }

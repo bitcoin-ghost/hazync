@@ -76,7 +76,8 @@ A good signature plus a matching checksum means the binary is the maintainer's p
 that the *stronger* guarantee is reproducibility, not the signature: anyone can rebuild the guest and
 confirm its `METHOD_ID` matches the canonical id in `reproduce/METHOD_ID`, and any proof verifies against
 that id regardless of who built the host. The signature adds provenance on top of that. (The canonical id
-is re-pinned whenever the guest changes — most recently to `3f52baff` (v0.10.0: libsecp's
+is re-pinned whenever the guest changes — most recently to `3867611d` (2026-09-04: the coprocessor
+field backend), after `1d6c3792` (parallel block validation) and `3f52baff` (v0.10.0: libsecp's
 `ECMULT_WINDOW_SIZE` 15→19, a compile-time speed trade with no consensus change), after the witness
 wire-format change (`68819a54`, v0.9.0), the round-9 post-audit hardening (`cb114426`), the real-Core
 `pow.cpp` retarget carve (`ffdc6095`), and chainparams-sourced consensus constants (`7a8b29e0`); see

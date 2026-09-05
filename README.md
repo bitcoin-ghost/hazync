@@ -1,5 +1,11 @@
 # Hazync
 
+[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
+[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
+[![verify it yourself](https://img.shields.io/badge/verify%20it%20yourself-30%20seconds-3fb950?style=flat-square)](#check-one-yourself-it-takes-about-thirty-seconds)
+
 **Bitcoin's consensus rules, proven with Bitcoin Core's own code, inside a zero-knowledge VM.**
 
 Not a reimplementation of the rules. The actual `interpreter.cpp`, the actual `SignatureHash`, the
@@ -14,7 +20,60 @@ that are *not* covered. Adversarial review is what this needs most; see
 
 ---
 
+## How a block becomes a proof
+
+```mermaid
+flowchart LR
+  B["block 962,000<br/>8,006 inputs"] --> P{{"cost packer<br/>16 chunks"}}
+  P --> C0["chunk 0"]
+  P --> C1["chunk 1"]
+  P --> CN["chunk 15"]
+  C0 --> R0["receipt"]
+  C1 --> R1["receipt"]
+  CN --> RN["receipt"]
+  R0 --> A["aggregate<br/>323 segments, join tree"]
+  R1 --> A
+  RN --> A
+  A --> J["journal digest<br/>4fb3e3c5…4656d"]
+  A --> S["recursion into the spine<br/>genesis-anchored"]
+  S --> K["SNARK wrap<br/>222 KB, verifies in ~1s"]
+  style B fill:#161b22,stroke:#30363d,color:#c9d1d9
+  style A fill:#1f2937,stroke:#58a6ff,color:#c9d1d9
+  style J fill:#132e1a,stroke:#3fb950,color:#c9d1d9
+  style K fill:#132e1a,stroke:#3fb950,color:#c9d1d9
+```
+
+**Every chunk is independent**, so the block fans out across cards; the aggregate joins them and
+recurses into a chain that reaches genesis. The digest is what makes an A/B trustworthy — a change
+that alters what was proven changes those 32 bytes.
+
+## Two modes, and the difference is how much of Core's code actually runs
+
+Both prove the same block. Both commit the **same 32 bytes** — every accepted change in either mode
+produces a journal digest byte-identical to stock Bitcoin Core. Neither is "less correct".
+
+| | 🛡 **CORE** — what ships | ⚡ **GHOST** — experimental |
+|---|---|---|
+| **libsecp's wNAF, GLV, ECDSA logic, every check** | untouched | scalar-multiplication strategy replaced |
+| **Cycles running Core's own code** | ~all of it | ~22% |
+| **Concession** | the field *backend* beneath libsecp — an interface it already parameterises for its own use — plus a pubkey hint Core's own arithmetic verifies before accepting | whatever is fastest |
+| **Hardware for a block in 10 minutes** | see [`docs/BUILDS.md`](docs/BUILDS.md) | fewer cards, larger claim |
+
+**Core is the project.** Ghost is an experiment in how much speed is available if fidelity stops
+being the constraint — it exists to price that trade honestly, not to replace Core.
+
+> [!IMPORTANT]
+> **Every performance figure here says what was measured, on what, and what remains unmeasured.**
+> This project has repeatedly been wrong by believing a projection, and the corrections are recorded
+> rather than edited out. **If a figure does not say how it was obtained, treat it as a projection.**
+> [`docs/BUILDS.md`](docs/BUILDS.md) is the authority on what each mode costs.
+
+---
+
 ### Check one yourself. It takes about thirty seconds.
+
+![verifying a Bitcoin validity proof](docs/assets/verify.svg)
+
 
 ```bash
 curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
@@ -193,8 +252,31 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
 - Why those numbers, and what we got wrong reaching them:
-  [`docs/TEN_MINUTE_BLOCK.md`](docs/TEN_MINUTE_BLOCK.md)
-- How it's built: [`docs/`](docs/)
+  [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md)
+- How it's built: [`docs/`](docs/) — current only. The development record is in
+  [`docs/history/`](docs/history/README.md), which names its own stale figures.
+
+## Finding your way around
+
+| | |
+|---|---|
+| [`docs/`](docs/README.md) | **start here** — current documentation, indexed |
+| [`docs/BUILDS.md`](docs/BUILDS.md) | the two modes: exact patches, env, constants, and what is *not* measured |
+| `prover/` | the guest (Core's consensus code, compiled to RISC-V) and the host that drives it |
+| `verifier/`, `verifier-ffi/`, `verifier-wasm/` | checking a proof — CLI, C ABI, and browser |
+| `patches/` | **every modification to Core or libsecp, numbered and individually justified** |
+| `coreshim/` | headers that let Core build for the guest |
+| `scripts/` | provisioning, benchmarks, correctness gates |
+| `reproduce/` | reproducing the canonical `METHOD_ID` from source |
+| `coordinator/` | the board and work distribution |
+| `accumulator/`, `coinbase-smt/`, `rangestate/` | supporting crates |
+| `audit-fuzz/`, `guest-pure-fuzz/`, `leaf-differential/` | adversarial testing harnesses |
+| [`docs/history/`](docs/history/README.md), `experimental/`, `tasks/` | **the development record — superseded, kept for provenance** |
+
+> [!NOTE]
+> If you are reading a number, check it came from `docs/` and not `docs/history/`. History is kept
+> because *how* a conclusion was reached is often the only defence against reaching a wrong one
+> twice — several levers here were proposed, rejected on measurement, and proposed again.
 
 ## Prior art and credit
 

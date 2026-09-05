@@ -24,7 +24,7 @@ and checked with the released v0.16.0 binaries (2026-08-04):
 $ hazync-verify neg500.snark
 NOT A GENESIS-ANCHORED CHAIN PROOF
 
-  The SNARK is VALID and was produced by guest 1d6c3792.
+  The SNARK is VALID and was produced by guest 3867611d.
   It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
 $ host verify-any range_500.bin
 RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
@@ -253,7 +253,7 @@ developer-chosen hash anywhere in the trust chain** — which is what separates 
 
 ```
 $ ghostd -hazyncproof=fold_8.snark -hazyncutxo=dump_h8.bin
-[hazync] proof VERIFIED against guest 1d6c3792…
+[hazync] proof VERIFIED against guest 3867611d…
 [hazync]   genesis-anchored through height 8
 [hazync]   UTXO dump … MATCHES the proven set (8 coins)
 ```

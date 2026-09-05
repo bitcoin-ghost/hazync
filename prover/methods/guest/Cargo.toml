@@ -5,6 +5,21 @@ edition = "2021"
 
 [workspace]
 
+# TIER 0 Rust codegen (E2). MEASURED on block 140,000, 212 inputs, execute mode
+# (TIER0_RESULTS_2026-08-26.md 2): lto="fat" is -0.486%, codegen-units=1 is -0.361%, and together
+# they are -0.697% -- close to additive, and additive with the C -O3 and ECMULT arms too (the three
+# best arms sum to -1.159% against a combined measurement of -1.160%).
+#
+# The gate that makes this safe: the combined arm produced a BYTE-IDENTICAL journal digest
+# (607f4a7e...) and identical ChunkOut against control, while the two METHOD_IDs differed -- proving
+# both arms genuinely rebuilt rather than one answering from a stale binary. The guest compiles with
+# -w, so -O3 is exactly where latent UB would have surfaced. None did.
+#
+# This crate declares its own [workspace], so these settings apply to the guest build.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [dependencies]
 # NO coinbase-smt DEPENDENCY — see the note in src/main.rs (hazync#88). A Cargo path dependency bakes
 # its ABSOLUTE path into the guest ELF, making the image id depend on the checkout location. The same
@@ -12,6 +27,9 @@ edition = "2021"
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = ['std', 'unstable'] }
 sha2 = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# hazync#139 middle-path experiment ONLY. Optional so a default build neither compiles it nor
+# changes METHOD_ID. Enable with --features bigint2-ecdsa; see src/bigint2_ecmult.rs.
+risc0-crypto = { version = "0.1.0-rc.1", optional = true }
 
 [build-dependencies]
 cc = "1"
@@ -26,3 +44,28 @@ sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8
 [features]
 default = ["serde"]
 serde = []
+# hazync#139: swap ONLY the group arithmetic under libsecp ECDSA verify. EXPERIMENTAL, opt-in,
+# and it MOVES METHOD_ID — never enable for a shipped build.
+bigint2-ecdsa = ["dep:risc0-crypto"]
+# hazync#205 / GHOST_GAINS G1: recover a pubkey's Y through the bigint2 coprocessor instead of
+# libsecp's software modular sqrt. EXPERIMENTAL, opt-in, MOVES METHOD_ID. See src/liftx_accel.rs
+# and patches/0007. Shares the risc0-crypto dependency with the #139 middle path.
+liftx-accel = ["dep:risc0-crypto"]
+# #136's read_slice fix for the AGGREGATE: 29.31% of it is serde Vec<u8> deserialisation of the chunk
+# journals. Host and guest must agree -- see HAZYNC_AGG_READSLICE.
+agg-readslice = []
+# Pippenger MSM over the coprocessor. Primitive only; see src/msm.rs and docs/MSM_BATCH_VERIFY.md.
+msm = ["dep:risc0-crypto"]
+# Field-op benchmark (mode 15). Needs patches/0011 for the libsecp half.
+field-bench = []
+# libsecp field backend on the coprocessor. Canonical 8x32 limbs, no conversion. patches/0012.
+field-bigint2 = ["dep:risc0-crypto"]
+# hazync#205 — recover a pubkey's Y from a host HINT and VERIFY it with y^2 == x^3+7. Advice-and-
+# verify: libsecp's own arithmetic decides, and a missing or wrong hint falls back to its sqrt.
+# Core-legal, unlike liftx-accel which substitutes the sqrt. See src/liftx_hint.rs and patches/0013.
+liftx-hint = []
+# patches/0008 — the ECDSA scalar inverse via the coprocessor. ⛔ Its Rust half lived inside the
+# `liftx-accel` module, so the two levers shared ONE gate and could not be composed: an arm wanting
+# the scalar inverse WITHOUT G1 failed to link with `undefined symbol: hazync_scalar_inverse`.
+# They are independent patches (0008 vs 0007) and now have independent features.
+scalar-inv-accel = []

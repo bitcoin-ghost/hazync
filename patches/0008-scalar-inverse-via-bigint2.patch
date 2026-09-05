@@ -1,0 +1,44 @@
+hazync#205 / GHOST_GAINS — route the ECDSA scalar inverse through the bigint2 accelerator.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_SCALAR_INV_ACCEL=1.
+⚠ Requires patches/0005: the Rust half lives in the same guest module the bigint2-ecdsa feature
+compiles.
+
+patches/0005 deliberately KEEPS secp256k1_scalar_inverse_var as literal libsecp -- the middle path
+moves only the group arithmetic, and the inversion, the r/s zero checks, both scalar_muls and the
+final comparison all stay Core's. That was the right call and it was invisible: an ECDSA verify cost
+1,723,407 cycles and the inversion was noise inside it.
+
+After bigint2 and G1 it is not noise. A profile of the CURRENT stack puts secp256k1_modinv32_var
+plus modinv32_update_de_30 at 146.7 M cycles -- 7.0% of the chunk work, the fourth-largest term.
+
+Fr::inverse() computes the same value over bigint2 arithmetic. On any failure the code falls back to
+libsecp's own scalar_inverse_var, so the accelerator is never load-bearing.
+
+⚠ Note what this does NOT change: the surrounding ECDSA logic is still libsecp's, and this adds no
+equivalence surface beyond the one patch 0005 already argues -- the same coprocessor, the same
+constrained-not-trusted posture, one more operation.
+
+--- a/src/ecdsa_impl.h
++++ b/src/ecdsa_impl.h
+@@ -205,7 +205,20 @@
+         return 0;
+     }
+ 
++#ifdef HAZYNC_SCALAR_INV_ACCEL
++    {
++        unsigned char bs[32], bi[32];
++        extern int hazync_scalar_inverse(const unsigned char *inb, unsigned char *outb);
++        secp256k1_scalar_get_b32(bs, sigs);
++        if (hazync_scalar_inverse(bs, bi)) {
++            secp256k1_scalar_set_b32(&sn, bi, NULL);
++        } else {
++            secp256k1_scalar_inverse_var(&sn, sigs);
++        }
++    }
++#else
+     secp256k1_scalar_inverse_var(&sn, sigs);
++#endif
+     secp256k1_scalar_mul(&u1, &sn, message);
+     secp256k1_scalar_mul(&u2, &sn, sigr);
+     secp256k1_gej_set_ge(&pubkeyj, pubkey);

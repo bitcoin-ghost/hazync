@@ -56,5 +56,67 @@ fn main() {
         println!("cargo:rerun-if-changed={}", inc.display());
     }
 
+    // hazync#139 middle-path experiment (EXPERIMENTAL, opt-in). Unset — the overwhelmingly normal
+    // case — takes the plain embed_methods() path below, byte-for-byte as before, so METHOD_ID is
+    // unmoved. Set to 1 and the guest gains the `bigint2-ecdsa` feature, which compiles
+    // guest/src/bigint2_ecmult.rs and MOVES METHOD_ID. See patches/0005 for the libsecp half.
+    println!("cargo:rerun-if-env-changed=HAZYNC_BIGINT2_ECDSA");
+    // hazync#205 / GHOST_GAINS G1: recover a pubkey's Y through the bigint2 coprocessor instead of
+    // libsecp's software sqrt. Independent of the middle path -- it needs no witness plumbing, so it
+    // can be enabled alone or alongside. See patches/0007 for the libsecp half.
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_ACCEL");
+
+    // Accumulate rather than early-return per flag. The previous shape returned on the FIRST flag it
+    // matched, so setting two silently built with only one -- the same class of silent default that
+    // already cost a measurement day: merging #139 without patch 0005 builds stock libsecp and says
+    // nothing, and #190 without its constant edit repacks nothing and says nothing.
+    let mut features: Vec<String> = Vec::new();
+    if std::env::var("HAZYNC_BIGINT2_ECDSA").as_deref() == Ok("1") {
+        features.push("bigint2-ecdsa".to_string());
+    }
+    if std::env::var("HAZYNC_LIFTX_ACCEL").as_deref() == Ok("1") {
+        features.push("liftx-accel".to_string());
+    }
+    // #136's read_slice fix for the aggregate. Host side is runtime-gated on the SAME variable.
+    println!("cargo:rerun-if-env-changed=HAZYNC_AGG_READSLICE");
+    if std::env::var("HAZYNC_AGG_READSLICE").as_deref() == Ok("1") {
+        features.push("agg-readslice".to_string());
+    }
+    println!("cargo:rerun-if-env-changed=HAZYNC_MSM");
+    if std::env::var("HAZYNC_MSM").as_deref() == Ok("1") {
+        features.push("msm".to_string());
+    }
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BENCH");
+    if std::env::var("HAZYNC_FIELD_BENCH").as_deref() == Ok("1") {
+        features.push("field-bench".to_string());
+    }
+    println!("cargo:rerun-if-env-changed=HAZYNC_LIFTX_HINT");
+    println!("cargo:rerun-if-env-changed=HAZYNC_FIELD_BIGINT2");
+    if std::env::var("HAZYNC_FIELD_BIGINT2").as_deref() == Ok("1") {
+        features.push("field-bigint2".to_string());
+    }
+    // ⚠ HAZYNC_LIFTX_HINT must hold the SAME value at build time and at run time. The guest only
+    // reads the hint block when built with the feature, so a mismatch desynchronises the input
+    // stream rather than merely losing the optimisation.
+    if std::env::var("HAZYNC_LIFTX_HINT").as_deref() == Ok("1") {
+        features.push("liftx-hint".to_string());
+    }
+    println!("cargo:rerun-if-env-changed=HAZYNC_SCALAR_INV_ACCEL");
+    if std::env::var("HAZYNC_SCALAR_INV_ACCEL").as_deref() == Ok("1") {
+        features.push("scalar-inv-accel".to_string());
+    }
+
+    if !features.is_empty() {
+        use std::collections::HashMap;
+        // GuestOptions is #[non_exhaustive], so it cannot be built with a struct expression from
+        // outside risc0-build; default-then-assign is the supported shape.
+        let mut guest = risc0_build::GuestOptions::default();
+        guest.features = features;
+        let mut opts = HashMap::new();
+        opts.insert("method", guest);
+        risc0_build::embed_methods_with_options(opts);
+        return;
+    }
+
     risc0_build::embed_methods();
 }

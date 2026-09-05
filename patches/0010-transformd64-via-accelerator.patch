@@ -1,0 +1,43 @@
+GHOST_GAINS — route the merkle-node double-SHA (TransformD64) through the accelerated Transform.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_SHA_D64_ACCEL=1.
+⚠ Applies ON TOP of patches/0002, which is what makes sha256::Transform the risc0 accelerator.
+
+patches/0002 accelerates Transform and mentions TransformD64 only as a CONTEXT line. They are
+different functions: TransformD64 is Core's fully-unrolled double-SHA over 64 bytes, used for EVERY
+merkle tree node, and it still ran entirely in software. patches/0009's fast path does not touch it
+either.
+
+MEASURED on the production aggregate after the read_slice fix: sha256::TransformD64 is 124,759,624
+cycles, 15.41% of the aggregate and its second-largest term.
+
+This is one line, and it is Core's OWN idiom. Core ships TransformD64Wrapper<tr> precisely so that a
+platform with a fast Transform can reuse it for the D64 path, and sets exactly this on SHA-NI, SSE4
+and ARM SHA-NI:
+
+    TransformD64 = TransformD64Wrapper<sha256_x86_shani::Transform>;
+    TransformD64 = TransformD64Wrapper<sha256_sse4::Transform>;
+
+We are doing the same with the accelerator as the underlying Transform. No new cryptography, no
+consensus change, and Core's own SelfTest() validates the result -- the same self-test that guards
+every other platform-specific Transform Core ships.
+
+--- a/src/crypto/sha256.cpp
++++ b/src/crypto/sha256.cpp
+@@ -413,7 +413,16 @@
+ }
+ 
+ TransformType Transform = sha256::Transform;
++#ifdef HAZYNC_SHA_D64_ACCEL
++/* Route the merkle-node double-SHA through the ACCELERATED Transform, using Core's own generic
++ * construction. This is exactly what Core does on any platform with a fast Transform -- see the
++ * SHA-NI, SSE4 and ARM branches below, all of which set TransformD64Wrapper<that Transform>.
++ * patches/0002 already made sha256::Transform the risc0 accelerator, so this points the D64 path at
++ * it too. No new cryptography, and SelfTest() checks the result. */
++TransformD64Type TransformD64 = TransformD64Wrapper<sha256::Transform>;
++#else
+ TransformD64Type TransformD64 = sha256::TransformD64;
++#endif
+ TransformD64Type TransformD64_2way = nullptr;
+ TransformD64Type TransformD64_4way = nullptr;
+ TransformD64Type TransformD64_8way = nullptr;

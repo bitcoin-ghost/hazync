@@ -851,7 +851,8 @@ quoted until one classifier is agreed and validated against `predicted_ec_ops`.*
 ## The three-card run (2026-08-25) — the aggregate, and a JIT nobody had counted
 
 Three cards on the **aggregate** (mode 5, `HAZYNC_AGG=1`) over block 962,000's sixteen chunk
-receipts, using the signed v0.19.0 binary and canonical guest `1d6c3792`. Inputs sha256-verified
+receipts, using the signed v0.19.0 binary and the then-canonical guest `1d6c3792`, since superseded.
+Inputs sha256-verified
 identical on every box. Utilisation sampled with `nvidia-smi --loop-ms=200` for whole runs, ~9,500
 samples each, not spot checks.
 

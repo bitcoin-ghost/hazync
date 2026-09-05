@@ -1,0 +1,58 @@
+hazync#139 MIDDLE PATH — route ONLY the ECDSA verify group arithmetic through bigint2.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_BIGINT2_ECDSA=1.
+Never apply for a shipped build.
+
+Replaces exactly one line of secp256k1_ecdsa_sig_verify — the secp256k1_ecmult call computing
+u1*G + u2*Q. Everything else in the function stays libsecp's literal code: the r/s zero checks,
+scalar_inverse_var, both scalar_muls, the infinity check, and the r == x(pr) mod n comparison.
+DER parsing, low-S normalisation, pubkey parsing and Core's sighash are untouched.
+
+⚠ It does NOT preserve libsecp's wNAF/GLV: double_scalar_mul is Shamir's trick over the
+accelerator, so the scalar-multiplication strategy changes with it. The equivalence surface is much
+smaller than substituting the whole risc0-crypto `ecdsa` module, but it is not nil.
+
+The Rust side is prover/methods/guest/src/bigint2_ecmult.rs, behind the `bigint2-ecdsa` feature.
+
+--- a/src/ecdsa_impl.h
++++ b/src/ecdsa_impl.h
+diff --git a/src/ecdsa_impl.h b/src/ecdsa_impl.h
+index ce36e85..c0af0a4 100644
+--- a/src/ecdsa_impl.h
++++ b/src/ecdsa_impl.h
+@@ -209,7 +209,35 @@ static int secp256k1_ecdsa_sig_verify(const secp256k1_scalar *sigr, const secp25
+     secp256k1_scalar_mul(&u1, &sn, message);
+     secp256k1_scalar_mul(&u2, &sn, sigr);
+     secp256k1_gej_set_ge(&pubkeyj, pubkey);
++#ifdef HAZYNC_BIGINT2_ECDSA
++    /* hazync#139 middle path: u1*G + u2*Q via the bigint2 accelerator. The surrounding ECDSA logic
++     * is unchanged; only the group arithmetic moves. Big-endian 32-byte interchange, matching
++     * secp256k1_scalar_get_b32 / secp256k1_fe_get_b32. */
++    {
++        unsigned char bu1[32], bu2[32], bqx[32], bqy[32], brx[32], bry[32];
++        secp256k1_ge pubkey_n = *pubkey;
++        secp256k1_ge r_ge;
++        secp256k1_fe rx, ry;
++        extern int hazync_ecmult_verify(unsigned char *out_x, unsigned char *out_y,
++                                        const unsigned char *u1, const unsigned char *u2,
++                                        const unsigned char *qx, const unsigned char *qy);
++        secp256k1_fe_normalize_var(&pubkey_n.x);
++        secp256k1_fe_normalize_var(&pubkey_n.y);
++        secp256k1_scalar_get_b32(bu1, &u1);
++        secp256k1_scalar_get_b32(bu2, &u2);
++        secp256k1_fe_get_b32(bqx, &pubkey_n.x);
++        secp256k1_fe_get_b32(bqy, &pubkey_n.y);
++        if (!hazync_ecmult_verify(brx, bry, bu1, bu2, bqx, bqy)) {
++            return 0;  /* infinity, or an off-curve pubkey libsecp should already have rejected */
++        }
++        (void)secp256k1_fe_set_b32_limit(&rx, brx);
++        (void)secp256k1_fe_set_b32_limit(&ry, bry);
++        secp256k1_ge_set_xy(&r_ge, &rx, &ry);
++        secp256k1_gej_set_ge(&pr, &r_ge);
++    }
++#else
+     secp256k1_ecmult(&pr, &pubkeyj, &u2, &u1);
++#endif
+     if (secp256k1_gej_is_infinity(&pr)) {
+         return 0;
+     }

@@ -33,6 +33,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod utreexo;
 mod script_flags;
+// hazync#139 middle-path experiment. Off by default; see the module docs and patches/0005.
+#[cfg(feature = "bigint2-ecdsa")]
+mod bigint2_ecmult;
+// hazync#205 / G1 — recover a pubkey's Y through the bigint2 coprocessor. The module also carries
+// patches/0008's scalar inverse, which is an INDEPENDENT lever, so it compiles for either feature.
+#[cfg(any(feature = "liftx-accel", feature = "scalar-inv-accel"))]
+mod liftx_accel;
+// hazync#205 — the same recovery as a HOST HINT that libsecp then verifies. Core-legal, unlike
+// liftx_accel above, which substitutes the sqrt outright.
+#[cfg(feature = "liftx-hint")]
+mod liftx_hint;
+// Pippenger MSM over the bigint2 coprocessor. PRIMITIVE ONLY — not wired into verification.
+#[cfg(feature = "msm")]
+mod msm;
+// Coprocessor half of libsecp's field_bigint2 backend. See docs/FIELD_BIGINT2_BACKEND.md.
+#[cfg(feature = "field-bigint2")]
+mod field_bigint2;
 use script_flags::block_script_flags;
 
 // A byte blob that (de)serialises via risc0 serde's PACKED byte path (deserialize_bytes → 4 bytes/word)
@@ -280,12 +297,46 @@ pub extern "C" fn secp256k1_default_illegal_callback_fn(_msg: *const u8, _data: 
 #[no_mangle]
 pub extern "C" fn secp256k1_default_error_callback_fn(_msg: *const u8, _data: *mut core::ffi::c_void) {}
 
+// A 32-byte hash, and a vector of them, over risc0 serde's PACKED byte path instead of the default
+// one-word-per-byte. MEASURED on block 962,000 (docs/WITNESS_WIRE_PROFILE_2026-08-28.md): `[u8; 32]`
+// and `Vec<[u8; 32]>` amplify 4.00x, and the two WireProofs alone were 60.0% of the whole witness.
+// Values are byte-identical on both sides -- ONLY the encoding changes, so every binding the guest
+// performs against these bytes is unaffected.
+#[derive(Clone, Default, PartialEq)]
+struct PackedHash([u8; 32]);
+impl<'de> serde::Deserialize<'de> for PackedHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() != 32 { return Err(serde::de::Error::custom("PackedHash must be 32 bytes")); }
+        let mut h = [0u8; 32]; h.copy_from_slice(&v); Ok(PackedHash(h))
+    }
+}
+#[derive(Clone, Default)]
+struct PackedHashes(Vec<[u8; 32]>);
+impl<'de> serde::Deserialize<'de> for PackedHashes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = packed_bytes(d)?;
+        if v.len() % 32 != 0 { return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32")); }
+        Ok(PackedHashes(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect()))
+    }
+}
+fn packed_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("bytes") }
+        fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> { Ok(v.to_vec()) }
+        fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> { Ok(v) }
+    }
+    d.deserialize_byte_buf(V)
+}
+
 // ---- Block-proof wire format (matches the host structs) ----
 #[derive(Deserialize)]
 struct WireProof {
-    leaf: [u8; 32],
+    leaf: PackedHash,
     position: u64,
-    siblings: Vec<[u8; 32]>,
+    siblings: PackedHashes,
 }
 #[derive(Deserialize)]
 struct BlockInput {
@@ -351,7 +402,7 @@ struct BlockWitness {
     header: Vec<u8>,            // 80-byte block header
     height: u32,               // block height (for the subsidy schedule)
     coinbase_tx: Vec<u8>,      // the coinbase tx (its outputs = subsidy + fees)
-    txids: Vec<[u8; 32]>,      // all txids in order (internal), for the merkle root
+    txids: PackedHashes,       // all txids in order (internal), for the merkle root
     root_prev: WireStump,
     txs: Vec<PackedBytes>,     // the block's non-coinbase txs, ONE shared blob each (raw bytes)
     tx_prevouts: Vec<PackedBytes>, // parallel to `txs`: each tx's concatenated input prevouts blob
@@ -380,7 +431,7 @@ struct BlockOutput {
 }
 
 fn to_proof(w: &WireProof) -> utreexo::Proof {
-    utreexo::Proof { leaf: w.leaf, position: w.position, siblings: w.siblings.clone() }
+    utreexo::Proof { leaf: w.leaf.0, position: w.position, siblings: w.siblings.0.clone() }
 }
 
 fn normalize(mut v: Vec<Option<[u8; 32]>>) -> Vec<Option<[u8; 32]>> {
@@ -569,10 +620,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     let cb_outputs = (output_leaves.len() - cb_start) as u32;
     cut!(1);   // <- stage 1 boundary: per-tx tx_out_leaves done
     for l in &output_leaves[cb_start..] { created_at.entry(*l).or_insert(0u32); }
-    if w.txids.is_empty() || cb_txid != w.txids[0] { all_ok = false; }
+    if w.txids.0.is_empty() || cb_txid != w.txids.0[0] { all_ok = false; }
     // The de-duplicated per-tx blobs: one raw_tx + one prevouts blob per non-coinbase tx. Bind their
     // counts to the merkle-committed tx set so a prover can neither add nor drop a tx.
-    if w.txs.len() + 1 != w.txids.len() || w.tx_prevouts.len() != w.txs.len() { all_ok = false; }
+    if w.txs.len() + 1 != w.txids.0.len() || w.tx_prevouts.len() != w.txs.len() { all_ok = false; }
     let mut tx_pos = 1usize; // 1-based block position (coinbase is position 0 / txids[0])
     for inp in &w.inputs {
         if inp.tx_first == 1 {
@@ -582,11 +633,11 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             let start = output_leaves.len();
             let t = gather(raw_tx, 0, &mut output_leaves);
             for l in &output_leaves[start..] { created_at.entry(*l).or_insert(tx_pos as u32); }
-            if tx_pos >= w.txids.len() || t != w.txids[tx_pos] { all_ok = false; }
+            if tx_pos >= w.txids.0.len() || t != w.txids.0[tx_pos] { all_ok = false; }
             tx_pos += 1;
         }
     }
-    if tx_pos != w.txids.len() { all_ok = false; } // tx count must match the merkle-committed set
+    if tx_pos != w.txids.0.len() { all_ok = false; } // tx count must match the merkle-committed set
     let mut spent_in_block: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut cur_tx: u32 = 0; // index of the tx currently being processed (increments on each tx_first)
 
@@ -890,14 +941,14 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             if !spent_in_block.insert(leaf) { all_ok = false; }
         } else {
             // EXTERNAL spend: the coin exists in the accumulator — verify inclusion + delete it.
-            if inp.proof_i.leaf != leaf {
+            if inp.proof_i.leaf.0 != leaf {
                 all_ok = false;
             }
             // stage 24: + the created_at lookup and in-block bookkeeping, WITHOUT building the
             // utreexo proofs. The deletion itself measured 1.7%, but that says nothing about the cost
             // of PREPARING its proof: these two lines clone ~28x32 B of siblings per input.
             if stage == 24 { continue; }
-            let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.clone() };
+            let pi = utreexo::Proof { leaf, position: inp.proof_i.position, siblings: inp.proof_i.siblings.0.clone() };
             let pl = to_proof(&inp.proof_last);
             // stage 3 runs this loop WITHOUT the accumulator delete, so (stage 4 - stage 3)
             // isolates utreexo deletion from the per-input `input_bind` hashing that shares it.
@@ -925,7 +976,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
                 if i >= n { all_ok = false; break; }
                 let mut leaf = [0u8; 32];
                 leaf.copy_from_slice(&buf[i * 32..i * 32 + 32]);
-                let pi = utreexo::Proof { leaf, position: d.proof_i.position, siblings: d.proof_i.siblings.clone() };
+                let pi = utreexo::Proof { leaf, position: d.proof_i.position, siblings: d.proof_i.siblings.0.clone() };
                 let pl = to_proof(&d.proof_last);
                 if !stump.delete(d.global_pos, &pi, &pl) { all_ok = false; }
             }
@@ -956,8 +1007,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
 
     let mut mroot = [0u8; 32];
     let mut mutated = 0u8;
-    let flat: Vec<u8> = w.txids.iter().flatten().copied().collect();
-    unsafe { merkle_root(flat.as_ptr(), w.txids.len() as u32, mroot.as_mut_ptr(), &mut mutated) };
+    // `Vec<[u8; 32]>` is ALREADY n*32 contiguous bytes, so merkle_root gets a view rather than a
+    // flattened copy. The old line walked ~200 KB byte-at-a-time through an iterator chain and
+    // allocated a second copy of it, to hand over bytes that were already laid out correctly.
+    unsafe { merkle_root(w.txids.0.as_ptr() as *const u8, w.txids.0.len() as u32, mroot.as_mut_ptr(), &mut mutated) };
     // root matches header AND the tree is not malleated (CVE-2012-2459 duplicate-txid mutation).
     let merkle_ok = mroot[..] == w.header[36..68] && mutated == 0; // header 36..68 = hashMerkleRoot
 
@@ -990,7 +1043,10 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
             }
         }
     }
-    let flat_wtx: Vec<u8> = rec_wtxids.iter().flatten().copied().collect();
+    // Same as the merkle preimage above: rec_wtxids is already contiguous, so no flattened copy.
+    let flat_wtx: &[u8] = unsafe {
+        core::slice::from_raw_parts(rec_wtxids.as_ptr() as *const u8, rec_wtxids.len() * 32)
+    };
     // G3: segwit activates at mainnet SegwitHeight 481824 (Core GetBlockScriptFlags / DeploymentActiveAfter).
     // BELOW activation Core never looks for a commitment and REJECTS any block carrying witness data
     // (unexpected-witness) — so witness_ok = "no witness present". FROM activation the BIP141 commitment is
@@ -1032,7 +1088,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // In-block duplicate txids are still rejected: two txs in one block sharing an outpoint is a
     // separate failure from the cross-block one, and cheap to check over the merkle-committed set.
     let ids_distinct = {
-        let mut ids = w.txids.clone();
+        let mut ids = w.txids.0.clone();
         ids.sort_unstable();
         ids.windows(2).all(|w| w[0] != w[1])
     };
@@ -1156,7 +1212,7 @@ fn validate_block_staged(w: &BlockWitness, mtp: u32, chunk: Option<(&Vec<[u8; 32
     // Core's GetBlockWeight also weighs the 80-byte header and the tx-count varint (non-witness data, so
     // ×WITNESS_SCALE_FACTOR) — `4*(80 + CompactSize(ntx))` — on top of the per-tx weights. Without it a
     // block could sit up to ~324 WU over the limit while Core rejects it (F2, round-5 audit).
-    let ntx = w.txids.len();
+    let ntx = w.txids.0.len();
     let cs: i64 = if ntx < 0xfd { 1 } else if ntx <= 0xffff { 3 } else if ntx <= 0xffff_ffff { 5 } else { 9 };
     total_weight += 4 * (80 + cs);
     let weight_ok = total_weight <= MAX_BLOCK_WEIGHT;
@@ -1582,6 +1638,27 @@ fn chunk_prove() {
     let block_hash: [u8; 32] = env::read(); // real block hash — needed for flag exceptions; a wrong
     let flags = block_script_flags(height, &block_hash); // hash yields wrong flags -> aggregate bind mismatch
     let n_txs: u32 = env::read();
+
+    // hazync#205 — install the pubkey-Y hint table BEFORE any script runs, since verification
+    // happens inside the read loop below. Host writes this block at the same point, gated on the
+    // same HAZYNC_LIFTX_HINT; the two must agree or the stream desynchronises.
+    #[cfg(feature = "liftx-hint")]
+    {
+        let n_hints: u32 = env::read();
+        let mut flat = vec![0u8; n_hints as usize * 64];
+        if n_hints > 0 {
+            env::read_slice(&mut flat);
+        }
+        let mut pairs = Vec::with_capacity(n_hints as usize);
+        for c in flat.chunks_exact(64) {
+            let (mut x, mut y) = ([0u8; 32], [0u8; 32]);
+            x.copy_from_slice(&c[..32]);
+            y.copy_from_slice(&c[32..]);
+            pairs.push((x, y));
+        }
+        liftx_hint::install(pairs);
+    }
+
     let mut binds: Vec<[u8; 32]> = Vec::new();
     let mut tx_wtxids: Vec<(u32, [u8; 32], u32)> = Vec::new();
     let mut leaves_out: Vec<[u8; 32]> = Vec::new();
@@ -1674,6 +1751,20 @@ fn chunk_prove() {
             vers_out.push(verbuf);
         }
     }
+    // A memo that never hits would silently reinstate the full decompression cost while every gate
+    // still passed, so report it: 0 hits is a FAILED experiment, not a null result.
+    #[cfg(feature = "liftx-accel")]
+    {
+        let (h, m) = liftx_accel::memo_stats();
+        risc0_zkvm::guest::env::log(&alloc::format!("liftx memo: hits={h} misses={m}"));
+    }
+    // Same reasoning for the HINT, which is a separate, Core-legal feature: an empty table would
+    // reinstate the sqrt while every gate still passed, so 0 hits must read as a FAILED experiment.
+    #[cfg(feature = "liftx-hint")]
+    {
+        let (hits, misses) = liftx_hint::stats();
+        risc0_zkvm::guest::env::log(&alloc::format!("liftx: hits={} misses={}", hits, misses));
+    }
     env::commit(&ChunkOut { kind: KIND_CHUNK, all_valid, binds, tx_wtxids, leaves_out, seqs_out, vers_out });
 }
 
@@ -1689,7 +1780,24 @@ fn aggregate() {
     let mut chunk_seqs: Vec<u32> = Vec::new();
     let mut chunk_vers: Vec<i32> = Vec::new();
     let mut chunks_ok = true;
+    // #136's fix, finally applied to the AGGREGATE. Chunks have read byte blobs via read_slice since
+    // #135; the aggregate still walked serde's word stream a byte at a time for every chunk journal.
+    // MEASURED on the production aggregate (HAZYNC_AGG_EXECUTE, not vb-stages): `Vec<u8> as
+    // Deserialize` is 336.1 M cycles, 29.31% of the whole aggregate -- its single largest term.
+    //
+    // ⚠ The witness ENCODER is a different win and was already taken: it cut the BYTES 2.019x. This
+    // changes the READ METHOD. Packing and read_slice are independent.
+    #[cfg(feature = "agg-readslice")]
+    fn read_bytes_agg(len: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (len as usize).div_ceil(4) * 4];
+        env::read_slice(&mut v);
+        v.truncate(len as usize);
+        v
+    }
     for _ in 0..k {
+        #[cfg(feature = "agg-readslice")]
+        let cj: Vec<u8> = { let n: u32 = env::read(); read_bytes_agg(n) };
+        #[cfg(not(feature = "agg-readslice"))]
         let cj: Vec<u8> = env::read();
         env::verify(self_id, &cj).expect("chunk proof invalid");
         let words: Vec<u32> = cj.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
@@ -1705,6 +1813,9 @@ fn aggregate() {
         chunk_vers.extend(out.vers_out);
         all_binds.extend(out.binds);
     }
+    #[cfg(feature = "agg-readslice")]
+    let prev_journal: Vec<u8> = { let n: u32 = env::read(); read_bytes_agg(n) };
+    #[cfg(not(feature = "agg-readslice"))]
     let prev_journal: Vec<u8> = env::read();
     let w: BlockWitness = env::read();
     let is_base: u32 = env::read();
@@ -1768,6 +1879,65 @@ fn main() {
         8 => test_locks(),
         9 => test_merkle(),
         12 => validate_block_stages(),
+        // Mode 13: MSM self-test. Reports the positive comparison AND a negative control, because a
+        // check that can only ever pass is not a check.
+        // Mode 15: field-op benchmark. libsecp's software field_10x26 against the bigint2
+        // coprocessor, same operation count, same run — the ratio decides whether Core mode can have
+        // field-level acceleration without conceding an algorithm.
+        #[cfg(all(feature = "msm", feature = "field-bench"))]
+        15 => {
+            use risc0_crypto::curves::secp256k1::Fq;
+            extern "C" {
+                fn hazync_bench_fe_mul(n: u32) -> i32;
+                fn hazync_bench_fe_sqr(n: u32) -> i32;
+                fn hazync_bench_fe_mul_hw(n: u32) -> i32;
+            }
+            let n: u32 = env::read();
+            let t0 = env::cycle_count();
+            let s1 = unsafe { hazync_bench_fe_mul(n) };
+            let t1 = env::cycle_count();
+            let s2 = unsafe { hazync_bench_fe_sqr(n) };
+            let t2 = env::cycle_count();
+            // Coprocessor: same chaining so the comparison is like for like.
+            let mut a = Fq::from_be_bytes_mod_order(&[3u8; 32]);
+            let b = Fq::from_be_bytes_mod_order(&[5u8; 32]);
+            let t3 = env::cycle_count();
+            for _ in 0..n { a = &a * &b; }
+            let t4 = env::cycle_count();
+            // The number that decides the design: coprocessor WITH libsecp's conversions.
+            let t7 = env::cycle_count();
+            let s3 = unsafe { hazync_bench_fe_mul_hw(n) };
+            let t8 = env::cycle_count();
+            let mut c = Fq::from_be_bytes_mod_order(&[7u8; 32]);
+            let t5 = env::cycle_count();
+            for _ in 0..n { c = &c * &c; }
+            let t6 = env::cycle_count();
+            env::log(&alloc::format!(
+                "FIELD BENCH n={n}\n  sw_mul={} sw_sqr={}\n  hw_native={} hw_sqr={}\n  hw_WITH_CONVERSION={}\n  guard={} {} {} {} {}",
+                t1 - t0, t2 - t1, t4 - t3, t6 - t5, t8 - t7, s1, s2, s3,
+                a.to_bigint().as_le_bytes()[0], c.to_bigint().as_le_bytes()[0]));
+            env::commit(&((t1 - t0) as u64));
+        }
+        // Mode 14: MSM benchmark at scale. Timing only — mode 13 is the correctness check.
+        #[cfg(feature = "msm")]
+        14 => {
+            let n: u32 = env::read();
+            let window: u32 = env::read();
+            let (x, _y) = msm::bench(n as usize, window as usize);
+            env::commit(&x);
+        }
+        #[cfg(feature = "msm")]
+        13 => {
+            let n: u32 = env::read();
+            let window: u32 = env::read();
+            let (pos, neg) = msm::selftest(n as usize, window as usize);
+            env::log(&alloc::format!(
+                "msm selftest n={n} window={window}: matches_reference={pos} perturbed_differs={neg}"
+            ));
+            assert!(pos, "MSM DISAGREES WITH REFERENCE");
+            assert!(neg, "MSM NEGATIVE CONTROL FAILED — a perturbed scalar produced the same result");
+            env::commit(&(pos && neg));
+        }
         _ => panic!("unknown guest mode {mode}"),
     }
 }

@@ -1,0 +1,70 @@
+hazync#205 — recover a pubkey's Y from a witness HINT, verified, instead of a modular square root.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_LIFTX_HINT=1.
+
+secp256k1_ge_set_xo_var already computes x3 = x^3 + 7 (two field ops) and already normalises and
+fixes the parity of y afterwards. The ONLY expensive step is secp256k1_fe_sqrt, measured natively at
+264x a field multiply and at 1.416 G cycles on block 962,000 — 9.83% of the block and ~45% of all
+post-#139 work, which patches/0005 does not touch because it lives outside secp256k1_ecmult.
+
+⛔ 2026-08-31: those figures predate patches/0012's coprocessor field backend, which makes every
+multiply and square in the sqrt chain ~14x cheaper. Re-measured on the same block WITH the backend,
+fe_sqrt is 241,023,621 cycles CUMULATIVE = 6.17%. This lever is worth at most that when the two are
+combined, not 9.83%.
+
+This replaces that sqrt with: take y from the hint, check y^2 == x3. Those two conditions plus the
+EXISTING parity fixup below determine y uniquely, so the check accepts exactly what the sqrt would
+have produced. An x not on the curve admits no y satisfying y^2 == x3, so it falls through to the
+real sqrt and fails there as before. secp256k1 has prime order and no point of order 2, so y == 0
+cannot arise.
+
+⇒ This is ADVICE-AND-VERIFY, not a reimplementation of consensus arithmetic: no group arithmetic is
+substituted and libsecp's own code decides the result. The fidelity posture is therefore strictly
+better than #139's — there is no equivalence surface to argue about, only a plumbing obligation.
+
+A missing or wrong hint is never load-bearing: ret stays 0 and the original sqrt runs.
+
+⚠ THE HUNK IN THIS FILE WAS REGENERATED WITH `diff` ON 2026-08-31. The original was hand-written and
+malformed -- it claimed `@@ -316,12 +316,38 @@` where the truth is `@@ -323,7 +323,36 @@`, wrong in the
+line number AND both counts, so `patch` rejected it outright. That is consistent with the commit's own
+admission that it was never compiled: nothing had ever tried to apply it.
+
+--- a/src/group_impl.h
++++ b/src/group_impl.h
+@@ -323,7 +323,36 @@
+     secp256k1_fe_mul(&x3, x, &x2);
+     r->infinity = 0;
+     secp256k1_fe_add_int(&x3, SECP256K1_B);
++#ifdef HAZYNC_LIFTX_HINT
++    ret = 0;
++    {
++        unsigned char bx[32], by[32];
++        secp256k1_fe xn, yh, y2, t;
++        extern int hazync_lift_x_hint(const unsigned char *xb, unsigned char *yb);
++        xn = *x;
++        secp256k1_fe_normalize_var(&xn);
++        secp256k1_fe_get_b32(bx, &xn);
++        if (hazync_lift_x_hint(bx, by) && secp256k1_fe_set_b32_limit(&yh, by)) {
++            secp256k1_fe_sqr(&y2, &yh);
++            /* magnitude-safe compare: normalise copies rather than relying on fe_equal's
++             * magnitude precondition, since x3 carries the +B from fe_add_int above. */
++            t = x3;
++            secp256k1_fe_normalize_var(&t);
++            secp256k1_fe_normalize_var(&y2);
++            if (secp256k1_fe_equal(&y2, &t)) {
++                r->y = yh;
++                ret = 1;
++            }
++        }
++    }
++    /* No hint, a malformed hint, or an x that is not on the curve: fall back to libsecp's own
++     * sqrt, which is also what decides the not-on-curve case. */
++    if (!ret) {
++        ret = secp256k1_fe_sqrt(&r->y, &x3);
++    }
++#else
+     ret = secp256k1_fe_sqrt(&r->y, &x3);
++#endif
+     secp256k1_fe_normalize_var(&r->y);
+     if (secp256k1_fe_is_odd(&r->y) != odd) {
+         secp256k1_fe_negate(&r->y, &r->y, 1);

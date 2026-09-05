@@ -1,0 +1,64 @@
+hazync#205 / GHOST_GAINS G3 — route BIP340 Schnorr verification through the bigint2 accelerator.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Applied only when HAZYNC_BIGINT2_SCHNORR=1.
+⚠ Requires patches/0005 as well: it reuses hazync_ecmult_verify, which the bigint2-ecdsa feature
+exports. Enabling this alone leaves the symbol undefined and the guest fails to LINK -- loud, at
+least, unlike the other traps in this tree.
+
+secp256k1_schnorrsig_verify computes rj = s*G + (-e)*pkj via
+    secp256k1_ecmult(&rj, &pkj, &e, &s)
+which is the IDENTICAL call shape patch 0005 replaces for ECDSA
+    secp256k1_ecmult(&pr, &pubkeyj, &u2, &u1)
+so the mapping is u1 <- s, u2 <- e (already negated on the line above), Q <- pk. No new Rust: the
+same accelerator entry point serves both curves.
+
+Everything else stays libsecp's literal code -- the challenge hash, the xonly pubkey load, the
+infinity check, the y-parity test and the final x comparison. As with 0005 this does NOT preserve
+wNAF/GLV, so the same equivalence-surface argument applies and no larger one.
+
+Measured motivation: block 962,000 is only 1.81% taproot by input, but #139 makes ECDSA and Schnorr
+diverge ~13.8x per verification, so Schnorr is a disproportionate share of what survives the
+accelerator -- and it grows directly with taproot adoption, which matters far more for a
+genesis-to-tip historic mode than for tip blocks today.
+
+⚠ Second-order effect worth having: with both curves accelerated their costs CONVERGE, so the 13.8x
+divergence that #190 exists to model shrinks and the chunk straggler improves for free.
+
+--- a/src/modules/schnorrsig/main_impl.h
++++ b/src/modules/schnorrsig/main_impl.h
+@@ -252,7 +252,35 @@
+     /* Compute rj =  s*G + (-e)*pkj */
+     secp256k1_scalar_negate(&e, &e);
+     secp256k1_gej_set_ge(&pkj, &pk);
++#ifdef HAZYNC_BIGINT2_SCHNORR
++    {
++        /* rj = s*G + e*pkj, with e already negated above -- the SAME double-scalar-mul shape that
++         * patches/0005 routes for ECDSA, so it reuses hazync_ecmult_verify unchanged. */
++        unsigned char bs[32], be[32], bqx[32], bqy[32], brx[32], bry[32];
++        secp256k1_ge pk_n = pk;
++        secp256k1_fe rx2, ry2;
++        secp256k1_ge r_ge;
++        extern int hazync_ecmult_verify(unsigned char *out_x, unsigned char *out_y,
++                                        const unsigned char *u1, const unsigned char *u2,
++                                        const unsigned char *qx, const unsigned char *qy);
++        secp256k1_fe_normalize_var(&pk_n.x);
++        secp256k1_fe_normalize_var(&pk_n.y);
++        secp256k1_scalar_get_b32(bs, &s);
++        secp256k1_scalar_get_b32(be, &e);
++        secp256k1_fe_get_b32(bqx, &pk_n.x);
++        secp256k1_fe_get_b32(bqy, &pk_n.y);
++        /* 0 means the point at infinity, which the is_infinity check below would reject anyway. */
++        if (!hazync_ecmult_verify(brx, bry, bs, be, bqx, bqy)) {
++            return 0;
++        }
++        (void)secp256k1_fe_set_b32_limit(&rx2, brx);
++        (void)secp256k1_fe_set_b32_limit(&ry2, bry);
++        secp256k1_ge_set_xy(&r_ge, &rx2, &ry2);
++        secp256k1_gej_set_ge(&rj, &r_ge);
++    }
++#else
+     secp256k1_ecmult(&rj, &pkj, &e, &s);
++#endif
+ 
+     secp256k1_ge_set_gej_var(&r, &rj);
+     if (secp256k1_ge_is_infinity(&r)) {

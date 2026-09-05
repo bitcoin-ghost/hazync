@@ -137,7 +137,7 @@ at a hardcoded rung (which on CPU would waste a duplicate attempt at the size th
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
 either way.
 
-**Releases.** The current release ships `METHOD_ID 1d6c3792`, pinned on 2026-08-23 by the
+**Releases.** The current release ships `METHOD_ID 3867611d`, pinned on 2026-09-04 by the
 **parallel block validation** re-baseline: `validate_block` restructured so per-transaction work is
 done once per transaction rather than once per input, cutting it from 3,455 M to 955 M cycles, with
 the coin leaves, sequence numbers and wtxids it needs now arriving from the chunks that already
@@ -160,7 +160,8 @@ is easy to attribute the current id to the wrong change:
 | `dfc9eeda` | 2026-08-03 | BIP30 closed by a coinbase-only SMT (#54), audit #3's 91842/91880 grandfather |
 | `b161735a` | 2026-08-04 | the id stopped depending on where the repo is checked out (#88) |
 | `b62d2a60` | 2026-08-04 | audit #5 |
-| **`1d6c3792`** | **2026-08-23** | **parallel block validation — current** |
+| `1d6c3792` | 2026-08-23 | parallel block validation |
+| **`3867611d`** | **2026-09-04** | **the coprocessor field backend — current** |
 
 `reproduce/METHOD_ID` carries the full reasoning for each. v0.13.0 added the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
@@ -247,7 +248,7 @@ proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
 the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id
-(`1d6c3792…`, the current guest) for **both** the CPU and CUDA release binaries.
+(`3867611d…`, the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 
@@ -312,7 +313,8 @@ In the sound build only SHA-256 is routed to the RISC0 accelerator (patch 0002);
 run through the compiled, unmodified `libsecp256k1`, unaccelerated. Speeding up the EC verify is open
 work — the k256 substitution was **removed from the guest** (2026-07-19; it reintroduced the
 reimplementation question), and the bigint2 field-mul intercept was prototyped and disproven (~10%
-slower). The guest is pure Core; acceleration analysis in [`ACCELERATION.md`](ACCELERATION.md).
+slower). The guest is pure Core; acceleration analysis in [`CORE_VS_GHOST.md`](CORE_VS_GHOST.md); the long historic
+record is [`history/ACCELERATION.md`](history/ACCELERATION.md).
 
 ## Building the release binaries (maintainer notes)
 
@@ -328,7 +330,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`1d6c3792…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`3867611d…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

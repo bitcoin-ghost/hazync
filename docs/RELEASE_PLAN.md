@@ -143,8 +143,8 @@ These are the items where being wrong costs money already spent.
 
 ## Re-baseline: what must move together
 
-The canonical guest is `1d6c3792…` (BIP30 closed by a coinbase-only SMT #54, audit #3's 91842/91880
-grandfather, BIP34Height read from Core), and the live board must serve it — the two cut over together.
+The canonical guest is `3867611d…` (the coprocessor field backend re-baseline, 2026-09-04), and the
+live board must serve it — the two cut over together.
 
 This section was written when `85dc0b56…` was staged *ahead of* a board still serving `3f52baff`, and
 it describes that hazard, which is the general one: while the two disagree, deploying either half

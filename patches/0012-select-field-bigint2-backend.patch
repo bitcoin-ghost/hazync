@@ -1,0 +1,48 @@
+Select the field_bigint2 backend when HAZYNC_FIELD_BIGINT2=1.
+
+⛔ EXPERIMENTAL, OPT-IN, AND IT MOVES METHOD_ID. Two one-line switch entries; nothing else changes.
+
+libsecp already parameterises its field backend -- field_5x52, field_10x26, asm variants -- so this
+uses its own extension point rather than working around it. Every algorithm above the field stays
+libsecp's: same wNAF, same GLV, same ECDSA logic, same checks. Only the representation and the five
+primitives beneath it change.
+
+⚠ Selected FIRST, ahead of the wide-multiplication choice. SECP256K1_WIDEMUL_INT64 vs INT128 decides
+how a 32x32 or 64x64 product is formed in software, which is irrelevant when the multiply is not
+performed here at all.
+
+Measured motivation (host field-bench, mode 15, libsecp's own functions, same run):
+    software fe_mul                1,167 cycles
+    coprocessor, native form          83
+    coprocessor, +10x26 conversion   854
+The conversion costs 771 cycles, 9.3x the operation, which is why the representation has to be
+canonical rather than converted at the boundary. See docs/FIELD_BIGINT2_BACKEND.md.
+
+--- a/src/field.h
++++ b/src/field.h
+@@ -37,7 +37,11 @@
+ #  define SECP256K1_FE_VERIFY_FIELDS
+ #endif
+ 
+-#if defined(SECP256K1_WIDEMUL_INT128)
++#if defined(HAZYNC_FIELD_BIGINT2)
++/* hazync: canonical 8x32 limbs backed by the RISC0 bigint2 coprocessor. Selected FIRST so it wins
++ * over the wide-multiplication choice, which is irrelevant when the multiply is not done here. */
++#include "field_bigint2.h"
++#elif defined(SECP256K1_WIDEMUL_INT128)
+ #include "field_5x52.h"
+ #elif defined(SECP256K1_WIDEMUL_INT64)
+ #include "field_10x26.h"
+--- a/src/field_impl.h
++++ b/src/field_impl.h
+@@ -10,7 +10,9 @@
+ #include "field.h"
+ #include "util.h"
+ 
+-#if defined(SECP256K1_WIDEMUL_INT128)
++#if defined(HAZYNC_FIELD_BIGINT2)
++#include "field_bigint2_impl.h"
++#elif defined(SECP256K1_WIDEMUL_INT128)
+ #include "field_5x52_impl.h"
+ #elif defined(SECP256K1_WIDEMUL_INT64)
+ #include "field_10x26_impl.h"
