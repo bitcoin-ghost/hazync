@@ -4261,21 +4261,30 @@ mod chunk_packing_tests {
         assert_eq!(p2tr_key.total(), p2wpkh.total());
     }
 
-    /// While the coefficients are equal this refit is a NO-OP: cost depends only on the total. That is
-    /// what makes it landable before the #139 fidelity decision rather than after it.
+    /// Cost is EXACTLY the two-term linear combination -- no rounding, no cross-terms, no hidden
+    /// dependence on the order of the split.
+    ///
+    /// This replaces `cost_is_curve_blind_while_the_coefficients_are_equal`, which asserted the two
+    /// constants were equal and so proved the curve dimension was a no-op. That premise was always
+    /// temporary and its own message said so: divergence "is #139 landing, and this test's premise
+    /// with it". #139 has landed (ECDSA 141,612, Schnorr 1,950,000), so the equality is gone while
+    /// the linearity it was really protecting is not. `pricing_the_curves_apart_actually_changes_the_cost`
+    /// covers the other half: that the divergence actually moves the packer.
     #[test]
-    fn cost_is_curve_blind_while_the_coefficients_are_equal() {
-        assert_eq!(
-            super::COST_PER_EC_OP, super::COST_PER_SCHNORR_OP,
-            "the constants have diverged -- that is #139 landing, and this test's premise with it"
-        );
+    fn cost_is_the_linear_combination_of_the_two_curve_coefficients() {
         for (e, s) in [(0, 0), (1, 0), (0, 1), (3, 2), (7, 11)] {
             let split = SigOps { ecdsa: e, schnorr: s };
             assert_eq!(
-                split.cost(), super::COST_PER_EC_OP * split.total(),
-                "curve split changed the cost while the coefficients are equal"
+                split.cost(),
+                super::COST_PER_EC_OP * e + super::COST_PER_SCHNORR_OP * s,
+                "cost is not the linear combination of the per-curve coefficients"
             );
         }
+        // An all-ECDSA and an all-Schnorr input of the same total must NOT cost the same now.
+        assert_ne!(
+            SigOps { ecdsa: 4, schnorr: 0 }.cost(), SigOps { ecdsa: 0, schnorr: 4 }.cost(),
+            "the curve dimension has stopped biting -- the coefficients have re-converged"
+        );
     }
 
     /// ⚠ The no-op test above would ALSO pass for a refit that does nothing whatsoever. This one shows
@@ -4450,10 +4459,14 @@ mod chunk_packing_tests {
         let cap = (COST_INPUT_BASE + COST_PER_EC_OP) * 10;
         let r_same = split_at_cap_keyed(&costs, &savings, &same, cap);
         let r_diff = split_at_cap_keyed(&costs, &savings, &distinct, cap);
+        // Assert the SIZE of the first run, not the number of runs. Run count is a ceiling and rounds
+        // the effect away: at n=40 a run of 10 and a run of 12 both give 4 runs, so this read as "no
+        // improvement" for any saving under 3.3x. The first run's width is what the discount actually
+        // moves, and it moves by the whole discount rather than by whatever survives the rounding.
+        let (w_same, w_diff) = (r_same[0].1 - r_same[0].0, r_diff[0].1 - r_diff[0].0);
         assert!(
-            r_same.len() < r_diff.len(),
-            "reused keys must pack denser: same={} runs, distinct={} runs",
-            r_same.len(), r_diff.len()
+            w_same > w_diff,
+            "reused keys must pack denser: same={w_same} inputs in the first run, distinct={w_diff}"
         );
         // and the unkeyed walk must agree with the all-distinct case, since nothing is ever reused
         assert_eq!(split_at_cap(&costs, cap).len(), r_diff.len());
