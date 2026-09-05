@@ -53,6 +53,48 @@ The packer balances its own model perfectly; that is what makes a wrong model in
 and block 741000 carries **2 Schnorr verifies out of 723** — so it cannot inform the curve split at
 all, and the curve split is the dimension Ghost most needs right.
 
+## ✅ MEASURED ON HARDWARE 2026-09-05 — the refit is worth 1.462x → 1.189x
+
+Two L40S, block 962,000, 16 chunks, **real GPU proving**. Same guest, same block, one box per arm,
+differing only in the four `HAZYNC_COST_*` values:
+
+| arm | straggler | max | mean |
+|---|---|---|---|
+| shipped defaults | **1.462x** | 149 s | 102 s |
+| refit | **1.189x** | 124 s | 104 s |
+
+That clears the ≤1.35 threshold §4.2 of `BUILDS.md` states for the fourth card. ⚠ I have not
+re-derived the card arithmetic itself, so read this as "the straggler target is met", not as a
+card count.
+
+Refit constants, fitted on block 965,500 (7.7% Schnorr), intercept forced to zero:
+
+```
+HAZYNC_COST_EC_OP=85636  HAZYNC_COST_SCHNORR_OP=168542
+HAZYNC_COST_INPUT_BYTE=2 HAZYNC_COST_INPUT_BASE=53162      Schnorr:ECDSA = 1.97x
+```
+
+### ⛔ How this nearly came out backwards
+
+The run first measured **1.567x — WORSE than doing nothing** — and that was reported. It was one
+chunk. Across 32 chunk timings on two boxes every measurement sits at **2.4–3.0 s/segment**; hz-b
+chunk 1 came in at **4.89 s/segment** (171 s for 35 segments). Re-run twice: **94 s, 94 s, 2.69
+s/segment** both times. The 171 s never reproduced.
+
+Three checks were needed to get there, and two of them refuted a hypothesis rather than confirming it:
+
+1. **The segment straggler said the opposite** — 57 → 49 max segments, i.e. the refit was *better*
+   by the machine-independent metric. That is what said the wall-clock number was wrong.
+2. **"The boxes differ in speed"** — plausible, and *false as an explanation*: an identical
+   33-segment chunk runs 87 s on hz-a and 90 s on hz-b, only 3.4% apart, **and a straggler is a
+   ratio, so box speed cancels out of it entirely.**
+3. **Wall time is proportional to segments** — 2.4–3.0 s/seg across 31 of 32 samples — which
+   isolated the 32nd as a transient rather than a property of the partition.
+
+⇒ A single un-replicated chunk timing was enough to invert the conclusion. Re-run an outlier before
+believing it, and prefer the quantised metric (segments) over the continuous one (cycles): proving
+bills in whole segments.
+
 ## The work, in order
 
 1. **Profile the Ghost arm on a taproot-bearing block.** `HAZYNC_PROFILE_EXEC=1`, 16 chunks, execute
