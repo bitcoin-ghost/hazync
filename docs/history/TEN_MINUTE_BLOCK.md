@@ -354,7 +354,7 @@ against today's. The board has been bitten by this twice already and both were c
 |---|---|---|
 | `hazync-artifacts/box1/` — all 16, block 962,000 | `b62d2a60…` | **superseded 2026-08-24** |
 | `hazync-dist-v0.18.5/hazync-host` | `4722cec8…` | no |
-| current canonical (`main`, v0.19.0) | `1d6c3792…` | **no receipts exist locally** |
+| canonical at the time, since superseded (`main`, v0.19.0) | `1d6c3792…` | **no receipts exist locally** |
 
 **`HAZYNC_AGG_EXECUTE` has never been run by anyone**, and it moves to the card day. Nor can
 arithmetic stand in for it: `reproduce/METHOD_ID` records the aggregate at `~1,137 M` cycles, which at

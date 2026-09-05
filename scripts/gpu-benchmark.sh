@@ -34,13 +34,13 @@ grep -q sys_sha_compress "$CORE/src/crypto/sha256.cpp" || die "base not restored
 case "$MODE" in
   core)  PATCHES="0012-select-field-bigint2-backend 0013-lift-x-via-witness-hint"
          export HAZYNC_FIELD_BIGINT2=1 HAZYNC_LIFTX_HINT=1
-         COSTS="HAZYNC_COST_EC_OP=450020 HAZYNC_COST_SCHNORR_OP=450020 HAZYNC_COST_INPUT_BYTE=1 HAZYNC_COST_INPUT_BASE=37946"
+         COSTS=(HAZYNC_COST_EC_OP=450020 HAZYNC_COST_SCHNORR_OP=450020 HAZYNC_COST_INPUT_BYTE=1 HAZYNC_COST_INPUT_BASE=37946)
          WANT="hazync_fq_mul_limbs hazync_lift_x_hint"; DENY="hazync_ecmult_verify hazync_lift_x" ;;
   ghost) PATCHES="0005-ecdsa-verify-group-arith-via-bigint2 0013-lift-x-via-witness-hint 0012-select-field-bigint2-backend 0006-schnorr-verify-group-arith-via-bigint2 0008-scalar-inverse-via-bigint2 0009-sha-transform-fastpath 0010-transformd64-via-accelerator"
          export HAZYNC_BIGINT2_ECDSA=1 HAZYNC_LIFTX_HINT=1 HAZYNC_FIELD_BIGINT2=1 HAZYNC_BIGINT2_SCHNORR=1 \
                 HAZYNC_SCALAR_INV_ACCEL=1 HAZYNC_SHA_FASTPATH=1 HAZYNC_AGG_READSLICE=1 HAZYNC_SHA_D64_ACCEL=1
          # ⛔ Ghost ships DEFAULT packing constants. Core's refit is a REGRESSION here: 1.469 -> 1.884.
-         COSTS=""
+         COSTS=()
          WANT="hazync_ecmult_verify hazync_lift_x_hint hazync_scalar_inverse hazync_fq_mul_limbs"; DENY="hazync_lift_x" ;;
   *) die "unknown mode '$MODE'" ;;
 esac
@@ -89,7 +89,10 @@ for i in $(seq 0 15); do
   # identically every time and retrying wastes the card for three times as long.
   RC=1
   for ATT in 1 2 3 4; do
-    ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_OUT="$OUT/receipts/chunk_$i.bin" $COSTS
+    # An ARRAY, not a word-split string: `export $COSTS` relied on splitting and shellcheck flagged
+    # it (SC2163). The `${a[@]+...}` form is what keeps an EMPTY array from expanding to one empty
+    # argument, which `export` would reject -- Ghost deliberately passes no overrides at all.
+    ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_OUT="$OUT/receipts/chunk_$i.bin" ${COSTS[@]+"${COSTS[@]}"}
       "$BIN" prove-chunk "$i" ) >"$OUT/prove_$i.log" 2>&1
     RC=$?
     [ $RC -eq 0 ] && { [ $ATT -gt 1 ] && { echo "  [#119] chunk $i: succeeded on attempt $ATT" | tee -a "$OUT/run.log"; echo "$i $ATT" >>"$OUT/119_retries.tsv"; }; break; }

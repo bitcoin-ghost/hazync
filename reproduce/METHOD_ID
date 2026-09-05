@@ -436,3 +436,15 @@
 # coupling is fail-CLOSED -- a wrong leaf misses root_next and the proof does not verify.
 #
 # Superseded the earlier id b62d2a60… (2026-08-04, audit #5).
+
+# ── EXPERIMENTAL IDS — NOT LINEAGE, NEVER SHIPPED ────────────────────────────────────────────────
+#
+# Ids produced by benchmark-only builds with experiment levers on. They are recorded so that a doc
+# quoting one is DOCUMENTED rather than unknown, and so `scripts/check-versions.sh` can tell a
+# recorded experiment from a typo'd or invented id. None of these ever verified a published proof
+# and none supersedes anything — they are branches off the side, not steps in the chain.
+#
+#   916cde9e…  control (`main`) arm of the stack-integration A/B, block 962,000
+#   70fc6484…  stack (`feat/stack-integration`) arm of the same A/B
+#              Both in docs/history/STACK_INTEGRATION_PLAN.md. All 32 journal digests were
+#              byte-identical across the pair; the ids DIFFER, which was the point of the test.

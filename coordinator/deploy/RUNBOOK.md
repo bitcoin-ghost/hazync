@@ -470,7 +470,7 @@ different ids**:
 |---|---|
 | `/home/…/dev/projects/hazync` (dev box) | `1bed31ef…` |
 | `/root/hazync-rebuild` (coordinator, scratch) | `1112670d…` |
-| `/hazync-zkvm` (container / canonical) | `1d6c3792…` |
+| `/hazync-zkvm` (container / canonical) | `3867611d…` |
 
 Only the third can produce a publishable proof. To prove or wrap on a box that is not the container,
 reproduce the container's environment exactly:
