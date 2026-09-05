@@ -60,9 +60,21 @@ shrinks the aggregate rather than needing it to distribute:
 
 | aggregate | cards (a) | if it does NOT distribute |
 |---|---|---|
-| 1,575 s today | 7 | impossible at any N |
+| 1,575 s (when this was written) | 7 | impossible at any N |
 | 767 s | **6** | impossible |
 | 497 s | **5** | **24 — viable** |
+| ✅ **405.6 s — MEASURED 2026-09-02** | | **better than this table's best row** |
+
+⇒ **The measurement overtook the projection.** Two workers give 405.6 s; one remote worker with an
+idle coordinator gives 772.4 s, and simply letting the coordinator work too gives **473.1 s — 1.63x
+for no extra hardware and no code change**. The row this table called "viable" has been passed, so
+the "if it does NOT distribute" column no longer describes a hazard: it distributes, and it is not
+the binding constraint. hazync#207 was closed as already-fixed on this evidence — its ~107 s serial
+execute measures **13.2 s**, removed by `read_slice` (#136) landing after the N=2 ceiling was
+observed.
+
+⚠ Measured at N=1 and N=2 only. This refutes the stated *mechanism* of an N=2 ceiling, not a ceiling
+at higher N, which still needs four cards to settle.
 
 ### The aggregate, taken apart (2026-08-28)
 
@@ -333,6 +345,7 @@ a newer risc0.
 | number | status |
 |---|---|
 | aggregate ">3,300 s" | ⛔ **STALE.** Measured 115.8-117.3 s at N=4 on block 741,000; 1,575 s on block 962,000 |
+| aggregate "1,575 s" on 962,000 | ⚠ **SUPERSEDED.** 405.6 s on two workers, 473.1 s with the coordinator also working (2026-09-02) |
 | "the aggregate is the binding constraint / impossible at any N" | ⛔ **FALSE.** The chunk side binds |
 | `N^1.79` aggregate scaling | ⛔ **ARTEFACT.** The block changed, not N |
 | "83 s floor, inferred from a two-worker run" | ⛔ Wrong in size **and shape** — it is the whole aggregate, and it is constant in N |
