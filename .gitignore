@@ -35,3 +35,6 @@ secrets/
 verifier-ffi/target/
 verifier-wasm/target/
 verifier-wasm/*.wasm
+
+# fetch_block*.py sidecar cache — regenerated, never committed
+prover/block_*.json.meta2.json
