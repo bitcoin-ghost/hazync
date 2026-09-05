@@ -51,7 +51,126 @@ hazync#139 is exactly that decision. See `TEN_MINUTE_BLOCK.md` and hazync#139.
 
 ---
 
-## 1. Fleet size — the latency question, for when it becomes live
+## 0.5 ✅ MEASURED 2026-08-28 — #139 proves out, and the aggregate distributes
+
+Two GPU results move every number below.
+
+| | result |
+|---|---|
+| **#139 bigint2, GPU proving wall** | **8.00x** (middle path) / **9.10x** (wholesale) — the coprocessor takes ~13%, not the win |
+| **distributed aggregate, 2 workers** | **1.81x** — scenario (c), where 10 min is unreachable at any N, is **dead** |
+
+Per-verify ECDSA drops **1,723,407 → 140,044 cycles (12.31x)**, and block 962,000 is only **1.8%
+taproot by input**, so #139 accelerates essentially the whole block.
+
+⇒ **With #139, a near-tip block needs ~7-9 cards rather than 32.**
+
+⚠ **The aggregate distributes — 1.81x on TWO CARDS (88-91% efficiency). Beyond two cards is
+UNMEASURED.**
+
+⛔ **A "seg-serve is the ceiling" claim was published here and is RETRACTED.** The N=4 arm that
+appeared to show saturation ran **2 worker processes per card on the same two boxes** — no extra
+compute, and GPU concurrency is measured at 0.95-1.03x (rejected three times). It tested nothing.
+→ `TEN_MINUTE_BLOCK.md` §8.14
+
+| | status |
+|---|---|
+| does the aggregate distribute at all? | ✅ yes — scenario (c) is dead |
+| does it scale past 2 cards? | ⛔ **UNMEASURED — needs a THIRD box** |
+| is `seg_serve_cmd` a bottleneck? | ⛔ **UNKNOWN** |
+
+⇒ **The 7-9 card figure stands on the 2-card evidence**, which supports scenario (a) as far as it
+goes. What is not established is whether it holds at fleet scale.
+
+⇒ **The aggregate's witness read is unaffected and remains the largest identified lever** — §7.5
+measured **78.2% of block-validation cycles** as deserialising the witness, and #136's `read_slice`
+fix went to **chunks only**. Worth ~3x on the aggregate, it rides the #139 re-baseline, and it
+shrinks the aggregate rather than needing it to distribute:
+
+| aggregate | cards (a) | if it does NOT distribute |
+|---|---|---|
+| 1,575 s (when this was written) | 7 | impossible at any N |
+| 767 s | **6** | impossible |
+| 497 s | **5** | **24 — viable** |
+| ✅ **405.6 s — MEASURED 2026-09-02** | | **better than this table's best row** |
+
+⇒ **The measurement overtook the projection.** Two workers give 405.6 s; one remote worker with an
+idle coordinator gives 772.4 s, and simply letting the coordinator work too gives **473.1 s — 1.63x
+for no extra hardware and no code change**. The row this table called "viable" has been passed, so
+the "if it does NOT distribute" column no longer describes a hazard: it distributes, and it is not
+the binding constraint. hazync#207 was closed as already-fixed on this evidence — its ~107 s serial
+execute measures **13.2 s**, removed by `read_slice` (#136) landing after the N=2 ceiling was
+observed.
+
+⚠ Measured at N=1 and N=2 only. This refutes the stated *mechanism* of an N=2 ceiling, not a ceiling
+at higher N, which still needs four cards to settle.
+
+### The aggregate, taken apart (2026-08-28)
+
+| lever | worth | where | `METHOD_ID`? |
+|---|---|---|---|
+| **witness read → `write_slice`** | **2.05x** on the aggregate | guest | yes — rides #139 |
+| **pipeline the join tree** | up to **~1.4x at 32 cards** | **host** | **no — ships alone** |
+| ~~resolution~~ | ~4.5 s at 16 chunks — not a floor | — | — |
+| ~~drop `tx_prevouts`~~ | ⛔ breaks the anti-substitution binding | — | — |
+| ~~`seg-serve` dispatch~~ | no evidence it binds | — | — |
+
+⛔ **The join tree is level-synchronous** — every level waits for all of its joins. A 116-segment
+aggregate is 7 levels of `[58, 29, 14, 7, 4, 2, 1]`, so efficiency falls from **93% at 2 cards to 40%
+at 32**. The two-card measurement above is in the one regime where this is invisible.
+
+✅ Under the **bounded-lag** framing the narrow tail costs nothing — block *h*'s tail overlaps block
+*h+1*'s wide segment phase. A performance argument for that framing, not just a cost one.
+
+⛔ **`tx_prevouts` is not payload.** The aggregate recomputes every leaf *because* recomputing is the
+check that a chunk verified THIS input and not a different valid spend. → `TEN_MINUTE_BLOCK.md` §8.15
+
+⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
+
+### ⚖ LEANING (not decided) 2026-08-28: the MIDDLE path over wholesale
+
+The wholesale arm is 15% faster (9.10x vs 8.00x) but buys **at most one card**, and only in the
+pessimistic aggregate case:
+
+| | aggregate 767 s | aggregate 497 s |
+|---|---|---|
+| middle path | **6 cards** | 5 cards |
+| wholesale | 5 cards | 5 cards |
+
+⚠ **This is a leaning, not a decision** — the operator has explicitly not committed. Do not treat it
+as settled, and do not let downstream work assume it.
+
+⇒ **One card looks like a cheap price for keeping Core's ECDSA logic** — DER parsing, low-S handling, the r/s
+checks, the inversion and the final `r == x(R) mod n` comparison all stay libsecp's literal code, and
+only the group arithmetic moves.
+
+⇒ **If that leaning holds, it would retire `HELIX_DUAL_BACKEND.md`.** Helix exists to run wholesale for backfill and
+Core at the tip. If the middle path runs **everywhere**, there is no second backend — no height gate,
+no committed cutover constant, no doubled audit surface, and none of the silent-divergence risk of two
+implementations disagreeing across a cutover.
+
+⚠ The middle path is **not** zero-surface: `double_scalar_mul` is Shamir's trick, so it does not
+preserve libsecp's wNAF/GLV. Much smaller than wholesale, not nil — differential testing across chain
+history remains the load-bearing work.
+
+→ `TEN_MINUTE_BLOCK.md` §8.14 for the full curve and the diagnostic.
+
+#### ⛔ CORRECTED BY LATER MEASUREMENT (2026-09-05)
+
+Four of the numbers above have since been measured, and the caveats resolved in opposite directions:
+
+| §0.5 said | MEASURED |
+|---|---|
+| **9.10x** wholesale | ⛔ **never measured at all.** `hazync_ecdsa_verify_full` existed from `3615a8d` and NOTHING EVER CALLED IT until `patches/0014` — the figure was never produced by a run. The 8.00x middle path IS measured |
+| aggregate **1.81x** on 2 workers | **1.90x** (405.6 s). And 1.63x comes free from letting the idle coordinator work: 772.4 s → 473.1 s, no extra hardware |
+| **~7-9 cards** with #139 | **10** (Core) / **5** (Ghost), `BUILDS.md` §1 |
+| caveat 1: "capped at 1.8x ⇒ 865 s, above the 600 s budget at any fleet size" | ⛔ **DEAD.** 405.6 s. hazync#207 closed as already-fixed: its ~107 s serial execute measures **13.2 s**, removed by `read_slice` (#136) landing after the ceiling was observed |
+| caveat 2: "#190 must land or the straggler goes to **2.45x**" | ⚠ **half right.** Ghost's measured cost-packed straggler is **1.477x** at default constants on a taproot-bearing block — bad, but not 2.45x. The cause is real though: the packer prices Schnorr at 13.77x ECDSA where the measured ratio is **1.97x**, so its model is 135.7% wrong. See hazync#209 |
+
+⚠ The aggregate was measured at N=1 and N=2 only. That refutes the stated *mechanism* of an N=2
+ceiling, not a ceiling at higher N, which still needs four cards to settle.
+
+## 1. Fleet size — first decide which question you are answering
 
 The two framings are not variants of one number. They have different answers, different risks, and
 different open blockers.
@@ -349,6 +468,7 @@ a newer risc0.
 | number | status |
 |---|---|
 | aggregate ">3,300 s" | ⛔ **STALE.** Measured 115.8-117.3 s at N=4 on block 741,000; 1,575 s on block 962,000 |
+| aggregate "1,575 s" on 962,000 | ⚠ **SUPERSEDED.** 405.6 s on two workers, 473.1 s with the coordinator also working (2026-09-02) |
 | "the aggregate is the binding constraint / impossible at any N" | ⛔ **FALSE.** The chunk side binds |
 | `N^1.79` aggregate scaling | ⛔ **ARTEFACT.** The block changed, not N |
 | "83 s floor, inferred from a two-worker run" | ⛔ Wrong in size **and shape** — it is the whole aggregate, and it is constant in N |
