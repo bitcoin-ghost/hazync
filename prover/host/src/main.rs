@@ -4414,12 +4414,41 @@ mod chunk_packing_tests {
         let real = |ec: u64, bytes: u64| super::COST_PER_EC_OP * ec + super::COST_PER_INPUT_BYTE * bytes;
         let (lean, fat) = (real(42, 37_933), real(42, 765_282));
 
-        // Within 2% of what those two chunks actually measured — the coefficients are fitted, so this
-        // fails loudly if either is changed without re-measuring. Values are post-dedup: chunk 1 fell
-        // 221,538,730 -> 109,113,751 -> 86,495,630 across the two halves of #135.
-        assert!((fat as f64 - 86_495_630.0).abs() / 86_495_630.0 < 0.02, "fat chunk: {fat}");
-        assert!((lean as f64 - 82_090_232.0).abs() / 82_090_232.0 < 0.02, "lean chunk: {lean}");
+        // RE-MEASURED 2026-09-05 under the #139 arm (patch 0005 applied, `hazync_ecmult_verify`
+        // present), block 741000, 16 chunks, execute mode. Chunks 1 and 11 are the controlled pair:
+        // identical 42 inputs and 42 EC verifies, differing only in bytes (765,282 vs 37,933).
+        //
+        //   chunk  1 (fat)   10,039,314 cycles
+        //   chunk 11 (lean)   7,763,901 cycles      ratio 1.293x
+        //
+        // The premise HOLDS -- bytes are costed, and an EC-only model would rate these two equal.
+        // The old anchors (86,495,630 / 82,090,232) were measured pre-#139, when an ECDSA verify cost
+        // 1,950,000 rather than 141,612; they describe a build that no longer exists.
+        //
+        // ⚠ This deliberately does NOT assert 2% agreement the way the old anchors did. Under #139 the
+        // model does not have that accuracy: it predicts 1.574x for this pair against 1.293x measured,
+        // because COST_PER_INPUT_BYTE (6) is ~2x the measured 3.13 cycles/byte. A least-squares refit
+        // over all 16 chunks gives 106,177*ec + 2.62*bytes + 90,395*inputs at 5.2% mean error, against
+        // 13.1% for the current constants. Refitting is a real calibration change and is NOT made here
+        // -- block 741000 carries 2 Schnorr verifies out of 723, so it cannot inform the curve split at
+        // all, and that split is the dimension the packer most needs to be right about.
+        const MEASURED_FAT: f64 = 10_039_314.0;
+        const MEASURED_LEAN: f64 = 7_763_901.0;
         assert!(fat > lean, "an EC-only model cannot tell these apart: {fat} vs {lean}");
+        // The model must track the measured ordering AND stay within a factor of the measured ratio.
+        // This catches the byte term collapsing to zero (ratio -> 1.0) or exploding, which is what the
+        // 2% anchors were really protecting, without asserting a precision the constants do not have.
+        let model_ratio = fat as f64 / lean as f64;
+        let measured_ratio = MEASURED_FAT / MEASURED_LEAN;
+        assert!(
+            model_ratio > 1.05,
+            "the byte term has stopped discriminating: model ratio {model_ratio:.3}x"
+        );
+        assert!(
+            model_ratio / measured_ratio < 1.5 && measured_ratio / model_ratio < 1.5,
+            "model ratio {model_ratio:.3}x is far from the measured {measured_ratio:.3}x -- \
+             a coefficient changed without re-measuring"
+        );
 
         // And the packer must act on it. Assert the PROPERTY, not a fixed partition: which split wins
         // depends on the coefficients, and an earlier version of this test hard-coded the answer that
