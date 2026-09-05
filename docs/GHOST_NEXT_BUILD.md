@@ -72,12 +72,17 @@ all, and the curve split is the dimension Ghost most needs right.
 
 ## ⛔ Closed — do not re-open without a new result
 
+Step figures are the measured cumulative chain in `docs/CORE_VS_GHOST.md` §"Where Ghost's 8.75x
+comes from" (stock 14,720 s → 1,683 s chunk total). **bigint2 alone is worth ~13 cards; everything
+after it is worth ~6 more combined** — the single substitution decision dominates and the rest is
+refinement, which is the right frame for judging anything proposed below.
+
 | lever | verdict |
 |---|---|
 | **MSM** | excluded by decision, not by evidence |
-| **Wholesale bigint2** | never wired; ~2.4% remaining. 15% faster in isolation but buys at most ONE card |
-| **G3 (Schnorr via bigint2)** | worth 4.45% — keep, already in |
-| **Scalar inverse** | worth 12.61% — keep, already in |
+| **Wholesale bigint2** | **8.00x middle vs 9.10x wholesale**, measured at proving time — the extra **14%** costs the whole equivalence surface and buys at most ONE card. Decision of record: middle path. ⚠ execute-mode cycles were 9.19x; do not quote the two interchangeably |
+| **G3 (Schnorr lane) + memo** | **1.253x** measured — keep, already in. ⚠ G3 is NOT isolated: it was measured together with the decompression memo, so neither has a standalone figure |
+| **Scalar inverse** | **1.082x** measured — keep, already in |
 | **Kernel-level work** | profiled: not at roofline, but the lever is CLOSED — 69.3% of GPU time |
 | **Aggregate fan-out** | free; the aggregate does NOT scale with chunk count |
 | **po2 23** | needs three fixes and is B200-only |

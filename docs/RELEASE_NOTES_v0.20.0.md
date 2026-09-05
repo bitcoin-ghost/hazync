@@ -6,6 +6,10 @@
 **`METHOD_ID` 1d6c3792… → 3867611d…**, so every proof published under the old id must be re-proved.
 That is not incidental to this release, it is the release: the guest's field arithmetic changed.
 
+> **Provenance.** Every figure below is one the repo or its git history can show. Cycle figures cite
+> `docs/FIELD_BIGINT2_BACKEND.md` or the commit that measured them; card counts and stragglers cite
+> `docs/BUILDS.md` §1, which is hardware-measured on two L40S. Nothing here is derived from memory.
+
 ---
 
 ## The headline: libsecp's field arithmetic on the bigint2 coprocessor
@@ -17,11 +21,12 @@ point; this uses it as one rather than patching call sites.
 
 Whole-block cycles on block 962,000, against a stock control built from the same tree:
 
-| | cycles | vs control |
-|---|---|---|
-| control (stock guest) | 13,748,003,793 | 1.000x |
-| field backend alone | 3,583,757,161 | 3.836x |
-| **Ghost** (all levers) | **1,198,904,653** | **11.467x** |
+| | cycles | vs control | source |
+|---|---|---|---|
+| control (stock guest) | 13,748,003,793 | 1.000x | `FIELD_BIGINT2_BACKEND.md` |
+| field backend alone | 3,583,757,161 | 3.836x | `FIELD_BIGINT2_BACKEND.md` |
+| **Core** (+ liftx hint) | — | **4.095x** | commit `0f90ed0` |
+| **Ghost** (all levers) | **1,198,904,653** | **11.467x** | `BUILDS.md` §1 |
 
 **Effect,** measured on two L40S with real proving (`docs/BUILDS.md` §1):
 
@@ -60,7 +65,9 @@ entire remaining field-arithmetic win.
 ## liftx hint (+6.31%) and the packer
 
 - **liftx via witness hint** — the x-only pubkey lift is verified against a host-supplied hint rather
-  than recomputed. Fidelity class: advice-and-verify.
+  than recomputed. **+6.31%** (commit `0f90ed0`; 6,897 hits / 134 misses, 98.1%), digest gate PASS.
+  Fidelity class: advice-and-verify. Its FLAT self-time is 0.30%, so a flat profile hides this lever
+  20x — size delegating functions cumulatively.
 - **The packer gained three dimensions it was blind to**: curve (ECDSA and Schnorr price separately,
   because #139 accelerates only ECDSA and they diverge ~13.8x), key reuse (the per-chunk decompression
   memo makes a repeat cost ~0.736 of a fresh key; 68.8% of block 962,000's verifying inputs take it),
