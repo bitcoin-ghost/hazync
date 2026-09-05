@@ -204,7 +204,10 @@ for b in $BINS; do [ -f "$DIST/$b" ] || die "$DIST/$b is missing — nothing to 
 # bytes: the host stores it as [u32;8] LITTLE-ENDIAN, which puts the raw 32 bytes on disk in natural
 # order. NB `grep -P '\x..'` silently finds nothing here — it is a check that cannot pass. Use python.
 CU="$DIST/hazync-host-x86_64-linux-gnu-cuda"
-if ! host_is_current "$CU" && command -v python3 >/dev/null; then
+# ⛔ TWO arguments. `host_is_current` reads $2 for the .built-from-<asset> stamp, and this call
+# passed only the path — under `set -u` that aborts phase 4 with "$2: unbound variable", which
+# reads as a broken release rather than a one-word bug. The other call site (above) passes both.
+if ! host_is_current "$CU" hazync-host-x86_64-linux-gnu-cuda && command -v python3 >/dev/null; then
     if [ "$(python3 -c "import sys;print(open(sys.argv[1],'rb').read().count(bytes.fromhex(sys.argv[2])))" "$CU" "$CANON" 2>/dev/null)" = "1" ]; then
         ok "cuda host: cannot execute here, but embeds ${CANON:0:8} in its bytes"
         # Build the variable name EXACTLY as check-dist.sh does. `tr -c 'A-Za-z0-9' '_'` looks
