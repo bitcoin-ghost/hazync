@@ -56,6 +56,28 @@ guest-codegen decision combined.
 unaware packer's straggler at **2.45x**, which would roughly halve the win. And 962,000 is only 2.7%
 Schnorr — #190 calls it "the mildest case available", so blocks with more taproot benefit less.
 
+---
+
+#### ⛔ CORRECTED BY MEASUREMENT (2026-09-05) — the table above is a projection, and two rows are wrong
+
+The projections here were made before any of it ran on hardware. What ran since:
+
+| this table said | MEASURED |
+|---|---|
+| **7 cards** with #139 | **10 cards** (Core), **5** (Ghost) — `BUILDS.md` §1, two L40S, real proving |
+| (c) *"fails at any N"*, aggregate 1,575 s | aggregate is **405.6 s** on two workers (772.4 s on one with an idle coordinator; 473.1 s once the coordinator also works — 1.63x, free). It does not exceed the budget |
+| bigint2 projected 7.53x | **4.48x** — the projection under-weighted the ~1.96 G non-ECDSA residual |
+
+✅ **The ⚠ above was right, and is now measured.** "Blocks with more taproot benefit less" holds
+sharply: on block 965,500 (7.7% Schnorr, per-chunk spread 0–40.5%) the Ghost arm's straggler measures
+**2.116x** against 1.438x on 2.7%-Schnorr 962,000, and the packer's own model is **135.7% wrong** there
+because it still prices Schnorr at 13.77x ECDSA when the measured ratio is **1.97x** — the liftx hint
+removes decompression from *both* curves. See hazync#209.
+
+⇒ The conclusion this section draws — *"whether the aggregate distributes is worth more than every
+card, po2 and guest-codegen decision combined"* — does **not** survive the aggregate measuring 405.6 s.
+The binding constraint is the packer's calibration, not the aggregate.
+
 **The arithmetic**, on measured block-962,000 figures — 14,926 chunk card-seconds, 1.05x straggler,
 1,575 s aggregate (1,379 s segment proving + 196 s resolution):
 
