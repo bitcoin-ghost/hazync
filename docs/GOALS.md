@@ -109,6 +109,12 @@ Bitcoin's history is somewhere around 1.8–3.0 billion inputs, so:
 **Keeping up with the tip** — one block per 600 s — needs about **29 L40S** continuously (~£20k/month),
 or **~41 RTX 4090s** at the lower po2 they can hold (~£3k–9k/month depending on the listing).
 
+⛔ **That 29 is the STOCK, unaccelerated guest.** The coprocessor field backend has since MEASURED
+**10 cards for Core and 5 for Ghost** on real proving (`BUILDS.md` §1), so 29 is the baseline the
+acceleration work is measured *against*, not a current requirement. The pound figures above scale
+with it: Core's 2.9x is a direct division of the monthly cost, and the backfill card-years below
+divide the same way.
+
 ⚠ **This is the THROUGHPUT number, and it is not the same question as `FLEET_SIZING.md`'s ~32.** This
 page prices keeping up with the chain at a bounded lag, where consecutive blocks overlap;
 `FLEET_SIZING.md` prices one block start-to-finish inside 600 s. Both are right about their own
