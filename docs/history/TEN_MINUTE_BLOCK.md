@@ -692,7 +692,7 @@ MEASURED, full prove, GPU sampled every 2 s throughout:
 |---|---|---|
 | segments at po2 22 | 28 | **376** |
 | segment proving | 101 s | **1,379 s** (3.67 s/seg) |
-| assumption resolution | 16.3 s | **196 s** |
+| assumption resolution | ~~16.3 s~~ ⛔ **STALE — measured 1.0-1.2 s on 2026-08-28** | ~~196 s~~ ⛔ **suspect, see §8.15** |
 | **total wall** | **117.3 s** | **1,574.9 s** |
 | GPU samples at 0% | 0 of 59 | **0 of 779** |
 
@@ -980,6 +980,235 @@ exactly backwards.
 than compared against the previous box's number: 116 s against 117.3 s, resolution 16 s against
 16.3 s, chunk times within 1.8% across all four. Two boxes, ~1% apart. That cost 25 extra minutes
 and is the only reason N=8 can be read as a clean single-variable comparison.
+
+### 8.14 ✅ The aggregate DOES distribute — measured 2026-08-28, and it saturates
+
+§8.13 ranked "does the distributed aggregate work?" as the blocker and noted it had **never been
+exercised**. It has now been, on two L40S in one datacentre (0.21 ms RTT, identical `METHOD_ID` on
+both, verified before the run because the coordinator refuses foreign receipts by name).
+
+**Block 741,000, 4 chunk receipts, aggregate only:**
+
+| workers | po2 22 | po2 20 |
+|---|---|---|
+| 1 | **118 s** (single-box reference: 115.8 s ✅) | **163 s** |
+| 2 | **65 s** — 1.81x | **90 s** — 1.81x |
+| 4 | — | **89 s** — 1.83x, **no gain** |
+
+⇒ **Scenario (c) is DEAD.** The aggregate is not serial; it distributes, and at N=2 it does so at 91%
+of ideal.
+
+⛔ **But it SATURATES at N=2, and this is not yet explained.** A two-point Amdahl fit on N=1,2
+predicted 54 s at N=4; it measured **89 s**. ⚠ **That is the `N^1.79` mistake repeating** — a curve
+extrapolated from two points that cannot constrain it (§8.12). The third point caught it, and it was
+only run because someone asked for it.
+
+**Two candidate causes, with opposite consequences:**
+
+| hypothesis | mechanism | at 16 chunks |
+|---|---|---|
+| **join-tree width** | 4 chunks = 4 leaves -> 2 joins -> 1, so only ~2-way parallelism EXISTS | 8-way width ⇒ §8.13's numbers hold |
+| **coordinator-bound** | single-threaded `seg-serve` cannot feed 4 workers | no improvement ⇒ the aggregate caps near 1.8x |
+
+**Diagnostic — GPU utilisation, 4 workers, sampled on both boxes:**
+
+```
+box1 (2 workers, LOCAL) : mean 82% util,  7% idle
+box2 (2 workers, REMOTE): mean 59% util, 35% idle
+```
+
+⇒ **Inconclusive, but it rules out the clean "no work exists" reading** — that would idle all four
+roughly equally. The **remote** box starves while the local one does not, which points at work
+*delivery* rather than work *availability*. Not decisive.
+
+### ⛔⛔ RETRACTED 2026-08-28 — the N=4 arm ADDED NO COMPUTE, so it measured nothing
+
+**Everything in this subsection is void. Read this before any of it.**
+
+The N=4 arm ran **2 workers on box1 + 2 workers on box2 — still only TWO PHYSICAL CARDS.** Each
+`seg-connect` is a separate process on the same GPU, and **GPU concurrency has been measured and
+rejected three times at 0.95-1.03x** (`ACCELERATION.md`): two proves on one card do not go faster.
+
+⇒ **N=2 and N=4 had IDENTICAL compute.** The flat result is exactly what that predicts and says
+**nothing whatever** about the segment coordinator, the join tree, or any ceiling.
+
+⇒ The utilisation data agrees and I read it backwards: box2 going from 26% to **36% idle** when its
+second worker was added is **two processes contending for one card**, not a coordinator failing to
+feed them.
+
+✅ **What was actually measured: the aggregate scales 1.76-1.81x on TWO CARDS** — 88-91% efficiency,
+which is *good*. **Scaling beyond two cards is UNMEASURED**, and needs a third box, not a fourth
+worker process.
+
+⚠ Method note, and it is the third instance in this document: §8.12's `N^1.79` artefact moved the
+block as well as N; §8.14's Amdahl fit extrapolated from two points; this one **changed the worker
+count without changing the hardware.** Every one produced a confident, wrong conclusion from a
+variable that was not the one under test.
+
+<details><summary>The superseded reasoning, kept as the record of the error</summary>
+
+#### (VOID) join-tree width is REFUTED; the segment coordinator is the ceiling
+
+The 16-chunk test was run. A 16-chunk aggregate has an **8-wide** join tree, so if width were the
+limit it would have scaled. It did not move at all:
+
+| workers | 4 chunks | **16 chunks** |
+|---|---|---|
+| 1 | 163 s | **165 s** |
+| 2 | 90 s — 1.81x | **94 s — 1.76x** |
+| 4 | 89 s — no gain | **95 s — no gain** |
+
+**Both saturate at exactly N=2.** And GPU utilisation confirms it from a second, independent angle —
+the **remote** box starves *worse* as workers are added while the local one stays busy:
+
+| | N=2 | N=4 |
+|---|---|---|
+| box1 (local) | 13% idle | 11% idle |
+| box2 (remote) | **26% idle** | **36% idle** |
+
+⇒ **The parallel work exists and is not being delivered.** `seg_serve_cmd`
+(`prover/host/src/main.rs`) is single-threaded — it runs `ExecutorImpl::run()` *and* dispatches
+segments *and* collects receipts — and it caps the aggregate at **~1.76x regardless of fleet size**.
+
+⚠ Note this is the **segment** coordinator (the ephemeral `seg-serve` process), not the **board**
+coordinator (`coordinator/server.py`). Two different things share the name.
+
+### What it costs, and the two ways out
+
+At a 1.76x ceiling the aggregate floors at **1,575 / 1.76 = 897 s** — above the entire 600 s budget,
+so **ten minutes is unreachable at any fleet size today.**
+
+| fix | fleet |
+|---|---|
+| neither | **IMPOSSIBLE at any N** |
+| `seg-serve` dispatch only | **7 cards** |
+| aggregate witness read only (§7.5) | 8-15 cards |
+| **both** | **5-6 cards** |
+
+✅ **Neither is architectural — both are ordinary software.** And they ship very differently:
+
+- **`seg-serve` is HOST-side.** It moves no `METHOD_ID`, needs **no re-baseline and no board reset**,
+  and can land on its own. It alone takes the target from impossible to reachable.
+- **The witness read is guest source**, so it rides the re-baseline already queued with #139.
+
+⇒ **Sequence `seg-serve` first.** It banks the largest single improvement — impossible to 7 cards —
+without waiting on the fidelity decision, and it de-risks #139 stalling again.
+
+⚠ **A two-point Amdahl fit on N=1,2 predicted 54 s at N=4; it measured 89 s.** Two points cannot
+constrain a curve.
+
+</details>
+
+### Where this actually leaves the aggregate
+
+| | status |
+|---|---|
+| aggregate distributes at all | ✅ **yes** — 1.81x on 2 cards, scenario (c) is dead |
+| scales past 2 cards | ⛔ **UNMEASURED** — needs a THIRD box |
+| is `seg-serve` a bottleneck? | ⛔ **UNKNOWN** — nothing here tested it |
+
+⇒ **The fleet arithmetic in `TOPOLOGY_AND_SETTINGS.md` §0.5 stands on the 2-card measurement**, which
+supports scenario (a) as far as it goes. The 7-9 card figure is intact; what is not established is
+whether it holds at the fleet sizes that matter.
+
+⇒ **The witness read (§7.5) is unaffected by any of this** — it shrinks the aggregate rather than
+distributing it, and is worth ~3x on its own.
+
+### 8.15 The aggregate, taken apart — 2026-08-28
+
+Three findings from reading the code against the day's coordinator logs. Two correct published
+figures; one identifies the real parallelism floor.
+
+#### (a) `tx_prevouts` cannot be dropped — it is a security invariant, not payload
+
+The aggregate recomputes every accumulator leaf via `coin_leaves_batch` even though the chunks supply
+`chunk_leaves`. That looks like waste and is not. From the guest:
+
+> *"take script validity from the chunks — **but ONLY after proving the chunk verified THIS input**…
+> recompute the same binding digest the chunk committed (tx bytes, input idx, prevouts, coin metadata,
+> and the block's own flags) and require it matches. This binds both the spending witness and the
+> flags, so **a chunk cannot substitute a different valid spend of the coin**, or validate it under
+> attacker-chosen weaker flags."*
+
+⇒ The recomputation **is** the anti-substitution check. Sending less is not available.
+
+#### (b) ⛔ The resolution figures in §8.10 are STALE, and resolution is ~40x cheaper than believed
+
+`seg_serve_cmd`'s own comment estimates resolves at *"roughly 11.35 M cycles each — about 175 s for
+sixteen"*. Measured, with resolves pushed to workers (#153):
+
+| block | po2 | chunks | resolves | per resolve |
+|---|---|---|---|---|
+| 741,000 | 22 | 4 | **1.0-1.2 s** | 0.28 s |
+| 741,000 | 20 | 16 | **4.4 s** | 0.28 s |
+
+Linear at **0.28 s per resolve** — the chain model is right, the constant was not.
+
+⛔ **§8.10 records 16.3 s for the same block, same po2, same 4 chunks. That is 14x this measurement**,
+and the likeliest explanation is that it predates #153 moving resolves off the coordinator — which is
+exactly the win that issue describes. **Its companion 196 s figure for block 962,000 inherits the
+doubt.**
+
+⇒ **Resolution is NOT the aggregate's floor.** At 0.28 s/resolve, 16 chunks is ~4.5 s.
+
+⚠ Not fully settled: block 962,000 has 376 segments against 741,000's 28, so a conditional-size
+dependence cannot be excluded from within-block evidence alone. **Re-measure on a tip block.**
+
+⚠ It IS linear in chunk count, so fan-out is not free forever: 64 chunks ≈ 18 s of pure serial time,
+128 ≈ 36 s. Worth knowing before picking a chunk count for a large fleet.
+
+#### (c) ⏰ The join tree is LEVEL-SYNCHRONOUS — and that is the real parallelism floor
+
+```rust
+while level_recs.len() > 1 {
+    ...
+    loop {                                        // hard barrier
+        let have = (0..npairs).filter(|p| ...exists()).count();
+        if have == npairs { break; }
+        sleep(300ms);
+    }
+```
+
+Every level waits for **all** of its joins before the next begins. For a 116-segment aggregate the
+tree is `[58, 29, 14, 7, 4, 2, 1]` — seven levels, and the tail cannot fill a fleet:
+
+| cards | join-tree efficiency | levels that cannot fill the fleet |
+|---|---|---|
+| **2** | **93%** | 0 of 7 |
+| 8 | 68% | 4 of 7 |
+| 16 | 54% | 5 of 7 |
+| 32 | **40%** | 6 of 7 |
+
+⛔ **This is why §8.14's two-card measurement looked healthy: N=2 is the one regime where the problem
+is invisible.** Projected against ideal scaling: 1.01x at N=2, **1.43x at N=32**.
+
+**Two separable problems:**
+
+1. **The barriers are FIXABLE and host-side** (no `METHOD_ID`, no re-baseline). Pipelining — start a
+   join as soon as its two children exist rather than waiting for the level — removes the
+   per-level straggler cost.
+2. **The narrow tail is STRUCTURAL.** The last levels hold 4, 2, 1 jobs; no arrangement of a binary
+   tree changes that. ✅ **But under the bounded-lag framing it is free**, because block *h*'s narrow
+   tail overlaps block *h+1*'s wide segment phase. That is a performance argument for the throughput
+   framing, on top of the cost one.
+
+⚠ The projection calibrates one unit cost from a single N=2 point and assumes `t_join ≈ t_seg`, which
+is unverified. The **shape** — efficiency falling as N rises — follows from the tree arithmetic alone.
+
+#### Where the aggregate's time actually goes
+
+| term | today | after the witness read fix | notes |
+|---|---|---|---|
+| witness read | 78.2% of validation | 47.2% | still the largest single term |
+| wtxids & witness commitment | 8.6% | 20.8% | next in line |
+| input loop, `created_at` | 8.9% | 21.7% | |
+| coordinator execute | 3 s | 3 s | negligible, serial |
+| resolution | ~4.5 s at 16 chunks | unchanged | serial, linear in chunks |
+| **join tree tail** | — | — | **the floor at fleet scale** |
+
+⇒ **Ranked: (1) the witness read, 2.05x, guest, rides the #139 re-baseline. (2) join-tree pipelining,
+up to ~1.4x at 32 cards, host-side, ships alone.** Resolution and the coordinator's execute phase are
+not worth attacking.
 
 ### 8.13 What it costs to reach ten minutes
 
