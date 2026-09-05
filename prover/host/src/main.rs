@@ -64,11 +64,59 @@ impl serde::Serialize for PackedHashes {
         s.serialize_bytes(flat)
     }
 }
+/// One element of a `PackedHashes` JSON sequence: a byte of the packed blob, or a whole 32-byte hash
+/// from a LEGACY pre-packing bundle. Unambiguous — a JSON number is a byte, a JSON array is a hash —
+/// and only ever reached through JSON, because risc0's binary serde lands on `visit_bytes`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ByteOrHash { Byte(u8), Hash([u8; 32]) }
+
 impl<'de> serde::Deserialize<'de> for PackedHashes {
+    /// Accepts BOTH wire shapes, on purpose.
+    ///
+    /// The 2026-08-28 packing changed `Vec<[u8; 32]>` from a nested list-of-lists to ONE flat n*32
+    /// blob. That is a read-side incompatibility with every bundle written before it — and the
+    /// coordinator holds **220,001 of them, 74 GB** (measured 2026-09-05), all nested. Regenerating
+    /// those means re-running the bridge over 220k blocks against a full node; the leaf values did
+    /// not change, only the encoding did, so that would be a lot of work to arrive back where we are.
+    ///
+    /// So the reader accepts the legacy shape. Nothing WRITES it — `serialize` still emits the flat
+    /// blob — and the binary path is untouched, so this costs the wire nothing and saves rewriting
+    /// 74 GB on a production box.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = packed_bytes(d)?;
-        if v.len() % 32 != 0 { return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32")); }
-        Ok(PackedHashes(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect()))
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Vec<[u8; 32]>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("packed 32-byte hashes (flat blob, or a legacy list of 32-byte lists)")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() % 32 != 0 { return Err(E::custom("PackedHashes must be a multiple of 32")); }
+                Ok(v.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect())
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                self.visit_bytes(&v)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let (mut flat, mut out) = (Vec::<u8>::new(), Vec::<[u8; 32]>::new());
+                while let Some(e) = seq.next_element::<ByteOrHash>()? {
+                    match e {
+                        ByteOrHash::Byte(b) => flat.push(b),
+                        ByteOrHash::Hash(h) => out.push(h),
+                    }
+                }
+                // A sequence is one shape or the other, never a mixture.
+                if !flat.is_empty() && !out.is_empty() {
+                    return Err(serde::de::Error::custom("PackedHashes mixes packed bytes and whole hashes"));
+                }
+                if !out.is_empty() { return Ok(out); }
+                if flat.len() % 32 != 0 {
+                    return Err(serde::de::Error::custom("PackedHashes must be a multiple of 32"));
+                }
+                Ok(flat.chunks_exact(32).map(|c| { let mut h = [0u8; 32]; h.copy_from_slice(c); h }).collect())
+            }
+        }
+        Ok(PackedHashes(d.deserialize_byte_buf(V)?))
     }
 }
 /// The byte-visitor both of the above share.
@@ -3154,6 +3202,29 @@ fn bundle_roundtrip_test() {
         let back: PackedHashes = serde_json::from_slice(&j)
             .expect("PackedHashes JSON round-trip must parse (regression: missing visit_seq)");
         if back.0 != case { println!(">>> BUNDLE-ROUNDTRIP: FAIL — PackedHashes {} hashes", case.len()); fails += 1; }
+    }
+    // 4) The LEGACY nested shape, which the coordinator's 220,001 stored bundles are written in.
+    //    Pre-2026-08-28, `Vec<[u8; 32]>` serialised as a list of 32-element lists; it is now one flat
+    //    n*32 blob. The reader must accept both or every stored bundle becomes unreadable, which is
+    //    74 GB of regeneration to arrive back at identical leaf values.
+    for hashes in [vec![], vec![[7u8; 32]], vec![[1u8; 32], [255u8; 32], [0u8; 32]]] {
+        let legacy = serde_json::to_vec(&hashes).expect("serialise legacy nested");
+        let back: PackedHashes = serde_json::from_slice(&legacy)
+            .expect("legacy NESTED PackedHashes must still parse (the coordinator's stored bundles)");
+        if back.0 != hashes {
+            println!(">>> BUNDLE-ROUNDTRIP: FAIL — legacy nested {} hashes", hashes.len()); fails += 1;
+        }
+        // and the flat shape must still agree on the same value
+        let flat: PackedHashes = serde_json::from_slice(
+            &serde_json::to_vec(&PackedHashes(hashes.clone())).expect("serialise flat")
+        ).expect("flat PackedHashes must parse");
+        if flat.0 != hashes {
+            println!(">>> BUNDLE-ROUNDTRIP: FAIL — flat {} hashes", hashes.len()); fails += 1;
+        }
+    }
+    // A mixture is not a real wire shape and must be refused rather than silently half-read.
+    if serde_json::from_slice::<PackedHashes>(b"[1,2,[3,3,3]]").is_ok() {
+        println!(">>> BUNDLE-ROUNDTRIP: FAIL — a mixed byte/hash sequence was accepted"); fails += 1;
     }
     {
         let case = PackedHash([0xABu8; 32]);

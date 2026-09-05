@@ -150,19 +150,24 @@ This section was written when `85dc0b56…` was staged *ahead of* a board still 
 it describes that hazard, which is the general one: while the two disagree, deploying either half
 early makes the public surface reject the public board:
 
-| artifact | state | deploy when |
-|---|---|---|
-| `hazync-verify.wasm` on bitcoinghost.org | built, parity-green, **held** | the board re-baselines |
-| `hazync-verify` / `-aarch64` release binaries | rebuilt, **unreleased** | same |
-| coordinator `hazync-host` | still `3f52baff` | same |
-| the board itself | `3f52baff`, 39,299 proven | genesis restart on new hardware |
+**MEASURED LIVE 2026-09-05.** Every public surface is coherent on the OLD id and the repo is coherent
+on the new one — which is the clean state to cut from, not a fault:
 
-They are one atomic step, not four. A verifier pinned to `85dc0b56` refuses a `3f52baff` proof — that
+| artifact | live state (measured) | repo state | deploy when |
+|---|---|---|---|
+| `/hazync/api/meta` | **`1d6c3792`**, frontier **1,879** | — | the board re-baselines |
+| `/hazync/verify/hazync-verify.wasm` | **`1d6c3792`** (1,065,791 B) | rebuilt, **undeployed** | same |
+| `hazync-verify` / `-aarch64` release binaries | v0.19.0, old id | `verifier/src/lib.rs` embeds `3867611d` | same |
+| the board itself | 1,879 proven, spine `[1..939]` | — | genesis restart |
+
+They are one atomic step, not four. A verifier pinned to `3867611d` refuses a `1d6c3792` proof — that
 is the cross-id isolation working, and it is exactly what a visitor would experience as "the site is
 broken" if the verifier moves before the board does.
 
-Verified held: the live `.wasm` still hashes to the old build, and `/hazync/api/meta` still reports
-`3f52baff`.
+⚠ The rows above previously read `3f52baff` throughout, which was TWO re-baselines stale
+(`3f52baff` → … → `1d6c3792` → `3867611d`). Re-measure this table at each cutover rather than
+trusting it; the commands are `curl -s bitcoinghost.org/hazync/api/meta` and grepping the served
+`.wasm` for the id.
 
 Also expiring at the re-baseline: the **220,000 bundles** on the coordinator (the witness format is
 unchanged but the leaf values are not — see #44), and the 38,507 receipts. Neither needs migrating;
