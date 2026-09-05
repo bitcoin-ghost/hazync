@@ -22,7 +22,36 @@ label is a bug in this page.**
 
 ---
 
-## 1. Fleet size — first decide which question you are answering
+## 0. Two modes — decide which one you are sizing for
+
+The project has **one goal and two workloads**, and almost every fleet argument this board has had
+came from pricing them as if they were the same thing. `GOALS.md` G2 is one; G6 is the other.
+
+| | **Backfill** (G2) | **Tip-following** (G6) |
+|---|---|---|
+| the work | **138-229 card-years** (1.8-3.0bn inputs @ 2.41 card-s/input) | **~29 L40S continuously** |
+| sized by | budget and calendar | the block interval |
+| per-block latency | **irrelevant** — 880,000 blocks are queued | matters, but only after catch-up |
+| fidelity posture | inputs are a **closed set** — exhaustively testable | inputs do not exist yet |
+
+⛔ **~29 cards is BREAK-EVEN, not the answer.** It matches the chain's growth and burns down **none**
+of the backlog. Backfill is a separate purchase on top: **+100 cards ≈ 1.4-2.3 years**, **+500 ≈
+0.3-0.5 years**.
+
+⇒ **Practical consequence: §1's latency-vs-lag question is not live yet.** While backfilling you are
+nowhere near the tip, so tip latency cannot be answered until catch-up is in sight — years out at any
+plausible fleet. **Size for throughput; a bounded lag costs nothing that matters.** Revisit §1 when
+catch-up is actually close.
+
+⚖ **The fidelity asymmetry is worth more than it looks.** Backfill's signature set is closed and
+enumerable, so an acceleration can be differential-tested against libsecp on **every input it will
+ever see**. Tip proving cannot be. Since backfill holds 138-229 card-years and tip-following ~29
+cards, a trade that is unacceptable at the tip may be entirely defensible for history —
+hazync#139 is exactly that decision. See `TEN_MINUTE_BLOCK.md` and hazync#139.
+
+---
+
+## 1. Fleet size — the latency question, for when it becomes live
 
 The two framings are not variants of one number. They have different answers, different risks, and
 different open blockers.
