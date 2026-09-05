@@ -16,7 +16,8 @@ mean, and **a block's wall-clock is its slowest chunk, not its mean**.
 ## Why the straggler is high: Ghost has no calibration of its own
 
 Ghost ships the **default** packing constants. This is deliberate and recorded in
-`scripts/gpu-benchmark.sh` — Core's refit is a *regression* on Ghost (1.469 → 1.884), so it was
+`scripts/gpu-benchmark.sh` — Core's refit is a *regression* on Ghost (1.469 derived → 1.884; the
+measured default-constants straggler is 1.438), so it was
 correctly refused. But refusing the wrong calibration is not the same as having the right one, and
 `BUILDS.md` §3 is blunt about it: **"Ghost needs its own calibration; it does not have one."**
 
@@ -80,9 +81,9 @@ refinement, which is the right frame for judging anything proposed below.
 | lever | verdict |
 |---|---|
 | **MSM** | excluded by decision, not by evidence |
-| **Wholesale bigint2** | **8.00x middle vs 9.10x wholesale**, measured at proving time — the extra **14%** costs the whole equivalence surface and buys at most ONE card. Decision of record: middle path. ⚠ execute-mode cycles were 9.19x; do not quote the two interchangeably |
+| **Wholesale bigint2** | ⛔ **NEVER MEASURED.** `hazync_ecdsa_verify_full` existed from `3615a8d` (2026-08-28) and **nothing ever called it** — no patch on any branch added a call site until `patches/0014`, so the recorded "wholesale is 15% faster" was never produced by a run (commit `9b767b5`). It also likely double-counts: wholesale subsumes the modular inversion that `patches/0008` accelerates separately. The middle path's **8.00x at proving time** IS measured. Decision of record: middle path |
 | **G3 (Schnorr lane) + memo** | **1.253x** measured — keep, already in. ⚠ G3 is NOT isolated: it was measured together with the decompression memo, so neither has a standalone figure |
-| **Scalar inverse** | **1.082x** measured — keep, already in |
+| **Scalar inverse** (modular inversion, `patches/0008`) | **12.61%** measured (commit `9b767b5`) — keep, already in. ⚠ Not the same quantity as `CORE_VS_GHOST.md`'s **1.082x**, which is this lever's step in Ghost's *cumulative* chain; both are real and they measure different things |
 | **Kernel-level work** | profiled: not at roofline, but the lever is CLOSED — 69.3% of GPU time |
 | **Aggregate fan-out** | free; the aggregate does NOT scale with chunk count |
 | **po2 23** | needs three fixes and is B200-only |

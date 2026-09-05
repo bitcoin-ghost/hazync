@@ -51,7 +51,7 @@ than #139's. A missing or hostile hint costs only the sqrt already being paid.
 
 | piece | state |
 |---|---|
-| `patches/0006-lift-x-via-witness-hint.patch` — the libsecp half | written |
+| `patches/0013-lift-x-via-witness-hint.patch` — the libsecp half | written |
 | `prover/methods/guest/src/liftx_hint.rs` — table, binary search, `hazync_lift_x_hint` | written |
 | `HAZYNC_LIFTX_HINT=1` -> `liftx-hint` feature (`build.rs`, `Cargo.toml`, `main.rs`) | written |
 | witness carries the hints (`write_chunk_inputs`) | written |
