@@ -121,6 +121,35 @@ Recorded because the pattern is the point, and every one moved the wrong way:
 marshalling bytes, the last re-anchored to a measured #139 profile · `msm-selftest` and `msm-bench` ·
 two-sided bigint2 symbol assertions.
 
+## Landed after the field backend, and part of this release
+
+**The coordinator's 220,001 stored bundles survive the re-baseline** (#210). Every one of them —
+**74 GB** — is in the pre-2026-08-28 nested wire shape, and the post-packing host could not parse a
+single one: `invalid type: sequence, expected u8`. `RELEASE_PLAN.md` said they "regenerate", which
+would have meant re-running the bridge over 220k blocks against a full node **to arrive at identical
+leaf values**, because only the encoding changed. `PackedHashes` now reads both shapes; nothing
+writes the legacy one, and the binary path is untouched. Verified against a real production bundle
+pulled off the box, not a fixture.
+
+**A stranger test** (#211). The README's own commands, run verbatim in a pristine container with no
+checkout, no cache and no keyring. Nothing else in CI looks at the *published* surface — the release
+assets, the live coordinator, the served wasm and the signing chain are all outside the repo, so any
+of them can break with every job green. Baseline before this cutover: **18 passed, 0 failed**,
+including the full trust chain (fingerprint from `SECURITY.md` → key from the publishing account →
+good signature → matching checksum).
+
+**The CUDA segment default was documented wrong** (#198). `seg_po2()` returns 21 on CUDA, not 22 —
+verified against the code. po2 21 peaks at ~22 GB; po2 22 at ~40.6 GB, and you only get it by setting
+`HAZYNC_SEG_PO2` explicitly.
+
+**Two operating modes, named** (#197), and **the aggregate taken apart** (#200) — including the
+correction that it measures **405.6 s** on two workers, not the 1,575 s that read as "impossible at
+any N".
+
+**`release.sh` phase 4 aborted on an unbound `$2`** (#212), right before the CUDA artifact check —
+the one artifact that cannot be verified by running it. Found by `--dry-run` preflighting this
+release.
+
 ## What this release does NOT touch
 
 - **No consensus logic.** The guest still runs Bitcoin Core's unmodified `VerifyScript`, sighash and
