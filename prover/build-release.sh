@@ -18,6 +18,32 @@
 #   NVCC multi-arch  Without explicit -gencode flags nvcc targets only the build box's GPU, and the
 #                    binary then fails on every other card. We ship sm_80/86/89/90 + compute_90 PTX.
 #
+# MEMORY: ⛔ BUILD THE CUDA ARTIFACT ON A BIG BOX. A SINGLE compiler process needs ~7.4 GB.
+#
+# Measured 2026-09-06, from the kernel log after two failed attempts:
+#
+#   Out of memory: Killed process (cicc)  total-vm:27436972kB  anon-rss:7351572kB
+#
+# That is ONE `cicc` compiling kernels/cuda/step_exec.cu — not many jobs competing. So capping
+# parallelism does NOT fix it: attempts at 16 jobs (2h19m) and 3 jobs (5h38m) died on the identical
+# file. Anything under ~10 GB of usable RAM cannot build this at any setting.
+#
+# It also does not report as a memory error. nvcc is SIGKILLed and cc-rs surfaces:
+#
+#   error occurred in cc-rs: command did not execute successfully (status code exit status: 137)
+#
+# 137 is 128+9 = SIGKILL. (The sibling DISK failure below reports 139 = SIGSEGV.) Neither names the
+# resource, which is why both are written down here.
+#
+# ⇒ Use the documented build host. coordinator/deploy/RUNBOOK.md §0: "Building host wants real
+#   RAM/CPU — a $10/mo box will choke. Build it once on a capable box."  The coordinator (62 GB)
+#   builds cpu in ~15 min and cuda without difficulty.
+#
+# CARGO_BUILD_JOBS is forwarded into the container anyway — useful for capping CPU or I/O contention
+# on a shared box, but it is NOT a remedy for the ceiling above:
+#
+#   CARGO_BUILD_JOBS=4 ./prover/build-release.sh cuda
+#
 # DISK: ~15 GB free is enough for `cpu`. It is NOT enough for `cuda` — measured 2026-08-02, a CUDA
 # build consumed ~18 GB and only completed with 25 GB free. Budget 25 GB for cuda.
 #
@@ -185,6 +211,7 @@ docker run --rm -v "$REPO:/hazync-zkvm" -e HOME=/root -e DEBIAN_FRONTEND=noninte
     -e "RECURSION_SRC_PATH=/hazync-zkvm/reproduce/vendor/recursion_zkr.zip" \
     -e "SKIP_GROTH16=${SKIP_GROTH16:-0}" ${RZUP_TIMEOUT:+-e "RZUP_TIMEOUT=$RZUP_TIMEOUT"} \
     -e "HAZYNC_PROVISION=$PROVISION_PHASE" \
+    ${CARGO_BUILD_JOBS:+-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"} \
     "${docker_args[@]}" "$IMAGE" bash -lc '
     set -e
     apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1
