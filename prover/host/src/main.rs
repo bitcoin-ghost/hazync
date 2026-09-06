@@ -740,6 +740,35 @@ fn build_full() -> (ChainState, BlockWitness) {
         cb.output.push(TxOut { value: Amount::from_sat(0), script_pubkey: ScriptBuf::from_bytes(vec![0xacu8; 30_001]) });
         w.coinbase_tx = serialize(&cb);
     }
+    if std::env::var("HAZYNC_TEST_BADSUBSIDY").is_ok() {
+        // Inflate the coinbase output by one satoshi over the allowed subsidy + fees → subsidy_ok=false.
+        // ONE satoshi on purpose: an obviously-huge value could be caught by an overflow guard rather
+        // than by the subsidy rule, which would make this test pass for the wrong reason.
+        let mut cb: Transaction = deserialize(&hx(cb_hex)).unwrap();
+        if let Some(o) = cb.output.first_mut() {
+            o.value = Amount::from_sat(o.value.to_sat().saturating_add(1));
+        }
+        w.coinbase_tx = serialize(&cb);
+    }
+    if std::env::var("HAZYNC_TEST_BADMERKLE").is_ok() {
+        // Flip one bit of the header's merkle root → merkle_ok=false. The guest recomputes the root
+        // from the txids it was given, so this is the check that the header is BOUND to the block body.
+        w.header[36] ^= 0x01;
+    }
+    if std::env::var("HAZYNC_TEST_BADPOW").is_ok() {
+        // Flip a nonce bit → the block hash no longer meets the target → pow_ok=false.
+        w.header[76] ^= 0x01;
+    }
+    if std::env::var("HAZYNC_TEST_BADBIP34").is_ok() {
+        // BIP34 requires the coinbase scriptSig to begin with a push of the block height. Corrupt the
+        // pushed height (not the opcode) → bip34_ok=false above the activation height.
+        let mut cb: Transaction = deserialize(&hx(cb_hex)).unwrap();
+        if let Some(i) = cb.input.first_mut() {
+            let mut b = i.script_sig.to_bytes();
+            if b.len() > 2 { b[1] ^= 0x01; i.script_sig = ScriptBuf::from_bytes(b); }
+        }
+        w.coinbase_tx = serialize(&cb);
+    }
     (anchor, w)
 }
 
