@@ -4,7 +4,26 @@
 > re-proving the frontier) has to happen with the tag, because this release **moves `METHOD_ID`**.
 
 **`METHOD_ID` 1d6c3792… → 3867611d…**, so every proof published under the old id must be re-proved.
-That is not incidental to this release, it is the release: the guest's field arithmetic changed.
+
+> ## ⛔ READ THIS FIRST: v0.20.0 ships the STOCK guest, not Core and not Ghost
+>
+> The acceleration below is **measured and merged, and it is NOT ENABLED in this release.** Every
+> guest lever defaults to off, and neither `reproduce/Dockerfile` nor `provision-vps.sh` turns one on.
+> Verified in the shipped binary — none of `hazync_fq_mul_limbs`, `hazync_lift_x_hint`,
+> `hazync_ecmult_verify` or `hazync_scalar_inverse` is present.
+>
+> **So proving speed is unchanged by this release.** The board runs at stock cost (~29 cards to hold
+> tip), not Core's 10.
+>
+> `METHOD_ID` moved because the guest SOURCE changed — files added, line numbers shifted — which is
+> enough on its own: the id is a hash of the whole build. It did not move because a lever was armed.
+>
+> **Shipping Core would be a separate re-baseline**, with its own `METHOD_ID`, its own cutover and
+> every existing proof invalidated again. The speed is not free; it costs a board reset. That is a
+> deliberate decision still to be taken, not an oversight.
+
+That framing matters for everything below: the field backend is the *work* in this release, not the
+*configuration* of it.
 
 > **Provenance.** Every figure below is one the repo or its git history can show. Cycle figures cite
 > `docs/FIELD_BIGINT2_BACKEND.md` or the commit that measured them; card counts and stragglers cite
