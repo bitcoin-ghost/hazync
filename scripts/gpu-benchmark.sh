@@ -91,8 +91,19 @@ for i in $(seq 0 15); do
   # (5 in 293 proves, every one recovering). Without a retry one occurrence loses a chunk, and then
   # agg-chunks cannot run at all. Retry ONLY that fault: an OOM or a malformed segment fails
   # identically every time and retrying wastes the card for three times as long.
-  RC=1
+  # ⛔ TIME THE SUCCESSFUL ATTEMPT, not the retry loop. #119 makes the prover emit a succinct receipt
+  # that fails its own verify() — transient, ~1 in 32, and it recovers on retry. The retry is
+  # transparent to the caller but NOT to the measurement: timing the whole loop charges the chunk for
+  # a wasted prove as well as a good one.
+  #
+  # MEASURED 2026-09-05: a chunk that hit #119 recorded 171 s for 35 segments = 4.89 s/segment, where
+  # all 31 other chunk timings across two boxes sat at 2.4-3.0. Re-run clean, twice: 94 s. That single
+  # figure inverted a packer-calibration verdict — 1.567x ("worse than doing nothing") against 1.189x
+  # measured correctly. On a straggler metric it is the worst possible chunk to inflate, because the
+  # straggler IS the maximum.
+  RC=1; ATT_T0=$SECONDS
   for ATT in 1 2 3 4; do
+    ATT_T0=$SECONDS   # reset per attempt: only the winning one is the chunk's cost
     # An ARRAY, not a word-split string: `export $COSTS` relied on splitting and shellcheck flagged
     # it (SC2163). The `${a[@]+...}` form is what keeps an EMPTY array from expanding to one empty
     # argument, which `export` would reject -- Ghost deliberately passes no overrides at all.
@@ -104,11 +115,24 @@ for i in $(seq 0 15); do
     echo "  [#119] chunk $i: invalid receipt on attempt $ATT, retrying" | tee -a "$OUT/run.log"
   done
   kill $SMI 2>/dev/null
-  WALL=$((SECONDS-T0)); PEAK=$(sort -n "$OUT/vram_$i.log" 2>/dev/null | tail -1)
-  echo "chunk=$i rc=$RC wall_s=$WALL peak_vram=$PEAK" | tee -a "$OUT/results.tsv" | tee -a "$OUT/run.log"
+  # wall_s      = the successful attempt — what the straggler and every card count must use
+  # wall_total_s = including any #119 retries — the real wall-clock cost, kept so the tax is visible
+  WALL=$((SECONDS-ATT_T0)); WALL_TOTAL=$((SECONDS-T0))
+  PEAK=$(sort -n "$OUT/vram_$i.log" 2>/dev/null | tail -1)
+  echo "chunk=$i rc=$RC wall_s=$WALL wall_total_s=$WALL_TOTAL peak_vram=$PEAK" | tee -a "$OUT/results.tsv" | tee -a "$OUT/run.log"
   [ $RC -eq 0 ] || say "  ⚠ chunk $i FAILED rc=$RC — see $OUT/prove_$i.log"
 done
-# the straggler, from WALL-CLOCK rather than cycles -- the whole point of running on a GPU
+# the straggler, from WALL-CLOCK rather than cycles -- the whole point of running on a GPU.
+#
+# ⚠ This splits on `wall_s=` while the same line also carries `wall_total_s=`. That is SAFE and was
+# checked, not assumed: "wall_total_s=" does not contain "wall_s=" (after `wall_` comes `t`). If the
+# total field is ever renamed to something ending in `wall_s=`, this silently starts reporting the
+# retry-inflated number -- which is the exact bug this change exists to remove. The self-test below
+# fails loudly if that ever becomes true.
+_rt=$(printf 'chunk=0 rc=0 wall_s=107 wall_total_s=171 peak_vram=1 MiB\n' \
+      | awk -F'wall_s=' '/wall_s=/{split($2,a," ");print a[1]}')
+[ "$_rt" = "107" ] || die "straggler parser picked '$_rt', not 107 -- it is reading wall_total_s"
+
 awk -F'wall_s=' '/wall_s=/{split($2,a," ");w[n++]=a[1];s+=a[1];if(a[1]>m)m=a[1]}
   END{if(n)printf "  MEASURED straggler: max %d vs mean %.0f = %.3fx over %d chunks\n",m,s/n,m/(s/n),n}'   "$OUT/results.tsv" | tee -a "$OUT/run.log"
 
