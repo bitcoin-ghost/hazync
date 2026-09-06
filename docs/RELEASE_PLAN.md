@@ -150,6 +150,29 @@ This section was written when `85dc0b56…` was staged *ahead of* a board still 
 it describes that hazard, which is the general one: while the two disagree, deploying either half
 early makes the public surface reject the public board:
 
+> ## ✅ DONE — the `3867611d` cutover completed 2026-09-06
+>
+> v0.20.0 published, signed and `latest`; the coordinator, the served wasm and the board all moved
+> together. Verified from OUTSIDE by `scripts/stranger-test.sh` against the live site: **18 passed,
+> 0 failed**, including a stranger downloading the released verifier and checking the chain under the
+> new guest with the PGP trust chain intact.
+>
+> | surface | after |
+> |---|---|
+> | `/hazync/api/meta` | `3867611d`, frontier rebuilding from 0 |
+> | served `hazync-verify.wasm` | `3867611d`, checksum matches the SIGNED manifest |
+> | board / proofs / spine / host binary | all retired as `*.1d6c3792` — moved, not deleted |
+>
+> ⚠ The stale **spine file** was the last thing to catch: `/var/lib/hazync/spine/spine.{bin,json}` is
+> served independently of the DB, so resetting the board left the site still handing out a `[1..939]`
+> proof the new verifier rejects. Retire it with the board, or the site accuses its own proof.
+>
+> ⚠ Start workers only AFTER the coordinator moves (hazync#99: the id is checked at STARTUP only), and
+> set the identity BEFORE they start — a fresh box generates a throwaway key and credits blocks to
+> `ghost:<pubkey[:6]>`. Rescued identities live in `secrets/`.
+
+The pre-cutover record, kept because the sequencing is the reusable part:
+
 **MEASURED LIVE 2026-09-05.** Every public surface is coherent on the OLD id and the repo is coherent
 on the new one — which is the clean state to cut from, not a fault:
 
