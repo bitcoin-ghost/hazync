@@ -48,8 +48,13 @@ esac
 # produced "contributor CLI not found next to this script". Accept either.
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI=""
+# ⛔ -f AS WELL AS -x. `[ -x dir ]` is TRUE for a directory, and a checkout of this repo sitting at
+# $_here/hazync is exactly that — so this picked the DIRECTORY and every worker span forever on
+# "./hazync: Is a directory". Measured 2026-09-06: six workers across two GPU boxes, zero blocks
+# proved, and the loop kept restarting so it looked alive. Same collision the comment above
+# describes ("hazync alone is too generic a name"), one step further: it collides with a directory.
 for _n in hazync-worker hazync; do
-    [ -x "$_here/$_n" ] && { CLI="$_here/$_n"; break; }
+    [ -f "$_here/$_n" ] && [ -x "$_here/$_n" ] && { CLI="$_here/$_n"; break; }
 done
 [ -n "$CLI" ] || CLI="$_here/hazync"      # keep the old path for the error message below
 
