@@ -104,10 +104,36 @@ if command -v gh >/dev/null; then
     #
     # Requiring a PASS rather than merely "no failures" keeps the audit-#6 property that made this
     # check exist: zero runs and all-green must not look the same.
+    # ⛔ `deployed-verifier` tests the LIVE SITE, not this commit, and it is red BY CONSTRUCTION
+    # between a re-baseline and its cutover: the repo carries the new guest while bitcoinghost.org
+    # still serves the old one. The cutover needs the wasm from the release this gate is guarding, so
+    # counting that job made every re-baseline release unreachable — the exact shape as the
+    # `cancelled` bug above, where a run that cannot have a useful opinion was given one.
+    #
+    # Its failure is still REPORTED below, because after the cutover it is a genuine regression.
+    IGNORABLE_JOB='deployed-verifier'
     Q() { gh run list --limit 40 --json headSha,conclusion \
           --jq "[.[]|select(.headSha==\"$HEAD_SHA\")|select($1)]|length" 2>/dev/null || echo "?"; }
+    # A failed run counts UNLESS every job that failed in it is ignorable.
+    run_is_ignorable() {
+        local jobs; jobs=$(gh api "repos/{owner}/{repo}/actions/runs/$1/jobs" \
+            --jq '[.jobs[]|select(.conclusion=="failure")|.name]|join(" ")' 2>/dev/null) || return 1
+        [ -n "$jobs" ] || return 1
+        for j in $jobs; do [ "$j" = "$IGNORABLE_JOB" ] || return 1; done
+        return 0
+    }
     PASS=$(Q '.conclusion=="success"')
-    BAD=$(Q '.conclusion|IN("failure","timed_out","startup_failure","action_required")')
+    BAD=0
+    for rid in $(gh run list --limit 40 --json headSha,conclusion,databaseId \
+                 --jq "[.[]|select(.headSha==\"$HEAD_SHA\")|select(.conclusion|IN(\"failure\",\"timed_out\",\"startup_failure\",\"action_required\"))|.databaseId][]" 2>/dev/null); do
+        if run_is_ignorable "$rid"; then
+            echo "  --   run $rid failed only in '$IGNORABLE_JOB' — that job tests the LIVE SITE and is"
+            echo "       expected to be red until this release is deployed. Not counted."
+        else
+            BAD=$((BAD+1))
+        fi
+    done
+    [ "$PASS" = "?" ] && BAD="?"
     if [ "$PASS" = "?" ] || [ "$BAD" = "?" ]; then
         echo "  --   could not read CI status (continuing)"
     elif [ "$BAD" != "0" ]; then
