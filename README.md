@@ -123,10 +123,10 @@ receipt at every configuration. Roughly thirty cards would bring it under ten mi
 only the segment in front of it, so it cannot forge a receipt, only fail to return one.
 [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
 
-The board **resets with this release**, as it does at every re-baseline: guest `1d6c3792` (2026-08-23)
-supersedes `b62d2a60` (2026-08-04, audit #5), because `validate_block` was restructured to do
-per-transaction work once per transaction rather than once per input: 3,455 M cycles down to 955 M,
-with Core's consensus code untouched. Changing the guest at all is what costs a reset: the id is what
+The board **reset with v0.20.0**, as it does at every re-baseline: guest `3867611d` (2026-09-06)
+supersedes `1d6c3792` (2026-08-23), because the coprocessor field backend changed how libsecp does
+256-bit modular arithmetic — 13,748 M cycles down to 3,584 M for the backend alone — with Core's
+consensus code untouched and the journal digest byte-identical to a stock control. Changing the guest at all is what costs a reset: the id is what
 makes a proof checkable, so a proof made under the old guest cannot verify under the new one.
 
 The board is open and anyone can join. Whatever figure it shows is not seventeen years of
