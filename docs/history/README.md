@@ -27,6 +27,9 @@ For what is true now, see [`../README.md`](../README.md).
 | `MODELS.md` | the original Core/Ghost framing | superseded by `../CORE_VS_GHOST.md` |
 | `STACK_INTEGRATION_PLAN.md` | the four-lever stack plan | executed; results in `../CORE_VS_GHOST.md` |
 | `BIGINT2_MIDDLE_PATH.md` | #139 middle vs wholesale | decided: middle path |
+| `EXPERIMENT_139_BIGINT2.md` | the #139 trial harness | landed from `exp/139-bigint2-middle-path` |
+| `HELIX_DUAL_BACKEND.md` | one guest, both backends, height-gated | verdict: probably not needed |
+| `GHOST_GAINS.md` | every remaining Ghost gain, priced | superseded in part by `GHOST_NEXT_BUILD.md` |
 | `MSM_BATCH_VERIFY.md` | Pippenger batch verification | **rejected on measurement** — 4.3x at chunk scale, worth one card |
 | `PERF_INVESTIGATION_2026-08-26.md` | the perf investigation | dated |
 | `TIER0_RESULTS_2026-08-26.md` | Tier 0 codegen results | dated; the wins shipped |

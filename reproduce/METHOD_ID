@@ -448,3 +448,6 @@
 #   70fc6484…  stack (`feat/stack-integration`) arm of the same A/B
 #              Both in docs/history/STACK_INTEGRATION_PLAN.md. All 32 journal digests were
 #              byte-identical across the pair; the ids DIFFER, which was the point of the test.
+#   db79b63b…  the S and P arms of the three-arm A/B in docs/history/GHOST_GAINS.md. S and P SHARE
+#              this id because #190 is host-only — which is itself the evidence that the packer
+#              changed the partition and not the computation.
