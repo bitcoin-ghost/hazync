@@ -63,7 +63,10 @@ if [ ! -f "$OVERLAY/serialize.h" ]; then
 fi
 
 FLAGS=(-std=c++20 -fexceptions -fno-rtti -O3 -w -I"$OVERLAY" -I"$SHIM" -I"$CORE" -I"$SECP/include")
-[ "${ASAN:-0}" = 1 ] && FLAGS+=(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+# The comma in -fsanitize=address,undefined belongs to the FLAG, not to the array. Unquoted it
+# is read as an element separator (SC2054). NB a comment whose first word is the linter's name is
+# parsed as a DIRECTIVE (SC1072/SC1073), which is why this sentence is phrased around it.
+[ "${ASAN:-0}" = 1 ] && FLAGS+=("-fsanitize=address,undefined" -fno-omit-frame-pointer -g)
 
 echo "== compiling $(( ${#TUS[@]} )) Core TUs for the host =="
 objs=()
