@@ -27,7 +27,10 @@
 > bitcoinghost.org use the **release binary** or the reproducible build.
 >
 > ⚠ Promoting a channel is never just a flag. It is a new `METHOD_ID`, a full cutover, and **every
-> existing proof invalidated** — v0.21.0 spent 1,586 blocks of board to do it. The speed is not free.
+> existing proof invalidated** — v0.21.0 spends the WHOLE board to do it. The speed is not free.
+> ⚠ Do not quote a block count here: the board keeps proving until the cutover lands, so any figure
+> is stale the moment it is written. Measured 7,852 at 2026-09-07 09:56Z and climbing ~10/min;
+> the real cost is whatever `/api/meta` reports the instant the swap happens.
 >
 > `provision-vps.sh` says the same of the Ghost lever: *"a box provisioned with this must never
 > produce a shipped proof. This box is for benchmarking only."*

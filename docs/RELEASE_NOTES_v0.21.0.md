@@ -5,7 +5,9 @@ every lever off; the README meanwhile said *"CORE — what ships"* and *"Core is
 gap is what this release closes. Nothing about the claim changed — the build finally matches it.
 
 ⛔ **This is a re-baseline. Every proof published under `3867611d…` is invalid**, and the board
-reset from 1,586 blocks to zero. That is not a side effect to apologise for, it is what a new guest
+resets to zero from whatever it has reached — 7,852 blocks measured 2026-09-07 09:56Z, and still
+climbing, so treat that as a reading and not a final cost. That is not a side effect to apologise
+for, it is what a new guest
 *means*: a verifier pinned to a new image id cannot accept a proof produced by a different one.
 
 > ⏰ **Canonical `METHOD_ID`: `37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd`**
