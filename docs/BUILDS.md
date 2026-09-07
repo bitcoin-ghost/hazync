@@ -146,8 +146,28 @@ backend arm's derived baseline is 1.469 (§2, and the value `scripts/gpu-benchma
 MEASURED default-constants straggler is **1.438** (§1). The regression is real on any of the three —
 they are quoted here so a reader is not left reconciling two numbers for one claim. The likely cause is rescaling Ghost's Schnorr constant by the old
 13.77x ECDSA ratio, when the hint removes decompression from *both* curves — taproot key-path spends
-call `lift_x` too — so that ratio should have narrowed. **Ghost needs its own calibration; it does
-not have one.**
+call `lift_x` too — so that ratio should have narrowed.
+
+✅ **Ghost DOES now have its own calibration — measured 2026-09-05, two L40S, real GPU proving on
+block 962,000.** The predicted narrowing is confirmed: the fitted Schnorr:ECDSA ratio is **1.97x**,
+not the old 13.77x.
+
+```
+HAZYNC_COST_EC_OP=85636  HAZYNC_COST_SCHNORR_OP=168542
+HAZYNC_COST_INPUT_BYTE=2 HAZYNC_COST_INPUT_BASE=53162
+```
+
+| arm | straggler | max | mean |
+|---|---|---|---|
+| shipped defaults | 1.462x | 149 s | 102 s |
+| Ghost refit | **1.189x** | 124 s | 104 s |
+
+⚠ These are GHOST's constants and they are NOT Core's (§2). Neither set transfers: Core's refit
+moves Ghost 1.407 → 1.884, about a card. Each channel carries its own fit, and a build that takes
+the wrong one is worse off than one that takes none.
+
+⚠ The card arithmetic was not re-derived — read this as "the ≤1.35 straggler target of §4.2 is
+met", not as a card count.
 
 ✅ **#139 and the field backend are orthogonal and stack**: 10.676x → 11.467x, +7.4%. They accelerate
 different things — #139 replaces `secp256k1_ecmult`; the field backend replaces the representation
