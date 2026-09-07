@@ -38,3 +38,8 @@ verifier-wasm/*.wasm
 
 # fetch_block*.py sidecar cache — regenerated, never committed
 prover/block_*.json.meta2.json
+
+# Scratch build tree for the native differential/memsafety fuzz harnesses (object files,
+# libcoreconsensus.a, ASan binaries). Regenerated on demand; nothing in the repo references it.
+# 63 of these were one `git add -A` away from being committed on 2026-09-06.
+fuzz-native/

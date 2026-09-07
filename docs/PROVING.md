@@ -137,18 +137,21 @@ at a hardcoded rung (which on CPU would waste a duplicate attempt at the size th
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
 either way.
 
-**Releases.** The current release ships `METHOD_ID 3867611d`, pinned on 2026-09-04 by the
-**parallel block validation** re-baseline: `validate_block` restructured so per-transaction work is
-done once per transaction rather than once per input, cutting it from 3,455 M to 955 M cycles, with
-the coin leaves, sequence numbers and wtxids it needs now arriving from the chunks that already
-computed them. Core's consensus code is unchanged — the saving is in what surrounds it.
+**Releases.** The current release ships `METHOD_ID 37987b85`, pinned on 2026-09-06 by the
+**Core-becomes-canonical** re-baseline: patches `0012` (the `field_bigint2` coprocessor backend) and
+`0013` (`lift_x` via a verified witness hint) are now applied unconditionally by `provision-vps.sh`,
+so the guest that ships is the one the README calls CORE. Until this id they were benchmark-only
+levers that no canonical build turned on. Block 962,000 commits the same journal as the superseded
+guest — byte-identical, `all_valid=1`, `binds=8006` — at 3,357,576,338 cycles against its
+13,748,003,793. Core's consensus code is unchanged; what moved is how libsecp does 256-bit modular
+arithmetic.
 
 `b62d2a60` (2026-08-04, the **audit #5** re-baseline: guest index guards on `coin_leaf`, a
 32-bit-safe overflow check in `coinbase_value`, and a missing `return true` whose absence was
 undefined behaviour on a leaf-commitment path) is **superseded**. A verifier pinned to it will
 reject proofs from this release, and vice versa — the id is what makes a proof checkable, so a
 re-baseline is a hard cut rather than an upgrade. Only a proof
-made against `4722cec8` verifies today.
+made against `37987b85` verifies today.
 
 It is worth being precise about the chain of guests behind it, because each one reset the board and it
 is easy to attribute the current id to the wrong change:
@@ -161,7 +164,8 @@ is easy to attribute the current id to the wrong change:
 | `b161735a` | 2026-08-04 | the id stopped depending on where the repo is checked out (#88) |
 | `b62d2a60` | 2026-08-04 | audit #5 |
 | `1d6c3792` | 2026-08-23 | parallel block validation |
-| **`3867611d`** | **2026-09-04** | **the coprocessor field backend — current** |
+| `3867611d` | 2026-09-04 | the coprocessor field backend (benchmark-only; the shipped guest was still stock) |
+| **`37987b85`** | **2026-09-06** | **Core becomes the guest that ships — current** |
 
 `reproduce/METHOD_ID` carries the full reasoning for each. v0.13.0 added the two things that let volunteered
 compute accumulate rather than pile up: an **incremental genesis-anchored spine**
@@ -248,7 +252,7 @@ proof before recording it, so a bad proof never lands on the board.
 
 The guest image id is **independent of the host proving backend** — the CPU and CUDA host binaries embed
 the same guest ELF — so the CPU-only `reproduce/Dockerfile` attests the canonical id
-(`3867611d…`, the current guest) for **both** the CPU and CUDA release binaries.
+(`37987b85…`, the current guest) for **both** the CPU and CUDA release binaries.
 
 ## SNARK wrap (optional, for cheap universal verification)
 
@@ -330,7 +334,7 @@ It runs the build at `HOME=/root` inside `ubuntu:22.04`, passes the multi-arch N
 you publish. The repo is bind-mounted, so `prover/target` persists and a host-only change rebuilds just
 the host crate rather than the guest and CUDA kernels again. The notes below are what it automates.
 
-Both published binaries must print the canonical `METHOD_ID` (`3867611d…`); the guest id is reproducible,
+Both published binaries must print the canonical `METHOD_ID` (`37987b85…`); the guest id is reproducible,
 the host bytes need not be. Build both in a container so the binary links against **glibc 2.34** (Ubuntu
 22.04) and runs on older distros:
 

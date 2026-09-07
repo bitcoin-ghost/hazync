@@ -8,9 +8,12 @@ gap is what this release closes. Nothing about the claim changed — the build f
 reset from 1,586 blocks to zero. That is not a side effect to apologise for, it is what a new guest
 *means*: a verifier pinned to a new image id cannot accept a proof produced by a different one.
 
-> ⏰ **Canonical `METHOD_ID` for this release: _pending_** — filled in from the reproducible Docker
-> build (`reproduce/METHOD_ID`), never from a developer laptop. Until that lands this file is a
-> draft and the release is not cuttable.
+> ⏰ **Canonical `METHOD_ID`: `37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd`**
+> (supersedes `3867611d…`). Produced by **three independent builds that agree** — a GitHub runner, a
+> `docker build -f reproduce/Dockerfile .` on the coordinator, and a direct `provision-vps.sh` build
+> on an L40S box. A laptop build yields `05a5a279…`; that is not drift, it is the id absorbing
+> `$HOME/.cargo` and `$HAZYNC_BASE` paths — which is exactly why the canonical id comes from the
+> container and never from a developer machine.
 
 ---
 

@@ -143,8 +143,14 @@ These are the items where being wrong costs money already spent.
 
 ## Re-baseline: what must move together
 
-The canonical guest is `3867611d…` (the coprocessor field backend re-baseline, 2026-09-04), and the
+The canonical guest is `37987b85…` (the Core-becomes-canonical re-baseline, 2026-09-06), and the
 live board must serve it — the two cut over together.
+
+⏰ **That cutover has NOT happened yet.** The live coordinator still serves `3867611d…` with 1,586
+blocks proven against it. The release, the coordinator swap, the wasm deploy and the board reset are
+ONE step. Until they land, the scheduled `deployed-verifier` job is EXPECTED to fail, because the
+browser verifier the site serves is pinned to the superseded id — that is the gate working, not drift.
+The `3867611d` record below is the PREVIOUS cutover, kept because the sequencing is the reusable part.
 
 This section was written when `85dc0b56…` was staged *ahead of* a board still serving `3f52baff`, and
 it describes that hazard, which is the general one: while the two disagree, deploying either half
