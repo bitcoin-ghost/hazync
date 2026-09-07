@@ -39,7 +39,12 @@ verifier-wasm/*.wasm
 # fetch_block*.py sidecar cache — regenerated, never committed
 prover/block_*.json.meta2.json
 
-# Scratch build tree for the native differential/memsafety fuzz harnesses (object files,
-# libcoreconsensus.a, ASan binaries). Regenerated on demand; nothing in the repo references it.
-# 63 of these were one `git add -A` away from being committed on 2026-09-06.
-fuzz-native/
+# Build output for the native differential/memsafety fuzz harnesses. A `git add -A` staged 63 of
+# these on 2026-09-06 and they were one commit from landing.
+# ⚠ Ignore the two OUTPUT trees, never `fuzz-native/` itself — hazync#222 tracks the harness
+# SOURCES there (build.sh, differential.cpp, memsafety.cpp, mkcorpus.py, realvector.cpp) and a
+# blanket ignore would hide them silently.
+# NB: hazync#222 adds `fuzz-native/build/` too. If that lands first this conflicts trivially —
+# resolve by keeping ONE copy of each line, not by dropping either.
+fuzz-native/build/
+fuzz-native/build-asan/
