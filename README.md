@@ -67,6 +67,9 @@ being the constraint — it exists to price that trade honestly, not to replace 
 > This project has repeatedly been wrong by believing a projection, and the corrections are recorded
 > rather than edited out. **If a figure does not say how it was obtained, treat it as a projection.**
 > [`docs/BUILDS.md`](docs/BUILDS.md) is the authority on what each mode costs.
+> ⛔ **Neither mode is what ships, and neither can contribute to the board** — both change the
+> guest, so both carry a different `METHOD_ID` and the coordinator rejects their proofs. Use the
+> release binary to contribute; those builds exist to measure.
 
 ---
 

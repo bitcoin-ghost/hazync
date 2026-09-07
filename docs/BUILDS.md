@@ -1,5 +1,26 @@
 # The two builds
 
+> ## ⛔ NEITHER OF THESE SHIPS, AND NEITHER CAN CONTRIBUTE TO THE BOARD
+>
+> The released binary is the **stock** guest. Both recipes below change guest source, so both produce
+> a **different `METHOD_ID`** — and the coordinator re-verifies every submission against its own:
+>
+> ```
+> receipt rejected: your prover's guest image id (METHOD_ID) does not match this
+> coordinator's — you built a different guest.
+> ```
+>
+> So a worker running a Core or Ghost build proves into rejections, indefinitely, and
+> `run-workers.sh` only checks the id at STARTUP (hazync#99). If you want to contribute to
+> bitcoinghost.org, use the **release binary** or the reproducible build — not these.
+>
+> These recipes exist to MEASURE what acceleration is available and at what fidelity cost. Making one
+> of them the shipped guest is a re-baseline decision: a new `METHOD_ID`, a full cutover, and every
+> existing proof invalidated. The speed is not free.
+>
+> `provision-vps.sh` says the same of the Ghost lever: *"a box provisioned with this must never
+> produce a shipped proof. This box is for benchmarking only."*
+
 ⏰ **Pinned 2026-09-01** against `feat/liftx-accel`. Everything here was measured in **execute mode
 on one laptop** — CPU only, no GPU — on block 962,000, single chunk, against a stock control built
 from the same tree. ⛔ **Wall-clock and therefore card counts are DERIVED, not measured.** Section 4
