@@ -1784,55 +1784,48 @@ fn prove_seg() {
 
 /// Runtime override for a packing constant.
 ///
-/// ⛔ These constants are CALIBRATED PER BUILD MODE and the defaults are #139's. `COST_PER_EC_OP`
-/// (141,612) prices an ECDSA verify that #139 has accelerated, and `COST_PER_SCHNORR_OP` is 13.8x
-/// higher because #139 does not touch Schnorr. **Core mode has no #139**: the coprocessor field
-/// backend accelerates both curves equally, so that split is wrong there, and so is the absolute
-/// scale. MEASURED on block 962,000 with the field backend, least squares over 32 chunk executions:
+/// ⛔ These constants are CALIBRATED PER BUILD MODE, and since v0.21.0 the defaults are **CORE's**
+/// — the canonical channel (hazync#225). They are the PER-CURVE fit of 2026-09-01, measured on
+/// block 962,000 with the field backend over 32 chunk executions, and they took the straggler
+/// 1.311 -> 1.210 (8.89 -> 8.28 cards). Core's cost fits this shape at 6.6% mean error.
 ///
-/// ```text
-/// cycles = 450,020*ec + 1.27*bytes + 37,946*inputs + 3,292,850     mean |error| 5.0%
-/// ```
+/// ⚠ They are WRONG for the other two channels, and not mildly: the same refit moves Ghost's
+/// straggler 1.407 -> 1.884, about a card, because Ghost's cost is NOT close to linear in
+/// `(ecdsa, schnorr, bytes, inputs)` — 15.2% mean error. A Ghost or stock build must override.
 ///
-/// against defaults of 141,612 / 6 / 34,000 -- EC 3.2x too low, bytes 4.7x too high. The packer
-/// balances its own predictor perfectly, so a wrong predictor does not show up as a bad straggler
-/// number, it shows up as a bad BLOCK: real chunk cycles spanned 33.6 M to 352 M across chunks the
-/// model priced identically at 125.4 M, a straggler of 1.563x -- WORSE than not packing at all.
+/// The previous defaults were #139's: EC 141,612 with Schnorr 13.8x higher, because #139
+/// accelerates ECDSA only. **Core has no #139** — its field backend accelerates both curves, and
+/// the per-curve fit measured the residual difference between them at just 1.11x.
+///
+/// Why a wrong predictor is dangerous rather than merely suboptimal: the packer balances its own
+/// predictor perfectly, so the error never surfaces as a bad straggler number — it surfaces as a
+/// bad BLOCK. Under the old defaults real chunk cycles spanned 33.6 M to 352 M across chunks the
+/// model priced identically at 125.4 M: a straggler of 1.563x, WORSE than not packing at all.
 ///
 /// Host-side only. Nothing here reaches the guest, so none of it moves METHOD_ID.
 fn cost_const(var: &str, default: u64) -> u64 {
     std::env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
-const COST_PER_EC_OP: u64 = 141_612;
-/// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA even though the two are equal
-/// today. #139 accelerates ECDSA only -- Schnorr keeps running libsecp's BIP340 code -- so after it
-/// lands these diverge by ~13.8x (ECDSA ~141,612, Schnorr 1,950,000). A packer that cannot see that
-/// divergence does not merely balance badly: a block's wall-clock is its SLOWEST chunk, and simulated
-/// on block 962,000 (only 2.7% Schnorr, the mildest case available) a blind packer turns #139's 6.95x
-/// into 2.95x. The fidelity is spent either way, so the missing dimension is worth 2.36x.
+const COST_PER_EC_OP: u64 = 417_798;
+/// Schnorr (BIP340) verification cost, tracked SEPARATELY from ECDSA.
 ///
-/// Keeping the two constants EQUAL means this change is a no-op today, provably: same costs, same
-/// partition, same chunks. #139 then becomes a one-line edit to COST_PER_EC_OP rather than a packer
-/// project, and the packer work does not have to wait on the fidelity decision.
-// ⚠ RE-DERIVED once G3 (patches/0006) put Schnorr through the SAME bigint2 accelerator as ECDSA.
-// The 13.8x divergence this constant existed to model is a property of accelerating ONE curve; with
-// both accelerated the costs converge again. Leaving it at 1,950,000 makes the packer starve
-// taproot-heavy chunks of inputs for a cost that is no longer there.
-// ⛔ REVERTED to 1,950,000 after measurement. Setting it equal to COST_PER_EC_OP was the obvious
-// inference once G3 put Schnorr through the same accelerator -- and it is WRONG on the only evidence
-// available. Measured on block 962,000: identical builds, this constant the only difference,
-// straggler 1.361 -> 1.539 and the block total barely moved, which costs a whole card.
-//
-// The likely reason is that Schnorr is NOT at ECDSA parity even accelerated: it still pays lift_x
-// through xonly_pubkey_load and the tagged challenge hash on top of the shared double-scalar-mul.
-// 93 of the block's 145 Schnorr inputs sit in one chunk, so repricing them 1.95 M -> 141 k drops that
-// chunk's predicted cost by ~168 M and the packer over-loads it.
-//
-// ⚠ 1,950,000 is not RIGHT either -- it is the pre-#139 stock ECDSA cost, and it now happens to pack
-// better. The honest value needs a profile of a G3 build, which does not exist yet. Do not read this
-// constant as a measurement of anything.
-const COST_PER_SCHNORR_OP: u64 = 1_950_000;
+/// The split is load-bearing: a block's wall-clock is its SLOWEST chunk, so a packer blind to the
+/// curve mix over-loads taproot-heavy chunks. Simulated on block 962,000 — only 2.7% Schnorr, the
+/// mildest case available — a blind packer turns #139's 6.95x into 2.95x.
+///
+/// CORE (canonical; this default): the per-curve fit measured Schnorr at **1.11x** ECDSA, 462,435
+/// against 417,798. Not parity — Schnorr still pays lift_x through xonly_pubkey_load and the
+/// tagged challenge hash on top of the shared double-scalar-mul — but nothing like the 13.8x of a
+/// one-curve accelerator, because Core's field backend speeds up both.
+///
+/// ⚠ GHOST history, kept because it remains a live trap there. Under #139 this sat at 1,950,000
+/// (13.8x). Once G3 (patches/0006) put Schnorr through the SAME bigint2 accelerator, setting it
+/// EQUAL to COST_PER_EC_OP was the obvious inference — and MEASURED WORSE: straggler 1.361 ->
+/// 1.539, a whole card. 93 of the block's 145 Schnorr inputs sit in one chunk, so repricing them
+/// down made the packer over-load it. 1,950,000 was not RIGHT either, merely the pre-#139 stock
+/// ECDSA cost that happened to pack well. Ghost still has no honest fit — docs/BUILDS.md §3.
+const COST_PER_SCHNORR_OP: u64 = 462_435;
 
 /// What a verify costs when its public key was ALREADY decompressed earlier in the same chunk.
 ///
@@ -1845,11 +1838,19 @@ const COST_PER_SCHNORR_OP: u64 = 1_950_000;
 /// 254 M, scalar inverse 147 M ⇒ the decompression a memo hit avoids is 26.4% of per-verify EC work,
 /// so a repeat costs ~0.736 of a fresh key. On block 962,000, 6,913 verifying inputs use only 2,160
 /// distinct keys, so 68.8% of inputs take this discount.
+///
+/// ⛔ NOT refit for Core, deliberately. 104,222 came from a post-G1 (#139) profile as 0.736 of a
+/// fresh key, and Core's liftx hint (patches/0013) removes most of the decompression that discount
+/// exists to price — so the true Core ratio is very likely nearer parity. It is left alone because
+/// the straggler 1.210 that justifies this channel was MEASURED with this value; changing it would
+/// invalidate that measurement. Refitting it is open work, not a shipping blocker.
 const COST_PER_EC_OP_REPEAT: u64 = 104_222;
-// An input that verifies no signature still costs something to read, deserialise and hash. Measured at
-// ~34K cycles on block 962,000's anchor spends, against ~1,953K for a P2WPKH.
-const COST_INPUT_BASE: u64 = 34_000;
-const COST_PER_INPUT_BYTE: u64 = 6;
+// An input that verifies no signature still costs something to read, deserialise and hash.
+// CORE per-curve fit (2026-09-01): 41,387 fixed cycles per input, 2 cycles per witness byte.
+// ⚠ The byte term moves 6 -> 2 and the base 34,000 -> 41,387. With the EC term corrected upward
+// (141,612 -> 417,798 — it was 3.2x too low) the fit shifts weight off bytes and onto inputs.
+const COST_INPUT_BASE: u64 = 41_387;
+const COST_PER_INPUT_BYTE: u64 = 2;
 
 /// Signature verifications an input performs, split by CURVE rather than merely counted.
 ///

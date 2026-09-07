@@ -101,7 +101,8 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   path. It still depends on `CARGO_HOME`, which is what the container fixes)
   → `b62d2a60…` (audit #5 guest guards)
   → `1d6c3792…` (parallel block validation, 2026-08-23)
-  → `3867611d…` (the coprocessor field backend, 2026-09-04; see the current-id note above)
+  → `3867611d…` (the coprocessor field backend, 2026-09-04)
+  → `37987b85…` (Core becomes the guest that ships, 2026-09-06; see the current-id note above)
   Each supersession changed only the guest source; the reproducible-build mechanism is unchanged.
   - [~] **Re-prove** the chain on the reproducible guest: through `36a0415d` → `cb114426` (R-1) the board
     carried over (robustness-only), and again through `ffdc6095` (pow.cpp carve) and `7a8b29e0`

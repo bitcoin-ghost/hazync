@@ -1,22 +1,36 @@
-# The two builds
+# The three channels
 
-> ## ⛔ NEITHER OF THESE SHIPS, AND NEITHER CAN CONTRIBUTE TO THE BOARD
+> ## ⚖ CORE SHIPS (v0.21.0). GHOST DOES NOT, AND CANNOT CONTRIBUTE TO THE BOARD
 >
-> The released binary is the **stock** guest. Both recipes below change guest source, so both produce
-> a **different `METHOD_ID`** — and the coordinator re-verifies every submission against its own:
+> Three channels, **one canonical guest id** (hazync#225):
+>
+> | channel | role | contributes to the board? |
+> |---|---|---|
+> | **stock** | the digest **oracle** — the fidelity floor every acceleration is checked against | no |
+> | **CORE** (§2) | **canonical.** What the release binary builds and what the board counts | **yes** |
+> | **GHOST** (§3) | experimental — where new levers land first | no |
+>
+> Stock does not get retired when it stops being the default: it is how any claim that an
+> acceleration left consensus untouched is *made*. Core was cleared against it on block 962,000 —
+> journal `4fb3e3c5…4656d` byte-identical, 4.095x fewer cycles.
+>
+> ⛔ **A Ghost build still proves into rejections.** It changes guest source, so it carries a
+> different `METHOD_ID`, and the coordinator re-verifies every submission against its own:
 >
 > ```
 > receipt rejected: your prover's guest image id (METHOD_ID) does not match this
 > coordinator's — you built a different guest.
 > ```
 >
-> So a worker running a Core or Ghost build proves into rejections, indefinitely, and
-> `run-workers.sh` only checks the id at STARTUP (hazync#99). If you want to contribute to
-> bitcoinghost.org, use the **release binary** or the reproducible build — not these.
+> That failure is silent in the worst way: `run-workers.sh` only checks the id at STARTUP
+> (hazync#99), so a mismatched worker proves indefinitely into nothing. To contribute to
+> bitcoinghost.org use the **release binary** or the reproducible build.
 >
-> These recipes exist to MEASURE what acceleration is available and at what fidelity cost. Making one
-> of them the shipped guest is a re-baseline decision: a new `METHOD_ID`, a full cutover, and every
-> existing proof invalidated. The speed is not free.
+> ⚠ Promoting a channel is never just a flag. It is a new `METHOD_ID`, a full cutover, and **every
+> existing proof invalidated** — v0.21.0 spends the WHOLE board to do it. The speed is not free.
+> ⚠ Do not quote a block count here: the board keeps proving until the cutover lands, so any figure
+> is stale the moment it is written. Measured 7,852 at 2026-09-07 09:56Z and climbing ~10/min;
+> the real cost is whatever `/api/meta` reports the instant the swap happens.
 >
 > `provision-vps.sh` says the same of the Ghost lever: *"a box provisioned with this must never
 > produce a shipped proof. This box is for benchmarking only."*

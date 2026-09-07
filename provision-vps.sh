@@ -170,6 +170,27 @@ git -C "$WORK/bitcoin-core" checkout -- src/serialize.h src/crypto/sha256.cpp 2>
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0001-serialize-ilp32-int-overload.patch"
 git -C "$WORK/bitcoin-core" apply "$REPO_DIR/patches/0002-sha256-route-through-risc0-accelerator.patch"
 
+# hazync#225 — the CORE channel. CANONICAL since v0.21.0: the shipped guest is Core, not stock.
+# Both are secp256k1-tree patches, applied UNCONDITIONALLY and before the id is taken.
+#
+#   0012  field_bigint2 backend    — substitution (narrow). One primitive swapped at a backend
+#                                    interface libsecp already parameterises; every algorithm above
+#                                    it untouched. Cleared by the block-962,000 digest gate:
+#                                    journal 4fb3e3c5...4656d, byte-identical to stock.
+#   0013  lift_x via witness hint  — advice-and-verify. The hint is CHECKED against y^2 = x^3+7
+#                                    using libsecp's own fe_sqr, so Core's arithmetic still decides.
+#
+# There is NO "apply now, arm later" state that keeps METHOD_ID stable: libsecp's VERIFY_CHECK
+# embeds __LINE__, so editing the tree moves the id even where the body is #ifdef'd out (the 0005
+# block below makes the same point from the other direction). Patch set and defines move together.
+#
+# Arming the defines WITHOUT these applies yields a silently STOCK build that still reports
+# success. That trap has already cost three bogus measurement runs — docs/CORE_VS_GHOST.md.
+echo "== 5a. apply the CORE channel patches (0012 + 0013) — canonical since v0.21.0 =="
+git -C "$WORK/secp256k1" checkout -- src/field.h src/field_impl.h src/group_impl.h 2>/dev/null || true
+git -C "$WORK/secp256k1" apply "$REPO_DIR/patches/0012-select-field-bigint2-backend.patch"
+git -C "$WORK/secp256k1" apply "$REPO_DIR/patches/0013-lift-x-via-witness-hint.patch"
+
 # hazync#139 middle-path EXPERIMENT — off unless HAZYNC_BIGINT2_ECDSA=1. Routes ONLY the ECDSA
 # verify group arithmetic through bigint2; see patches/0005 and prover/methods/guest/src/
 # bigint2_ecmult.rs. ⛔ It MOVES METHOD_ID, so a box provisioned with this must never produce a
@@ -193,10 +214,22 @@ cp "$REPO_DIR"/coreshim/*.h "$WORK/coreshim/"
 echo "== 6. env wiring (guest build.rs reads HAZYNC_BASE; toolchain auto-discovered under RISC0_HOME) =="
 export HAZYNC_BASE="$WORK"
 export RISC0_HOME="$HOME/.risc0"
+
+# CORE channel defines (hazync#225). MUST travel with the phase-5a patches — the pair defines the
+# canonical METHOD_ID, and either half alone is wrong:
+#   defines without patches -> silently stock;  patches without defines -> a third, unshipped id.
+# ECMULT_WINDOW=21 is the measured optimum (-1.245% at 212 inputs): a build knob rather than a
+# fidelity lever, but part of the canonical build and therefore part of the id.
+export HAZYNC_FIELD_BIGINT2=1
+export HAZYNC_LIFTX_HINT=1
+export HAZYNC_ECMULT_WINDOW=21
 grep -q 'HAZYNC_BASE' "$HOME/.bashrc" || cat >> "$HOME/.bashrc" <<EOF
 export PATH="\$HOME/.risc0/bin:\$HOME/.cargo/bin:\$PATH"
 export RISC0_HOME="\$HOME/.risc0"
 export HAZYNC_BASE="$WORK"
+export HAZYNC_FIELD_BIGINT2=1
+export HAZYNC_LIFTX_HINT=1
+export HAZYNC_ECMULT_WINDOW=21
 EOF
 
 # 7. (optional) CUDA for GPU proving — installed BEFORE the build so we can compile the CUDA backend.
@@ -258,6 +291,13 @@ fi
 export HAZYNC_BASE="$WORK"
 export RISC0_HOME="$HOME/.risc0"
 export PATH="$HOME/.risc0/bin:$HOME/.cargo/bin:$PATH"
+
+# ...including the CORE defines. `build` skips phase 6, and reproduce/Dockerfile builds the
+# canonical image with exactly HAZYNC_PROVISION=build — so omitting these here would compile the
+# 5a-patched source WITHOUT its defines and silently yield a different, unshipped METHOD_ID.
+export HAZYNC_FIELD_BIGINT2=1
+export HAZYNC_LIFTX_HINT=1
+export HAZYNC_ECMULT_WINDOW=21
 
 # VENDORED zkr (hazync#164). risc0-circuit-recursion's build.rs downloads a 57 MB blob from
 # risc0-artifacts.s3.us-west-2.amazonaws.com during cargo build. On 2026-08-24 that object returned
