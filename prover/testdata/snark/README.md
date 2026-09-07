@@ -3,15 +3,26 @@
 Two wrapped range proofs, used by `prover/ci_snark_verify.sh` to gate Groth16 **verification** on every
 push (#23).
 
-⛔ **STALE — these fixtures do NOT match the canonical guest.** They were last regenerated
-2026-09-05 under `3867611d…`, which the 2026-09-06 Core-becomes-canonical re-baseline superseded.
-`ci_snark_verify.sh`, `ci_verify_any.sh` and `verifier-wasm/test-parity.sh` will fail until the pair
-is re-proved and re-wrapped — see "Regenerating" below. That regeneration is part of the v0.21.0
-cutover, not a separate task.
+✅ **Regenerated 2026-09-07 under `37987b85…`**, the Core-becomes-canonical guest. Both gates were
+run before these were committed, and both were checked for the RIGHT outcome rather than merely a
+non-zero exit:
 
-Lineage: `3867611d…` (the coprocessor-field-backend re-baseline — see `reproduce/METHOD_ID`)
-superseded `1d6c3792…` (2026-08-24, parallel block validation), which superseded `b62d2a60…`
-(2026-08-04, audit #5 guest guards), which superseded `b161735a…`.
+```
+hazync-verify fold_8.snark   -> exit 0   VERIFIED — genesis-anchored, 2353 bytes, guest 37987b85
+hazync-verify neg500.snark   -> exit 2   valid SNARK, refused ON THE ANCHOR (not "invalid proof")
+host verify-snark fold_8.snark -> exit 0 (canonical container-built host)
+```
+
+Proved on the coordinator, not a laptop: 9 blocks (~6-9 min each, strictly serial — one CPU prove
+holds ~4.7 GB), 7 folds, 2 wraps, every step `REAL_EXIT=0`. The host binary was extracted from the
+`hazync-core-0a7c174` image and `host method-id` was confirmed to equal the canonical id BEFORE
+anything was proved.
+
+⚠ The previous pair was made under `3867611d…`, and after the re-baseline `accumulator-tests` failed
+exactly as this file predicts — `verifier REJECTED the genesis-anchored proof (exit 1)`. That is the
+gate working. Lineage: `3867611d…` (the coprocessor-field-backend re-baseline — see
+`reproduce/METHOD_ID`) superseded `1d6c3792…` (2026-08-24, parallel block validation), which
+superseded `b62d2a60…` (2026-08-04, audit #5 guest guards), which superseded `b161735a…`.
 
 A proof carries its guest id inside it, so a re-baseline cannot be absorbed by editing anything: the
 pair has to be re-proved and re-wrapped. Until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and
@@ -26,10 +37,15 @@ omitted the `visit_seq` arm `PackedBytes` already had, so the host could not par
 carrying `txids`, including one it had written itself. Fixed in `packed_bytes`; if this signature
 returns, check that helper before suspecting the coordinator or the bundles.
 
-⚠ Also on 2026-09-05: the coordinator's `/api/witness/<h>` still serves the PRE-packing shape, with
-`txids` and `WireProof.siblings` as nested lists rather than one flat `n*32` blob. Bundles fetched
-from it must be flattened before `prove-range-bridge` will read them. `leaf`, `txs`, `tx_prevouts`
-and every SMT field were always flat and must be left alone.
+⚠ The coordinator's `/api/witness/<h>` still serves the PRE-packing shape — measured again
+2026-09-07, `txids`, `wtxids` and `new_outputs` all come back as nested lists rather than one flat
+`n*32` blob.
+
+✅ **They no longer need flattening.** The 2026-09-05 note said bundles "must be flattened before
+`prove-range-bridge` will read them"; that was true of the host that existed when it was written.
+The `packed_bytes` fix above added the missing `visit_seq` arm, and all nine bundles fetched
+straight from `/api/witness/<h>` proved with no preprocessing at all. Fetch and prove; do not write
+a flattener. `leaf`, `txs`, `tx_prevouts` and every SMT field were always flat regardless.
 
 ⚠ On the 2026-08-23 re-baseline that produced `1d6c3792…`, the stale pair failed **two** CI jobs, not
 one: `accumulator-tests` at the standalone-verifier step and `reproducible-image-id` at the Groth16
