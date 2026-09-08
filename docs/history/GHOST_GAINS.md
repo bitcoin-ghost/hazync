@@ -1,6 +1,6 @@
 # Every remaining gain for Ghost — enumerated, priced, and ranked
 
-> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `feat/stack-integration`, 2026-08-29.**
+> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `archive/feat-stack-integration`, 2026-08-29.**
 > Kept because the reasoning is worth having; **read the corrections below before quoting any number.**
 >
 > - **the aggregate is not 1,575 s** — measured **405.6 s** on two workers (2026-09-02).

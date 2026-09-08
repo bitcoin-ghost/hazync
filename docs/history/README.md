@@ -27,7 +27,7 @@ For what is true now, see [`../README.md`](../README.md).
 | `MODELS.md` | the original Core/Ghost framing | superseded by `../CORE_VS_GHOST.md` |
 | `STACK_INTEGRATION_PLAN.md` | the four-lever stack plan | executed; results in `../CORE_VS_GHOST.md` |
 | `BIGINT2_MIDDLE_PATH.md` | #139 middle vs wholesale | decided: middle path |
-| `EXPERIMENT_139_BIGINT2.md` | the #139 trial harness | landed from `exp/139-bigint2-middle-path` |
+| `EXPERIMENT_139_BIGINT2.md` | the #139 trial harness | landed from `archive/exp-139-bigint2-middle-path` |
 | `HELIX_DUAL_BACKEND.md` | one guest, both backends, height-gated | verdict: probably not needed |
 | `GHOST_GAINS.md` | every remaining Ghost gain, priced | superseded in part by `GHOST_NEXT_BUILD.md` |
 | `MSM_BATCH_VERIFY.md` | Pippenger batch verification | **rejected on measurement** — 4.3x at chunk scale, worth one card |
@@ -36,3 +36,22 @@ For what is true now, see [`../README.md`](../README.md).
 | `WITNESS_WIRE_PROFILE_2026-08-28.md` | witness deserialisation profile | dated; `read_slice` shipped |
 | `TIP_BLOCK_BIGINT2_2026-08-28.md` | bigint2 on the tip block | dated; **contains its own retraction** (7.53x → 4.48x) |
 | `SEGDIST_STEP2.md`, `SEGDIST_TASKS.md` | segment distribution steps | folded into `../SEGMENT_DISTRIBUTION.md` |
+
+## Where the experiment branches went
+
+The arms these records cite are **git tags**, not branches: `archive/<branch-name-with-dashes>`.
+
+An experiment branch is a fixed point, not work in progress, and leaving ten of them in the branch
+list makes the two that ARE work in progress hard to see. A tag says the same thing and says it more
+honestly. Nothing was lost — each tag is the exact tip the branch had:
+
+```sh
+git fetch origin 'refs/tags/archive/*:refs/tags/archive/*'
+git show archive/feat-stack-integration          # the arm GHOST_GAINS.md cites
+git diff main...archive/exp-139-bigint2-middle-path
+```
+
+⚠ **Retire the branch and its citation together.** These records name their arm so a number can be
+traced back to the code that produced it; a citation pointing at a deleted branch is worse than no
+citation, because it looks resolvable. If you archive a branch, rewrite the references in the same
+commit.

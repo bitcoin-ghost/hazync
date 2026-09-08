@@ -1,6 +1,6 @@
 # Helix — one guest, two verification backends, gated by height
 
-> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `hazync_helix_experiment`, 2026-08-28.**
+> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `archive/hazync_helix_experiment`, 2026-08-28.**
 > Kept because the reasoning is worth having; **read the corrections below before quoting any number.**
 >
 > - **9.10x wholesale was never measured** — see `9b767b5`; nothing called the wholesale entry point.

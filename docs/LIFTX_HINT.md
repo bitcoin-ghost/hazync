@@ -72,7 +72,7 @@ matters because **the interesting arm enables both.**
    correctness condition** — an unhinted key falls back to the sqrt.
 2. For each, compute `y = sqrt(x^3+7)` host-side (cheap natively) and emit `(x, y)` pairs.
 3. Ship them in the chunk payload as a `PackedHashes`-shaped field — ~32 B per key, **~256 KB
-   against a 7.2 MB witness**. The packed encoder on `feat/aggregate-witness-read-v2` already
+   against a 7.2 MB witness**. The packed encoder on `archive/feat-aggregate-witness-read-v2` already
    handles fields of this shape.
 4. Guest calls `liftx_hint::install(pairs)` before script verification.
 5. **Print `liftx_hint::stats()`.** A silently-empty table reinstates the sqrt while every gate still

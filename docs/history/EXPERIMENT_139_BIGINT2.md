@@ -1,6 +1,6 @@
 # hazync#139, middle path — trial harness
 
-> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `exp/139-bigint2-middle-path`, 2026-08-28.**
+> ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `archive/exp-139-bigint2-middle-path`, 2026-08-28.**
 > Kept because the reasoning is worth having; **read the corrections below before quoting any number.**
 >
 > - **"wholesale is 15% faster" was NEVER PRODUCED BY A RUN.** `hazync_ecdsa_verify_full` existed
