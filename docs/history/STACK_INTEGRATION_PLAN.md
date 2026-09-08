@@ -59,15 +59,15 @@ beside any figure taken from it.**
 
 | # | branch | lever | worth | side | moves `METHOD_ID`? |
 |---|---|---|---|---|---|
-| 1 | `feat/bigint2-middle` | #139 middle path | 32 -> 8 cards | guest | **yes** |
+| 1 | `archive/feat-bigint2-middle` | #139 middle path | 32 -> 8 cards | guest | **yes** |
 | 2 | `feat/aggregate-witness-read` | aggregate witness deserialisation | see 2.2 | guest + host | **yes** |
 | 3 | `feat/join-tree-pipelining` | remove the level barrier | ~1.4x at 32 cards; 7-8% margin at 6 | **host** | **no** |
-| 4 | `feat/tier0-codegen` | guest codegen flags | ~2% | guest build | **yes** |
+| 4 | `archive/feat-tier0-codegen` | guest codegen flags | ~2% | guest build | **yes** |
 
 Three of four move `METHOD_ID`, so they ship as **one re-baseline batch**. Lever 3 is host-side and
 can merge to `main` alone, at any time, with no board reset.
 
-### 2.1 `feat/bigint2-middle` — DONE, pushed
+### 2.1 `archive/feat-bigint2-middle` — DONE, pushed
 
 Routes only the ECDSA group arithmetic through the bigint2 accelerator: one line,
 `ecdsa_impl.h:212`, the `secp256k1_ecmult` computing `u1*G + u2*Q`. libsecp keeps DER parsing, low-S
@@ -140,7 +140,7 @@ so they do not commute). **Only the schedule changes.**
 The narrow tail is structural and stays — but it is **free under bounded lag**, since block *h*'s tail
 overlaps block *h+1*'s wide segment phase.
 
-### 2.4 `feat/tier0-codegen` — flags only
+### 2.4 `archive/feat-tier0-codegen` — flags only
 
 `-O3`, rust LTO, CGU=1, `ECMULT_WINDOW_SIZE=21`. Measured in `TIER0_RESULTS_2026-08-26.md`; window 21
 alone is **-1.245%** at 212 inputs. Whole batch is ~2%.
@@ -160,11 +160,11 @@ roughly halves the win. It is open with checks pending. Treat it as a gate on th
 
 ## 4. Integration and benchmarking
 
-`feat/stack-integration` carries all four merged, for one build and one benchmark run. Sequence:
+`archive/feat-stack-integration` carries all four merged, for one build and one benchmark run. Sequence:
 
 1. Land lever 3 (`join-tree-pipelining`) to `main` on its own — it needs nothing from the others.
 2. Land #190.
-3. Merge levers 1, 2, 4 into `feat/stack-integration` as **one re-baseline**; record the new
+3. Merge levers 1, 2, 4 into `archive/feat-stack-integration` as **one re-baseline**; record the new
    `METHOD_ID` once.
 4. Benchmark on block 962,000 at 6 cards. Target: <= 8.3 min, >= 17% margin.
 
@@ -173,17 +173,17 @@ roughly halves the win. It is open with checks pending. Treat it as a gate on th
 
 ## 4.1 STATUS as of 2026-08-28 22:25
 
-All four levers are implemented, committed, pushed, and merged into `feat/stack-integration`
+All four levers are implemented, committed, pushed, and merged into `archive/feat-stack-integration`
 with **no conflicts**. The merged tree type-checks: `REAL_EXIT=0`, zero errors, warning count
 unchanged at 8 (all pre-existing and elsewhere in the file).
 
 | branch | commit | state |
 |---|---|---|
-| `feat/bigint2-middle` | `bae4394` | measured 8.00x at proving time |
-| `feat/join-tree-pipelining-v2` | `27163ba` | compiles; **unbenchmarked** — needs a 3rd box |
-| `feat/tier0-codegen` | `3d8f1fd` | compiles; window-21 table regenerated (see below) |
-| `feat/aggregate-witness-read-v2` | `15a1190` | profiled, encoder written, compiles |
-| `feat/stack-integration` | `077b2ee` | all four merged |
+| `archive/feat-bigint2-middle` | `bae4394` | measured 8.00x at proving time |
+| `archive/feat-join-tree-pipelining-v2` | `27163ba` | compiles; **unbenchmarked** — needs a 3rd box |
+| `archive/feat-tier0-codegen` | `3d8f1fd` | compiles; window-21 table regenerated (see below) |
+| `archive/feat-aggregate-witness-read-v2` | `15a1190` | profiled, encoder written, compiles |
+| `archive/feat-stack-integration` | `077b2ee` | all four merged |
 
 ✅ **Tier 0 is provably active, not silently ignored.** The build regenerated
 `$HAZYNC_BASE/secp256k1/src/precomputed_ecmult.c` from `#if ECMULT_WINDOW_SIZE > 19` to
@@ -200,7 +200,7 @@ mutable files were backed up to `~/hazync-base-backup-2026-08-28/` before buildi
 Block 962,000, 8,006 inputs, `HAZYNC_CHUNKS=16`, `HAZYNC_PROFILE_EXEC=1`, both partitions
 (`count-packed (old)` and `cost-packed (new)`) = 32 chunk executes per arm.
 
-| | control (`main`) | stack (`feat/stack-integration`) |
+| | control (`main`) | stack (`archive/feat-stack-integration`) |
 |---|---|---|
 | `METHOD_ID` | `916cde9ed4ff3d0bb469b20a33a0a5e2a52e4161a118acd001b284764a288895` | `70fc6484be0a5e2538dd64fae5b0dfcfc82c4a4ae46ea999601d939e053f084d` |
 | journal digests | 32 | 32 |
@@ -235,7 +235,7 @@ width computation into a real function and point the test at it**, so it exercis
 ### ⛔⛔ MERGING THE BRANCH DOES NOT ENABLE bigint2
 
 **Discovered 2026-08-28 by checking, not by reading.** After a full build of
-`feat/stack-integration`, `$HAZYNC_BASE/secp256k1/src/ecdsa_impl.h` was still at the CLEAN md5
+`archive/feat-stack-integration`, `$HAZYNC_BASE/secp256k1/src/ecdsa_impl.h` was still at the CLEAN md5
 `308fc36774999286dcc77bf7c7df87b9`. The stack had built without its largest lever and nothing said so.
 
 Two separate things must BOTH happen, and merging the branch does neither:
@@ -250,7 +250,7 @@ Two separate things must BOTH happen, and merging the branch does neither:
 does nothing** (macro undefined). Either one on its own builds stock libsecp and looks like a
 successful build of the stack.
 
-⚠ **Anyone benchmarking `feat/stack-integration` without both steps will measure a stack missing the
+⚠ **Anyone benchmarking `archive/feat-stack-integration` without both steps will measure a stack missing the
 32 -> 8 card lever, and conclude the stack does not work.** Verify with the md5 above: if
 `ecdsa_impl.h` is still `308fc367...`, bigint2 is NOT in the build.
 
