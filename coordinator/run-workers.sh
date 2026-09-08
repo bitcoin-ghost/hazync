@@ -7,6 +7,14 @@
 #   MODE=mixed ./coordinator/run-workers.sh 4   # N-2 proving, 1 folding, 1 advancing the spine
 #   MODE=spine ./coordinator/run-workers.sh 1   # just the spine (only ever needs ONE)
 #
+# ⛔ "only ever needs ONE" is FLEET-WIDE, not per box — and `mixed` is how it gets broken.
+#    MODE=mixed allocates one spine worker PER BOX, so running it on N boxes gives N spine
+#    workers against one spine. They then race: a worker fetches the head, waits on the GPU
+#    lock, and by the time its fold runs the head has moved, so the claim digest no longer
+#    matches. It self-heals on the next pass, but it burns GPU time and — until hazync#220 —
+#    reported itself as a guest-id mismatch, sending you after a cause that was not there.
+#    Run `mixed` on ONE box and `prove` on the rest.
+#
 # Env:
 #   HAZYNC_HOST   path to the prover binary            (required)
 #   COORD_URL     coordinator base URL                 (default https://bitcoinghost.org/hazync)
