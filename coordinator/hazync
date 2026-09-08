@@ -999,8 +999,30 @@ def cmd_spine(args):
                                    capture_output=True, text=True)
             if r.returncode != 0 or not out.exists():
                 both = (r.stdout or "") + (r.stderr or "")
-                # A seam failure here is information, not noise: it means the board's receipt for this
-                # height does not continue the spine, which is worth surfacing loudly.
+                # hazync#220: a LOST RACE looks exactly like a guest mismatch, and the host's advice
+                # ("build a host that matches the proof's guest") sends you after a cause that is not
+                # there. Two spine workers against one spine is the usual way in: we fetched the head,
+                # waited on the GPU lock, and by the time the fold ran the head had moved — so the
+                # claim digest no longer matched a head that no longer exists.
+                #
+                # The two cases are distinguishable, and this is the only place that can tell them
+                # apart, because only the caller knows which head the fold was computed against.
+                # A genuine guest mismatch is deterministic; a lost race self-heals on the next pass.
+                moved = None
+                try:
+                    now = json.loads(get("/api/spine"))
+                    if now and "hi" in now:
+                        moved = int(now["hi"])
+                except Exception:
+                    moved = None
+                was = int(head["hi"]) if head and "hi" in head else None
+                if moved is not None and was is not None and moved != was:
+                    # Not an error. The other worker did the work we were about to do.
+                    print(f"  the spine advanced under us while this fold ran "
+                          f"([1..{was}] -> [1..{moved}]) — refolding from the new head")
+                    continue
+                # Head unchanged, so the host's build-mismatch advice is now actually the likely
+                # cause, and a seam failure here is information rather than noise.
                 sys.exit(f"extend-spine failed for block {nxt}:\n{both[-400:]}")
             if not submit_head(out, nxt):
                 break
