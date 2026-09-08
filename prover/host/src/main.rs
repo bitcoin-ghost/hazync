@@ -1844,7 +1844,15 @@ const COST_PER_SCHNORR_OP: u64 = 462_435;
 /// exists to price — so the true Core ratio is very likely nearer parity. It is left alone because
 /// the straggler 1.210 that justifies this channel was MEASURED with this value; changing it would
 /// invalidate that measurement. Refitting it is open work, not a shipping blocker.
-const COST_PER_EC_OP_REPEAT: u64 = 104_222;
+// hazync#226. 104,222 was 0.736 x the OLD COST_PER_EC_OP (141,612). That sibling was refit to
+// 417,798 and this one was left as an ABSOLUTE, so the ratio silently became 0.249 — a number
+// nobody chose. 350,000 is the measured optimum on block 962,000 (straggler 1.0806 against 1.7686
+// at 104,222), and it keeps the ratio in the 0.74-0.84 band the fit actually supports.
+//
+// ⚠ This constant is INERT unless HAZYNC_PACK_KEYS=1: repeat_savings() is behind that gate and it
+// is off by default. Refit anyway, because at 104,222 the gate is a LANDMINE — enabling it measures
+// 1.7686 on block 962,000 and 1.9016 on 965,978, both far worse than not pricing repeats at all.
+const COST_PER_EC_OP_REPEAT: u64 = 350_000;
 // An input that verifies no signature still costs something to read, deserialise and hash.
 // CORE per-curve fit (2026-09-01): 41,387 fixed cycles per input, 2 cycles per witness byte.
 // ⚠ The byte term moves 6 -> 2 and the base 34,000 -> 41,387. With the EC term corrected upward
@@ -1999,7 +2007,11 @@ fn repeat_savings(w: &BlockWitness) -> Vec<u64> {
     w.inputs.iter().map(|inp| {
         let tx = &w.txs[inp.tx_idx as usize].0;
         let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
-        predicted_sig_ops(tx, inp.input_idx, prevouts).total() * (COST_PER_EC_OP - COST_PER_EC_OP_REPEAT)
+        // hazync#226: overridable like its four siblings, so the constant can be A/B'd without a
+        // rebuild per arm. Default unchanged.
+        predicted_sig_ops(tx, inp.input_idx, prevouts).total()
+            * (cost_const("HAZYNC_COST_EC_OP", COST_PER_EC_OP)
+                .saturating_sub(cost_const("HAZYNC_COST_EC_OP_REPEAT", COST_PER_EC_OP_REPEAT)))
     }).collect()
 }
 
@@ -2191,7 +2203,20 @@ fn chunk_profile() {
             let sz = n.div_ceil(k.max(1));
             (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect::<Vec<_>>()
         }),
-        ("cost-packed (new)", pack_chunks(&costs, nchunks, None)),
+        // hazync#226: honour HAZYNC_PACK_KEYS here too. This arm hardcoded `None`, so the memo
+        // term — and with it COST_PER_EC_OP_REPEAT — could never influence the partition that
+        // chunk-profile reports. The A/B the issue asks for was therefore a guaranteed null: every
+        // value of the constant produced byte-identical output, which reads as "no effect" rather
+        // than "not exercised". Measured before this change: 104,222 and 413,800 both gave
+        // straggler 1.2104. → gotcha_checks_that_cannot_fail_and_logs_that_cannot_speak
+        ("cost-packed (new)", {
+            if std::env::var("HAZYNC_PACK_KEYS").as_deref() == Ok("1") {
+                let (sv, ks) = (repeat_savings(&w), input_keys(&w));
+                pack_chunks(&costs, nchunks, Some((&sv, &ks)))
+            } else {
+                pack_chunks(&costs, nchunks, None)
+            }
+        }),
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
