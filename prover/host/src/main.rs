@@ -1999,7 +1999,11 @@ fn repeat_savings(w: &BlockWitness) -> Vec<u64> {
     w.inputs.iter().map(|inp| {
         let tx = &w.txs[inp.tx_idx as usize].0;
         let prevouts = &w.tx_prevouts[inp.tx_idx as usize].0;
-        predicted_sig_ops(tx, inp.input_idx, prevouts).total() * (COST_PER_EC_OP - COST_PER_EC_OP_REPEAT)
+        // hazync#226: overridable like its four siblings, so the constant can be A/B'd without a
+        // rebuild per arm. Default unchanged.
+        predicted_sig_ops(tx, inp.input_idx, prevouts).total()
+            * (cost_const("HAZYNC_COST_EC_OP", COST_PER_EC_OP)
+                .saturating_sub(cost_const("HAZYNC_COST_EC_OP_REPEAT", COST_PER_EC_OP_REPEAT)))
     }).collect()
 }
 
@@ -2191,7 +2195,20 @@ fn chunk_profile() {
             let sz = n.div_ceil(k.max(1));
             (0..k).map(|c| (c * sz, ((c + 1) * sz).min(n))).filter(|(a, b)| a < b).collect::<Vec<_>>()
         }),
-        ("cost-packed (new)", pack_chunks(&costs, nchunks, None)),
+        // hazync#226: honour HAZYNC_PACK_KEYS here too. This arm hardcoded `None`, so the memo
+        // term — and with it COST_PER_EC_OP_REPEAT — could never influence the partition that
+        // chunk-profile reports. The A/B the issue asks for was therefore a guaranteed null: every
+        // value of the constant produced byte-identical output, which reads as "no effect" rather
+        // than "not exercised". Measured before this change: 104,222 and 413,800 both gave
+        // straggler 1.2104. → gotcha_checks_that_cannot_fail_and_logs_that_cannot_speak
+        ("cost-packed (new)", {
+            if std::env::var("HAZYNC_PACK_KEYS").as_deref() == Ok("1") {
+                let (sv, ks) = (repeat_savings(&w), input_keys(&w));
+                pack_chunks(&costs, nchunks, Some((&sv, &ks)))
+            } else {
+                pack_chunks(&costs, nchunks, None)
+            }
+        }),
     ] {
         println!("\n--- {label}: {} chunks ---", bounds.len());
         let mut predicted: Vec<u64> = Vec::new();
