@@ -205,13 +205,20 @@ data-durability gaps a public write endpoint exposes:
 
   Measured on the coordinator 2026-09-08: `ufw` **active**, default deny incoming, `22` and `8333`
   open, and `:8899` reachable only from the web box. The `INPUT` chain also carries hand-added rules
-  ahead of ufw's (`-P INPUT DROP`, three `--dport 8899` ACCEPTs, then a DROP), so **there are two
+  ahead of ufw's (`-P INPUT DROP`, the `--dport 8899` ACCEPTs, then a DROP), so **there are two
   sources of truth for one port** — read `iptables -S INPUT` as well as `ufw status`, or you will
   believe a rule that something else overrides.
 
-  ⚠ One of those hand-added ACCEPTs is for a host that no longer talks to us: `94.237.17.228` moved
-  **0 packets in 90 s** while the web box moved 1,690. It is a stale allow for a recycled provider
-  address and should be removed.
+  ✅ Removed 2026-09-08: a hand-added ACCEPT for `94.237.17.228`, an UpCloud prover in the same range
+  as the retired `hazync-b200` — 0 packets in 90 s against the web box's 1,690, and gone from the
+  account. Its `RATE_EXEMPT` entry went with it (hazync#218).
+
+  ⛔ **Retire the exemption when you retire the box.** A stale firewall ACCEPT lets a stranger reach
+  the port; a stale `RATE_EXEMPT` entry lets them reach it WITHOUT LIMITS, which is the flood this
+  section exists to stop. Provider addresses go back to a pool when a box is deleted.
+  ⚠ And do not judge an allow-rule by its packet counter alone — a dormant counter shows silence, not
+  decommissioning. That rule was referenced in two places and described as "our own prover"; what
+  settled it was the account inventory.
   The server now **refuses to bind a public interface** while verification/signatures are permissive
   (`VERIFY_MODE=mock`, `COORD_ALLOW_MOCK`, missing sig lib, `COORD_ALLOW_UNSIGNED`) unless you set
   `COORD_ALLOW_PUBLIC_INSECURE=1` — so a misconfigured redeploy fails loudly instead of crediting
