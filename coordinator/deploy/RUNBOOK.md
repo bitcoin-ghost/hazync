@@ -63,7 +63,8 @@ the publisher is absent or stale. Setting it too low understates % complete and,
 submissions above it as out of range.
 
 `RANGE_SIZE=1000`. The unit binds `127.0.0.1` (behind the proxy); if the web box is a different
-machine, set `COORD_BIND` to the private-network IP and firewall `:8899` to the web box only.
+machine, firewall `:8899` to the web box only — see §7, and note that a private-network IP is NOT
+available on this topology.
 
 ## 1b. Publish the node height (required for a correct chain tip)
 
@@ -193,7 +194,24 @@ data-durability gaps a public write endpoint exposes:
   multi-block receipts 413 at the proxy). Part A of that file goes in the `http { }` context — remember
   `sudo mkdir -p /var/cache/nginx/hazync && sudo chown www-data: /var/cache/nginx/hazync`.
 - **Secure bind.** The unit binds `127.0.0.1` (behind the proxy). If the coordinator is a separate box,
-  set `COORD_BIND` to its **private-network IP** (not `0.0.0.0`) and firewall `:8899` to the web box.
+  firewall `:8899` to the web box.
+
+  ⛔ **This previously said "set `COORD_BIND` to its private-network IP (not `0.0.0.0`)". That is not
+  possible on the live topology and the instruction was unfollowable** (hazync#218). The coordinator
+  has `lo`, one PUBLIC `eth0` (152.53.93.164) and `docker0`; the web box (83.136.255.218) proxies to
+  it **over the public internet**. There is no private IP to bind, and `COORD_BIND=127.0.0.1` would
+  take the board dark. `COORD_BIND=0.0.0.0` is correct here — the access control is the firewall,
+  not the bind address.
+
+  Measured on the coordinator 2026-09-08: `ufw` **active**, default deny incoming, `22` and `8333`
+  open, and `:8899` reachable only from the web box. The `INPUT` chain also carries hand-added rules
+  ahead of ufw's (`-P INPUT DROP`, three `--dport 8899` ACCEPTs, then a DROP), so **there are two
+  sources of truth for one port** — read `iptables -S INPUT` as well as `ufw status`, or you will
+  believe a rule that something else overrides.
+
+  ⚠ One of those hand-added ACCEPTs is for a host that no longer talks to us: `94.237.17.228` moved
+  **0 packets in 90 s** while the web box moved 1,690. It is a stale allow for a recycled provider
+  address and should be removed.
   The server now **refuses to bind a public interface** while verification/signatures are permissive
   (`VERIFY_MODE=mock`, `COORD_ALLOW_MOCK`, missing sig lib, `COORD_ALLOW_UNSIGNED`) unless you set
   `COORD_ALLOW_PUBLIC_INSECURE=1` — so a misconfigured redeploy fails loudly instead of crediting
