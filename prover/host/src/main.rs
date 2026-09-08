@@ -5650,19 +5650,33 @@ fn seg_serve_cmd() {
         write_chunk_inputs(&mut b, &w, lo, hi);
     }
 
+    // hazync#235 / hazync#207: STREAM segments as the executor produces them.
+    //
+    // This was `run()` followed by a loop serialising every segment, and BOTH finished before the
+    // listener below was bound. Every worker idled through the whole execute AND the whole bulk
+    // serialisation, which is why the aggregate saturated at exactly N=2 however many workers were
+    // added (1.81x at N=2, then flat to N=4): a 16-chunk join tree is 8 wide, so width was never
+    // the limit -- the serial prologue was.
+    //
+    // The executor now runs on its OWN thread and publishes each segment as it appears, so the
+    // listener binds immediately and a worker can prove segment 0 while segment 50 is still being
+    // produced.
+    //
+    // ⛔ THE LAST SEGMENT IS NEVER STREAMED. The session journal and assumption set merge into its
+    // claim before it is lifted, so it is tagged NOLIFT and proven here -- and which one is last is
+    // not knowable until execution ends. Segments are therefore published with a ONE-SEGMENT LAG:
+    // on producing segment i we publish i-1. The final one is published only once the executor has
+    // returned, by which point it is known to be last, so no worker can ever receive it.
     let t_exec = Instant::now();
-    let session = ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap().run().unwrap();
-    let exec_s = t_exec.elapsed().as_secs_f64();
-    let total = session.segments.len();
 
-    // Serialise every segment once, up front. The alternative -- resolving on demand -- would put
-    // disk work on the critical path of a worker that is waiting.
-    let mut wire: Vec<Vec<u8>> = Vec::with_capacity(total);
-    for sref in session.segments.iter() {
-        wire.push(bincode::serialize(&sref.resolve().expect("resolve")).expect("serialize"));
-    }
-    let wire = Arc::new(wire);
-    let bytes: usize = wire.iter().map(|v| v.len()).sum();
+    // Each segment's bytes sit behind their own Arc, so a sender clones a pointer under the lock
+    // instead of ~0.77 MB while other threads wait on it.
+    let wire: Arc<Mutex<Vec<Arc<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(Vec::new()));
+    // usize::MAX until the executor returns. Nothing may assume a total before then.
+    let total_known = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+
 
     // hazync#163: bound the in-flight window by BYTES, not by frame count.
     //
@@ -5686,7 +5700,13 @@ fn seg_serve_cmd() {
         // absurd amounts. Sized so the default depth stays fully pipelined at po2 22.
         let budget: usize = std::env::var("HAZYNC_PUSH_BYTES").ok().and_then(|s| s.parse().ok())
             .unwrap_or(64 * 1024 * 1024);
-        let maxseg = wire.iter().map(|v| v.len()).max().unwrap_or(1).max(1);
+        // hazync#235: under streaming there is no complete set to take a max over -- the clamp now
+        // runs before most segments exist. Size it from the segment limit instead, which is the
+        // bound the executor is actually working to: a po2-N segment cannot exceed 2^N cycles, and
+        // 4 MB at po2 22 is what the largest measured segment (3.98 MB) came to. Over-estimating
+        // is the safe direction: it only ever lowers the cap.
+        let maxseg = (1usize << seg_po2().min(22)) / 1024 * 4;
+        let maxseg = maxseg.max(1);
         let cap = (budget / maxseg).max(1);
         if depth > cap {
             println!("  push depth {depth} -> {cap}: {maxseg} B/segment against a {budget} B budget \
@@ -5696,7 +5716,7 @@ fn seg_serve_cmd() {
     };
 
     if !agg { println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
-    println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB, depth {depth}", bytes as f64/1e6);
+    println!("  streaming segments as they are produced (hazync#235), depth {depth}");
     println!("  listening on 0.0.0.0:{port}");
 
     // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
@@ -5705,11 +5725,10 @@ fn seg_serve_cmd() {
     // spin -- workers returned all `total` segments while the loop tested for exactly `total - 1`.
     // ALL segments, including the last (hazync#157). It is tagged NOLIFT at write time rather than
     // being stored tagged, so `wire[i]` stays a plain index.
-    let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new((0..total).collect()));
+    // `queue` and `out` are created above, before the executor starts, and GROW as segments arrive.
     // The last segment comes back as a SegmentReceipt, not a SuccinctReceipt, so it needs its own
     // slot -- the `out` vector is typed for lifted receipts.
     let last_out: Arc<Mutex<Option<SegmentReceipt>>> = Arc::new(Mutex::new(None));
-    let out: Arc<Mutex<Vec<Option<SuccinctReceipt<ReceiptClaim>>>>> = Arc::new(Mutex::new(vec![None; total]));
     // Join work, fed one tree level at a time. Threads take from here once segments run out, so a
     // connection stays open across both phases instead of the fleet disbanding after proving and
     // leaving the segment coordinator to fold alone -- which is what left assembly flat at 373 s while
@@ -5733,8 +5752,9 @@ fn seg_serve_cmd() {
     // can be plain detached threads. The main thread then stays free to drive the tree WHILE they
     // are still alive, which is the whole point.
     let acc_alldone = alldone.clone();
-    let (aq, ao, aw, aj, ajo, alo) =
-        (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone());
+    let (aq, ao, aw, aj, ajo, alo, atk) =
+        (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone(),
+         total_known.clone());
     // Detached on purpose -- see the deadlock note above; nothing joins this handle.
     let _acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
@@ -5742,8 +5762,9 @@ fn seg_serve_cmd() {
             match listener.accept() {
                 Ok((s, peer)) => {
                     println!("  worker connected from {peer}");
-                    let (queue, out, wire, jobs, jout, alldone, last_out) =
-                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(), alo.clone());
+                    let (queue, out, wire, jobs, jout, alldone, last_out, total_known) =
+                        (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(),
+                         alo.clone(), atk.clone());
                     handles.push(std::thread::spawn(move || {
                         // hazync#163: one READER thread and one WRITER thread per connection.
                         //
@@ -5851,9 +5872,18 @@ fn seg_serve_cmd() {
                                 let next = { queue.lock().unwrap().pop_front() };
                                 match next {
                                     Some(i) => {
-                                        let tag = if i == total - 1 { i as u32 | NOLIFT_TAG } else { i as u32 };
+                                        // hazync#235: `total` is unknown until the executor returns, so the
+                                        // NOLIFT test reads the atomic. It is only ever true for the segment
+                                        // published AFTER execution ended (the one-segment lag guarantees
+                                        // that), so a worker cannot be handed the last segment early.
+                                        let known = total_known.load(std::sync::atomic::Ordering::SeqCst);
+                                        let tag = if known != usize::MAX && i == known - 1 {
+                                            i as u32 | NOLIFT_TAG
+                                        } else { i as u32 };
+                                        // Clone the Arc under the lock, not the ~0.77 MB behind it.
+                                        let frame = { wire.lock().unwrap()[i].clone() };
                                         inflight.lock().unwrap().push_back(i);   // record BEFORE the write
-                                        if write_frame(&mut ws, tag, &wire[i]).is_err() {
+                                        if write_frame(&mut ws, tag, &frame).is_err() {
                                             inflight.lock().unwrap().retain(|&x| x != i);
                                             queue.lock().unwrap().push_front(i);
                                             stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5902,6 +5932,43 @@ fn seg_serve_cmd() {
         }
         for h in handles { let _ = h.join(); }
     });
+
+    // hazync#235: collect the executor. It has been producing segments this whole time, with any
+    // connected worker already proving them — that overlap is the entire point of the change. From
+    // here on `total` is final, and everything below needs the session (journal + assumptions).
+    //
+    // ⚠ Joining here, AFTER the acceptor is detached and serving, is load-bearing. Join before the
+    // listener binds and the streaming is decorative: workers still arrive to a finished execute.
+    // ⚠ ExecutorImpl is NOT Send (it holds a `dyn SessionEvents`), so the executor cannot be moved
+    // to a thread. It does not need to be: the acceptor above is already detached and serving, so
+    // running the executor HERE — after the bind — gives the same overlap. Workers connect and prove
+    // segment 0 while this call is still producing segment 50.
+    let session = {
+        let mut pending: Option<usize> = None;   // the one-segment lag; see the note above
+        ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap()
+            .run_with_callback(|segment| {
+                let bytes = bincode::serialize(&segment).expect("serialize");
+                let idx = {
+                    let mut wl = wire.lock().unwrap();
+                    wl.push(Arc::new(bytes));
+                    out.lock().unwrap().push(None);
+                    wl.len() - 1
+                };
+                if let Some(prev) = pending.replace(idx) {
+                    queue.lock().unwrap().push_back(prev);
+                }
+                // The bytes are already captured above; the ref itself is not needed again.
+                Ok(Box::new(risc0_zkvm::NullSegmentRef))
+            })
+            .expect("execute")
+    };
+    let exec_s = t_exec.elapsed().as_secs_f64();
+    let total = wire.lock().unwrap().len();
+    total_known.store(total, std::sync::atomic::Ordering::SeqCst);
+    // The held-back segment is the last one. Safe to publish now that that is established.
+    if total > 0 { queue.lock().unwrap().push_back(total - 1); }
+    let bytes: usize = wire.lock().unwrap().iter().map(|v| v.len()).sum();
+    println!("  execution {exec_s:.1} s   {total} segments, {:.1} MB (streamed)", bytes as f64 / 1e6);
 
     // Wait for every segment to come back before lifting. The threads stay alive throughout and
     // pick up join work as the tree below publishes it.
