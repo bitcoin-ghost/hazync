@@ -2602,9 +2602,18 @@ fn write_aggregate_env(
 /// cannot become a valid assumption, and finding that out here names the file instead of failing
 /// somewhere inside the prover.
 fn read_chunk_receipts(nchunks: usize) -> Vec<risc0_zkvm::Receipt> {
+    // Directory the per-chunk receipts live in (hazync#229). `prove-chunk` writes each receipt to
+    // $HAZYNC_OUT, which is a full path, so the two halves of a run can disagree about where the
+    // receipts are: scripts/gpu-benchmark.sh has always exported HAZYNC_RECEIPTS here and nothing
+    // ever read it, so phase 3 resolved `chunk_0.bin` against its own CWD and died on a run whose
+    // proves had all succeeded.
+    //
+    // Defaults to `.`, which is exactly the previous behaviour — this adds a way to say where,
+    // it does not change where they are looked for when nobody says.
+    let dir = std::env::var("HAZYNC_RECEIPTS").unwrap_or_else(|_| ".".into());
     let mut receipts: Vec<risc0_zkvm::Receipt> = Vec::with_capacity(nchunks);
     for i in 0..nchunks {
-        let f = format!("chunk_{i}.bin");
+        let f = format!("{dir}/chunk_{i}.bin");
         let r: risc0_zkvm::Receipt =
             bincode::deserialize(&std::fs::read(&f).unwrap_or_else(|e| panic!("chunk receipt {f}: {e}"))).unwrap();
         r.verify(METHOD_ID).unwrap_or_else(|e| panic!("chunk receipt {f} does not verify: {e}"));
