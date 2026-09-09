@@ -477,6 +477,9 @@ impl ProverServer for ProverImpl {
             .remove(&receipt.index)
         {
             capture_119(&receipt, po2, "valid-after-retry", None);
+        } else if std::env::var("HAZYNC_119_CAPTURE_ALL").as_deref() == Ok("1") {
+            // Self-test only -- see the note above capture_119_dir.
+            capture_119(&receipt, po2, "valid-capture-all", None);
         }
 
         Ok(receipt)
@@ -632,6 +635,16 @@ fn check_claims(
 // Capture is on by default and bounded. It writes only on the failure path, keeps at most
 // HAZYNC_119_CAPTURE_MAX (default 4) files per process so a busy prover cannot fill a contributor's
 // disk, and is switched off with HAZYNC_119_CAPTURE=off.
+//
+// ⛔ SELF-TEST, and why it exists. Everything above runs ONLY when #119 fires, which needs a CUDA
+// box and a ~6% roll of the dice. A writer that has never executed is exactly the kind of check
+// that turns out to be broken on the one occurrence it was built for -- a wrong path, a
+// serialization failure, an unwritable directory -- and by then the evidence is gone.
+//
+// HAZYNC_119_CAPTURE_ALL=1 captures every segment on the SUCCESS path instead, so the writer, the
+// metadata and `host verify-segment` can all be exercised end to end on any machine with no GPU and
+// no fault. It is a test switch, not an operational one: it writes a file per segment (bounded by
+// HAZYNC_119_CAPTURE_MAX like everything else) and must never be set on a prover doing real work.
 
 /// Where captures are written, or `None` when capture is switched off.
 fn capture_119_dir() -> Option<std::path::PathBuf> {
