@@ -182,6 +182,8 @@ impl ProverServer for DevModeProver {
             terminate_state: segment.inner.claim.terminate_state,
             output: segment.output.clone(),
             segment_index: segment.index,
+            // hazync#119: dev mode never proves, so there is no challenge to record.
+            rand_z: [0; 4],
         })
     }
 
