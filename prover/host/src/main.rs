@@ -3882,6 +3882,11 @@ fn main() {
         receipt_digest_cmd(f);
         return;
     }
+    if let Some(p) = args.iter().position(|a| a == "verify-segment") {
+        let f = args.get(p + 1).expect("verify-segment <captured .segment-receipt.bin>");
+        verify_segment_cmd(f);
+        return;
+    }
     if args.iter().any(|a| a == "seg-coordinate-tree") {
         seg_coordinate_tree_cmd();
         return;
@@ -5152,6 +5157,47 @@ fn receipt_digest_cmd(path: &str) {
     }
     println!("journal_bytes {}", r.journal.bytes.len());
     println!("journal_digest {}", hex(r.journal.digest().as_bytes()));
+}
+
+/// `verify-segment <file>`: verify a captured segment receipt with THIS binary's verifier.
+///
+/// The other half of the hazync#119 capture added to `vendor/risc0-zkvm` — a captured seal is a blob
+/// until something can check it. Run a CPU-built host over a seal captured on CUDA and the answer
+/// splits #119 in half:
+///
+///   VALID here, invalid on the card  ⇒ the seal is fine and the CUDA VERIFIER is at fault
+///   INVALID here too                 ⇒ the PROOF is genuinely bad and the CUDA PROVER is at fault
+///
+/// That question has been open since 2026-08-17. It was costed as 5–16 h of CPU proving per trial,
+/// needing ten or more trials — but that prices "re-run the workload on CPU". Checking an artifact
+/// costs seconds, and this is the command that does it.
+///
+/// Takes the `.segment-receipt.bin` written by `capture_119`. The matching `.json` carries the
+/// index, po2 and claim digests in readable form.
+fn verify_segment_cmd(path: &str) {
+    use risc0_zkvm::sha::Digestible;
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let r: risc0_zkvm::SegmentReceipt =
+        bincode::deserialize(&bytes).expect("deserialize segment receipt");
+
+    println!("segment_index      {}", r.index);
+    println!("hashfn             {}", r.hashfn);
+    println!("seal_words         {}", r.seal.len());
+    println!("verifier_params    {}", r.verifier_parameters);
+    println!("claim_pre_state    {}", r.claim.pre.digest());
+    println!("claim_post_state   {}", r.claim.post.digest());
+    println!("claim_digest       {}", r.claim.digest());
+
+    // The same context `prove_segment_core` used when it rejected this seal, so a difference in
+    // outcome is a difference in the VERIFIER and not in what it was asked to check.
+    let ctx = risc0_zkvm::VerifierContext::default();
+    match r.verify_integrity_with_context(&ctx) {
+        Ok(()) => println!("\nSEGMENT VERIFIES on this build"),
+        Err(e) => {
+            println!("\nSEGMENT INVALID on this build: {e:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 // SEGMENT DISTRIBUTION step 3: run the join tree as distributed work items.

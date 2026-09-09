@@ -456,9 +456,28 @@ impl ProverServer for ProverImpl {
             claim,
             verifier_parameters,
         };
-        receipt
-            .verify_integrity_with_context(ctx)
-            .context("verify segment")?;
+        // hazync#119: keep the evidence before the error unwinds. See `capture_119` at the end of
+        // this file for why -- in short, every occurrence since 2026-08-16 has produced one log line
+        // and no artifact, which is why the issue has a rate and no diagnosis.
+        if let Err(e) = receipt.verify_integrity_with_context(ctx) {
+            capture_119(&receipt, po2, "invalid", Some(&format!("{e:#}")));
+            capture_119_failed()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(receipt.index);
+            return Err(e).context("verify segment");
+        }
+
+        // This segment index produced an invalid proof earlier in THIS process and has now proved
+        // correctly from identical input (the hazync#237 retry re-proves the same index). Two seals
+        // for one claim, one valid and one not, is the artifact #119 has never had.
+        if capture_119_failed()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&receipt.index)
+        {
+            capture_119(&receipt, po2, "valid-after-retry", None);
+        }
 
         Ok(receipt)
     }
@@ -580,4 +599,146 @@ fn check_claims(
         );
     }
     Ok(())
+}
+
+// ================================================================================================
+// hazync#119 — EVIDENCE CAPTURE FOR THE INTERMITTENT INVALID SEGMENT PROOF
+//
+// `prove_segment_core` above verifies each segment proof it produces. On CUDA that check
+// intermittently rejects a segment this very prover has just proved: reproduced on L40S and on
+// B200, at po2 20, 21 and 22, with stock upstream scheduling, an idle card, no profiler attached,
+// zero ECC errors and unremarkable VRAM. Execution is deterministic — the same segment proves
+// correctly on a later attempt from byte-identical input — so it is the PROVING that is
+// nondeterministic.
+//
+// Since 2026-08-16 every occurrence has produced ONE LOG LINE AND NOTHING ELSE. That is why the
+// issue has a well-measured rate and no diagnosis: there has never been an artifact to examine.
+// Upstream is not a route either — risc0#3798 has no maintainer reply, and risc0#3781 (a one-line
+// CUDA overflow fix, with a test) has sat unmerged since 2026-07-11.
+//
+// Keeping the failing seal costs nothing on the happy path and makes two things possible that were
+// previously out of reach, both WITHOUT a GPU:
+//
+//   * Re-verify the failing seal with the CPU verifier. If it verifies there, the fault is in the
+//     CUDA VERIFIER; if it fails there too, the PROOF is genuinely bad. This question has been open
+//     since 2026-08-17 and was costed at 5–16 h of CPU proving per trial, needing ten or more
+//     trials for a meaningful negative. On a captured seal it costs seconds — the expensive framing
+//     was "re-run the workload on CPU", not "check the artifact on CPU".
+//
+//   * Diff a failing seal against a passing one for the SAME segment index: same claim, same input,
+//     one seal that verifies and one that does not. That is also precisely what risc0#3798 offered
+//     upstream and could never send.
+//
+// Capture is on by default and bounded. It writes only on the failure path, keeps at most
+// HAZYNC_119_CAPTURE_MAX (default 4) files per process so a busy prover cannot fill a contributor's
+// disk, and is switched off with HAZYNC_119_CAPTURE=off.
+
+/// Where captures are written, or `None` when capture is switched off.
+fn capture_119_dir() -> Option<std::path::PathBuf> {
+    match std::env::var("HAZYNC_119_CAPTURE").as_deref() {
+        Ok("off") | Ok("0") => None,
+        Ok(d) if !d.is_empty() => Some(std::path::PathBuf::from(d)),
+        _ => std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join(".hazync").join("119-captures")),
+    }
+}
+
+/// Segment indices that produced an invalid proof in this process, so the pass that the retry
+/// produces for the same index can be kept as its matched partner.
+fn capture_119_failed() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static FAILED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    FAILED.get_or_init(Default::default)
+}
+
+/// Write one segment receipt to the capture directory, with a sidecar naming what it is.
+///
+/// Deliberately infallible from the caller's point of view: this runs on a path that is already
+/// failing, and a capture that panicked would turn a recoverable fault into a lost chunk. Every
+/// error is reported on stderr and swallowed.
+fn capture_119(receipt: &SegmentReceipt, po2: u32, tag: &str, err: Option<&str>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WRITTEN: AtomicUsize = AtomicUsize::new(0);
+
+    let Some(dir) = capture_119_dir() else { return };
+    let max = std::env::var("HAZYNC_119_CAPTURE_MAX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
+    if WRITTEN.load(Ordering::Relaxed) >= max {
+        return;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stem = format!("seg{:06}_{tag}_{ts}", receipt.index);
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("  [#119] capture: cannot create {}: {e}", dir.display());
+        return;
+    }
+
+    let seal_path = dir.join(format!("{stem}.segment-receipt.bin"));
+    match bincode::serialize(receipt) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&seal_path, &bytes) {
+                eprintln!("  [#119] capture: cannot write {}: {e}", seal_path.display());
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("  [#119] capture: cannot serialize segment receipt: {e}");
+            return;
+        }
+    }
+
+    // Hand-rolled rather than serde_json: that is a dev-dependency here, and this is not worth
+    // moving into the build graph of every prover.
+    let meta = format!(
+        concat!(
+            "{{\n",
+            "  \"issue\": \"hazync#119\",\n",
+            "  \"tag\": \"{tag}\",\n",
+            "  \"unix_time\": {ts},\n",
+            "  \"segment_index\": {index},\n",
+            "  \"po2\": {po2},\n",
+            "  \"hashfn\": \"{hashfn}\",\n",
+            "  \"seal_words\": {seal_words},\n",
+            "  \"verifier_parameters\": \"{vp}\",\n",
+            "  \"claim_pre_state\": \"{pre}\",\n",
+            "  \"claim_post_state\": \"{post}\",\n",
+            "  \"claim_digest\": \"{claim}\",\n",
+            "  \"error\": \"{err}\"\n",
+            "}}\n"
+        ),
+        tag = tag,
+        ts = ts,
+        index = receipt.index,
+        po2 = po2,
+        hashfn = receipt.hashfn,
+        seal_words = receipt.seal.len(),
+        vp = receipt.verifier_parameters,
+        pre = receipt.claim.pre.digest(),
+        post = receipt.claim.post.digest(),
+        claim = receipt.claim.digest(),
+        err = err.unwrap_or("").replace('"', "'").replace('\n', " "),
+    );
+    let meta_path = dir.join(format!("{stem}.json"));
+    if let Err(e) = std::fs::write(&meta_path, meta) {
+        eprintln!("  [#119] capture: cannot write {}: {e}", meta_path.display());
+        return;
+    }
+
+    let n = WRITTEN.fetch_add(1, Ordering::Relaxed) + 1;
+    // stderr, not `tracing`: this must be visible in a worker log with no RUST_LOG set. An
+    // occurrence that is not shouted about is an occurrence nobody goes and looks at.
+    eprintln!(
+        "  [#119] CAPTURED {tag} segment {} (po2 {po2}, {} seal words) -> {}  [{n}/{max}]",
+        receipt.index,
+        receipt.seal.len(),
+        seal_path.display(),
+    );
 }
