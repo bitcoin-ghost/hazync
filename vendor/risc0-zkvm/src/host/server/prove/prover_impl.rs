@@ -15,6 +15,14 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+// hazync#119: the challenge type and its field, so it can be drawn, recorded and replayed here.
+// The circuit's own `ExtVal` alias lives in a private module, but it is defined as
+// `<CircuitField as Field>::ExtElem` with `CircuitField = risc0_core::field::baby_bear::BabyBear`
+// (`zirgen/mod.rs:36`), so this names exactly the same type.
+use risc0_core::field::{
+    baby_bear::{Elem as BabyBearElem, ExtElem as ExtVal},
+    Elem as _, ExtElem as _,
+};
 
 use super::{keccak::prove_keccak, ProverServer};
 use crate::{
@@ -414,13 +422,22 @@ impl ProverServer for ProverImpl {
             segment.po2(),
             self.opts.max_segment_po2
         );
-        let inner = risc0_circuit_rv32im::prove::segment_prover()?.preflight(&segment.inner)?;
+        // hazync#119: draw the challenge here instead of letting `preflight()` draw it internally,
+        // so that it can be recorded and replayed. See `hazync_rand_z`.
+        //
+        // This is faithful to what it replaces: `SegmentProverImpl::preflight` is exactly
+        // `PreflightResults::new(segment, rand_z)` around the same draw (`prove/hal/mod.rs:129`).
+        // Preflight is pure CPU witness generation and touches no HAL, so going direct skips
+        // nothing but a `scope!("preflight")` tracing span.
+        let z = hazync_rand_z(segment.index);
+        let inner = risc0_circuit_rv32im::prove::PreflightResults::new(&segment.inner, z)?;
 
         Ok(PreflightResults {
             inner,
             terminate_state: segment.inner.claim.terminate_state,
             output: segment.output.clone(),
             segment_index: segment.index,
+            rand_z: rand_z_words(z),
         })
     }
 
@@ -439,6 +456,9 @@ impl ProverServer for ProverImpl {
         );
 
         let po2 = preflight_results.inner.po2();
+        // Read before `inner` is moved into prove_core: on a #119 fault this is the one input that
+        // differed between this attempt and the ones that worked.
+        let rand_z = preflight_results.rand_z;
         let seal =
             risc0_circuit_rv32im::prove::segment_prover()?.prove_core(preflight_results.inner)?;
         let mut claim = ReceiptClaim::decode_from_seal_v2(&seal, Some(po2))?;
@@ -460,7 +480,7 @@ impl ProverServer for ProverImpl {
         // this file for why -- in short, every occurrence since 2026-08-16 has produced one log line
         // and no artifact, which is why the issue has a rate and no diagnosis.
         if let Err(e) = receipt.verify_integrity_with_context(ctx) {
-            capture_119(&receipt, po2, "invalid", Some(&format!("{e:#}")));
+            capture_119(&receipt, po2, rand_z, "invalid", Some(&format!("{e:#}")));
             capture_119_failed()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -476,10 +496,10 @@ impl ProverServer for ProverImpl {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&receipt.index)
         {
-            capture_119(&receipt, po2, "valid-after-retry", None);
+            capture_119(&receipt, po2, rand_z, "valid-after-retry", None);
         } else if std::env::var("HAZYNC_119_CAPTURE_ALL").as_deref() == Ok("1") {
             // Self-test only -- see the note above capture_119_dir.
-            capture_119(&receipt, po2, "valid-capture-all", None);
+            capture_119(&receipt, po2, rand_z, "valid-capture-all", None);
         }
 
         Ok(receipt)
@@ -670,7 +690,7 @@ fn capture_119_failed() -> &'static std::sync::Mutex<std::collections::HashSet<u
 /// Deliberately infallible from the caller's point of view: this runs on a path that is already
 /// failing, and a capture that panicked would turn a recoverable fault into a lost chunk. Every
 /// error is reported on stderr and swallowed.
-fn capture_119(receipt: &SegmentReceipt, po2: u32, tag: &str, err: Option<&str>) {
+fn capture_119(receipt: &SegmentReceipt, po2: u32, rand_z: [u32; 4], tag: &str, err: Option<&str>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static WRITTEN: AtomicUsize = AtomicUsize::new(0);
 
@@ -724,6 +744,7 @@ fn capture_119(receipt: &SegmentReceipt, po2: u32, tag: &str, err: Option<&str>)
             "  \"claim_pre_state\": \"{pre}\",\n",
             "  \"claim_post_state\": \"{post}\",\n",
             "  \"claim_digest\": \"{claim}\",\n",
+            "  \"rand_z\": \"{rand_z}\",\n",
             "  \"error\": \"{err}\"\n",
             "}}\n"
         ),
@@ -737,6 +758,7 @@ fn capture_119(receipt: &SegmentReceipt, po2: u32, tag: &str, err: Option<&str>)
         pre = receipt.claim.pre.digest(),
         post = receipt.claim.post.digest(),
         claim = receipt.claim.digest(),
+        rand_z = rand_z_string(rand_z),
         err = err.unwrap_or("").replace('"', "'").replace('\n', " "),
     );
     let meta_path = dir.join(format!("{stem}.json"));
@@ -754,4 +776,103 @@ fn capture_119(receipt: &SegmentReceipt, po2: u32, tag: &str, err: Option<&str>)
         receipt.seal.len(),
         seal_path.display(),
     );
+}
+
+// ================================================================================================
+// hazync#119 — THE CHALLENGE IS THE MISSING INPUT
+//
+// `SegmentProverImpl::preflight` (risc0-circuit-rv32im 4.0.5, `prove/hal/mod.rs:136`) does:
+//
+//     let mut rng = rand::rng();
+//     let rand_z = ExtVal::random(&mut rng);
+//
+// A fresh random field element per SEGMENT, per RUN, straight from the OS RNG. It feeds a
+// Schwartz–Zippel checksum over memory transactions in witgen, so the trace — and therefore
+// everything the CUDA kernels are handed — differs on every run of the same binary on the same
+// block.
+//
+// ⇒ #119's founding observation, "same input, same binary, same idle card, different validity",
+// IS NOT TRUE AS STATED. The input is not the same. That reframes the fault from flaky silicon to
+// a DATA-DEPENDENT bug that is merely sampled at random, and it explains the whole profile: retries
+// behave as independent trials, no chunk ever fails twice in a row, it appears on L40S and on B200
+// alike (the draw sits in the shared HAL, above the CUDA kernels), and removing the pipelining
+// changed nothing.
+//
+// `rand_z` is not itself the bug — it feeds a fingerprint, not a denominator (witgen contains no
+// inverses), and a collision over ExtVal is ~2^-100 against an observed ~1e-4 per segment.
+//
+// It is, however, THE ONLY ENTROPY IN THE PATH, and risc0 throws it away. Recording it is what
+// turns #119 from an intermittent fault into a reproducible one: a failure that fires ~6% of the
+// time becomes one that fires on demand, which is the difference between observing this bug and
+// bisecting it.
+//
+//   HAZYNC_RAND_Z=w0,w1,w2,w3    replay this challenge instead of drawing one
+//   HAZYNC_RAND_Z_SEGMENT=<n>    ...for segment n only; every other segment still draws fresh
+//   HAZYNC_RAND_Z_LOG=<path>     append every drawn challenge, so a run that dies uncleanly still
+//                                leaves the record behind
+//
+// ⛔ REPLAY IS A DEBUGGING TOOL AND MUST NEVER BE A DEFAULT. The checksum `rand_z` feeds is sound
+// because the challenge is unpredictable; pinning it across runs weakens that argument. With none
+// of these set the behaviour is byte-for-byte what upstream does: a fresh draw from the OS RNG.
+
+/// The four canonical base-field words of a challenge — the form it is recorded and replayed in.
+fn rand_z_words(z: ExtVal) -> [u32; 4] {
+    let mut out = [0u32; 4];
+    for (slot, elem) in out.iter_mut().zip(z.subelems().iter()) {
+        *slot = elem.as_u32();
+    }
+    out
+}
+
+fn rand_z_string(words: [u32; 4]) -> String {
+    words.map(|w| w.to_string()).join(",")
+}
+
+fn parse_rand_z(spec: &str) -> Option<ExtVal> {
+    let words: Vec<u32> = spec
+        .split(',')
+        .map(|w| w.trim().parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let w: [u32; 4] = words.try_into().ok()?;
+    Some(ExtVal::new(
+        BabyBearElem::new(w[0]),
+        BabyBearElem::new(w[1]),
+        BabyBearElem::new(w[2]),
+        BabyBearElem::new(w[3]),
+    ))
+}
+
+/// Draw the per-segment challenge, honouring a replay request. See the note above.
+fn hazync_rand_z(segment_index: u32) -> ExtVal {
+    if let Ok(spec) = std::env::var("HAZYNC_RAND_Z") {
+        let scoped = std::env::var("HAZYNC_RAND_Z_SEGMENT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if scoped.is_none_or(|want| want == segment_index) {
+            match parse_rand_z(&spec) {
+                Some(z) => {
+                    eprintln!("  [#119] REPLAY segment {segment_index} with rand_z={spec}");
+                    return z;
+                }
+                // Loud, and then carry on with a fresh draw. A replay that silently did not happen
+                // would be read as "the bug did not reproduce", which is the worst possible lie
+                // this code could tell.
+                None => eprintln!(
+                    "  [#119] ⛔ HAZYNC_RAND_Z={spec:?} is not four comma-separated u32s — \
+                     DRAWING FRESH, this run is NOT a replay"
+                ),
+            }
+        }
+    }
+
+    let mut rng = rand::rng();
+    let z = ExtVal::random(&mut rng);
+
+    if let Ok(path) = std::env::var("HAZYNC_RAND_Z_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{segment_index} {}", rand_z_string(rand_z_words(z)));
+        }
+    }
+    z
 }

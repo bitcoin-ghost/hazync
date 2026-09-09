@@ -142,12 +142,24 @@ pub struct PreflightResults {
     pub(crate) terminate_state: Option<TerminateState>,
     pub(crate) output: Option<Output>,
     pub(crate) segment_index: u32,
+
+    /// hazync#119: the per-segment challenge this preflight was run with, as its four canonical
+    /// base-field words. risc0 draws this inside `preflight()` and then discards it, which is why
+    /// #119 has never been reproducible -- the one input that varies between a run that proves and
+    /// a run that does not was not written down anywhere. Carried here so a failure can record it.
+    pub(crate) rand_z: [u32; 4],
 }
 
 impl PreflightResults {
     /// The index of the [Segment] this [PreflightResults] came from.
     pub fn segment_index(&self) -> u32 {
         self.segment_index
+    }
+
+    /// hazync#119: the per-segment challenge, as four canonical base-field words. Feed it back with
+    /// `HAZYNC_RAND_Z` to reproduce this exact preflight.
+    pub fn rand_z(&self) -> [u32; 4] {
+        self.rand_z
     }
 }
 
