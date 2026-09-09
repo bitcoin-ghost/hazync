@@ -12,3 +12,5 @@ lto = true
 
 [patch.crates-io]
 risc0-zkvm = { path = "../vendor/risc0-zkvm" }
+# hazync#119: the CUDA kernels live here, and `eltwise_zeroize_fp` runs off the end of its buffer.
+risc0-sys = { path = "../vendor/risc0-sys" }
