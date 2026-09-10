@@ -1,6 +1,47 @@
 --- a/prover.rs
 +++ b/prover.rs
-@@ -140,6 +140,37 @@
+@@ -18,7 +18,7 @@
+ };
+ 
+ use crate::{
+-    core::poly::poly_interpolate,
++    core::poly::{poly_eval, poly_interpolate},
+     hal::{Buffer, CircuitHal, Hal},
+     prove::{fri::fri_prove, poly_group::PolyGroup, write_iop::WriteIOP},
+     taps::TapSet,
+@@ -33,6 +33,10 @@
+     groups: Vec<Option<PolyGroup<H>>>,
+     cycles: usize,
+     po2: usize,
++    // hazync#119: optional constraint evaluator, installed by the circuit so the prover can replay
++    // the verifier's DEEP-ALI check on its own seal. None for every other caller.
++    #[allow(clippy::type_complexity)]
++    hazync_validity: Option<Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + 'a>>,
+ }
+ 
+ fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
+@@ -59,9 +63,20 @@
+                 .collect(),
+             cycles: 0,
+             po2: usize::MAX,
++            hazync_validity: None,
+         }
+     }
+ 
++    /// hazync#119: install the circuit's `poly_ext` so `finalize` can replay the verifier's
++    /// DEEP-ALI check with the prover's own values. Diagnostic; nothing else reads it.
++    #[allow(clippy::type_complexity)]
++    pub fn hazync_set_validity(
++        &mut self,
++        f: Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + 'a>,
++    ) {
++        self.hazync_validity = Some(f);
++    }
++
+     /// Accesses the prover's IOP to commit or read random data.
+     pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
+         &mut self.iop
+@@ -140,6 +155,37 @@
              self.cycles,
          );
  
@@ -37,4 +78,80 @@
 +
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
+ 
+@@ -269,6 +315,75 @@
+             // Set the mix value, which is used for FRI batching.
+         });
+ 
++        // hazync#119: replay the verifier's DEEP-ALI check here, where every input is still
++        // available. The seal is rejected at verify/mod.rs:381 (`check != result`), and the tap
++        // scan says the witness violates no constraint at any trace row -- so the disagreement is
++        // downstream of the witness. This splits the three remaining possibilities:
++        //
++        //   A. `coeff_u` does not round-trip: the verifier's `poly_eval` of the interpolated taps
++        //      differs from the values the prover interpolated. That is a bug in
++        //      poly_interpolate/poly_eval at these z-dependent points, and would be self-contained.
++        //   B. It round-trips, but `check != result`: `eval_check`'s check polynomial disagrees
++        //      with `poly_ext` over the same constraint system.
++        //   C. Both agree here, yet the verifier still rejects: the seal does not carry the values
++        //      the prover used, and the divergence is in the transcript.
++        if std::env::var("HAZYNC_119_VALIDITY").is_ok() {
++            let num_taps = eval_u.len();
++            let mut eval_u_v: Vec<H::ExtElem> = Vec::with_capacity(num_taps);
++            let mut cur_pos = 0;
++            for reg in self.taps.regs() {
++                for i in 0..reg.size() {
++                    let x = z * back_one.pow(reg.back(i));
++                    eval_u_v.push(poly_eval(&coeff_u[cur_pos..cur_pos + reg.size()], x));
++                }
++                cur_pos += reg.size();
++            }
++            let mism: Vec<usize> = (0..num_taps).filter(|&i| eval_u_v[i] != eval_u[i]).collect();
++            eprintln!(
++                "[#119-VAL] po2={} taps={num_taps} roundtrip_mismatch={} first={:?}",
++                self.po2,
++                mism.len(),
++                &mism[..mism.len().min(8)]
++            );
++
++            // The verifier's reconstruction of the check polynomial at z, verify/mod.rs:360.
++            let mut check = H::ExtElem::ZERO;
++            let remap = [0usize, 2, 1, 3];
++            let fp0 = H::Elem::ZERO;
++            let fp1 = H::Elem::ONE;
++            let basis = [
++                [fp1, fp0, fp0, fp0],
++                [fp0, fp1, fp0, fp0],
++                [fp0, fp0, fp1, fp0],
++                [fp0, fp0, fp0, fp1],
++            ];
++            for (i, rmi) in remap.iter().enumerate() {
++                for (k, b) in basis.iter().enumerate() {
++                    check += coeff_u[num_taps + rmi + 4 * k]
++                        * z.pow(i)
++                        * H::ExtElem::from_subelems(*b);
++                }
++            }
++            let three = H::Elem::from_u64(3);
++            check *= (H::ExtElem::from_subfield(&three) * z).pow(self.cycles) - H::ExtElem::ONE;
++
++            match self.hazync_validity.as_ref() {
++                Some(f) => {
++                    let r_pro = f(&poly_mix, &eval_u);
++                    let r_ver = f(&poly_mix, &eval_u_v);
++                    eprintln!("[#119-VAL] check       ={:?}", check.subelems());
++                    eprintln!("[#119-VAL] result(prover)  ={:?}", r_pro.subelems());
++                    eprintln!("[#119-VAL] result(verifier)={:?}", r_ver.subelems());
++                    eprintln!(
++                        "[#119-VAL] VERDICT check==result_verifier: {} (prover==verifier: {})",
++                        check == r_ver,
++                        r_pro == r_ver
++                    );
++                }
++                None => eprintln!("[#119-VAL] no evaluator installed; check={:?}", check.subelems()),
++            }
++        }
++
+         let mix = self.iop.random_ext_elem();
+         tracing::debug!("Mix = {mix:?}");
  

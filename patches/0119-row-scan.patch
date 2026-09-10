@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,6 +216,30 @@
+@@ -216,10 +216,168 @@
  
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
@@ -31,7 +31,21 @@
                  mix
              });
  
-@@ -223,3 +247,123 @@
++            // hazync#119: hand the prover the same constraint evaluator the verifier uses, so
++            // finalize can replay the DEEP-ALI check on its own values. Globals are copied out
++            // because the closure outlives the `view` borrow.
++            if std::env::var("HAZYNC_119_VALIDITY").is_ok() {
++                let mut out_v: Vec<Val> = Vec::new();
++                let mut mix_v: Vec<Val> = Vec::new();
++                global.view(|v| out_v.extend_from_slice(v));
++                mix.buf.view(|v| mix_v.extend_from_slice(v));
++                prover.hazync_set_validity(Box::new(move |poly_mix, u| {
++                    use risc0_zkp::adapter::PolyExt;
++                    CircuitImpl.poly_ext(poly_mix, u, &[&out_v, &mix_v]).tot
++                }));
++            }
++
+             prover.finalize(&[&mix.buf, global], circuit_hal.as_ref())
          }))
      }
  }
@@ -61,7 +75,7 @@
 +) {
 +    use rayon::prelude::*;
 +    use risc0_zkp::adapter::{PolyExt, TapsProvider};
-+    use risc0_zkp::field::{Elem as _, ExtElem as _};
++    use risc0_zkp::field::Elem as _;
 +
 +    let taps = CircuitImpl.get_taps();
 +    let circuit = CircuitImpl;
