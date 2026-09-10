@@ -59,6 +59,7 @@
 +    out: &H::Buffer<Val>,
 +    mix: &H::Buffer<Val>,
 +) {
++    use rayon::prelude::*;
 +    use risc0_zkp::adapter::{PolyExt, TapsProvider};
 +    use risc0_zkp::field::Elem as _;
 +
@@ -69,29 +70,28 @@
 +
 +    code.view(|c| { data.view(|d| { accum.view(|a| { out.view(|o| { mix.view(|m| {
 +        let groups: [&[Val]; 3] = [c, d, a];
-+        let mut u: Vec<ExtVal> = Vec::new();
-+        let mut bad: Vec<usize> = Vec::new();
-+        let mut total_bad = 0usize;
-+
-+        for row in 0..steps {
-+            u.clear();
-+            for reg in taps.regs() {
-+                let g = groups[reg.group()];
-+                for i in 0..reg.size() {
-+                    let back = reg.back(i);
-+                    let r = (row + steps - (back % steps)) % steps;
-+                    let v = g[reg.offset() * steps + r];
-+                    u.push(ExtVal::new(v, Val::ZERO, Val::ZERO, Val::ZERO));
++        // poly_ext is an interpreted walk over PolyExtStepDef -- far slower per row than poly_fp.
++        // Serially this is hours per segment; fanned out over the machine it is seconds.
++        let mut bad: Vec<usize> = (0..steps)
++            .into_par_iter()
++            .filter_map(|row| {
++                let mut u: Vec<ExtVal> = Vec::new();
++                for reg in taps.regs() {
++                    let g = groups[reg.group()];
++                    for i in 0..reg.size() {
++                        let back = reg.back(i);
++                        let r = (row + steps - (back % steps)) % steps;
++                        let v = g[reg.offset() * steps + r];
++                        u.push(ExtVal::new(v, Val::ZERO, Val::ZERO, Val::ZERO));
++                    }
 +                }
-+            }
-+            let tot = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
-+            if tot != ExtVal::ZERO {
-+                total_bad += 1;
-+                if bad.len() < 16 {
-+                    bad.push(row);
-+                }
-+            }
-+        }
++                let tot = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
++                (tot != ExtVal::ZERO).then_some(row)
++            })
++            .collect();
++        bad.sort_unstable();
++        let total_bad = bad.len();
++        bad.truncate(16);
 +        eprintln!("[#119-TAP] steps={steps} violating_rows={total_bad} first={bad:?}");
 +    }); }); }); }); });
 +}
