@@ -31,7 +31,7 @@
                  mix
              });
  
-@@ -223,3 +247,63 @@
+@@ -223,3 +247,80 @@
          }))
      }
  }
@@ -69,7 +69,24 @@
 +    let poly_mix = ExtVal::new(Val::new(2), Val::new(3), Val::new(5), Val::new(7));
 +
 +    code.view(|c| { data.view(|d| { accum.view(|a| { out.view(|o| { mix.view(|m| {
-+        let groups: [&[Val]; 3] = [c, d, a];
++        // ⛔ index by the CONSTANTS, not by the order the buffers happen to be written. The group
++        // ids come from a macro and are not [code, data, accum]; assuming that order indexed past
++        // the end of a buffer (len 2,097,152, index 3,600,291).
++        let mut groups: [&[Val]; 3] = [c, c, c];
++        groups[REGISTER_GROUP_CODE] = c;
++        groups[REGISTER_GROUP_DATA] = d;
++        groups[REGISTER_GROUP_ACCUM] = a;
++        for (gi, g) in groups.iter().enumerate() {
++            let want = taps.group_size(gi) * steps;
++            if g.len() != want {
++                eprintln!(
++                    "[#119-TAP] group {gi} buffer is {} elems, taps expect {} ({} cols x {steps}) -- \
++                     layout assumption is wrong, aborting scan",
++                    g.len(), want, taps.group_size(gi)
++                );
++                return;
++            }
++        }
 +        // poly_ext is an interpreted walk over PolyExtStepDef -- far slower per row than poly_fp.
 +        // Serially this is hours per segment; fanned out over the machine it is seconds.
 +        let mut bad: Vec<usize> = (0..steps)
