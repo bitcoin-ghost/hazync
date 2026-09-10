@@ -6164,6 +6164,24 @@ fn seg_serve_cmd() {
     println!();
     println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
     println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
+
+    // ⛔ PERSIST IT. This receipt is the entire point of the run and it used to exist only in this
+    // process's memory: `seg-serve` verified it, printed a digest, and exited. The 2026-09-10
+    // milestone (block 966,256, 26 cards, 485 s) therefore ended with a digest in a log and no
+    // artifact -- and the coordinator was a rented pod that was torn down minutes later. Hours of
+    // fleet time produced something nobody can hand to a third party.
+    //
+    // `prove-chunk` has always honoured HAZYNC_OUT; the aggregate simply never did. Same convention
+    // here, with a default so the file exists even when nobody sets it.
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| "aggregate_receipt.bin".into());
+    match bincode::serialize(&info.receipt) {
+        Ok(bytes) => match std::fs::write(&out, &bytes) {
+            Ok(()) => println!("    receipt written to {out} ({} bytes)", bytes.len()),
+            // Loud, and a non-zero exit: a run that verified but could not save is not a success.
+            Err(e) => { eprintln!("⛔ RECEIPT VERIFIED BUT NOT SAVED: {out}: {e}"); std::process::exit(3); }
+        },
+        Err(e) => { eprintln!("⛔ RECEIPT VERIFIED BUT NOT SERIALIZABLE: {e}"); std::process::exit(3); }
+    }
 }
 
 // Survive hazync#119: the CUDA prover intermittently returns a segment proof that fails its own
