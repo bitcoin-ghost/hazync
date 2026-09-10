@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -212,14 +212,488 @@
+@@ -212,14 +212,499 @@
                  // Make the mixing values
                  let mix: [Val; REGCOUNT_MIX] = std::array::from_fn(|_| prover.iop().random_elem());
  
@@ -149,6 +149,17 @@
 +                prover.hazync_set_rowscan(Box::new(move |pm| {
 +                    hazync_119_tap_scan_slices(steps, &cv, &dv, &av, &ov, &mv, *pm);
 +                }));
++            }
++
++            // hazync#119: hand the witness to finalize, indexed by GROUP ID (accum=0, code=1,
++            // data=2 -- alphabetical, from the macro; NOT the order they are committed in).
++            if std::env::var("HAZYNC_119_WIT").is_ok() {
++                let ngroups = TAPSET.num_groups();
++                let mut w: Vec<Vec<Val>> = vec![Vec::new(); ngroups];
++                code.view(|v| w[REGISTER_GROUP_CODE] = v.to_vec());
++                data.view(|v| w[REGISTER_GROUP_DATA] = v.to_vec());
++                witgen.accum.buf.view(|v| w[REGISTER_GROUP_ACCUM] = v.to_vec());
++                prover.hazync_set_witness(w);
 +            }
 +
              prover.finalize(&[&mix.buf, global], circuit_hal.as_ref())
