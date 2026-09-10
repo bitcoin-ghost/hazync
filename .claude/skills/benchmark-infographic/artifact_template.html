@@ -1,0 +1,349 @@
+<title>Block 966,256 Proof Trace</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600;700&display=swap">
+<style>
+/* Committed single-theme instrument readout: the fleet's own console, dark by design.
+   Every colour is painted explicitly so the page holds on either host ground. */
+:root{
+  --ground:#0f1012; --panel:#16181b; --panel-2:#1c1f23;
+  --rule:#2e3135; --rule-soft:#212427;
+  --text:#e6e4de; --dim:#8b8a84; --fainter:#55544f;
+  --accent:#f7931a; --accent-weak:rgba(247,147,26,.14);
+  --verified:#5cc77e; --verified-weak:rgba(92,199,126,.12);
+  --us:#f7931a; --ca:#e8a94f; --is:#6fb3c4; --tw:#d4694f; --no:#78c4a0; --fr:#b8879b;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--mono);
+  font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1280px;margin:0 auto;padding:28px 24px 40px}
+
+/* ---- masthead ---- */
+.mast{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
+  gap:20px;padding-bottom:18px;border-bottom:1px solid var(--rule)}
+.eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);
+  display:flex;align-items:center;gap:10px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--verified);
+  box-shadow:0 0 0 3px var(--verified-weak)}
+h1{font-family:var(--sans);font-weight:700;font-size:clamp(26px,4.2vw,42px);
+  margin:8px 0 0;letter-spacing:-.02em;text-wrap:balance}
+h1 em{font-style:normal;color:var(--accent)}
+.sub{color:var(--dim);font-size:12.5px;margin-top:7px}
+.headline{display:flex;gap:26px;flex-wrap:wrap}
+.hfig{text-align:right}
+.hfig .v{font-family:var(--sans);font-weight:700;font-size:clamp(22px,3vw,34px);
+  letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.05}
+.hfig .k{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--fainter);
+  margin-top:5px}
+.hfig.acc .v{color:var(--accent)}
+
+/* ---- controls ---- */
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:18px 0 16px}
+button{font-family:var(--mono);font-size:12px;color:var(--text);background:var(--panel-2);
+  border:1px solid var(--rule);border-radius:3px;padding:7px 14px;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button[aria-pressed="true"]{background:var(--accent-weak);border-color:var(--accent);color:var(--accent)}
+.clock{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12px;margin-left:auto}
+.clock b{color:var(--text);font-weight:500}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dim)}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+
+/* ---- main grid ---- */
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+.chart{background:var(--panel);border:1px solid var(--rule-soft);border-radius:4px;
+  padding:14px 16px 8px;overflow-x:auto}
+.chart svg{display:block;width:100%;height:auto;min-width:640px}
+.side{display:flex;flex-direction:column;gap:14px}
+.card{background:var(--panel);border:1px solid var(--rule-soft);border-radius:4px;padding:14px 16px}
+.card h2{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--fainter);
+  margin:0 0 11px;font-weight:500;font-family:var(--mono)}
+.rows{display:flex;flex-direction:column;gap:7px}
+.row{display:flex;justify-content:space-between;gap:12px;font-size:12px}
+.row span:first-child{color:var(--dim)}
+.row span:last-child{font-variant-numeric:tabular-nums;text-align:right}
+.hot{color:var(--accent)}
+.ok{color:var(--verified)}
+.ring{display:block;margin:0 auto}
+
+/* ---- inspector ---- */
+#inspect{min-height:74px;border-left:2px solid var(--accent);padding-left:12px}
+#inspect .t{font-size:12.5px;margin-bottom:6px}
+#inspect .d{color:var(--dim);font-size:11.5px;line-height:1.7}
+
+/* ---- digests ---- */
+.foot{margin-top:22px;padding-top:16px;border-top:1px solid var(--rule);
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px 26px}
+.dg{font-size:11px;color:var(--dim);min-width:0}
+.dg b{display:block;color:var(--fainter);font-weight:400;letter-spacing:.13em;
+  text-transform:uppercase;font-size:9.5px;margin-bottom:3px}
+.dg code{color:var(--text);word-break:break-all;font-size:10.5px}
+.caveat{margin-top:16px;font-size:11.5px;color:var(--fainter);line-height:1.65;max-width:78ch}
+.caveat b{color:var(--dim);font-weight:400}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <div class="mast">
+    <div>
+      <div class="eyebrow"><span class="dot"></span> hazync &middot; run 4 &middot; 2026-09-10</div>
+      <h1>A Bitcoin block, proved by <em>27 rented GPUs</em></h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <div class="headline">
+      <div class="hfig acc"><div class="v" id="h-time"></div><div class="k">wall clock</div></div>
+      <div class="hfig"><div class="v" id="h-cost"></div><div class="k">GPU cost</div></div>
+      <div class="hfig"><div class="v" id="h-kwh"></div><div class="k">GPU energy</div></div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="play">▶ Replay the run</button>
+    <button id="metric" aria-pressed="false">Show utilisation</button>
+    <div class="legend" id="legend"></div>
+    <div class="clock" id="clock"></div>
+  </div>
+
+  <div class="grid">
+    <div class="chart"><svg id="trace" viewBox="0 0 900 690" role="img"
+        aria-label="Twenty-seven GPU power traces over the 544 second run, one row per chunk"></svg></div>
+    <div class="side">
+      <div class="card">
+        <h2>Aggregate</h2>
+        <svg class="ring" id="ring" width="200" height="200" viewBox="0 0 200 200" role="img"
+             aria-label="Run progress ring"></svg>
+        <div class="rows" id="agg"></div>
+      </div>
+      <div class="card">
+        <h2>The fleet</h2>
+        <div class="rows" id="fleet"></div>
+      </div>
+      <div class="card">
+        <h2>Card detail</h2>
+        <div id="inspect"><div class="t">Hover a trace</div>
+          <div class="d">Each row is one chunk's GPU, sampled at 1&nbsp;Hz for its whole prove.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot" id="foot"></div>
+  <div class="caveat" id="caveat"></div>
+</div>
+<script>const RUN = __DATA__;</script>
+<script>
+(() => {
+const $ = s => document.querySelector(s);
+const SITE_COLOR = {US:'#f7931a',CA:'#e8a94f',IS:'#6fb3c4',TW:'#d4694f',NO:'#78c4a0',FR:'#b8879b'};
+const W = RUN.wall_total_s, cards = RUN.card_list;
+const fmt = n => n.toLocaleString('en-US');
+const mmss = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+
+/* ---------- masthead ---------- */
+$('#h-time').textContent = (W/60).toFixed(2) + ' min';
+$('#h-cost').textContent = '$' + RUN.cost_usd.toFixed(2);
+$('#h-kwh').textContent  = RUN.energy_kwh.toFixed(3) + ' kWh';
+$('#sub').textContent =
+  `block ${fmt(RUN.block)} · ${fmt(RUN.txs)} transactions · ${fmt(RUN.inputs)} inputs · ` +
+  `${fmt(RUN.total_segments)} segments · ${RUN.cards}× ${RUN.gpu}`;
+$('#legend').innerHTML = Object.entries(RUN.sites).map(([s,n]) =>
+  `<span><i style="background:${SITE_COLOR[s]}"></i>${RUN.site_names[s]||s} ${n}</span>`).join('');
+
+/* ---------- ridgeline ---------- */
+const SVG='http://www.w3.org/2000/svg';
+const svg=$('#trace'), VW=900, VH=690;
+const L=64, R=828, TOP=26, ROW=23, TRACE=17;
+const x = t => L + (t/W)*(R-L);
+const el=(n,a)=>{const e=document.createElementNS(SVG,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
+const PMAX = 360;   // W -- every 4090 here peaked between 259 and 328
+
+// time grid + phase markers
+RUN.phases.forEach(p=>{
+  const px=x(p.at), last=p.at===W;
+  svg.appendChild(el('line',{x1:px,y1:TOP-8,x2:px,y2:TOP+27*ROW+4,
+    stroke:last?'#5cc77e':'#2e3135','stroke-width':1,'stroke-dasharray':last?'':'2 4'}));
+  const lab=el('text',{x:px+4,y:TOP-13,fill:last?'#5cc77e':'#6b6b68','font-size':9.5,
+    'font-family':'IBM Plex Mono, monospace','letter-spacing':'.08em'});
+  lab.textContent=p.label.toUpperCase(); svg.appendChild(lab);
+});
+for(let t=0;t<=W;t+=60){
+  const tx=el('text',{x:x(t),y:TOP+27*ROW+22,fill:'#55544f','font-size':9.5,'text-anchor':'middle',
+    'font-family':'IBM Plex Mono, monospace'});
+  tx.textContent=mmss(t); svg.appendChild(tx);
+}
+const axis=el('text',{x:L,y:TOP+27*ROW+40,fill:'#55544f','font-size':9.5,
+  'font-family':'IBM Plex Mono, monospace','letter-spacing':'.1em'});
+axis.textContent='ELAPSED — GPU POWER PER CARD, 1 Hz'; svg.appendChild(axis);
+
+// The aggregate window. The chunk traces stop at +263 s but the run does not -- this is the
+// LARGER half (241.2 s against 247.9 s of chunk proving). Leaving it as blank axis would read as
+// nothing happening, so it carries its own breakdown. The workers were attached and resolving here;
+// the per-card samplers had already exited, which is why there are no traces to draw.
+const AGX0=x(293.7), AGX1=x(W), AGY0=TOP-4, AGY1=TOP+27*ROW+4;
+svg.appendChild(el('rect',{x:AGX0,y:AGY0,width:AGX1-AGX0,height:AGY1-AGY0,
+  fill:'#5cc77e','fill-opacity':.03}));
+(function aggregateBand(){
+  const by=TOP+9*ROW, bh=ROW*7, segs=[
+    ['execution',38.9,'#6fb3c4'],['worker wall',73.6,'#e8a94f'],['assembly',128.7,'#5cc77e']];
+  let cur=293.7+(544-293.7-241.2)/2;   // the three phases run back to back inside the window
+  const cap=el('text',{x:AGX0+10,y:by-16,fill:'#5cc77e','font-size':10,'letter-spacing':'.12em',
+    'font-family':'IBM Plex Mono, monospace'});
+  cap.textContent='AGGREGATE — 241.2 s'; svg.appendChild(cap);
+  segs.forEach(([lab,dur,col])=>{
+    const sx=x(cur), sw=x(cur+dur)-sx;
+    svg.appendChild(el('rect',{x:sx,y:by,width:sw,height:bh,fill:col,'fill-opacity':.13,
+      stroke:col,'stroke-width':1,'stroke-opacity':.5}));
+    const l1=el('text',{x:sx+sw/2,y:by+bh/2-4,fill:col,'font-size':10,'text-anchor':'middle',
+      'font-family':'IBM Plex Mono, monospace'});
+    l1.textContent=lab; svg.appendChild(l1);
+    const l2=el('text',{x:sx+sw/2,y:by+bh/2+11,fill:'#8b8a84','font-size':10,'text-anchor':'middle',
+      'font-family':'IBM Plex Mono, monospace','font-variant-numeric':'tabular-nums'});
+    l2.textContent=dur+' s'; svg.appendChild(l2);
+    cur+=dur;
+  });
+  const n1=el('text',{x:AGX0+10,y:by+bh+18,fill:'#55544f','font-size':9.5,
+    'font-family':'IBM Plex Mono, monospace'});
+  n1.textContent='585 segments → 1, depth-4 join tree'; svg.appendChild(n1);
+  const n2=el('text',{x:AGX0+10,y:by+bh+31,fill:'#55544f','font-size':9.5,
+    'font-family':'IBM Plex Mono, monospace'});
+  n2.textContent='584 pushed to 27 attached workers — not sampled'; svg.appendChild(n2);
+})();
+
+const paths=[], groups=[];
+cards.forEach((c,i)=>{
+  const y0=TOP+i*ROW+TRACE, col=SITE_COLOR[c.site]||'#f7931a';
+  const g=el('g',{}); groups.push(g);
+  g.appendChild(el('line',{x1:L,y1:y0+.5,x2:R,y2:y0+.5,stroke:'#212427','stroke-width':1}));
+  const lab=el('text',{x:L-8,y:y0-1,fill:'#6b6b68','font-size':9.5,'text-anchor':'end',
+    'font-family':'IBM Plex Mono, monospace'});
+  lab.textContent=`${String(c.chunk).padStart(2,'0')} ${c.site}`; g.appendChild(lab);
+  // area under the power curve
+  let d=`M ${x(c.t[0]||0)} ${y0}`;
+  for(let k=0;k<c.t.length;k++) d+=` L ${x(c.t[k]).toFixed(1)} ${(y0-Math.min(1,c.w[k]/PMAX)*TRACE).toFixed(1)}`;
+  d+=` L ${x(c.t[c.t.length-1]||0)} ${y0} Z`;
+  const area=el('path',{d,fill:col,'fill-opacity':.17,stroke:'none'});
+  const line=el('path',{d:d.replace(/ Z$/,''),fill:'none',stroke:col,'stroke-width':1.25,
+    'stroke-linejoin':'round'});
+  g.appendChild(area); g.appendChild(line);
+  // endpoint + wall time
+  const ex=x(c.end_s);
+  g.appendChild(el('circle',{cx:ex,cy:y0,r:1.9,fill:col}));
+  const wl=el('text',{x:ex+7,y:y0+3,fill:'#6b6b68','font-size':9,
+    'font-family':'IBM Plex Mono, monospace'});
+  wl.textContent=`${c.wall_s.toFixed(0)}s`; g.appendChild(wl);
+  const hit=el('rect',{x:L,y:y0-TRACE-2,width:R-L,height:ROW,fill:'transparent'});
+  hit.addEventListener('mouseenter',()=>inspect(c));
+  g.appendChild(hit);
+  svg.appendChild(g);
+  paths.push({c,area,line,y0,col,d});
+});
+
+function inspect(c){
+  $('#inspect').innerHTML =
+    `<div class="t"><b style="color:${SITE_COLOR[c.site]}">chunk ${c.chunk}</b> · ${c.site_name}</div>
+     <div class="d">${fmt(c.inputs)} inputs · ${c.segments} segments · ${c.s_per_segment.toFixed(2)} s/segment<br>
+     wall <b style="color:#e6e4de">${c.wall_s.toFixed(1)} s</b> · finished at +${c.end_s.toFixed(0)} s<br>
+     peak ${c.peak_w.toFixed(0)} W · ${c.peak_c} °C · ${fmt(c.peak_vram_mib)} MiB · util ${c.mean_util}%<br>
+     <span style="color:#55544f">${c.cpu}</span></div>`;
+}
+
+/* ---------- ring ---------- */
+const ring=$('#ring'), CX=100, CY=100, RR=78, C=2*Math.PI*RR;
+ring.appendChild(el('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:'#212427','stroke-width':9}));
+const arcChunk=el('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:'#f7931a','stroke-width':9,
+  'stroke-linecap':'butt',transform:`rotate(-90 ${CX} ${CY})`,
+  'stroke-dasharray':`${C*287.9/W} ${C}`});
+const arcAgg=el('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:'#5cc77e','stroke-width':9,
+  'stroke-linecap':'butt',transform:`rotate(-90 ${CX} ${CY})`,
+  'stroke-dasharray':`${C*(W-293.7)/W} ${C}`,'stroke-dashoffset':`${-C*293.7/W}`});
+ring.appendChild(arcChunk); ring.appendChild(arcAgg);
+const rBig=el('text',{x:CX,y:CY-2,fill:'#e6e4de','font-size':27,'text-anchor':'middle',
+  'font-family':'IBM Plex Sans, sans-serif','font-weight':700});
+const rSml=el('text',{x:CX,y:CY+20,fill:'#5cc77e','font-size':10,'text-anchor':'middle',
+  'letter-spacing':'.16em','font-family':'IBM Plex Mono, monospace'});
+ring.appendChild(rBig); ring.appendChild(rSml);
+function setRing(t,done){
+  rBig.textContent = done ? (W/60).toFixed(2)+' min' : mmss(t);
+  rSml.textContent = done ? 'VERIFIED' : 'PROVING';
+  rSml.setAttribute('fill', done ? '#5cc77e' : '#6b6b68');
+  arcChunk.setAttribute('stroke-dasharray',`${C*Math.min(t,287.9)/W} ${C}`);
+  const a=Math.max(0,Math.min(t,W)-293.7);
+  arcAgg.setAttribute('stroke-dasharray',`${C*a/W} ${C}`);
+}
+
+/* ---------- side panels ---------- */
+const A=RUN.aggregate, S=RUN.chunk_stats;
+$('#agg').innerHTML=[
+  ['chunk phase','247.9 s'],['aggregate','<span class="hot">'+A.total_s+' s</span>'],
+  ['&nbsp;&nbsp;execution',A.execution_s+' s'],['&nbsp;&nbsp;worker wall',A.worker_wall_s+' s'],
+  ['&nbsp;&nbsp;assembly',A.assembly_s+' s'],['join tree',A.segments+' → 1, depth '+A.depth]
+].map(([k,v])=>`<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+$('#fleet').innerHTML=[
+  ['cards',RUN.cards+'× '+RUN.gpu],['countries',Object.keys(RUN.sites).length],
+  ['segments proved',fmt(RUN.total_segments)],
+  ['#119 faults','<span class="ok">'+RUN.retries_119+'</span>'],
+  ['fastest chunk',S.min_s.toFixed(0)+' s'],['slowest chunk',S.max_s.toFixed(0)+' s'],
+  ['straggler ratio',S.straggler.toFixed(3)]
+].map(([k,v])=>`<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+$('#foot').innerHTML=[
+  ['journal digest',RUN.journal_digest],['guest METHOD_ID',RUN.method_id],
+  ['receipt sha256',RUN.receipt_sha+'  ('+fmt(RUN.receipt_bytes)+' bytes)'],
+  ['chain tip',RUN.tip_hash]
+].map(([k,v])=>`<div class="dg"><b>${k}</b><code>${v}</code></div>`).join('');
+$('#caveat').innerHTML=
+  `<b>What is proved and what is attested.</b> The receipt verifies against the canonical guest id — `+
+  `that part needs no trust in us. The wall clock does not: it is attested from driver logs and 1 Hz `+
+  `telemetry, and no amount of sitting beside a digest makes a stopwatch cryptographic. `+
+  `The energy figure is a floor, not a total — GPU rails only, and the samplers stopped as each card `+
+  `finished, so the ${A.total_s}-second aggregate is not counted in it.`;
+
+/* ---------- replay ---------- */
+let raf=null;
+function draw(t){
+  paths.forEach(p=>{
+    const c=p.c;
+    if(t<=c.start_s){p.area.setAttribute('d','');p.line.setAttribute('d','');return;}
+    let n=0; while(n<c.t.length && c.t[n]<=t) n++;
+    if(n<2){p.area.setAttribute('d','');p.line.setAttribute('d','');return;}
+    let d=`M ${x(c.t[0])} ${p.y0}`;
+    for(let k=0;k<n;k++) d+=` L ${x(c.t[k]).toFixed(1)} ${(p.y0-Math.min(1,c.w[k]/PMAX)*TRACE).toFixed(1)}`;
+    p.line.setAttribute('d',d);
+    p.area.setAttribute('d',d+` L ${x(c.t[n-1])} ${p.y0} Z`);
+  });
+  setRing(t,t>=W);
+  $('#clock').innerHTML=`<b>${mmss(Math.min(t,W))}</b> / ${mmss(W)} &nbsp;·&nbsp; `+
+    `${cards.filter(c=>c.end_s<=t).length}/27 chunks`;
+}
+function rest(){ if(raf)cancelAnimationFrame(raf); raf=null;
+  paths.forEach(p=>{p.line.setAttribute('d',p.d.replace(/ Z$/,''));p.area.setAttribute('d',p.d);});
+  setRing(W,true);
+  $('#clock').innerHTML=`<b>${mmss(W)}</b> / ${mmss(W)} &nbsp;·&nbsp; 27/27 chunks`;
+  $('#play').textContent='▶ Replay the run';
+}
+$('#play').addEventListener('click',()=>{
+  if(raf){rest();return;}
+  const t0=performance.now(), SPAN=22000;   // 544 s of run compressed into 22 s
+  $('#play').textContent='■ Stop';
+  (function step(now){
+    const t=((now-t0)/SPAN)*W;
+    if(t>=W){rest();return;}
+    draw(t); raf=requestAnimationFrame(step);
+  })(t0);
+});
+$('#metric').addEventListener('click',e=>{
+  const on=e.currentTarget.getAttribute('aria-pressed')==='true';
+  e.currentTarget.setAttribute('aria-pressed',String(!on));
+  e.currentTarget.textContent=on?'Show utilisation':'Show power';
+  paths.forEach(p=>{
+    const c=p.c, src=on?c.w:c.u, max=on?PMAX:100;
+    let d=`M ${x(c.t[0]||0)} ${p.y0}`;
+    for(let k=0;k<c.t.length;k++) d+=` L ${x(c.t[k]).toFixed(1)} ${(p.y0-Math.min(1,src[k]/max)*TRACE).toFixed(1)}`;
+    p.d=d+` L ${x(c.t[c.t.length-1]||0)} ${p.y0} Z`;
+  });
+  rest();
+});
+rest();
+inspect(cards.find(c=>c.chunk===0)||cards[0]);
+})();
+</script>
