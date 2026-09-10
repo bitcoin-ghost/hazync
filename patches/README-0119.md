@@ -23,3 +23,21 @@ witness exists before either backend runs.
 `rand_z` and a passing one can be diffed against the *same* memory transactions.
 
 ⛔ Diagnostic only, and slow — it writes a line per memory transaction.
+
+## 0119-scan-check-poly.patch — risc0-zkp
+
+Same reconstruct-from-registry approach:
+
+```sh
+Z=$(ls -d ~/.cargo/registry/src/*/risc0-zkp-3.0.5 | head -1)
+cp -r "$Z" vendor/risc0-zkp && chmod -R u+w vendor/risc0-zkp
+patch -p1 -d vendor/risc0-zkp/src/prove < patches/0119-scan-check-poly.patch
+```
+
+`HAZYNC_119_SCAN_CHECK=1` reports non-zero entries in the check polynomial — a witness satisfying
+every constraint leaves it zero on the trace-domain points, so a non-zero entry names the row.
+
+⛔ **The upstream `circuit_debug` feature cannot be used for this.** It does not compile in 3.0.5
+(`verify/mod.rs:315`, `from_subelems` over the wrong item type), and it **changes the protocol**:
+under that feature the verifier *reads* the DEEP point from the transcript instead of deriving it,
+so a binary built with it cannot verify ordinary seals. This patch only observes.

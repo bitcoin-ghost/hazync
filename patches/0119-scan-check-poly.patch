@@ -1,0 +1,40 @@
+--- a/prover.rs
++++ b/prover.rs
+@@ -140,6 +140,37 @@
+             self.cycles,
+         );
+ 
++        // hazync#119: the same scan the `circuit_debug` feature performs, but env-gated and
++        // prover-side only.
++        //
++        // ⛔ The upstream feature cannot be used for this. It does not compile in 3.0.5
++        // (`verify/mod.rs:315`, from_subelems over the wrong item type), and more importantly it
++        // CHANGES THE PROTOCOL: under `circuit_debug` the verifier READS the DEEP point from the
++        // transcript instead of deriving it, so a binary built with it cannot verify ordinary
++        // seals. This block only observes.
++        //
++        // check_poly is the constraint polynomial over the extended domain. A witness that
++        // satisfies every constraint leaves it zero on the trace-domain points; a violated
++        // constraint shows up as a non-zero entry whose index names the row.
++        if std::env::var("HAZYNC_119_SCAN_CHECK").is_ok() {
++            check_poly.view(|check_out| {
++                let mut nz = 0usize;
++                let mut first: Vec<usize> = Vec::new();
++                for i in (0..domain).step_by(4) {
++                    if check_out[i] != H::Elem::ZERO {
++                        nz += 1;
++                        if first.len() < 12 {
++                            first.push(i);
++                        }
++                    }
++                }
++                eprintln!(
++                    "[#119-SCAN] po2={} cycles={} domain={} nonzero_check_entries={} first={:?}",
++                    self.po2, self.cycles, domain, nz, first
++                );
++            });
++        }
++
+         #[cfg(feature = "circuit_debug")]
+         let mut bad_z = None;
+ 

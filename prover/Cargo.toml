@@ -15,3 +15,7 @@ risc0-zkvm = { path = "../vendor/risc0-zkvm" }
 # hazync#119: vendored so preflight can be instrumented. Witness generation is the ONLY code the
 # CPU and CUDA backends share, and both emit a byte-identical invalid seal, so the fault is here.
 risc0-circuit-rv32im = { path = "../vendor/risc0-circuit-rv32im" }
+# hazync#119: vendored to add an env-gated scan of the check polynomial. The upstream
+# `circuit_debug` feature cannot be used -- it does not compile in 3.0.5 and it changes the
+# verifier's protocol (reads the DEEP point instead of deriving it).
+risc0-zkp = { path = "../vendor/risc0-zkp" }
