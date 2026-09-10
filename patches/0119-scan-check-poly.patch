@@ -37,7 +37,7 @@
  /// Object to generate a zero-knowledge proof of the execution of some circuit.
  pub struct Prover<'a, H: Hal> {
      hal: &'a H,
-@@ -33,6 +55,10 @@
+@@ -33,6 +55,27 @@
      groups: Vec<Option<PolyGroup<H>>>,
      cycles: usize,
      po2: usize,
@@ -45,17 +45,40 @@
 +    // the verifier's DEEP-ALI check on its own seal. None for every other caller.
 +    #[allow(clippy::type_complexity)]
 +    hazync_validity: Option<Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + Send + Sync + 'a>>,
++    // hazync#119: per-constraint decomposition, installed by the circuit.
++    hazync_perk: Option<HazyncPerk<'a, H>>,
++}
++
++/// hazync#119: the circuit's constraint polynomial split per constraint.
++/// `C = sum_k mix^k * c_k`, so `q_hi = sum_k mix^k * q_hi,k`, and the k with a non-zero above-4N
++/// component name the constraints that exceed the check group's degree budget.
++#[allow(clippy::type_complexity)]
++pub struct HazyncPerk<'a, H: Hal> {
++    /// number of constraints in the shortlist
++    pub count: usize,
++    /// site -> mix power, for reporting
++    pub powers: Vec<usize>,
++    /// site -> static degree bound
++    pub degrees: Vec<usize>,
++    /// fills `c_k` for every shortlisted site at one tap vector
++    pub eval: Box<dyn Fn(&[H::ExtElem], &mut [H::ExtElem]) + Send + Sync + 'a>,
  }
  
  fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
-@@ -59,9 +85,20 @@
+@@ -59,9 +102,26 @@
                  .collect(),
              cycles: 0,
              po2: usize::MAX,
 +            hazync_validity: None,
++            hazync_perk: None,
          }
      }
  
++    /// hazync#119: install the per-constraint decomposition. Diagnostic; defaults to None.
++    pub fn hazync_set_perk(&mut self, perk: HazyncPerk<'a, H>) {
++        self.hazync_perk = Some(perk);
++    }
++
 +    /// hazync#119: install the circuit's `poly_ext` so `finalize` can replay the verifier's
 +    /// DEEP-ALI check with the prover's own values. Diagnostic; nothing else reads it.
 +    #[allow(clippy::type_complexity)]
@@ -69,7 +92,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -140,6 +177,116 @@
+@@ -140,6 +200,116 @@
              self.cycles,
          );
  
@@ -186,7 +209,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,6 +308,31 @@
+@@ -161,6 +331,31 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -218,7 +241,7 @@
          self.hal.batch_interpolate_ntt(&check_poly, ext_size);
  
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
-@@ -269,6 +441,174 @@
+@@ -269,6 +464,271 @@
              // Set the mix value, which is used for FRI batching.
          });
  
@@ -387,9 +410,114 @@
 +                        if nonzero == 0 { "ABSENT (degree fits)" } else { "PRESENT (degree overflow)" }
 +                    );
 +                }
++
++                // hazync#119: WHICH constraint carries the degree.
++                //
++                // Each c_k is individually divisible by Z (every constraint vanishes on the trace
++                // domain -- measured, violating_rows=0), so q_k = c_k/Z is a polynomial and
++                // q_hi = sum_k mix^k * q_hi,k. Computing q_hi,k per constraint names the culprits.
++                //
++                // interp_k(z) is a LINEAR functional of the samples, so it accumulates streaming:
++                //     interp_k(z) = ((z^M - 1)/M) * sum_j c_k(x_j)/Z_j * w^j/(z - w^j)
++                // which needs one accumulator per constraint and no per-point storage.
++                if let Some(perk) = self.hazync_perk.as_ref() {
++                    use rayon::prelude::*;
++                    let kn = perk.count;
++                    let mask = domain - 1;
++                    let w = H::Elem::ROU_FWD[self.po2 + INV_RATE.trailing_zeros() as usize];
++
++                    let views: Vec<Vec<H::Elem>> = self
++                        .groups
++                        .iter()
++                        .map(|pg| pg.as_ref().unwrap().evaluated.to_vec())
++                        .collect();
++
++                    let ntaps = eval_u.len();
++                    let acc = (0..domain)
++                        .into_par_iter()
++                        .fold(
++                            || {
++                                (
++                                    vec![H::ExtElem::ZERO; kn],
++                                    Vec::<H::ExtElem>::with_capacity(ntaps),
++                                    vec![H::ExtElem::ZERO; kn],
++                                )
++                            },
++                            |(mut a, mut u, mut c), j| {
++                                u.clear();
++                                for reg in self.taps.regs() {
++                                    let g = &views[reg.group()];
++                                    for i in 0..reg.size() {
++                                        let row =
++                                            j.wrapping_sub(INV_RATE * reg.back(i)) & mask;
++                                        u.push(H::ExtElem::from_subfield(
++                                            &g[reg.offset() * domain + row],
++                                        ));
++                                    }
++                                }
++                                (perk.eval)(&u, &mut c);
++                                let x = w.pow(j);
++                                let zj = (three * x).pow(1 << self.po2) - H::Elem::ONE;
++                                let wj = H::ExtElem::from_subfield(&x);
++                                let lam = wj
++                                    * (z - wj).inv()
++                                    * H::ExtElem::from_subfield(&zj.inv());
++                                for k in 0..kn {
++                                    a[k] += c[k] * lam;
++                                }
++                                (a, u, c)
++                            },
++                        )
++                        .map(|(a, _, _)| a)
++                        .reduce(
++                            || vec![H::ExtElem::ZERO; kn],
++                            |mut a, b| {
++                                for k in 0..kn {
++                                    a[k] += b[k];
++                                }
++                                a
++                            },
++                        );
++
++                    // c_k at z, from the taps the protocol already evaluated there
++                    let mut c_at_z = vec![H::ExtElem::ZERO; kn];
++                    (perk.eval)(&eval_u, &mut c_at_z);
++
++                    let m_inv = H::Elem::from_u64(domain as u64).inv();
++                    let scale = (z.pow(domain) - H::ExtElem::ONE)
++                        * H::ExtElem::from_subfield(&m_inv);
++                    let z_at_z = (H::ExtElem::from_subfield(&three) * z).pow(self.cycles)
++                        - H::ExtElem::ONE;
++                    let denom = (z.pow(domain) - H::ExtElem::ONE).inv();
++                    let zinv = z_at_z.inv();
++
++                    let mut guilty: Vec<(usize, usize)> = Vec::new();
++                    for k in 0..kn {
++                        let interp_k = acc[k] * scale;
++                        let q_k = c_at_z[k] * zinv;
++                        let q_hi_k = (q_k - interp_k) * denom;
++                        if q_hi_k != H::ExtElem::ZERO {
++                            guilty.push((perk.degrees[k], perk.powers[k]));
++                        }
++                    }
++                    eprintln!(
++                        "[#119-PERK] po2={} shortlist={kn} carrying_degree={} sites={:?}",
++                        self.po2,
++                        guilty.len(),
++                        &guilty[..guilty.len().min(24)]
++                    );
++                }
 +            }
 +        }
 +
          let mix = self.iop.random_ext_elem();
          tracing::debug!("Mix = {mix:?}");
  
+--- a/mod.rs
++++ b/mod.rs
+@@ -26,4 +26,4 @@
+ pub mod soundness;
+ pub mod write_iop;
+ 
+-pub use prover::Prover;
++pub use prover::{HazyncPerk, Prover};

@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,10 +216,184 @@
+@@ -216,10 +216,380 @@
  
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
@@ -43,6 +43,47 @@
 +                    use risc0_zkp::adapter::PolyExt;
 +                    CircuitImpl.poly_ext(poly_mix, u, &[&out_v, &mix_v]).tot
 +                }));
++            }
++
++            // hazync#119: install the per-constraint decomposition so finalize can report WHICH
++            // constraints carry an above-4N component. Shortlisted by static degree: only sites
++            // whose flat-DAG degree exceeds 5 can overflow a budget of deg(C) < 5N.
++            if std::env::var("HAZYNC_119_PERK").is_ok() {
++                let (sites, _nfp) = hazync_119_sites(5);
++                let powers: Vec<usize> = sites.iter().map(|s| s.power).collect();
++                let degrees: Vec<usize> = sites.iter().map(|s| s.degree).collect();
++                eprintln!(
++                    "[#119-PERK] shortlist {} sites, degrees {:?}..{:?}",
++                    sites.len(),
++                    degrees.first(),
++                    degrees.last()
++                );
++                let mut out_v: Vec<Val> = Vec::new();
++                let mut mix_v: Vec<Val> = Vec::new();
++                global.view(|v| out_v.extend_from_slice(v));
++                mix.buf.view(|v| mix_v.extend_from_slice(v));
++                let sites = std::sync::Arc::new(sites);
++                let count = sites.len();
++                prover.hazync_set_perk(risc0_zkp::prove::HazyncPerk {
++                    count,
++                    powers,
++                    degrees,
++                    eval: Box::new(move |u, out| {
++                        thread_local! {
++                            static SCRATCH: std::cell::RefCell<Vec<ExtVal>> =
++                                const { std::cell::RefCell::new(Vec::new()) };
++                        }
++                        SCRATCH.with(|sc| {
++                            hazync_119_perk(
++                                &sites,
++                                u,
++                                &[&out_v, &mix_v],
++                                &mut sc.borrow_mut(),
++                                out,
++                            )
++                        });
++                    }),
++                });
 +            }
 +
              prover.finalize(&[&mix.buf, global], circuit_hal.as_ref())
@@ -184,4 +225,159 @@
 +        bad.truncate(16);
 +        eprintln!("[#119-TAP] steps={steps} violating_rows={total_bad} first={bad:?}");
 +    }); }); }); }); });
++}
++
++/// hazync#119: per-constraint decomposition of the constraint polynomial.
++///
++/// `C = sum_k mix^k * c_k`, so `q_hi = sum_k mix^k * q_hi,k` and the k with a non-zero above-4N
++/// component NAME the constraints that blow the degree budget.
++///
++/// The `mul` of a MixState is always a pure monomial in mix -- it starts at ONE and is only ever
++/// multiplied by mix (AndEqz) or by another mul (AndCond) -- so every AndEqz site contributes
++/// exactly one term, at a statically known power, scaled by the product of the conds enclosing it.
++/// Expanding the chain backwards from `ret` yields a flat table: 7,951 sites, one per power, with
++/// a cond path at most 4 deep. Measured, no blowup, despite 88 mix vars having several parents.
++#[cfg(not(target_os = "zkvm"))]
++pub(crate) struct Hazync119Site {
++    pub power: usize,
++    pub inner: usize,
++    pub conds: Vec<usize>,
++    pub degree: usize,
++}
++
++/// Every site whose STATIC degree exceeds `max_deg`, plus the number of fp vars to evaluate.
++/// The bound is on the flat DAG, so this is a shortlist of candidates, not a verdict: whether a
++/// site actually contributes depends on its coefficients for the witness at hand.
++#[cfg(not(target_os = "zkvm"))]
++pub(crate) fn hazync_119_sites(max_deg: usize) -> (Vec<Hazync119Site>, usize) {
++    use risc0_zkp::adapter::PolyExtStep as S;
++    let def = &crate::zirgen::poly_ext::DEF;
++
++    let (mut fp_deg, mut mix_mp, mut mix_ops) = (Vec::new(), Vec::new(), Vec::new());
++    for op in def.block.iter() {
++        match op {
++            S::Const(..) | S::ConstExt(..) | S::GetGlobal(..) => fp_deg.push(0),
++            S::Get(..) => fp_deg.push(1),
++            S::Add(a, b) | S::Sub(a, b) => fp_deg.push(fp_deg[*a].max(fp_deg[*b])),
++            S::Mul(a, b) => fp_deg.push(fp_deg[*a] + fp_deg[*b]),
++            S::True => {
++                mix_mp.push(0usize);
++                mix_ops.push((0usize, 0usize, 0usize));
++            }
++            S::AndEqz(c, i) => {
++                mix_mp.push(mix_mp[*c] + 1);
++                mix_ops.push((1usize, *c, *i));
++            }
++            S::AndCond(c, cond, i) => {
++                mix_mp.push(mix_mp[*c] + mix_mp[*i]);
++                mix_ops.push((2usize, *c, *cond));
++                // inner index stashed alongside below
++            }
++            _ => fp_deg.push(0),
++        }
++    }
++    // second pass for AndCond inner indices (kept separately to keep the tuple small)
++    let mut and_cond_inner = vec![0usize; mix_ops.len()];
++    {
++        let mut mi = 0usize;
++        for op in def.block.iter() {
++            match op {
++                S::True | S::AndEqz(..) => mi += 1,
++                S::AndCond(_, _, i) => {
++                    and_cond_inner[mi] = *i;
++                    mi += 1;
++                }
++                _ => {}
++            }
++        }
++    }
++
++    // walk the chain backwards from ret, pushing (power offset, cond path) to each parent
++    let mut paths: Vec<Vec<(usize, Vec<usize>)>> = vec![Vec::new(); mix_ops.len()];
++    paths[def.ret].push((0, Vec::new()));
++    let mut sites = Vec::new();
++    for i in (0..mix_ops.len()).rev() {
++        let here = std::mem::take(&mut paths[i]);
++        if here.is_empty() {
++            continue;
++        }
++        let (kind, chain, arg) = mix_ops[i];
++        for (off, conds) in here {
++            match kind {
++                1 => {
++                    let degree = fp_deg[arg] + conds.iter().map(|c| fp_deg[*c]).sum::<usize>();
++                    sites.push(Hazync119Site {
++                        power: off + mix_mp[chain],
++                        inner: arg,
++                        conds: conds.clone(),
++                        degree,
++                    });
++                    paths[chain].push((off, conds));
++                }
++                2 => {
++                    let inner = and_cond_inner[i];
++                    let mut deeper = conds.clone();
++                    deeper.push(arg);
++                    paths[inner].push((off + mix_mp[chain], deeper));
++                    paths[chain].push((off, conds));
++                }
++                _ => {}
++            }
++        }
++    }
++    sites.retain(|s| s.degree > max_deg);
++    sites.sort_by(|a, b| b.degree.cmp(&a.degree).then(a.power.cmp(&b.power)));
++    (sites, fp_deg.len())
++}
++
++/// Evaluate `c_k` for each shortlisted site at one point. `scratch` holds the fp vars and is
++/// reused across the millions of points in a coset pass.
++#[cfg(not(target_os = "zkvm"))]
++pub(crate) fn hazync_119_perk(
++    sites: &[Hazync119Site],
++    u: &[ExtVal],
++    args: &[&[Val]],
++    scratch: &mut Vec<ExtVal>,
++    out: &mut [ExtVal],
++) {
++    use risc0_zkp::adapter::PolyExtStep as S;
++    use risc0_zkp::field::{Elem as _, ExtElem as _};
++    let def = &crate::zirgen::poly_ext::DEF;
++
++    scratch.clear();
++    for op in def.block.iter() {
++        match op {
++            S::Const(v) => scratch.push(ExtVal::from_subfield(&Val::from_u64(*v as u64))),
++            S::ConstExt(a, b, c, d) => scratch.push(ExtVal::new(
++                Val::from_u64(*a as u64),
++                Val::from_u64(*b as u64),
++                Val::from_u64(*c as u64),
++                Val::from_u64(*d as u64),
++            )),
++            S::Get(t) => scratch.push(u[*t]),
++            S::GetGlobal(base, off) => {
++                scratch.push(ExtVal::from_subfield(&args[*base][*off]))
++            }
++            S::Add(a, b) => {
++                let v = scratch[*a] + scratch[*b];
++                scratch.push(v);
++            }
++            S::Sub(a, b) => {
++                let v = scratch[*a] - scratch[*b];
++                scratch.push(v);
++            }
++            S::Mul(a, b) => {
++                let v = scratch[*a] * scratch[*b];
++                scratch.push(v);
++            }
++            _ => {}
++        }
++    }
++    for (i, s) in sites.iter().enumerate() {
++        let mut v = scratch[s.inner];
++        for c in s.conds.iter() {
++            v *= scratch[*c];
++        }
++        out[i] = v;
++    }
 +}
