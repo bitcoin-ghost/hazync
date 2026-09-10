@@ -1,7 +1,46 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,10 +216,449 @@
+@@ -212,14 +212,488 @@
+                 // Make the mixing values
+                 let mix: [Val; REGCOUNT_MIX] = std::array::from_fn(|_| prover.iop().random_elem());
  
++                // hazync#119: is the committed DATA still the data everything else reads?
++                //
++                // commit_group(DATA) has already snapshotted the buffer into coefficients. If
++                // step_accum then writes into `data`, the committed polynomial is the PRE-accum
++                // data while every scan reads the POST-accum data -- constraints would hold on
++                // what the scan sees and C built from what was committed would not vanish, which
++                // is exactly the measured signature: the check polynomial has full degree 4N-1 on
++                // the failing segment where the bound is 4N-5.
++                let hazync_h = |b: &H::Buffer<Val>| -> u64 {
++                    let mut h = 0xcbf2_9ce4_8422_2325u64;
++                    b.view(|v| {
++                        for e in v.iter() {
++                            h ^= e.as_u32_montgomery() as u64;
++                            h = h.wrapping_mul(0x100_0000_01b3);
++                        }
++                    });
++                    h
++                };
++                let hazync_dbg = std::env::var("HAZYNC_119_DATAHASH").is_ok();
++                let (d0, c0) = if hazync_dbg {
++                    (hazync_h(data), hazync_h(code))
++                } else {
++                    (0, 0)
++                };
++
+                 let mix = witgen.accum(hal.as_ref(), circuit_hal.as_ref(), &mix)?;
+ 
++                if hazync_dbg {
++                    let (d1, c1) = (hazync_h(data), hazync_h(code));
++                    eprintln!(
++                        "[#119-MUT] po2={po2} data_before={d0:016x} data_after={d1:016x} \
++                         changed={} | code_before={c0:016x} code_after={c1:016x} changed={}",
++                        d0 != d1,
++                        c0 != c1
++                    );
++                }
++
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
 +                // hazync#119: constraint scan. The seal is rejected at risc0-zkp's DEEP-ALI check
