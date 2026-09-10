@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,10 +216,239 @@
+@@ -216,10 +216,184 @@
  
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
@@ -154,76 +154,21 @@
 +            );
 +        }
 +
-+        // ⛔ THE MEASUREMENT THAT MATTERS. HAZYNC_119_VALIDITY showed `check != result` while
-+        // `coeff_u` round-trips exactly, so `eval_check` and `poly_ext` disagree over the same
-+        // constraint system on the same data. They are two independently generated evaluators:
-+        // poly_fp is generated C++ driven by a POLY_MIX_POWERS table, poly_ext an interpreted walk
-+        // over PolyExtStepDef.
++        // ⛔ DO NOT try to compare poly_fp against poly_ext at rate 1. `kInvRate` is a
++        // COMPILE-TIME CONSTANT in the generated C++ -- `arg8[29 * steps + ((cycle - kInvRate * 0)
++        // & mask)]`, risc0-circuit-rv32im-sys-4.0.3/kernels/cxx/rust_poly_fp_0.cpp:22,114 -- so a
++        // back tap `b` always reads `cycle - 4*b` no matter what `steps` you pass. Hand it rate-1
++        // buffers and every tap with back >= 1 reads the wrong row: measured
++        // disagree=2,097,151 of 2,097,152 on a segment that VERIFIES, which is the signature of a
++        // broken instrument, not a broken prover.
 +        //
-+        // Run BOTH at rate 1 over the trace, with the SAME poly_mix, and compare per row. poly_fp's
-+        // `tot` is a function of tap VALUES only -- the x it would be divided by is computed by the
-+        // caller, not inside -- so evaluating it on the trace domain is meaningful even though the
-+        // trace domain is (1/3)·μ_n. (The earlier attempt reported every row because it kept the
-+        // division by the vanishing polynomial, which is meaningless off the coset.)
++        // ⚠ This is also the real reason the very first "poly_fp at rate 1" attempt failed. The
++        // note that blamed the division by the vanishing polynomial was wrong, and repeating the
++        // approach on the back of that wrong explanation cost a build and a run.
 +        //
-+        // args order is eval_check's own: [accum, data, out, mix] (prove/hal/cpu.rs:177).
-+        if std::env::var("HAZYNC_119_FP_COMPARE").is_ok() {
-+            use risc0_circuit_rv32im_sys::risc0_circuit_rv32im_cpu_poly_fp;
-+            use risc0_zkp::field::map_pow;
-+
-+            // The FFI takes raw pointers, which are not Send. eval_check itself fans out over the
-+            // same buffers the same way (prove/hal/cpu.rs:160) -- reads only, no overlap.
-+            struct Args([*const Val; 4]);
-+            unsafe impl Send for Args {}
-+            unsafe impl Sync for Args {}
-+            impl Args {
-+                // A method, not a field access: edition-2021 disjoint capture would otherwise
-+                // capture the raw array and demand Sync of the pointers themselves.
-+                fn ptr(&self) -> *const *const Val {
-+                    self.0.as_ptr()
-+                }
-+            }
-+
-+            let pows = map_pow(poly_mix, crate::zirgen::info::POLY_MIX_POWERS);
-+            let args = Args([a.as_ptr(), d.as_ptr(), o.as_ptr(), m.as_ptr()]);
-+
-+            let mut rows: Vec<(usize, ExtVal, ExtVal)> = (0..steps)
-+                .into_par_iter()
-+                .filter_map(|row| {
-+                    let mut fp = ExtVal::ZERO;
-+                    unsafe {
-+                        risc0_circuit_rv32im_cpu_poly_fp(
-+                            row,
-+                            steps,
-+                            pows.as_ptr(),
-+                            args.ptr(),
-+                            &mut fp,
-+                        )
-+                    };
-+                    let ext = circuit.poly_ext(&poly_mix, &tap_vec(row), &[o, m]).tot;
-+                    (fp != ext || fp != ExtVal::ZERO).then_some((row, fp, ext))
-+                })
-+                .collect();
-+            rows.sort_unstable_by_key(|r| r.0);
-+            let disagree = rows.iter().filter(|r| r.1 != r.2).count();
-+            let fp_nonzero = rows.iter().filter(|r| r.1 != ExtVal::ZERO).count();
-+            for (row, fp, ext) in rows.iter().filter(|r| r.1 != r.2).take(8) {
-+                eprintln!(
-+                    "[#119-FP] row={row} poly_fp={:?} poly_ext={:?}",
-+                    fp.elems(),
-+                    ext.elems()
-+                );
-+            }
-+            let first: Vec<usize> = rows
-+                .iter()
-+                .filter(|r| r.1 != r.2)
-+                .map(|r| r.0)
-+                .take(16)
-+                .collect();
-+            eprintln!(
-+                "[#119-FP] steps={steps} poly_fp_nonzero={fp_nonzero} disagree={disagree} first={first:?}"
-+            );
-+        }
++        // The comparison has to happen where poly_fp is designed to run -- on the extended coset,
++        // against the `evaluated` buffers -- which is HAZYNC_119_COSET_COMPARE in risc0-zkp's
++        // finalize, where check_poly and the evaluated groups are both in scope.
 +
 +        // poly_ext is an interpreted walk over PolyExtStepDef -- far slower per row than poly_fp.
 +        // Serially this is hours per segment; fanned out over the machine it is seconds.

@@ -16,7 +16,7 @@
 +    // hazync#119: optional constraint evaluator, installed by the circuit so the prover can replay
 +    // the verifier's DEEP-ALI check on its own seal. None for every other caller.
 +    #[allow(clippy::type_complexity)]
-+    hazync_validity: Option<Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + 'a>>,
++    hazync_validity: Option<Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + Send + Sync + 'a>>,
  }
  
  fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
@@ -33,7 +33,7 @@
 +    #[allow(clippy::type_complexity)]
 +    pub fn hazync_set_validity(
 +        &mut self,
-+        f: Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + 'a>,
++        f: Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + Send + Sync + 'a>,
 +    ) {
 +        self.hazync_validity = Some(f);
 +    }
@@ -41,7 +41,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -140,6 +155,37 @@
+@@ -140,6 +155,116 @@
              self.cycles,
          );
  
@@ -76,10 +76,89 @@
 +            });
 +        }
 +
++        // hazync#119: compare the two constraint evaluators ON THE COSET, where poly_fp is
++        // designed to run. HAZYNC_119_VALIDITY established that `check != result` with a witness
++        // that violates no per-row constraint and a `coeff_u` that round-trips exactly, so
++        // eval_check and poly_ext disagree over the same constraint system on the same data.
++        //
++        // check_poly currently holds tot/Z per coset point, laid out column-major by ExtElem
++        // subelement: check[i * domain + cycle] (rv32im prove/hal/cpu.rs:198). Multiplying back by
++        // Z recovers poly_fp's own `tot`, so no second FFI call is needed and this works for every
++        // HAL. Tap indexing mirrors the generated C++ exactly:
++        // `arg[off * domain + ((cycle - kInvRate * back) & mask)]`, kInvRate = INV_RATE = 4.
++        //
++        // ⛔ Must run BEFORE batch_interpolate_ntt, which overwrites check_poly in place.
++        //
++        // Gated on po2 as well as the env var: the scan views every evaluated group to the host
++        // (~13 GB at po2=20) and evaluates poly_ext at 4N points, so it is only worth paying on the
++        // segment under investigation. HAZYNC_119_COSET_PO2 selects it.
++        if std::env::var("HAZYNC_119_COSET_COMPARE").is_ok()
++            && std::env::var("HAZYNC_119_COSET_PO2")
++                .ok()
++                .and_then(|v| v.parse::<usize>().ok())
++                .map_or(true, |want| want == self.po2)
++        {
++            match self.hazync_validity.as_ref() {
++                None => eprintln!("[#119-COSET] no evaluator installed, skipping"),
++                Some(poly_ext) => {
++                    use rayon::prelude::*;
++                    let mask = domain - 1;
++                    let exp_po2 = INV_RATE.trailing_zeros() as usize;
++                    let three = H::Elem::from_u64(3);
++                    let rou = H::Elem::ROU_FWD[self.po2 + exp_po2];
++
++                    let views: Vec<Vec<H::Elem>> = self
++                        .groups
++                        .iter()
++                        .map(|pg| pg.as_ref().unwrap().evaluated.to_vec())
++                        .collect();
++
++                    check_poly.view(|chk| {
++                        let mut bad: Vec<usize> = (0..domain)
++                            .into_par_iter()
++                            .filter_map(|cycle| {
++                                let mut u: Vec<H::ExtElem> = Vec::new();
++                                for reg in self.taps.regs() {
++                                    let g = &views[reg.group()];
++                                    for i in 0..reg.size() {
++                                        let row =
++                                            cycle.wrapping_sub(INV_RATE * reg.back(i)) & mask;
++                                        u.push(H::ExtElem::from_subfield(
++                                            &g[reg.offset() * domain + row],
++                                        ));
++                                    }
++                                }
++                                let ext = poly_ext(&poly_mix, &u);
++
++                                // recover poly_fp's tot: ret * ((3x)^N - 1)
++                                let mut sub = [H::Elem::ZERO; 4];
++                                for (i, s) in sub.iter_mut().enumerate() {
++                                    *s = chk[i * domain + cycle];
++                                }
++                                let ret = H::ExtElem::from_subelems(sub);
++                                let x = rou.pow(cycle);
++                                let y = (three * x).pow(1 << self.po2);
++                                let fp = ret * H::ExtElem::from_subfield(&(y - H::Elem::ONE));
++
++                                (fp != ext).then_some(cycle)
++                            })
++                            .collect();
++                        bad.sort_unstable();
++                        let n = bad.len();
++                        bad.truncate(16);
++                        eprintln!(
++                            "[#119-COSET] po2={} domain={domain} disagree={n} first={bad:?}",
++                            self.po2
++                        );
++                    });
++                }
++            }
++        }
++
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -269,6 +315,75 @@
+@@ -269,6 +394,75 @@
              // Set the mix value, which is used for FRI batching.
          });
  
