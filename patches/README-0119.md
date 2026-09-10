@@ -63,8 +63,16 @@ non-zero at a row proves some constraint is violated at that row.
 
 ### Two approaches that do NOT work — recorded so nobody repeats them
 
-1. **Scanning `check_poly`.** It is the quotient on the extended coset, non-zero everywhere by
-   construction: 2,097,152 non-zero entries of 2,097,152, in *both* a failing and a passing run.
+1. **Scanning `check_poly`.** Wrong for two independent reasons, and it is worth knowing both.
+   *Mathematically*, it is the quotient on the extended **coset** — a domain deliberately disjoint
+   from the trace domain, so `C/Z` there is generically non-zero and a scan reports everything:
+   2,097,152 non-zero entries of 2,097,152, in *both* a failing and a passing run.
+   *Mechanically*, the scan also read the buffer wrong. `eval_check` writes
+   `check[i * domain + cycle]` (`prove/hal/cpu.rs:198`) — column-major, one contiguous run of
+   `domain` values per `ExtVal` subelement — so `for i in (0..domain).step_by(4)` walks subelement 0
+   at cycles 0, 4, 8… and never touches the other three. ⛔ Upstream's `circuit_debug` block does
+   exactly the same thing, which is presumably why its own `assert!(bad_z.is_none())` sits
+   commented out.
 2. **Evaluating `poly_fp` at rate 1.** The vanishing polynomial is `(3x)^n - 1`, so risc0's trace
    domain is `(1/3)·μ_n`, **not** `μ_n` — and `poly_fp` derives `x` internally from
    `(cycle, domain)` with no way to pass an arbitrary point. It reported every row of every segment,
@@ -73,5 +81,40 @@ non-zero at a row proves some constraint is violated at that row.
 Constraints are algebraic relations among tap values, so the evaluator works on values and has no
 domain arithmetic to get wrong.
 
-⚠ This finds the ROW. Naming *which* constraint additionally needs a `PolyExtStepDef` walk, for
-which `circuit_debug`'s `mix_index` tracking is the mechanism.
+⚠ This finds the ROW. Naming *which* constraint additionally needs a `PolyExtStepDef` walk. The
+generated `DEF` carries a `loc(callsite(... top.zir:47:34 ...))` comment on every step, so once a
+row is known the step index maps straight back to a line of `.zir` source.
+
+### Measured result — the witness is NOT the problem
+
+`HAZYNC_119_ROW_SCAN` reports `violating_rows=0` on **every** segment of the deterministic
+reproducer, including the three consecutive attempts at segment 21 that each produce a seal the
+verifier rejects.
+
+⛔ That is only meaningful with a negative control, because "reports 0 on segments that verify" is
+also what a dead evaluator does. `HAZYNC_119_TAP_CONTROL` perturbs one tap at a time and counts how
+many perturbations move the result off zero: **1,084 of 3,950 across five rows, with the
+unperturbed result exactly zero at all five**. The evaluator is live, so the zero is a measurement.
+
+⇒ **The witness satisfies every per-row constraint on the trace domain and the seal is still
+rejected.** The long-standing reading of the DEEP-ALI failure — "the witness violates a constraint"
+— is disproved; the fault is downstream of the witness.
+
+## 0119-scan-check-poly.patch — the DEEP-ALI replay
+
+The same patch now also carries `HAZYNC_119_VALIDITY`, which replays the verifier's check inside
+`finalize`, where every input is still available. `Prover::hazync_set_validity` takes the circuit's
+`poly_ext` (installed from rv32im, defaulting to `None` so no other circuit is affected).
+
+It splits what is left into three:
+
+- **A** — `coeff_u` does not round-trip: the verifier's `poly_eval` of the interpolated taps differs
+  from what the prover interpolated. Self-contained bug in `poly_interpolate`/`poly_eval`.
+- **B** — it round-trips but `check != result`: `eval_check`'s check polynomial disagrees with
+  `poly_ext` over the same constraint system. These are two independently generated evaluators
+  (`poly_fp` via a `POLY_MIX_POWERS` table, `poly_ext` via an interpreted `MixState` walk).
+- **C** — both agree here and the verifier still rejects: the seal does not carry the values the
+  prover used.
+
+Positive control on a passing segment: `roundtrip_mismatch=0`, and `check`, `result(prover)` and
+`result(verifier)` are all identical.
