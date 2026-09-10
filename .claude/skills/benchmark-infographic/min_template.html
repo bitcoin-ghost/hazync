@@ -1,0 +1,188 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>HAZYNC zkVM proof — minimal</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap">
+<style>
+:root{--ground:#0f1012;--rule:#22262a;--soft:#1b1e21;--text:#e6e4de;--dim:#8b8a84;
+      --faint:#55544f;--accent:#f7931a;--ok:#5cc77e;
+      --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:#0a0b0c;color:var(--text);font-family:var(--mono);font-size:12px}
+.page{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:0}
+.frame{width:min(100vw,177.78vh);background:var(--ground)}
+.frame svg{display:block;width:100%;height:auto}
+.panel{width:1200px;max-width:100%;display:flex;flex-wrap:wrap;gap:18px;align-items:center;
+  background:#121315;border:1px solid var(--rule);border-radius:4px;padding:12px 16px}
+.panel b{font-weight:500;color:var(--faint);font-size:10px;letter-spacing:.14em;
+  text-transform:uppercase;margin-right:2px}
+label{display:inline-flex;align-items:center;gap:7px;color:var(--dim)}
+input[type=range]{width:104px;accent-color:var(--accent)}
+output{color:var(--text);min-width:34px;font-variant-numeric:tabular-nums}
+button{font-family:var(--mono);font-size:12px;color:var(--text);background:#1c1f23;
+  border:1px solid var(--rule);border-radius:3px;padding:6px 13px;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+.hint{color:var(--faint);width:1200px;max-width:100%;line-height:1.7}
+</style>
+<div class="page">
+  <div class="frame" id="poster"><svg id="sv" viewBox="0 0 1600 900"></svg></div>
+</div>
+<script>const RUN=__DATA__;</script>
+<script>
+const $=s=>document.querySelector(s);
+const NS='http://www.w3.org/2000/svg';
+const SITE={US:'#f7931a',CA:'#e8a94f',IS:'#6fb3c4',TW:'#d4694f',NO:'#78c4a0',FR:'#b8879b'};
+const C=RUN.card_list, W=RUN.wall_total_s, TSPAN=287.9, PMAX=360;
+const LW=1600,LH=900,PAD=56,X0=PAD,X1=LW-PAD;
+
+const CX=1052,CY=116,RR=74;
+
+const fmt=n=>n.toLocaleString('en-US'), mmss=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+const tx=t=>X0+(t/W)*(X1-X0);
+const E=(n,a,txt)=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);
+  if(txt!==undefined)e.textContent=txt;return e;};
+const FG=0.75;   // title + ring opacity, matching render_min.py
+const opt=()=>({op:0.25, rh:17.0, th:13.2, mono:false, ruler:true});
+
+function poster(upto){
+  const o=opt(), s=$('#sv'); s.textContent='';
+  const AGG=RUN.aggregate, AW={}; AGG.workers.forEach(w=>AW[w.w]=w);
+  const AGSPAN=Math.max(...AGG.workers.map(w=>w.wall_s)), AGOFF=W-AGSPAN, AGGC='#5cc77e';
+  const TTOP=214, TROW=o.rh, TRH=o.th, RR=118;
+  s.appendChild(E('rect',{width:LW,height:LH,fill:'var(--ground)'}));
+  const T=(x,y,t,sz,f,a='start',w='400')=>s.appendChild(E('text',
+    {x,y,'font-size':sz,fill:f,'text-anchor':a,'font-weight':w,'font-family':'var(--mono)'},t));
+  const L=(x1,y1,x2,y2,c,w=1)=>s.appendChild(E('line',{x1,y1,x2,y2,stroke:c,'stroke-width':w}));
+  const tn = upto===undefined ? W : upto;
+
+  // one centred title line: the name and the three headline figures, split by colons.
+  // A single <text text-anchor="middle"> with coloured tspans centres the whole run for free.
+  const TP=[['Hazync zkVM bitcoin block proof','var(--text)'],[' : ','var(--faint)'],
+   [`${(W/60).toFixed(2)} min`,'var(--accent)'],[' · ','var(--faint)'],
+   [`$${RUN.cost_usd.toFixed(2)}`,'var(--text)'],[' · ','var(--faint)'],
+   [`${RUN.energy_kwh.toFixed(3)} kWh`,'var(--text)']];
+  // auto-fit: 62 characters overruns the frame at 44 px. IBM Plex Mono advances 0.6 em per glyph.
+  const chars=TP.reduce((n,[t])=>n+t.length,0);
+  const tsize=Math.min(44,Math.floor((X1-X0)/(chars*0.6)));
+  const title=E('text',{x:LW/2,y:72,'font-size':tsize,'text-anchor':'middle','font-weight':'400',
+    'font-family':'var(--mono)',opacity:FG});
+  TP.forEach(([txt,c])=>title.appendChild(E('tspan',{fill:c,'xml:space':'preserve'},txt)));
+  s.appendChild(title);
+  T(LW/2,134,`block ${fmt(RUN.block)} · ${fmt(RUN.txs)} transactions · ${fmt(RUN.inputs)} inputs · `+
+            `${fmt(RUN.total_segments)} segments · ${RUN.cards}× ${RUN.gpu}`,17,'var(--dim)','middle')
+    .setAttribute('opacity',FG);
+  L(PAD,160,LW-PAD,160,'var(--rule)');
+
+  // The aggregate's three phases are measured by the coordinator and match what the workers report:
+  // they attach after execution, push for 73.6 s -- where their logged work stops -- then sit
+  // through 128.7 s of assembly, which IS the join tree folding 584 receipts into 1.
+  const AGST=W-AGG.total_s, PUSH0=AGST+AGG.execution_s, ASM0=PUSH0+AGG.worker_wall_s;
+  const YROOT=TTOP+27*TROW/2;   // where the tree folds to a single receipt
+  T(X0,190,'PROVING',13,'var(--accent)','start','700');
+  T(tx(AGST),190,'AGGREGATION',13,AGGC,'start','700');
+  [PUSH0,ASM0].forEach(xb=>s.appendChild(E('line',{x1:tx(xb),y1:TTOP-6,x2:tx(xb),y2:TTOP+27*TROW+4,
+    stroke:AGGC,'stroke-opacity':.22,'stroke-width':1})));
+  C.forEach((c,i)=>{
+    const y0=TTOP+i*TROW+TRH, col=o.mono?'#f7931a':(SITE[c.site]||'#f7931a');
+    let n=c.t.length; if(upto!==undefined){n=0;while(n<c.t.length&&c.t[n]<=tn)n++;}
+    if(n>=2){
+      let d=`M ${tx(c.t[0]).toFixed(1)} ${y0.toFixed(1)}`;
+      for(let k=0;k<n;k++) d+=` L ${tx(c.t[k]).toFixed(1)} ${(y0-Math.min(1,c.w[k]/PMAX)*TRH).toFixed(1)}`;
+      s.appendChild(E('path',{d:d+` L ${tx(c.t[n-1]).toFixed(1)} ${y0} Z`,fill:col,'fill-opacity':o.op*0.28}));
+      s.appendChild(E('path',{d,fill:'none',stroke:col,'stroke-width':1.6,'stroke-opacity':o.op,
+        'stroke-linejoin':'round'}));
+    }
+    const w=AW[c.chunk]; if(!w) return;
+    const el = upto===undefined ? AGSPAN : tn-AGOFF; if(el<=0) return;
+    const last=Math.max(...w.measured.map(p=>p[0])), br=Math.min(last,el);
+    if(br>0) s.appendChild(E('line',{x1:tx(AGOFF),y1:y0,x2:tx(AGOFF+br),y2:y0,
+      stroke:AGGC,'stroke-opacity':.62,'stroke-width':3.0}));
+    if(el>last){
+      // flat while still pushing, then CONVERGE: the join tree folds every worker's work into one
+      // receipt. Both ends are measured -- 26 workers at assembly start, 1 receipt at VERIFIED --
+      // the curve between is the tree's shape, not a claim about when each join landed.
+      const gnow=AGOFF+Math.min(w.wall_s,el), flatEnd=Math.min(gnow,ASM0);
+      if(flatEnd>AGOFF+last)
+        s.appendChild(E('line',{x1:tx(AGOFF+last),y1:y0,x2:tx(flatEnd),y2:y0,
+          stroke:AGGC,'stroke-opacity':.16,'stroke-width':1.9}));
+      if(gnow>ASM0){
+        const pts=[];
+        for(let k=0;k<=26;k++){
+          const gt=ASM0+(gnow-ASM0)*k/26, f=Math.pow((gt-ASM0)/(W-ASM0),2.4);
+          pts.push(`${tx(gt).toFixed(1)},${(y0+(YROOT-y0)*f).toFixed(1)}`);
+        }
+        s.appendChild(E('polyline',{points:pts.join(' '),fill:'none',stroke:AGGC,
+          'stroke-opacity':.22,'stroke-width':1.6}));
+      }
+    }
+    w.measured.filter(p=>p[0]<=el).forEach(p=>s.appendChild(E('line',
+      {x1:tx(AGOFF+p[0]),y1:y0-4.4,x2:tx(AGOFF+p[0]),y2:y0+2.0,stroke:AGGC,'stroke-opacity':.85,'stroke-width':1})));
+  });
+
+  if(tn>=W){
+    s.appendChild(E('line',{x1:tx(W-6),y1:YROOT,x2:tx(W),y2:YROOT,stroke:AGGC,
+      'stroke-opacity':.95,'stroke-width':3}));
+  }
+
+  const ry=TTOP+27*TROW+10;
+  if(o.ruler){
+    L(X0,ry,X1,ry,'var(--rule)');
+    [0,60,120,180,240,300,360,420,480,W].forEach(t=>{L(tx(t),ry,tx(t),ry+4,'var(--rule)');
+      T(tx(t),ry+16,mmss(t),11.5,'var(--faint)',t===W?'end':(t===0?'start':'middle'));});
+  }
+
+  const CX=(X0+X1)/2, CY=TTOP+27*TROW/2, Cc=2*Math.PI*RR;
+  s.appendChild(E('circle',{cx:CX,cy:CY,r:RR+26,fill:'var(--ground)','fill-opacity':.93}));
+  s.appendChild(E('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:'var(--soft)','stroke-width':16,opacity:FG}));
+  s.appendChild(E('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:'var(--accent)','stroke-width':16,opacity:FG,
+    transform:`rotate(-90 ${CX} ${CY})`,'stroke-dasharray':`${Cc*Math.min(tn,287.9)/W} ${Cc}`}));
+  const ag=Math.max(0,Math.min(tn,W)-293.7);
+  s.appendChild(E('circle',{cx:CX,cy:CY,r:RR,fill:'none',stroke:AGGC,'stroke-width':16,opacity:FG,
+    transform:`rotate(-90 ${CX} ${CY})`,'stroke-dasharray':`${Cc*ag/W} ${Cc}`,
+    'stroke-dashoffset':`${-Cc*293.7/W}`}));
+  const done=tn>=W;
+  T(CX,CY+10,done?(W/60).toFixed(2):mmss(tn),38,'var(--text)','middle','700').setAttribute('opacity',FG);
+  T(CX,CY+46,done?'MIN · VERIFIED':'PROVING',13,done?'var(--ok)':'var(--dim)','middle')
+    .setAttribute('opacity',FG);
+
+  // credits, two per line: one left justified, one right
+  [['journal digest',RUN.journal_digest],
+   ['guest METHOD_ID',RUN.method_id],
+   ['receipt sha256',`${RUN.receipt_sha}  (${fmt(RUN.receipt_bytes)} bytes)`],
+   ['chain tip',RUN.tip_hash]].forEach(([label,value],i)=>{
+    const y=742+Math.floor(i/2)*70, right=i%2===1;
+    const x=right?X1:X0, a=right?'end':'start';
+    T(x,y,label,12,'var(--accent)',a);
+    T(x,y+24,value,16,'var(--text)',a);
+  });
+}
+
+function credits(){
+  const s=$('#cr'); s.textContent='';
+  s.appendChild(E('rect',{width:LW,height:LH,fill:'var(--ground)'}));
+  const T=(x,y,t,sz,f)=>s.appendChild(E('text',
+    {x,y,'font-size':sz,fill:f,'font-family':'var(--mono)'},t));
+  const STEP=150;
+  let y=(LH-(3*STEP+62))/2 + 14;
+  [['journal digest',RUN.journal_digest,
+    'what the guest committed — a function of the block, identical across every run'],
+   ['guest METHOD_ID',RUN.method_id,
+    'which program was proved; the canonical v0.21.0 guest'],
+   ['receipt sha256',`${RUN.receipt_sha}  (${fmt(RUN.receipt_bytes)} bytes)`,
+    'this particular receipt file — seal bytes differ every run, by design'],
+   ['chain tip',RUN.tip_hash,
+    'the header this proof advances to']].forEach(([k,v,note])=>{
+    T(PAD,y,k,14,'var(--accent)'); T(PAD,y+34,v,18,'var(--text)');
+    T(PAD,y+62,note,12,'var(--faint)'); y+=STEP;});
+}
+
+// Autoplay loop: fill left to right, hold on the finished run, repeat.
+const FILL=9000, HOLD=2600;
+const T0=performance.now();
+function frame(now){
+  const p=(now-T0)%(FILL+HOLD);
+  poster(p<FILL ? p/FILL*W : undefined);
+  requestAnimationFrame(frame);
+}
+poster();
+if(!matchMedia('(prefers-reduced-motion: reduce)').matches) requestAnimationFrame(frame);
+</script>
