@@ -237,7 +237,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,6 +352,31 @@
+@@ -161,8 +352,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -268,8 +268,50 @@
 +
          self.hal.batch_interpolate_ntt(&check_poly, ext_size);
  
++        // hazync#119: MEASURE the degree of the committed check polynomial.
++        //
++        // Every other link in the chain is measured; `deg(C) <= 5(N-1)` is the only one that is
++        // argued, from a static walk of the constraint DAG. If it holds then q = C/Z has degree
++        // <= 4N-5 and the top coefficients here must be ZERO. Non-zero top coefficients mean the
++        // 4N samples are not of a low-degree polynomial, and the static bound is wrong.
++        //
++        // ⚠ Reported under BOTH orderings: `zk_shift` needs natural order, but finalize's own
++        // comment says the check coefficients are bit-reversed. Whichever gives a clean cutoff is
++        // the real layout -- do not assume.
++        if std::env::var("HAZYNC_119_DEG2").is_ok() {
++            check_poly.view(|c| {
++                let bits = domain.trailing_zeros();
++                let rev = |mut v: usize| {
++                    let mut r = 0usize;
++                    for _ in 0..bits {
++                        r = (r << 1) | (v & 1);
++                        v >>= 1;
++                    }
++                    r
++                };
++                let (mut hi_nat, mut hi_rev, mut nz) = (0usize, 0usize, 0usize);
++                for sub in 0..ext_size {
++                    for k in 0..domain {
++                        if c[sub * domain + k] != H::Elem::ZERO {
++                            nz += 1;
++                            hi_nat = hi_nat.max(k);
++                            hi_rev = hi_rev.max(rev(k));
++                        }
++                    }
++                }
++                let budget = 4 * self.cycles;
++                eprintln!(
++                    "[#119-DEG2] po2={} domain={domain} nonzero={nz} top_coeff_natural={hi_nat} \
++                     top_coeff_bitrev={hi_rev} budget(4N)={budget} slack_needed=5",
++                    self.po2
++                );
++            });
++        }
++
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
-@@ -269,6 +485,364 @@
+         // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
+         // x^3.  To do this, we normally would grab all the coefficients of f(x) =
+@@ -269,6 +525,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
