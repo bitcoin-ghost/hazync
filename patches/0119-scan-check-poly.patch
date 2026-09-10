@@ -269,7 +269,7 @@
          self.hal.batch_interpolate_ntt(&check_poly, ext_size);
  
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
-@@ -269,6 +485,271 @@
+@@ -269,6 +485,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
@@ -296,6 +296,99 @@
 +                }
 +                cur_pos += reg.size();
 +            }
++            // hazync#119: check the taps at z against an INDEPENDENT source.
++            //
++            // `roundtrip_mismatch` below only proves the prover and the verifier agree with each
++            // OTHER about eval_u -- both read it from coeff_u, so a wrong eval_u is invisible to
++            // it. And eval_u is the one quantity in the whole chain fetched from the bit-reversed
++            // COEFFICIENTS via batch_evaluate_any; everything else (the row scan, the coset
++            // compare, the check samples) comes from the evaluation domain.
++            //
++            // The chain now forces result != C(z): C vanishes at every trace row under the real
++            // poly_mix, deg(C) <= 5(N-1) so q = C/Z is a polynomial of degree < 4N, the samples
++            // ARE q on the coset, and bary(samples)*Z(z) == check. So recompute every tap at z
++            // straight from the `evaluated` buffers and diff.
++            //
++            // Grouped by distinct back value: the inversions cost one pass per back, not per tap.
++            if std::env::var("HAZYNC_119_TAPS").is_ok() {
++                use rayon::prelude::*;
++                use std::collections::BTreeMap;
++
++                let w = H::Elem::ROU_FWD[self.po2 + INV_RATE.trailing_zeros() as usize];
++                let views: Vec<Vec<H::Elem>> = self
++                    .groups
++                    .iter()
++                    .map(|pg| pg.as_ref().unwrap().evaluated.to_vec())
++                    .collect();
++
++                let mut backs: Vec<usize> = Vec::new();
++                for reg in self.taps.regs() {
++                    for i in 0..reg.size() {
++                        if !backs.contains(&reg.back(i)) {
++                            backs.push(reg.back(i));
++                        }
++                    }
++                }
++                let m_inv = H::Elem::from_u64(domain as u64).inv();
++                let lambdas: BTreeMap<usize, (Vec<H::ExtElem>, H::ExtElem)> = backs
++                    .iter()
++                    .map(|&b| {
++                        let x = z * back_one.pow(b);
++                        let lam: Vec<H::ExtElem> = (0..domain)
++                            .into_par_iter()
++                            .map(|j| {
++                                let wj = H::ExtElem::from_subfield(&w.pow(j));
++                                wj * (x - wj).inv()
++                            })
++                            .collect();
++                        let scale = (x.pow(domain) - H::ExtElem::ONE)
++                            * H::ExtElem::from_subfield(&m_inv);
++                        (b, (lam, scale))
++                    })
++                    .collect();
++
++                let mut flat: Vec<(usize, usize, usize)> = Vec::new(); // group, offset, back
++                for reg in self.taps.regs() {
++                    for i in 0..reg.size() {
++                        flat.push((reg.group(), reg.offset(), reg.back(i)));
++                    }
++                }
++                let recomputed: Vec<H::ExtElem> = flat
++                    .par_iter()
++                    .map(|&(g, off, b)| {
++                        let (lam, scale) = &lambdas[&b];
++                        let col = &views[g][off * domain..(off + 1) * domain];
++                        let acc = col
++                            .par_iter()
++                            .zip(lam.par_iter())
++                            .map(|(v, l)| *l * H::ExtElem::from_subfield(v))
++                            .reduce(|| H::ExtElem::ZERO, |a, c| a + c);
++                        acc * *scale
++                    })
++                    .collect();
++
++                let bad: Vec<usize> = (0..eval_u.len())
++                    .filter(|&i| recomputed[i] != eval_u[i])
++                    .collect();
++                eprintln!(
++                    "[#119-TAPZ] po2={} taps={} distinct_backs={} mismatched={} first={:?}",
++                    self.po2,
++                    eval_u.len(),
++                    backs.len(),
++                    bad.len(),
++                    &bad[..bad.len().min(12)]
++                );
++                for &i in bad.iter().take(3) {
++                    let (g, off, b) = flat[i];
++                    eprintln!(
++                        "[#119-TAPZ]   tap {i}: group={g} offset={off} back={b} \
++                         coeffs={:?} evaluated={:?}",
++                        eval_u[i].subelems(),
++                        recomputed[i].subelems()
++                    );
++                }
++            }
++
 +            let mism: Vec<usize> = (0..num_taps).filter(|&i| eval_u_v[i] != eval_u[i]).collect();
 +            eprintln!(
 +                "[#119-VAL] po2={} taps={num_taps} roundtrip_mismatch={} first={:?}",
