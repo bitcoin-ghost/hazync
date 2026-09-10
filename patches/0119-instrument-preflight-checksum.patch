@@ -1,6 +1,44 @@
 --- a/poseidon2.rs
 +++ b/poseidon2.rs
-@@ -263,6 +263,14 @@
+@@ -246,7 +246,14 @@
+             *power = cur;
+             cur *= *rand_z;
+         }
+-        // tracing::trace!("powers: {powers:?}");
++        if std::env::var("HAZYNC_119_WATCH_ZCHECK").is_ok() {
++            for (i, p) in powers.iter().enumerate() {
++                if *p == ExtVal::ZERO || *p == ExtVal::ONE {
++                    eprintln!("[#119-ZCHECK] DEGENERATE power[{i}] = {:?}", p.elems());
++                }
++            }
++            eprintln!("[#119-ZCHECK] z={:?} z^16={:?}", rand_z.elems(), powers[16].elems());
++        }
+ 
+         Self {
+             powers,
+@@ -255,14 +262,36 @@
+     }
+ 
+     pub(crate) fn start(&mut self) {
++        // hazync#119: the checksum INPUTS were proved identical between a failing and a passing
++        // draw -- same transactions, same coefficients, none out of range. So the divergence is in
++        // the accumulator itself. A zero here is the kind of measure-zero event that would be rare,
++        // knife-edge in z, and capable of breaking a constraint.
++        if std::env::var("HAZYNC_119_WATCH_ZCHECK").is_ok() {
++            let z = self.zcheck;
++            if z == ExtVal::ZERO {
++                eprintln!("[#119-ZCHECK] ZERO accumulator at start()");
++            }
++            eprintln!("[#119-ZCHECK] start zcheck={:?}", z.elems());
++        }
+         self.zcheck *= self.powers[16];
+     }
+ 
+     pub(crate) fn clear(&mut self) {
++        if std::env::var("HAZYNC_119_WATCH_ZCHECK").is_ok() {
++            eprintln!("[#119-ZCHECK] clear, was={:?}", self.zcheck.elems());
++        }
+         self.zcheck = ExtVal::ZERO;
      }
  
      pub(crate) fn add(&mut self, tx_kind: u32, idx: usize, txn: &RawMemoryTransaction) {
@@ -15,7 +53,7 @@
          let mut coeffs = match tx_kind {
              tx::READ => (0, 1),
              tx::PAGE_IN => (0, txn.cycle as i32 - txn.prev_cycle as i32),
-@@ -278,6 +286,16 @@
+@@ -278,6 +307,16 @@
          if coeffs.1 < 0 {
              coeffs.1 += baby_bear::P as i32;
          }
