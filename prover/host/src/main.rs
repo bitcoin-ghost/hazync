@@ -2494,20 +2494,17 @@ fn prove_chunk(idx: usize) {
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
     let ctx = risc0_zkvm::VerifierContext::default();
-    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+    let session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
         .unwrap().run().unwrap();
     let nseg = session.segments.len();
     println!("chunk {idx}: {} inputs, {nseg} segments at po2 {} — proving", hi - lo, seg_po2());
-    session.add_hook(FoldProgress {
-        total: nseg,
-        done: std::sync::atomic::AtomicUsize::new(0),
-        t0: Instant::now(),
-        every: (nseg / 20).max(1),
-    });
     // SCALING: prove the chunk to a SUCCINCT receipt (not the default composite). This runs the
     // STARK-to-STARK "lift" NOW, in parallel across the chunk fleet — so agg-chunks resolves each
     // assumption cheaply instead of lifting all N composite receipts sequentially.
-    let receipt = server.prove_session(&ctx, &session).unwrap().receipt;
+    //
+    // #237: driven segment-by-segment so every segment goes through the #119 retry. A fault used to
+    // cost the whole chunk; it now costs one segment.
+    let receipt = prove_session_resilient(&server, &ctx, &session);
     receipt.verify(METHOD_ID).unwrap();
     let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("chunk_{idx}.bin"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
@@ -2520,29 +2517,9 @@ fn prove_chunk(idx: usize) {
 // cosmetic complaint: hazync#147 wedged twice, for 76 minutes and 3h38m, and what eventually gave it
 // away was `nvidia-smi` showing 0% with the process alive -- not any output from the prover.
 //
-// risc0 fires this per segment. It costs nothing now: hooks used to force the sequential path away
-// from the preflight pipelining, and that patch has been removed, so the sequential loop is the only
-// path and a hook changes no behaviour at all.
-struct FoldProgress {
-    total: usize,
-    done: std::sync::atomic::AtomicUsize,
-    t0: std::time::Instant,
-    every: usize,
-}
-
-impl risc0_zkvm::SessionEvents for FoldProgress {
-    fn on_post_prove_segment(&self, _seg: &risc0_zkvm::Segment) {
-        use std::sync::atomic::Ordering;
-        let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % self.every != 0 && n != self.total { return; }
-        let el = self.t0.elapsed().as_secs_f64();
-        // Rate from work actually done, not from a guess. Early estimates are poor and say so by
-        // being obviously early rather than by being hidden.
-        let eta = if n > 0 { el / n as f64 * (self.total.saturating_sub(n)) as f64 } else { 0.0 };
-        println!("    segment {n}/{}  {:.0}s elapsed, ~{:.0}s left", self.total, el, eta);
-    }
-}
-
+// The per-segment progress now comes from `prove_session_resilient`, which drives the segment loop
+// itself (#237) rather than observing `prove_session` through a `SessionEvents` hook. Same lines,
+// same cadence, and every segment additionally goes through the #119 retry.
 // HAZYNC_AGG_EXECUTE=1 — execute mode 5 WITHOUT proving, and report its cycles.
 //
 // Settles which half of the aggregate is expensive. In execute mode `env::verify` merely RECORDS an
@@ -2671,17 +2648,13 @@ fn agg_chunks() {
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
     let ctx = risc0_zkvm::VerifierContext::default();
-    let mut session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
+    let session = risc0_zkvm::ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF)
         .unwrap().run().unwrap();
     let nseg = session.segments.len();
     println!("  {nseg} segments to prove at po2 {}", seg_po2());
-    session.add_hook(FoldProgress {
-        total: nseg,
-        done: std::sync::atomic::AtomicUsize::new(0),
-        t0: Instant::now(),
-        every: (nseg / 20).max(1),      // ~20 lines whatever the size, so it scales with the fold
-    });
-    let agg = server.prove_session(&ctx, &session).unwrap().receipt;
+    // #237: the aggregate had the SAME unprotected `prove_session` as `prove-chunk`. A #119 fault
+    // here loses the whole fold, which is the most expensive single unit of work in the pipeline.
+    let agg = prove_session_resilient(&server, &ctx, &session);
     agg.verify(METHOD_ID).unwrap();
     let tip: ChainState = agg.journal.decode().unwrap();
     assert!(tip.self_id == METHOD_ID, "S1: proof recursed against wrong image id");
@@ -6231,6 +6204,60 @@ fn prove_segment_resilient(
         }
     }
     panic!("{what}: failed {ATTEMPTS} times, last error: {}", last.unwrap_or_default());
+}
+
+/// Proves an executed session segment by segment, each through `prove_segment_resilient`, then
+/// assembles — the #119-resilient equivalent of `ProverServer::prove_session`.
+///
+/// ⛔ WHY THIS EXISTS (#237). `prove_session` proves every segment behind a single call, so a
+/// transient #119 fault surfaces as one `Err` *after* the whole chunk's work, and takes the chunk
+/// with it. The only retry for that path lived in `scripts/gpu-benchmark.sh` — outside the binary —
+/// so anyone running `prove-chunk` by hand simply lost the chunk.
+///
+/// Measured on 8× L40S (docs/history/BENCH_8xL40S_2026-09-08.md): a fault two-thirds of the way
+/// through a chunk cost **33% of the block's critical path** — 817 s wall against 614 s of useful
+/// work — because recovery could only restart from segment zero. The observed fault rate was 5 in 80
+/// chunk attempts (6.3%), i.e. a ~40% chance of at least one per 8-chunk block. It is not rare.
+///
+/// Driving the segments here puts every one through the bounded retry, so a #119 fault costs ONE
+/// segment instead of the chunk.
+///
+/// ⚠ Retrying "proof is invalid" is safe ONLY because the guest and the inputs are identical across
+/// attempts: a genuinely invalid proof fails every attempt and the bounded loop still terminates.
+/// That is `prove_segment_resilient`'s reasoning and it is the reason this wrapper is not a way of
+/// papering over a real soundness failure.
+///
+/// Assembly is NOT reimplemented. `assemble_from_segment_receipts` is the same code `prove_session`
+/// runs after its own loop, so this path and that one cannot drift.
+fn prove_session_resilient(
+    server: &std::rc::Rc<dyn risc0_zkvm::ProverServer>,
+    ctx: &risc0_zkvm::VerifierContext,
+    session: &risc0_zkvm::Session,
+) -> risc0_zkvm::Receipt {
+    use std::time::Instant;
+    let nseg = session.segments.len();
+    // ~20 progress lines whatever the size, matching the cadence `FoldProgress` used when this went
+    // through `prove_session`. The line format is deliberately unchanged: recorded benchmark logs
+    // are parsed for it.
+    let every = (nseg / 20).max(1);
+    let t = Instant::now();
+    let mut receipts: Vec<risc0_zkvm::SegmentReceipt> = Vec::with_capacity(nseg);
+    for (i, sref) in session.segments.iter().enumerate() {
+        let seg = sref.resolve().expect("resolve segment");
+        receipts.push(prove_segment_resilient(server, ctx, &seg, &format!("segment {i}")));
+        let n = i + 1;
+        if n % every == 0 || n == nseg {
+            let el = t.elapsed().as_secs_f64();
+            // Rate from work actually done, not from a guess — early estimates are poor and say so
+            // by being obviously early rather than by being hidden.
+            let eta = el / n as f64 * (nseg - n) as f64;
+            println!("    segment {n}/{nseg}  {el:.0}s elapsed, ~{eta:.0}s left");
+        }
+    }
+    server
+        .assemble_from_segment_receipts(ctx, session, receipts)
+        .expect("assemble from segment receipts")
+        .receipt
 }
 
 static RETRIES_119: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
