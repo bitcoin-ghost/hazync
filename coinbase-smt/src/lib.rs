@@ -66,8 +66,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+// Only the std-only `Smt` uses these; the roots half carries its own. Ungated they warn on
+// every guest (no_std) build, and warnings in a guest-facing crate are where a real one hides.
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
 
 #[cfg(feature = "std")]
 use std::collections::HashMap;
@@ -78,6 +80,7 @@ pub mod bip30;
 // Re-exported flat so `hazync_coinbase_smt::verify` etc. keep working for the host and bridge.
 mod roots;
 pub use roots::*;
+#[cfg(feature = "std")]
 use roots::bit;   // private helper the std-only Smt shares with the roots half
 
 /// The full tree. Host/bridge side only — never compiled into the guest.
@@ -356,6 +359,7 @@ impl Smt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn k(n: u64) -> Key {
         let mut key = [0u8; 32];
@@ -508,6 +512,7 @@ mod oracle {
     //! point — it shares no code and therefore no bugs.
 
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn k(n: u64) -> Key {
         let mut key = [0u8; 32];
