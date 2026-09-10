@@ -1,6 +1,6 @@
 --- a/prover.rs
 +++ b/prover.rs
-@@ -18,13 +18,35 @@
+@@ -18,13 +18,74 @@
  };
  
  use crate::{
@@ -34,10 +34,49 @@
 +    acc * (zp.pow(m) - E::ONE) * E::from_subfield(&E::SubElem::from_u64(m as u64).inv())
 +}
 +
++
++/// hazync#119: forward NTT, coefficients -> values at `root^r`. Standard iterative Cooley-Tukey.
++///
++/// ⛔ The HAL cannot do this: batch_expand_into_evaluate_ntt with expand_bits = 0 aborts the
++/// process with a foreign exception (rc=134). Rate 1 is not a supported mode.
++#[cfg(not(target_os = "zkvm"))]
++fn hazync_119_ntt<E: Elem>(a: &mut [E], root: E) {
++    let n = a.len();
++    let mut j = 0usize;
++    for i in 1..n {
++        let mut bit = n >> 1;
++        while j & bit != 0 {
++            j ^= bit;
++            bit >>= 1;
++        }
++        j |= bit;
++        if i < j {
++            a.swap(i, j);
++        }
++    }
++    let mut len = 2usize;
++    while len <= n {
++        let w_len = root.pow(n / len);
++        let mut i = 0usize;
++        while i < n {
++            let mut w = E::ONE;
++            for k in 0..len / 2 {
++                let u = a[i + k];
++                let v = a[i + k + len / 2] * w;
++                a[i + k] = u + v;
++                a[i + k + len / 2] = u - v;
++                w *= w_len;
++            }
++            i += len;
++        }
++        len <<= 1;
++    }
++}
++
  /// Object to generate a zero-knowledge proof of the execution of some circuit.
  pub struct Prover<'a, H: Hal> {
      hal: &'a H,
-@@ -33,6 +55,32 @@
+@@ -33,6 +94,32 @@
      groups: Vec<Option<PolyGroup<H>>>,
      cycles: usize,
      po2: usize,
@@ -70,7 +109,7 @@
  }
  
  fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
-@@ -59,9 +107,50 @@
+@@ -59,9 +146,50 @@
                  .collect(),
              cycles: 0,
              po2: usize::MAX,
@@ -121,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +205,96 @@
+@@ -116,7 +244,138 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -205,6 +244,48 @@
 +                        bad.len(),
 +                        &bad[..bad.len().min(8)]
 +                    );
++
++                    // Localise to ROWS: un-shift the committed coefficients (coeff i times 3^-i,
++                    // undoing zk_shift) and evaluate on mu_N. That must reproduce the witness
++                    // column cell for cell, so any differing index names a row.
++                    if !bad.is_empty() {
++                        let tmp = self.hal.alloc_elem("hz_nat", pg.count * n);
++                        self.hal.eltwise_copy_elem(&tmp, &pg.coeffs);
++                        self.hal.batch_bit_reverse(&tmp, pg.count);
++                        let inv3 = H::Elem::from_u64(3).inv();
++                        let w_fwd = H::Elem::ROU_FWD[self.po2];
++                        tmp.view(|co| {
++                            for &c in bad.iter().take(8) {
++                                let mut col: Vec<H::Elem> = co[c * n..(c + 1) * n].to_vec();
++                                let mut p = H::Elem::ONE;
++                                for e in col.iter_mut() {
++                                    *e *= p;
++                                    p *= inv3;
++                                }
++                                hazync_119_ntt(&mut col, w_fwd);
++                                let want = &w[c * n..(c + 1) * n];
++                                let diff: Vec<usize> =
++                                    (0..n).filter(|&r| col[r] != want[r]).collect();
++                                let head: Vec<(usize, u32, u32)> = diff
++                                    .iter()
++                                    .take(4)
++                                    .map(|&r| {
++                                        (
++                                            r,
++                                            want[r].to_u32_words()[0],
++                                            col[r].to_u32_words()[0],
++                                        )
++                                    })
++                                    .collect();
++                                eprintln!(
++                                    "[#119-ROW] po2={} group={id} col={c} differing_rows={} \
++                                     of {n} first_(row,witness,committed)={head:?}",
++                                    self.po2,
++                                    diff.len()
++                                );
++                            }
++                        });
++                    }
 +                }
 +            }
 +        }
@@ -218,7 +299,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +318,116 @@
+@@ -140,6 +399,116 @@
              self.cycles,
          );
  
@@ -335,7 +416,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +449,73 @@
+@@ -161,8 +530,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -409,7 +490,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +622,364 @@
+@@ -269,6 +703,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
