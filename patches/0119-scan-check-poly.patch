@@ -121,65 +121,89 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +205,72 @@
+@@ -116,7 +205,96 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
 +        // hazync#119: does the COMMITTED polynomial interpolate the witness?
 +        //
-+        // coeffs = zk_shift(interpolate(witness)), i.e. G(y) = g(3y). Undo the shift (coefficient
-+        // i times 3^-i) and evaluate at rate 1: that must reproduce the witness exactly, cell for
-+        // cell. If it does not, constraints hold on the witness the scans read while C built from
-+        // what was committed does not vanish -- Z does not divide C, which is the measured
-+        // signature (check poly degree 4N-1 on the failing segment against 4N-5 on a passing one
-+        // at the same po2).
++        // Nothing has ever compared `coeffs` against the witness. Every scan reads the witness;
++        // every check-polynomial quantity comes from `coeffs`. The tap check compared eval_u
++        // (from coeffs) against a barycentric recomputation over `evaluated` -- which is DERIVED
++        // from coeffs, so it only proved the committed data is self-consistent.
++        //
++        // Evaluate each column at ONE point, two independent ways:
++        //   (a) from the committed coefficients, via the protocol's own batch_evaluate_any;
++        //   (b) from the witness, barycentric on mu_N.
++        // coeffs = zk_shift(interpolate(witness)), i.e. G(y) = g(3y), so compare G(y) against
++        // g at 3y. A single differing cell changes the polynomial, so one point catches it --
++        // far stronger than sampling cells, and no NTT.
++        //
++        // ⛔ The NTT route died here: batch_expand_into_evaluate_ntt with expand_bits = 0 aborts
++        // the process ("Rust cannot catch foreign exceptions"), rc=134. Rate 1 is not supported.
 +        if std::env::var("HAZYNC_119_WIT").is_ok() {
 +            if let Some(wit) = self.hazync_witness.as_ref() {
-+                let inv3 = H::Elem::from_u64(3).inv();
++                use rayon::prelude::*;
++                let n = self.cycles;
++                let w_n = H::Elem::ROU_FWD[self.po2];
++                let three = H::ExtElem::from_subfield(&H::Elem::from_u64(3));
++                // ⚠ an ARBITRARY probe point -- this runs before z is drawn, and any point off
++                // the domains does the job: a single differing cell changes the polynomial.
++                let probe = H::ExtElem::from_subelems([
++                    H::Elem::from_u64(7),
++                    H::Elem::from_u64(11),
++                    H::Elem::from_u64(13),
++                    H::Elem::from_u64(17),
++                ]);
++                let x = three * probe; // g is evaluated at 3y, since G(y) = g(3y)
++
++                // shared across every column: lambda_r = w^r / (x - w^r)
++                let lam: Vec<H::ExtElem> = (0..n)
++                    .into_par_iter()
++                    .map(|r| {
++                        let wr = H::ExtElem::from_subfield(&w_n.pow(r));
++                        wr * (x - wr).inv()
++                    })
++                    .collect();
++                let n_inv = H::Elem::from_u64(n as u64).inv();
++                let scale = (x.pow(n) - H::ExtElem::ONE) * H::ExtElem::from_subfield(&n_inv);
++
 +                for (id, pg) in self.groups.iter().enumerate() {
 +                    let pg = pg.as_ref().unwrap();
-+                    let n = pg.count * self.cycles;
-+                    let tmp = self.hal.alloc_elem("hz_unshift", n);
-+                    self.hal.eltwise_copy_elem(&tmp, &pg.coeffs);
-+                    self.hal.batch_bit_reverse(&tmp, pg.count);
-+                    tmp.view_mut(|v| {
-+                        for c in 0..pg.count {
-+                            let mut p = H::Elem::ONE;
-+                            for i in 0..self.cycles {
-+                                v[c * self.cycles + i] *= p;
-+                                p *= inv3;
-+                            }
-+                        }
-+                    });
-+                    let ev1 = self.hal.alloc_elem("hz_rate1", n);
++                    // (a) committed coefficients at z
++                    let which: Vec<u32> = (0..pg.count as u32).collect();
++                    let xs = vec![probe; pg.count];
++                    let which = self.hal.copy_from_u32("hz_which", which.as_slice());
++                    let xs = self.hal.copy_from_extelem("hz_xs", xs.as_slice());
++                    let out = self.hal.alloc_extelem("hz_out", pg.count);
 +                    self.hal
-+                        .batch_expand_into_evaluate_ntt(&ev1, &tmp, pg.count, 0);
++                        .batch_evaluate_any(&pg.coeffs, pg.count, &which, &xs, &out);
++                    let mut from_coeffs: Vec<H::ExtElem> = Vec::new();
++                    out.view(|v| from_coeffs.extend(v));
 +
-+                    let (mut bad, mut first) = (0usize, Vec::new());
-+                    ev1.view(|got| {
-+                        let want = &wit[id];
-+                        if want.len() != got.len() {
-+                            eprintln!(
-+                                "[#119-WIT] group {id}: witness has {} elems, committed {} -- skipping",
-+                                want.len(),
-+                                got.len()
-+                            );
-+                            return;
-+                        }
-+                        for k in 0..got.len() {
-+                            if got[k] != want[k] {
-+                                bad += 1;
-+                                if first.len() < 6 {
-+                                    first.push((k / self.cycles, k % self.cycles));
-+                                }
-+                            }
-+                        }
-+                    });
++                    // (b) the witness, barycentric at 3z
++                    let w = &wit[id];
++                    let from_wit: Vec<H::ExtElem> = (0..pg.count)
++                        .into_par_iter()
++                        .map(|c| {
++                            let col = &w[c * n..(c + 1) * n];
++                            let acc = col
++                                .par_iter()
++                                .zip(lam.par_iter())
++                                .map(|(v, l)| *l * H::ExtElem::from_subfield(v))
++                                .reduce(|| H::ExtElem::ZERO, |p, q| p + q);
++                            acc * scale
++                        })
++                        .collect();
++
++                    let bad: Vec<usize> =
++                        (0..pg.count).filter(|&c| from_coeffs[c] != from_wit[c]).collect();
 +                    eprintln!(
-+                        "[#119-WIT] po2={} group={id} cols={} cells={n} mismatched={bad} \
-+                         first_(col,row)={first:?}",
++                        "[#119-WIT] po2={} group={id} cols={} mismatched={} first={:?}",
 +                        self.po2,
-+                        pg.count
++                        pg.count,
++                        bad.len(),
++                        &bad[..bad.len().min(8)]
 +                    );
 +                }
 +            }
@@ -194,7 +218,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +294,116 @@
+@@ -140,6 +318,116 @@
              self.cycles,
          );
  
@@ -311,7 +335,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +425,73 @@
+@@ -161,8 +449,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -385,7 +409,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +598,364 @@
+@@ -269,6 +622,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
