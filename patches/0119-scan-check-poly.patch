@@ -1,6 +1,6 @@
 --- a/prover.rs
 +++ b/prover.rs
-@@ -18,7 +18,7 @@
+@@ -18,13 +18,35 @@
  };
  
  use crate::{
@@ -9,7 +9,35 @@
      hal::{Buffer, CircuitHal, Hal},
      prove::{fri::fri_prove, poly_group::PolyGroup, write_iop::WriteIOP},
      taps::TapSet,
-@@ -33,6 +33,10 @@
+     INV_RATE,
+ };
+ 
++
++/// hazync#119: evaluate samples on mu_M at an arbitrary point, barycentric.
++///     f(zp) = ((zp^M - 1)/M) * sum_j  f_j * w^j / (zp - w^j)
++#[cfg(not(target_os = "zkvm"))]
++fn hazync_119_bary<E: ExtElem>(samples: &[E], w: E::SubElem, zp: E) -> E
++where
++    E: Send + Sync,
++    E::SubElem: Send + Sync,
++{
++    use rayon::prelude::*;
++    let m = samples.len();
++    let acc = samples
++        .par_iter()
++        .enumerate()
++        .map(|(j, fj)| {
++            let wj = w.pow(j);
++            *fj * E::from_subfield(&wj) * (zp - E::from_subfield(&wj)).inv()
++        })
++        .reduce(|| E::ZERO, |a, b| a + b);
++    acc * (zp.pow(m) - E::ONE) * E::from_subfield(&E::SubElem::from_u64(m as u64).inv())
++}
++
+ /// Object to generate a zero-knowledge proof of the execution of some circuit.
+ pub struct Prover<'a, H: Hal> {
+     hal: &'a H,
+@@ -33,6 +55,10 @@
      groups: Vec<Option<PolyGroup<H>>>,
      cycles: usize,
      po2: usize,
@@ -20,7 +48,7 @@
  }
  
  fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
-@@ -59,9 +63,20 @@
+@@ -59,9 +85,20 @@
                  .collect(),
              cycles: 0,
              po2: usize::MAX,
@@ -41,7 +69,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -140,6 +155,116 @@
+@@ -140,6 +177,116 @@
              self.cycles,
          );
  
@@ -158,7 +186,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,6 +286,31 @@
+@@ -161,6 +308,31 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -190,7 +218,7 @@
          self.hal.batch_interpolate_ntt(&check_poly, ext_size);
  
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
-@@ -269,6 +419,118 @@
+@@ -269,6 +441,174 @@
              // Set the mix value, which is used for FRI batching.
          });
  
@@ -273,22 +301,9 @@
 +            //   bary*Z == check,  != result ->  the samples do not determine C at z: C/Z is not a
 +            //                                   polynomial of degree < 4N. Degree overflow.
 +            if let Some(samples) = hazync_samples.as_ref() {
-+                use rayon::prelude::*;
 +                let exp_po2 = INV_RATE.trailing_zeros() as usize;
 +                let w = H::Elem::ROU_FWD[self.po2 + exp_po2];
-+                let acc = samples
-+                    .par_iter()
-+                    .enumerate()
-+                    .map(|(j, fj)| {
-+                        let wj = w.pow(j);
-+                        let denom = z - H::ExtElem::from_subfield(&wj);
-+                        *fj * H::ExtElem::from_subfield(&wj) * denom.inv()
-+                    })
-+                    .reduce(|| H::ExtElem::ZERO, |a, b| a + b);
-+                let m_inv = H::Elem::from_u64(domain as u64).inv();
-+                let bary = acc
-+                    * (z.pow(domain) - H::ExtElem::ONE)
-+                    * H::ExtElem::from_subfield(&m_inv);
++                let bary = hazync_119_bary::<H::ExtElem>(samples, w, z);
 +
 +                let three = H::Elem::from_u64(3);
 +                let z_at = (H::ExtElem::from_subfield(&three) * z).pow(self.cycles)
@@ -303,6 +318,75 @@
 +                        .map(|f| bary_z == f(&poly_mix, &eval_u))
 +                        .unwrap_or(false)
 +                );
++
++                // hazync#119: DEGREE PROBE. Write q = C/Z as q_lo + x^(4N)*q_hi with both halves
++                // of degree < 4N. On mu_4N the x^(4N) factor is 1, so the interpolant of the
++                // samples is exactly q_lo + q_hi, and at any off-domain point zp
++                //
++                //     q_hi(zp) = (q(zp) - interp(zp)) / (zp^(4N) - 1)
++                //
++                // q_hi == 0 means the check polynomial has NO component above degree 4N and the
++                // 4N samples determine it. A non-zero q_hi at several independent points is a
++                // direct measurement that they do not -- the degree overflow, rather than an
++                // inference from a single disagreement at z.
++                //
++                // Sampling at K points costs one batch_evaluate_any per point, the same work the
++                // protocol already does once for eval_u.
++                if let Some(poly_ext) = self.hazync_validity.as_ref() {
++                    const K: usize = 6;
++                    let mut nonzero = 0usize;
++                    let mut shown = 0usize;
++                    for k in 0..K {
++                        // deterministic probe points, unrelated to the transcript: z * 3^(k+1)
++                        let shift = H::Elem::from_u64(3).pow(k + 1);
++                        let zp = z * H::ExtElem::from_subfield(&shift);
++
++                        // taps at zp, mirroring the eval_u construction above
++                        let mut eval_p: Vec<H::ExtElem> = Vec::new();
++                        for (id, pg) in self.groups.iter().enumerate() {
++                            let pg = pg.as_ref().unwrap();
++                            let mut which = Vec::new();
++                            let mut xs = Vec::new();
++                            for tap in self.taps.group_taps(id) {
++                                which.push(tap.offset() as u32);
++                                xs.push(back_one.pow(tap.back()) * zp);
++                            }
++                            let which = self.hal.copy_from_u32("which", which.as_slice());
++                            let xs = self.hal.copy_from_extelem("xs", xs.as_slice());
++                            let out = self.hal.alloc_extelem("out", which.size());
++                            self.hal
++                                .batch_evaluate_any(&pg.coeffs, pg.count, &which, &xs, &out);
++                            out.view(|v| eval_p.extend(v));
++                        }
++                        let c_at = poly_ext(&poly_mix, &eval_p);
++                        let z_p = (H::ExtElem::from_subfield(&three) * zp).pow(self.cycles)
++                            - H::ExtElem::ONE;
++                        if z_p == H::ExtElem::ZERO {
++                            eprintln!("[#119-DEG] probe {k}: Z(zp)=0, skipping");
++                            continue;
++                        }
++                        let q_at = c_at * z_p.inv();
++                        let interp = hazync_119_bary::<H::ExtElem>(samples, w, zp);
++                        let denom = zp.pow(domain) - H::ExtElem::ONE;
++                        if denom == H::ExtElem::ZERO {
++                            eprintln!("[#119-DEG] probe {k}: zp^4N=1, skipping");
++                            continue;
++                        }
++                        let q_hi = (q_at - interp) * denom.inv();
++                        if q_hi != H::ExtElem::ZERO {
++                            nonzero += 1;
++                            if shown < 3 {
++                                eprintln!("[#119-DEG] probe {k}: q_hi={:?}", q_hi.subelems());
++                                shown += 1;
++                            }
++                        }
++                    }
++                    eprintln!(
++                        "[#119-DEG] po2={} probes={K} q_hi_nonzero={nonzero} -- above-4N component {}",
++                        self.po2,
++                        if nonzero == 0 { "ABSENT (degree fits)" } else { "PRESENT (degree overflow)" }
++                    );
++                }
 +            }
 +        }
 +
