@@ -49,3 +49,5 @@ prover/block_*.json.meta2.json
 # where 30 of those 63 artefacts sat.
 fuzz-native/build/
 fuzz-native/build-asan/
+# vendored diagnostically, see patches/README-0119.md
+vendor/risc0-circuit-rv32im/

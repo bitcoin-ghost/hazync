@@ -1,0 +1,34 @@
+--- /home/defenwycke/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-circuit-rv32im-4.0.5/src/prove/witgen/poseidon2.rs	2006-07-24 02:21:28.000000000 +0100
++++ vendor/risc0-circuit-rv32im/src/prove/witgen/poseidon2.rs	2026-09-10 14:04:55.117536706 +0100
+@@ -263,6 +263,14 @@
+     }
+ 
+     pub(crate) fn add(&mut self, tx_kind: u32, idx: usize, txn: &RawMemoryTransaction) {
++        // hazync#119 instrumentation. Both backends emit a BYTE-IDENTICAL invalid seal, and
++        // preflight is the only code they share, so the bad witness is produced here. This dumps
++        // every checksum input so a failing rand_z and a passing one can be diffed on the SAME
++        // memory transactions -- whatever differs is the bug.
++        //
++        // ⛔ The `+= P` correction below is only sound if the signed difference stays in (-P, P).
++        // PAGE_IN's coefficient is a cycle DELTA, and nothing here bounds it.
++        let dbg = std::env::var("HAZYNC_119_DUMP_CHECKSUM").is_ok();
+         let mut coeffs = match tx_kind {
+             tx::READ => (0, 1),
+             tx::PAGE_IN => (0, txn.cycle as i32 - txn.prev_cycle as i32),
+@@ -278,6 +286,16 @@
+         if coeffs.1 < 0 {
+             coeffs.1 += baby_bear::P as i32;
+         }
++        // record BEFORE the u32 cast, so an out-of-range value is visible rather than wrapped
++        if dbg {
++            let (raw0, raw1) = (coeffs.0, coeffs.1);
++            let bad = raw0 < 0 || raw1 < 0 || raw0 >= baby_bear::P as i32 || raw1 >= baby_bear::P as i32;
++            eprintln!(
++                "[#119-CKSUM] kind={tx_kind} idx={idx} cycle={} prev_cycle={} word={:#010x} prev_word={:#010x} c0={raw0} c1={raw1}{}",
++                txn.cycle, txn.prev_cycle, txn.word, txn.prev_word,
++                if bad { "  <-- OUT OF RANGE AFTER CORRECTION" } else { "" }
++            );
++        }
+         let coeffs = (coeffs.0 as u32, coeffs.1 as u32);
+         self.zcheck += self.powers[2 * idx] * ExtVal::from_u32(coeffs.0);
+         self.zcheck += self.powers[2 * idx + 1] * ExtVal::from_u32(coeffs.1);

@@ -12,3 +12,6 @@ lto = true
 
 [patch.crates-io]
 risc0-zkvm = { path = "../vendor/risc0-zkvm" }
+# hazync#119: vendored so preflight can be instrumented. Witness generation is the ONLY code the
+# CPU and CUDA backends share, and both emit a byte-identical invalid seal, so the fault is here.
+risc0-circuit-rv32im = { path = "../vendor/risc0-circuit-rv32im" }
