@@ -41,3 +41,22 @@ every constraint leaves it zero on the trace-domain points, so a non-zero entry 
 (`verify/mod.rs:315`, `from_subelems` over the wrong item type), and it **changes the protocol**:
 under that feature the verifier *reads* the DEEP point from the transcript instead of deriving it,
 so a binary built with it cannot verify ordinary seals. This patch only observes.
+
+## 0119-row-scan.patch — risc0-circuit-rv32im
+
+```sh
+patch -p1 -d vendor/risc0-circuit-rv32im/src/prove/hal < patches/0119-row-scan.patch
+```
+
+`HAZYNC_119_ROW_SCAN=1` reports **trace rows** whose mixed constraint value is non-zero.
+
+Why it has to be here: the seal is rejected at risc0-zkp's DEEP-ALI check, so the witness violates a
+constraint on the trace domain. `eval_check` cannot show which row — it evaluates on the extended
+coset and divides by the vanishing polynomial, so it is non-zero everywhere by construction. Scanning
+it reported 2,097,152 non-zero entries of 2,097,152 in **both** a failing and a passing run.
+
+At the `commit_group(REGISTER_GROUP_ACCUM, ...)` call site the code/data/accum buffers are still in
+**trace** form, so `poly_fp` can be evaluated at rate 1. `poly_mix` is arbitrary there: any mixing
+non-zero at a row proves some constraint is violated at that row.
+
+⚠ This finds the ROW. Naming *which* constraint additionally needs a `PolyExtStepDef` walk.

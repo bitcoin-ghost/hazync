@@ -1,0 +1,97 @@
+--- a/mod.rs
++++ b/mod.rs
+@@ -216,6 +216,29 @@
+ 
+                 prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
+ 
++                // hazync#119: constraint scan. The seal is rejected at risc0-zkp's DEEP-ALI check
++                // (verify/mod.rs:381), which means the WITNESS violates a constraint on the trace
++                // domain. eval_check cannot show that -- it evaluates on the extended coset and
++                // divides by the vanishing polynomial, so it is non-zero everywhere by construction
++                // and a scan of it reports every entry (measured: 2,097,152 of 2,097,152, in both a
++                // failing and a passing run).
++                //
++                // Constraints vanish on the TRACE domain. Here the code/data/accum buffers are
++                // still in trace form -- commit_group takes the witness before make_coeffs -- so
++                // poly_fp can be evaluated at rate 1, where a non-zero result names the offending
++                // row. poly_mix is arbitrary for this purpose: any mixing that is non-zero at a row
++                // proves some constraint is violated there.
++                if std::env::var("HAZYNC_119_ROW_SCAN").is_ok() {
++                    hazync_119_row_scan::<H>(
++                        1usize << po2,
++                        data,
++                        &witgen.accum.buf,
++                        global,
++                        &mix.buf,
++                    );
++                }
++
++
+                 mix
+             });
+ 
+@@ -223,3 +246,64 @@
+         }))
+     }
+ }
++
++
++/// hazync#119: report trace rows whose mixed constraint value is non-zero.
++///
++/// The seal is rejected at risc0-zkp's DEEP-ALI check (`verify/mod.rs:381`), which means the witness
++/// violates a constraint **on the trace domain**. `eval_check` cannot show which row: it evaluates on
++/// the extended coset and divides by the vanishing polynomial, so it is non-zero everywhere by
++/// construction — a scan of it reported 2,097,152 non-zero entries of 2,097,152 in *both* a failing
++/// and a passing run.
++///
++/// Here the buffers are still in trace form, so `poly_fp` can be evaluated at rate 1. `poly_mix` is
++/// arbitrary for this purpose: any mixing that is non-zero at a row proves some constraint is
++/// violated there. Naming *which* constraint needs the `PolyExtStepDef` walk; this finds the row.
++#[cfg(not(target_os = "zkvm"))]
++fn hazync_119_row_scan<H: risc0_zkp::hal::Hal<Elem = Val, ExtElem = ExtVal>>(
++    steps: usize,
++    data: &H::Buffer<Val>,
++    accum: &H::Buffer<Val>,
++    out: &H::Buffer<Val>,
++    mix: &H::Buffer<Val>,
++) {
++    use risc0_circuit_rv32im_sys::risc0_circuit_rv32im_cpu_poly_fp;
++    use risc0_zkp::field::{map_pow, Elem as _};
++
++    // any fixed value: we are asking "is this row non-zero", not reconstructing the protocol
++    let poly_mix = ExtVal::new(Val::new(2), Val::new(3), Val::new(5), Val::new(7));
++    let poly_mix_pows = map_pow(poly_mix, crate::zirgen::info::POLY_MIX_POWERS);
++
++    data.view(|d| {
++        accum.view(|a| {
++            out.view(|o| {
++                mix.view(|m| {
++                    let args: [*const Val; 4] = [a.as_ptr(), d.as_ptr(), o.as_ptr(), m.as_ptr()];
++                    let mut nonzero: Vec<usize> = Vec::new();
++                    for cycle in 0..steps {
++                        let mut tot = ExtVal::ZERO;
++                        unsafe {
++                            risc0_circuit_rv32im_cpu_poly_fp(
++                                cycle,
++                                steps,
++                                poly_mix_pows.as_ptr(),
++                                args.as_ptr(),
++                                &mut tot,
++                            )
++                        };
++                        if tot != ExtVal::ZERO {
++                            if nonzero.len() < 32 {
++                                nonzero.push(cycle);
++                            }
++                        }
++                    }
++                    eprintln!(
++                        "[#119-ROW] steps={steps} violating_rows_shown={} first={:?}",
++                        nonzero.len(),
++                        nonzero
++                    );
++                });
++            });
++        });
++    });
++}
