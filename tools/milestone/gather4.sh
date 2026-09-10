@@ -4,7 +4,7 @@ S=${HAZYNC_RUNDIR:?set HAZYNC_RUNDIR to a working directory for this run}
 K=~/.ssh/ghost_signet_ed25519
 D=/home/defenwycke/hazync-milestone-966256-run4
 LOG=$S/gather4.log; : > $LOG
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r PID IP PORT LOC CHUNK _ _; do
  ( D2=$D/cards/chunk_$CHUNK; mkdir -p $D2
    RDIR=/workspace; grep -qx "$CHUNK" $S/_reassigned 2>/dev/null && RDIR=/workspace/re$CHUNK
    for f in result.json facts.json prove.log gpu_samples.csv run.log aggw.log aa.log; do

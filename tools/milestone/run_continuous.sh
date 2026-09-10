@@ -15,12 +15,14 @@ LOG=$S/continuous.log; : > $LOG
 say(){ echo "[$(date -Is)] $*" >> $LOG; }
 COORD_ID=k0lx8ioh5ztex6; COORD_IP=80.15.7.37; COORD_SSH=46144; AGG_IP=80.15.7.37; AGG_PORT=46145
 N=$(wc -l < $S/assign_opt.txt)
-SETUP_GRACE=600; STALL=100
+# Only STALL remains. SETUP_GRACE existed for the log-growth heuristic, which was removed: it fired
+# during the CPU-only execute phase and during first-segment CUDA warm-up, shooting healthy cards.
+STALL=100
 
 # ---------- phase 0: clear + verify (OUTSIDE the clock: setup, not proving) ----------
 rm -f $S/_reassigned $S/_busy
 say "clearing fleet"
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r PID IP PORT LOC CHUNK _ _; do
   ( scp -q -o ConnectTimeout=15 -i $K -P "$PORT" $S/remote_clear.sh root@"$IP":/tmp/ 2>/dev/null
     R=$(timeout 60 ssh -n -o ConnectTimeout=15 -i $K -p "$PORT" root@"$IP" 'bash /tmp/remote_clear.sh 2>/dev/null | grep LEFT' 2>/dev/null | tail -1)
     echo "$CHUNK:${R:-ERR}" >> $S/_c2 ) &
@@ -32,7 +34,7 @@ say "pods verified empty: $CLEAN/$N"
 
 # ---------- THE CLOCK STARTS ----------
 T0=$(date +%s.%N); say "### T0=$T0 ###"
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r PID IP PORT LOC CHUNK _ _; do
   ( timeout 45 ssh -n -o ConnectTimeout=15 -i $K -p "$PORT" root@"$IP" \
       "cd /workspace && HAZYNC_BLOCK_NAME=block_966256.json HAZYNC_CHUNKS=$N nohup setsid ./pod-prove.sh $CHUNK > run.log 2>&1 < /dev/null & disown; exit 0" >/dev/null 2>&1 ) &
 done < $S/assign_opt.txt
@@ -51,7 +53,7 @@ for i in $(seq 1 600); do
   sleep 1
 done
 AA
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r PID IP PORT LOC CHUNK _ _; do
   [ "$PID" = "$COORD_ID" ] && continue
   ( scp -q -o ConnectTimeout=15 -i $K -P "$PORT" $S/autoattach.sh root@"$IP":/workspace/ 2>/dev/null
     timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p "$PORT" root@"$IP" \
@@ -60,29 +62,27 @@ done < $S/assign_opt.txt
 say "auto-attach armed on all workers"
 
 declare -A LASTSZ LASTCHG DONEC
-while read -r P I O L C SG R; do LASTSZ[$C]=0; LASTCHG[$C]=$(date +%s); done < $S/assign_opt.txt
-for tick in $(seq 1 120); do
+while read -r _ _ _ _ C _ _; do LASTSZ[$C]=0; LASTCHG[$C]=$(date +%s); done < $S/assign_opt.txt
+for _ in $(seq 1 120); do
   NDONE=0
   # ⛔ THE POLL WAS SEQUENTIAL: 27 ssh round-trips, one after another, ~0.7 s each. A tick therefore
   # took ~20 s, which is why the last chunk of run 4 sat FINISHED and unnoticed for 24.9 s -- the
   # single largest recoverable waste in the run, bigger than anything left in the chunk phase.
   # Fan the probes out first, collect from files, then walk the results. A tick is now ~1 s.
   rm -rf $S/_probe && mkdir -p $S/_probe
-  while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+  while read -r PID IP PORT LOC CHUNK _ _; do
     [ "${DONEC[$CHUNK]:-0}" = "1" ] && continue
     RD=/workspace; grep -qx "$CHUNK" $S/_reassigned 2>/dev/null && RD=/workspace/re$CHUNK
     ( timeout 25 ssh -n -o ConnectTimeout=10 -i $K -p "$PORT" root@"$IP" \
         "RDIR=$RD; CHUNK=$CHUNK; "'if [ -f $RDIR/chunk_$CHUNK.bin ]; then echo DONE; else Z=$(stat -c%s $RDIR/prove.log 2>/dev/null || echo 0); U=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); V=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1); N=$(pgrep -cf hazync-host-cuda); echo "$Z:${U:-0}:${V:-0}:$N"; fi' 2>/dev/null | tail -1 > $S/_probe/$CHUNK ) &
   done < $S/assign_opt.txt
   wait
-  while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+  while read -r PID IP PORT LOC CHUNK _ _; do
     [ "${DONEC[$CHUNK]:-0}" = "1" ] && { NDONE=$((NDONE+1)); continue; }
     # ⛔ Resolve the directory LOCALLY. This referenced $S/_reassigned INSIDE the remote command --
     # a path on the operator's laptop, absent on the pod -- so it always fell back to /workspace,
     # watched the card's FIRST (finished, static) chunk log, and declared a stall. Chunk 4 bounced
     # across three cards in a reassignment loop before this was caught.
-    RDIR=/workspace
-    grep -qx "$CHUNK" $S/_reassigned 2>/dev/null && RDIR=/workspace/re$CHUNK
     # ⛔⛔ THE SAME BUG, ONE LINE LOWER. This probe was written in DOUBLE quotes, so `$(grep ...)`,
     # `$(stat ...)`, `$P` and `$S` were expanded on the LAPTOP before ssh ever ran. grep/stat found
     # no /workspace/prove.log locally, so the remote command was literally `echo :<scratchpad path>`
@@ -98,7 +98,7 @@ for tick in $(seq 1 120); do
       DONEC[$CHUNK]=1; NDONE=$((NDONE+1))
       # OVERLAP: stage this receipt now, while other cards are still proving. Batching all of them
       # after the last chunk cost 57s of dead time in the 10.5-min run.
-      ( for a in 1 2 3; do
+      ( for _ in 1 2 3; do
           SRC=/workspace; [ -f $S/_reassigned ] && grep -qx "$CHUNK" $S/_reassigned && SRC=/workspace/re$CHUNK
           timeout 120 scp -q -o ConnectTimeout=15 -i $K -P "$PORT" root@"$IP":$SRC/chunk_$CHUNK.bin $S/rc/ 2>/dev/null
           [ -s "$S/rc/chunk_$CHUNK.bin" ] || continue
@@ -126,7 +126,7 @@ for tick in $(seq 1 120); do
       say "⛔ chunk $CHUNK DEAD on $LOC (gpu=${UTIL}% vram=${VRAM} procs=${NPROC}, log static $((NOW-${LASTCHG[$CHUNK]}))s) -- restarting"
       timeout 25 ssh -n -o ConnectTimeout=10 -i $K -p "$PORT" root@"$IP" 'for p in $(pgrep -f pod-prove); do kill -9 $p; done; for p in $(pgrep -f hazync-host-cuda); do kill -9 $p; done; exit 0' >/dev/null 2>&1
       MOVED=0
-      while read -r P2 I2 O2 L2 C2 S2 R2; do
+      while read -r P2 I2 O2 L2 C2 _ _; do
         # ⛔ "Receipt exists" is NOT "card is free". pod-prove.sh writes chunk_N.bin near the end
         # but the process keeps ~22 GB of VRAM until it exits. Reassigning onto such a card starts a
         # second prove on top of the first and both die with the hazync#97 memory failure -- which is
@@ -167,7 +167,7 @@ done
 
 # ---------- gather, with every copy verified ----------
 # receipts were streamed during the chunk phase; sweep up anything that failed its retries
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r PID IP PORT LOC CHUNK _ _; do
   ( OK=$(timeout 20 ssh -n -o ConnectTimeout=10 -i $K -p "$COORD_SSH" root@"$COORD_IP" "test -s /workspace/chunk_$CHUNK.bin && echo Y" 2>/dev/null)
     if [ "$OK" != "Y" ]; then
       timeout 120 scp -q -o ConnectTimeout=15 -i $K -P "$PORT" root@"$IP":/workspace/chunk_$CHUNK.bin $S/rc/ 2>/dev/null
@@ -184,10 +184,10 @@ timeout 45 ssh -n -o ConnectTimeout=15 -i $K -p $COORD_SSH root@$COORD_IP \
  "cd /workspace && rm -f agg.log agg.err && HAZYNC_LIFTX_HINT=1 HAZYNC_FIELD_BIGINT2=1 HAZYNC_ECMULT_WINDOW=21 \
   HAZYNC_BLOCK=/workspace/block_966256.json HAZYNC_CHUNKS=$N HAZYNC_AGG=1 HAZYNC_PORT=9110 \
   nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & disown; exit 0" >/dev/null 2>&1
-for i in $(seq 1 40); do timeout 5 bash -c "</dev/tcp/$AGG_IP/$AGG_PORT" 2>/dev/null && break; sleep 3; done
+for _ in $(seq 1 40); do timeout 5 bash -c "</dev/tcp/$AGG_IP/$AGG_PORT" 2>/dev/null && break; sleep 3; done
 say "listener open at +$(python3 -c "print(round($(date +%s.%N)-$T0,1))")s"
 say "workers auto-attached at +$(python3 -c "print(round($(date +%s.%N)-$T0,1))")s"
-for i in $(seq 1 200); do
+for _ in $(seq 1 200); do
   # ⛔ `pgrep -cf seg-serve` SELF-MATCHES: the remote shell's own command line contains the string,
   # so it never returns 0 and a dead aggregate reads as a live one. And `ps -eo comm` truncates to
   # 15 chars, so grepping "^hazync-host-cuda$" matches NOTHING and a LIVE aggregate reads as dead --

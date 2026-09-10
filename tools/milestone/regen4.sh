@@ -9,9 +9,9 @@ LOG=$S/regen4.log; : > $LOG
 say(){ echo "[$(date -Is)] $*" >> $LOG; }
 D=/home/defenwycke/hazync-milestone-966256-run4; mkdir -p $D/receipts
 # evidence first: pull all 27 chunk receipts off the workers before anything can clear them
-while read -r PID IP PORT LOC CHUNK SEGS RATE; do
+while read -r _ IP PORT _ CHUNK _ _; do
  ( RDIR=/workspace; grep -qx "$CHUNK" $S/_reassigned 2>/dev/null && RDIR=/workspace/re$CHUNK
-   for a in 1 2 3; do
+   for _ in 1 2 3; do
      timeout 120 scp -q -o ConnectTimeout=20 -i $K -P "$PORT" root@"$IP":$RDIR/chunk_$CHUNK.bin $D/receipts/ 2>/dev/null
      [ -s "$D/receipts/chunk_$CHUNK.bin" ] && break
    done ) &
@@ -24,7 +24,7 @@ timeout 45 ssh -n -o ConnectTimeout=15 -i $K -p $CPORT root@$CIP \
   HAZYNC_BLOCK=/workspace/block_966256.json HAZYNC_CHUNKS=27 \
   nohup setsid ./hazync-host-cuda agg-chunks > regen.log 2> regen.err < /dev/null & disown; exit 0" >/dev/null 2>&1
 say "agg-chunks started on the coordinator"
-for i in $(seq 1 300); do
+for _ in $(seq 1 300); do
   R=$(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $CPORT root@$CIP \
     'ls -l /workspace/*.receipt 2>/dev/null | awk "{print \$9, \$5}"
      tail -2 /workspace/regen.log 2>/dev/null | cut -c1-160

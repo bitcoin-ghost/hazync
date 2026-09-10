@@ -2,7 +2,7 @@
 # Fleet bootstrap + screening control run.
 # ⛔ compat removal is REQUIRED on consumer cards (CUDA Error 804) -- see stage 1.
 set -u
-W=/workspace; mkdir -p $W; cd $W
+W=/workspace; mkdir -p $W; cd $W || exit 1
 for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done
 ldconfig 2>/dev/null
 BIN=$W/hazync-host-cuda
