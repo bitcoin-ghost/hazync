@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,6 +216,29 @@
+@@ -216,6 +216,30 @@
  
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
@@ -17,8 +17,9 @@
 +                // row. poly_mix is arbitrary for this purpose: any mixing that is non-zero at a row
 +                // proves some constraint is violated there.
 +                if std::env::var("HAZYNC_119_ROW_SCAN").is_ok() {
-+                    hazync_119_row_scan::<H>(
++                    hazync_119_tap_scan::<H>(
 +                        1usize << po2,
++                        code,
 +                        data,
 +                        &witgen.accum.buf,
 +                        global,
@@ -30,68 +31,67 @@
                  mix
              });
  
-@@ -223,3 +246,64 @@
+@@ -223,3 +247,63 @@
          }))
      }
  }
 +
 +
-+/// hazync#119: report trace rows whose mixed constraint value is non-zero.
++/// hazync#119: report the trace rows at which a constraint is violated.
 +///
-+/// The seal is rejected at risc0-zkp's DEEP-ALI check (`verify/mod.rs:381`), which means the witness
-+/// violates a constraint **on the trace domain**. `eval_check` cannot show which row: it evaluates on
-+/// the extended coset and divides by the vanishing polynomial, so it is non-zero everywhere by
-+/// construction — a scan of it reported 2,097,152 non-zero entries of 2,097,152 in *both* a failing
-+/// and a passing run.
++/// ⛔ The obvious approach does not work, and the reason is worth recording. `eval_check` evaluates
++/// on the extended coset and divides by the vanishing polynomial, so it is non-zero everywhere by
++/// construction — a scan of it reported 2,097,152 non-zero entries of 2,097,152 in **both** a
++/// failing and a passing run. Evaluating `poly_fp` at rate 1 does not work either: the vanishing
++/// polynomial is `(3x)^n - 1`, so risc0's trace domain is `(1/3)·μ_n`, not `μ_n`, and `poly_fp`
++/// derives `x` internally from `(cycle, domain)` with no way to pass an arbitrary point. That scan
++/// reported every row of every segment, including segments that verify.
 +///
-+/// Here the buffers are still in trace form, so `poly_fp` can be evaluated at rate 1. `poly_mix` is
-+/// arbitrary for this purpose: any mixing that is non-zero at a row proves some constraint is
-+/// violated there. Naming *which* constraint needs the `PolyExtStepDef` walk; this finds the row.
++/// Constraints are algebraic relations among TAP VALUES, so evaluate them the way the verifier does
++/// — `poly_ext(mix, u, args)` — but with `u` read from the trace at row `r` instead of at the DEEP
++/// point. There is no domain arithmetic to get wrong, and a non-zero result names the row.
 +#[cfg(not(target_os = "zkvm"))]
-+fn hazync_119_row_scan<H: risc0_zkp::hal::Hal<Elem = Val, ExtElem = ExtVal>>(
++fn hazync_119_tap_scan<H: risc0_zkp::hal::Hal<Elem = Val, ExtElem = ExtVal>>(
 +    steps: usize,
++    code: &H::Buffer<Val>,
 +    data: &H::Buffer<Val>,
 +    accum: &H::Buffer<Val>,
 +    out: &H::Buffer<Val>,
 +    mix: &H::Buffer<Val>,
 +) {
-+    use risc0_circuit_rv32im_sys::risc0_circuit_rv32im_cpu_poly_fp;
-+    use risc0_zkp::field::{map_pow, Elem as _};
++    use risc0_zkp::adapter::{PolyExt, TapsProvider};
++    use risc0_zkp::field::Elem as _;
 +
-+    // any fixed value: we are asking "is this row non-zero", not reconstructing the protocol
++    let taps = CircuitImpl.get_taps();
++    let circuit = CircuitImpl;
++    // arbitrary: we ask "is this row non-zero", not reconstruct the protocol
 +    let poly_mix = ExtVal::new(Val::new(2), Val::new(3), Val::new(5), Val::new(7));
-+    let poly_mix_pows = map_pow(poly_mix, crate::zirgen::info::POLY_MIX_POWERS);
 +
-+    data.view(|d| {
-+        accum.view(|a| {
-+            out.view(|o| {
-+                mix.view(|m| {
-+                    let args: [*const Val; 4] = [a.as_ptr(), d.as_ptr(), o.as_ptr(), m.as_ptr()];
-+                    let mut nonzero: Vec<usize> = Vec::new();
-+                    for cycle in 0..steps {
-+                        let mut tot = ExtVal::ZERO;
-+                        unsafe {
-+                            risc0_circuit_rv32im_cpu_poly_fp(
-+                                cycle,
-+                                steps,
-+                                poly_mix_pows.as_ptr(),
-+                                args.as_ptr(),
-+                                &mut tot,
-+                            )
-+                        };
-+                        if tot != ExtVal::ZERO {
-+                            if nonzero.len() < 32 {
-+                                nonzero.push(cycle);
-+                            }
-+                        }
-+                    }
-+                    eprintln!(
-+                        "[#119-ROW] steps={steps} violating_rows_shown={} first={:?}",
-+                        nonzero.len(),
-+                        nonzero
-+                    );
-+                });
-+            });
-+        });
-+    });
++    code.view(|c| { data.view(|d| { accum.view(|a| { out.view(|o| { mix.view(|m| {
++        let groups: [&[Val]; 3] = [c, d, a];
++        let mut u: Vec<ExtVal> = Vec::new();
++        let mut bad: Vec<usize> = Vec::new();
++        let mut total_bad = 0usize;
++
++        for row in 0..steps {
++            u.clear();
++            for reg in taps.regs() {
++                let g = groups[reg.group()];
++                for i in 0..reg.size() {
++                    let back = reg.back(i);
++                    let r = (row + steps - (back % steps)) % steps;
++                    let v = g[reg.offset() * steps + r];
++                    u.push(ExtVal::new(v, Val::ZERO, Val::ZERO, Val::ZERO));
++                }
++            }
++            let tot = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
++            if tot != ExtVal::ZERO {
++                total_bad += 1;
++                if bad.len() < 16 {
++                    bad.push(row);
++                }
++            }
++        }
++        eprintln!("[#119-TAP] steps={steps} violating_rows={total_bad} first={bad:?}");
++    }); }); }); }); });
 +}

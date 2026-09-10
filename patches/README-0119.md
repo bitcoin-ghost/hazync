@@ -48,7 +48,9 @@ so a binary built with it cannot verify ordinary seals. This patch only observes
 patch -p1 -d vendor/risc0-circuit-rv32im/src/prove/hal < patches/0119-row-scan.patch
 ```
 
-`HAZYNC_119_ROW_SCAN=1` reports **trace rows** whose mixed constraint value is non-zero.
+`HAZYNC_119_ROW_SCAN=1` reports **trace rows** at which a constraint is violated, by evaluating
+`poly_ext(mix, u, args)` with the tap vector `u` read from the trace at row `r` — the same function
+the verifier calls, but at a row instead of at the DEEP point.
 
 Why it has to be here: the seal is rejected at risc0-zkp's DEEP-ALI check, so the witness violates a
 constraint on the trace domain. `eval_check` cannot show which row — it evaluates on the extended
@@ -59,4 +61,17 @@ At the `commit_group(REGISTER_GROUP_ACCUM, ...)` call site the code/data/accum b
 **trace** form, so `poly_fp` can be evaluated at rate 1. `poly_mix` is arbitrary there: any mixing
 non-zero at a row proves some constraint is violated at that row.
 
-⚠ This finds the ROW. Naming *which* constraint additionally needs a `PolyExtStepDef` walk.
+### Two approaches that do NOT work — recorded so nobody repeats them
+
+1. **Scanning `check_poly`.** It is the quotient on the extended coset, non-zero everywhere by
+   construction: 2,097,152 non-zero entries of 2,097,152, in *both* a failing and a passing run.
+2. **Evaluating `poly_fp` at rate 1.** The vanishing polynomial is `(3x)^n - 1`, so risc0's trace
+   domain is `(1/3)·μ_n`, **not** `μ_n` — and `poly_fp` derives `x` internally from
+   `(cycle, domain)` with no way to pass an arbitrary point. It reported every row of every segment,
+   including segments that verify.
+
+Constraints are algebraic relations among tap values, so the evaluator works on values and has no
+domain arithmetic to get wrong.
+
+⚠ This finds the ROW. Naming *which* constraint additionally needs a `PolyExtStepDef` walk, for
+which `circuit_debug`'s `mix_index` tracking is the mechanism.
