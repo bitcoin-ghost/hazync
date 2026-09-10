@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -216,10 +216,380 @@
+@@ -216,10 +216,449 @@
  
                  prover.commit_group(REGISTER_GROUP_ACCUM, &witgen.accum.buf);
  
@@ -86,6 +86,32 @@
 +                });
 +            }
 +
++            // hazync#119: run the row scan with the TRANSCRIPT'S poly_mix, not an arbitrary one.
++            //
++            // ⛔ The original scan used (2,3,5,7) because poly_mix is drawn from the IOP inside
++            // finalize, after this point. That answers a different question from the verifier's.
++            // With degree overflow structurally excluded (max constraint degree is 5, exactly the
++            // INV_RATE=4 budget), the branch left by `bary == check != result` is that Z does not
++            // divide C -- some constraint does NOT vanish on the trace domain. A fixed mix can
++            // report that as clean, so the scan has to be re-run with the real one.
++            //
++            // Evaluating the committed polynomials on the trace domain returns the witness exactly
++            // (interpolation is exact), so the witness buffers are the right input; only the mix
++            // was wrong.
++            if std::env::var("HAZYNC_119_ROW_SCAN_REAL").is_ok() {
++                let steps = 1usize << po2;
++                let (mut cv, mut dv, mut av, mut ov, mut mv) =
++                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
++                code.view(|v| cv.extend_from_slice(v));
++                data.view(|v| dv.extend_from_slice(v));
++                witgen.accum.buf.view(|v| av.extend_from_slice(v));
++                global.view(|v| ov.extend_from_slice(v));
++                mix.buf.view(|v| mv.extend_from_slice(v));
++                prover.hazync_set_rowscan(Box::new(move |pm| {
++                    hazync_119_tap_scan_slices(steps, &cv, &dv, &av, &ov, &mv, *pm);
++                }));
++            }
++
              prover.finalize(&[&mix.buf, global], circuit_hal.as_ref())
          }))
      }
@@ -114,16 +140,33 @@
 +    out: &H::Buffer<Val>,
 +    mix: &H::Buffer<Val>,
 +) {
-+    use rayon::prelude::*;
-+    use risc0_zkp::adapter::{PolyExt, TapsProvider};
-+    use risc0_zkp::field::Elem as _;
-+
-+    let taps = CircuitImpl.get_taps();
-+    let circuit = CircuitImpl;
-+    // arbitrary: we ask "is this row non-zero", not reconstruct the protocol
++    // ⚠ ARBITRARY mix. This asks "is this row non-zero for SOME mixing", which is not the
++    // question the verifier asks. Use HAZYNC_119_ROW_SCAN_REAL for the transcript's own mix.
 +    let poly_mix = ExtVal::new(Val::new(2), Val::new(3), Val::new(5), Val::new(7));
 +
 +    code.view(|c| { data.view(|d| { accum.view(|a| { out.view(|o| { mix.view(|m| {
++        hazync_119_tap_scan_slices(steps, c, d, a, o, m, poly_mix);
++    }); }); }); }); });
++}
++
++/// The scan core, over plain slices and an explicit `poly_mix`.
++#[cfg(not(target_os = "zkvm"))]
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn hazync_119_tap_scan_slices(
++    steps: usize,
++    c: &[Val],
++    d: &[Val],
++    a: &[Val],
++    o: &[Val],
++    m: &[Val],
++    poly_mix: ExtVal,
++) {
++    use rayon::prelude::*;
++    use risc0_zkp::adapter::{PolyExt, TapsProvider};
++    use risc0_zkp::field::Elem as _;
++    let taps = CircuitImpl.get_taps();
++    let circuit = CircuitImpl;
++    {
 +        // ⛔ index by the CONSTANTS, not by the order the buffers happen to be written. The group
 +        // ids come from a macro and are not [code, data, accum]; assuming that order indexed past
 +        // the end of a buffer (len 2,097,152, index 3,600,291).
@@ -223,8 +266,11 @@
 +        bad.sort_unstable();
 +        let total_bad = bad.len();
 +        bad.truncate(16);
-+        eprintln!("[#119-TAP] steps={steps} violating_rows={total_bad} first={bad:?}");
-+    }); }); }); }); });
++        eprintln!(
++            "[#119-TAP] steps={steps} mix={:?} violating_rows={total_bad} first={bad:?}",
++            poly_mix.elems()
++        );
++    }
 +}
 +
 +/// hazync#119: per-constraint decomposition of the constraint polynomial.
@@ -246,6 +292,12 @@
 +}
 +
 +/// Every site whose STATIC degree exceeds `max_deg`, plus the number of fp vars to evaluate.
++///
++/// ⛔ MEASURED EMPTY at `max_deg = 5`: the circuit's maximum constraint degree is exactly 5, which
++/// is the `INV_RATE = 4` budget (`deg(C/Z) <= 4N-5 < 4N`). The earlier claim of degree 34 came
++/// from a regex that matched `GetGlobal` as `Get`, counting degree-0 globals as degree-1 taps.
++/// Degree overflow cannot happen here, so this shortlist has nothing to report -- kept only so the
++/// dead end is not re-explored.
 +/// The bound is on the flat DAG, so this is a shortlist of candidates, not a verdict: whether a
 +/// site actually contributes depends on its coefficients for the witness at hand.
 +#[cfg(not(target_os = "zkvm"))]
@@ -324,6 +376,23 @@
 +                _ => {}
 +            }
 +        }
++    }
++    if std::env::var("HAZYNC_119_SITES_DEBUG").is_ok() {
++        let mx = sites.iter().map(|s| s.degree).max().unwrap_or(0);
++        eprintln!(
++            "[#119-SITES] block={} fp_vars={} mix_vars={} ret={} sites={} max_degree={} over5={} \
++             max_fp_deg={} fp_over5={} max_mul_power={}",
++            def.block.len(),
++            fp_deg.len(),
++            mix_ops.len(),
++            def.ret,
++            sites.len(),
++            mx,
++            sites.iter().filter(|s| s.degree > 5).count(),
++            fp_deg.iter().max().copied().unwrap_or(0),
++            fp_deg.iter().filter(|d| **d > 5).count(),
++            mix_mp.iter().max().copied().unwrap_or(0)
++        );
 +    }
 +    sites.retain(|s| s.degree > max_deg);
 +    sites.sort_by(|a, b| b.degree.cmp(&a.degree).then(a.power.cmp(&b.power)));

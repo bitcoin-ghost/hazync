@@ -37,7 +37,7 @@
  /// Object to generate a zero-knowledge proof of the execution of some circuit.
  pub struct Prover<'a, H: Hal> {
      hal: &'a H,
-@@ -33,6 +55,27 @@
+@@ -33,6 +55,30 @@
      groups: Vec<Option<PolyGroup<H>>>,
      cycles: usize,
      po2: usize,
@@ -47,6 +47,9 @@
 +    hazync_validity: Option<Box<dyn Fn(&H::ExtElem, &[H::ExtElem]) -> H::ExtElem + Send + Sync + 'a>>,
 +    // hazync#119: per-constraint decomposition, installed by the circuit.
 +    hazync_perk: Option<HazyncPerk<'a, H>>,
++    // hazync#119: row scan run with the REAL poly_mix, which only exists inside finalize.
++    #[allow(clippy::type_complexity)]
++    hazync_rowscan: Option<Box<dyn Fn(&H::ExtElem) + Send + Sync + 'a>>,
 +}
 +
 +/// hazync#119: the circuit's constraint polynomial split per constraint.
@@ -65,15 +68,28 @@
  }
  
  fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H::Buffer<H::Elem> {
-@@ -59,9 +102,26 @@
+@@ -59,9 +105,39 @@
                  .collect(),
              cycles: 0,
              po2: usize::MAX,
 +            hazync_validity: None,
 +            hazync_perk: None,
++            hazync_rowscan: None,
          }
      }
  
++    /// hazync#119: run a scan with the transcript's own `poly_mix`.
++    ///
++    /// ⛔ The earlier row scan used an arbitrary mix `(2,3,5,7)` because `poly_mix` is drawn from
++    /// the IOP inside `finalize`, after the circuit's scan site. An arbitrary mix answers a
++    /// different question from the one the verifier asks, and with `bary == check != result` and
++    /// degree overflow structurally excluded, the remaining branch is that `Z` does not divide
++    /// `C` -- which the fixed-mix scan could report as clean.
++    #[allow(clippy::type_complexity)]
++    pub fn hazync_set_rowscan(&mut self, f: Box<dyn Fn(&H::ExtElem) + Send + Sync + 'a>) {
++        self.hazync_rowscan = Some(f);
++    }
++
 +    /// hazync#119: install the per-constraint decomposition. Diagnostic; defaults to None.
 +    pub fn hazync_set_perk(&mut self, perk: HazyncPerk<'a, H>) {
 +        self.hazync_perk = Some(perk);
@@ -92,7 +108,19 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -140,6 +200,116 @@
+@@ -117,6 +193,11 @@
+         // Set the poly mix value, which is used for constraint compression in the
+         // DEEP-ALI protocol.
+         let poly_mix = self.iop.random_ext_elem();
++
++        // hazync#119: the scan the circuit installed, now with the real poly_mix.
++        if let Some(f) = self.hazync_rowscan.as_ref() {
++            f(&poly_mix);
++        }
+         let domain = self.cycles * INV_RATE;
+         let ext_size = H::ExtElem::EXT_SIZE;
+ 
+@@ -140,6 +221,116 @@
              self.cycles,
          );
  
@@ -209,7 +237,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,6 +331,31 @@
+@@ -161,6 +352,31 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -241,7 +269,7 @@
          self.hal.batch_interpolate_ntt(&check_poly, ext_size);
  
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
-@@ -269,6 +464,271 @@
+@@ -269,6 +485,271 @@
              // Set the mix value, which is used for FRI batching.
          });
  
