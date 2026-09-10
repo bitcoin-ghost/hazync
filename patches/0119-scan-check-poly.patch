@@ -158,7 +158,39 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -269,6 +394,75 @@
+@@ -161,6 +286,31 @@
+         // roots of unity (which are the only thing that and values get multiplied
+         // by) are in Fp, FpExt values act like simple vectors of Fp for the
+         // purposes of interpolate/evaluate.
++        // hazync#119: keep the coset SAMPLES of check_poly before the NTT destroys them.
++        // HAZYNC_119_COSET_COMPARE measured poly_fp and poly_ext agreeing at all 4,194,304 coset
++        // points on the failing segment, yet `check != result` at z. So either these samples do not
++        // determine C at z (C/Z is not representable in 4N points -- degree overflow), or the
++        // interpolate -> PolyGroup -> evaluate path corrupts them. Evaluating the samples directly
++        // at z, independently of that path, tells the two apart. ~67 MB at po2=20.
++        // ⚠ Buffer::view returns (), so the value has to come out through a captured binding.
++        let hazync_samples: Option<Vec<H::ExtElem>> = if std::env::var("HAZYNC_119_BARY").is_ok() {
++            let mut v: Vec<H::ExtElem> = Vec::new();
++            check_poly.view(|c| {
++                v = (0..domain)
++                    .map(|cy| {
++                        let mut sub = [H::Elem::ZERO; 4];
++                        for (i, e) in sub.iter_mut().enumerate() {
++                            *e = c[i * domain + cy];
++                        }
++                        H::ExtElem::from_subelems(sub)
++                    })
++                    .collect();
++            });
++            Some(v)
++        } else {
++            None
++        };
++
+         self.hal.batch_interpolate_ntt(&check_poly, ext_size);
+ 
+         // The next step is to convert the degree 4*n check polynomial into 4 degree n
+@@ -269,6 +419,118 @@
              // Set the mix value, which is used for FRI batching.
          });
  
@@ -228,6 +260,49 @@
 +                    );
 +                }
 +                None => eprintln!("[#119-VAL] no evaluator installed; check={:?}", check.subelems()),
++            }
++
++            // Evaluate the pre-NTT samples at z by barycentric interpolation on the full
++            // root-of-unity domain mu_M, M = domain:
++            //     f(z) = ((z^M - 1)/M) * sum_j  f_j * w^j / (z - w^j)
++            // This touches none of batch_interpolate_ntt, PolyGroup, or batch_evaluate_any, so it
++            // is an independent witness to what the samples actually say at z.
++            //
++            //   bary*Z == result, != check  ->  the samples are right; the NTT/PolyGroup path
++            //                                   corrupts them.
++            //   bary*Z == check,  != result ->  the samples do not determine C at z: C/Z is not a
++            //                                   polynomial of degree < 4N. Degree overflow.
++            if let Some(samples) = hazync_samples.as_ref() {
++                use rayon::prelude::*;
++                let exp_po2 = INV_RATE.trailing_zeros() as usize;
++                let w = H::Elem::ROU_FWD[self.po2 + exp_po2];
++                let acc = samples
++                    .par_iter()
++                    .enumerate()
++                    .map(|(j, fj)| {
++                        let wj = w.pow(j);
++                        let denom = z - H::ExtElem::from_subfield(&wj);
++                        *fj * H::ExtElem::from_subfield(&wj) * denom.inv()
++                    })
++                    .reduce(|| H::ExtElem::ZERO, |a, b| a + b);
++                let m_inv = H::Elem::from_u64(domain as u64).inv();
++                let bary = acc
++                    * (z.pow(domain) - H::ExtElem::ONE)
++                    * H::ExtElem::from_subfield(&m_inv);
++
++                let three = H::Elem::from_u64(3);
++                let z_at = (H::ExtElem::from_subfield(&three) * z).pow(self.cycles)
++                    - H::ExtElem::ONE;
++                let bary_z = bary * z_at;
++                eprintln!("[#119-BARY] samples_at_z*Z ={:?}", bary_z.subelems());
++                eprintln!(
++                    "[#119-BARY] VERDICT bary==check: {}  bary==result: {}",
++                    bary_z == check,
++                    self.hazync_validity
++                        .as_ref()
++                        .map(|f| bary_z == f(&poly_mix, &eval_u))
++                        .unwrap_or(false)
++                );
 +            }
 +        }
 +
