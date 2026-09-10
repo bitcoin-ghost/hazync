@@ -31,7 +31,7 @@
                  mix
              });
  
-@@ -223,3 +247,80 @@
+@@ -223,3 +247,123 @@
          }))
      }
  }
@@ -61,7 +61,7 @@
 +) {
 +    use rayon::prelude::*;
 +    use risc0_zkp::adapter::{PolyExt, TapsProvider};
-+    use risc0_zkp::field::Elem as _;
++    use risc0_zkp::field::{Elem as _, ExtElem as _};
 +
 +    let taps = CircuitImpl.get_taps();
 +    let circuit = CircuitImpl;
@@ -87,22 +87,65 @@
 +                return;
 +            }
 +        }
++        // The tap vector the verifier builds, but read at a trace ROW instead of at the DEEP point.
++        // Order must match risc0-zkp verify/mod.rs:336 exactly -- regs() outer, 0..reg.size() inner.
++        let tap_vec = |row: usize| -> Vec<ExtVal> {
++            let mut u: Vec<ExtVal> = Vec::new();
++            for reg in taps.regs() {
++                let g = groups[reg.group()];
++                for i in 0..reg.size() {
++                    let back = reg.back(i);
++                    let r = (row + steps - (back % steps)) % steps;
++                    let v = g[reg.offset() * steps + r];
++                    u.push(ExtVal::new(v, Val::ZERO, Val::ZERO, Val::ZERO));
++                }
++            }
++            u
++        };
++
++        // ⛔ NEGATIVE CONTROL. `violating_rows=0` on a witness that is KNOWN BAD is only evidence
++        // if this evaluator can produce a non-zero result at all. Reporting 0 on segments that
++        // verify proves nothing -- a function that always returns zero passes that test too.
++        //
++        // Perturb one tap at a time and count how many perturbations move `tot` off zero. A live
++        // evaluator moves for most of them; a dead one moves for none.
++        if std::env::var("HAZYNC_119_TAP_CONTROL").is_ok() {
++            let probes = [0usize, 1, steps / 2, steps - 2, steps - 1];
++            let (mut checked, mut moved) = (0usize, 0usize);
++            for &row in probes.iter() {
++                let mut u = tap_vec(row);
++                let base = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
++                let (mut cr, mut mr) = (0usize, 0usize);
++                for k in 0..u.len() {
++                    let save = u[k];
++                    u[k] = save + ExtVal::ONE;
++                    let t = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
++                    u[k] = save;
++                    cr += 1;
++                    if t != ExtVal::ZERO {
++                        mr += 1;
++                    }
++                }
++                eprintln!(
++                    "[#119-CTL] row={row} taps={} base_tot={:?} perturbed={cr} nonzero={mr}",
++                    u.len(),
++                    base.elems()
++                );
++                checked += cr;
++                moved += mr;
++            }
++            eprintln!(
++                "[#119-CTL] TOTAL perturbed={checked} nonzero={moved} -- evaluator is {}",
++                if moved == 0 { "DEAD (result is meaningless)" } else { "LIVE" }
++            );
++        }
++
 +        // poly_ext is an interpreted walk over PolyExtStepDef -- far slower per row than poly_fp.
 +        // Serially this is hours per segment; fanned out over the machine it is seconds.
 +        let mut bad: Vec<usize> = (0..steps)
 +            .into_par_iter()
 +            .filter_map(|row| {
-+                let mut u: Vec<ExtVal> = Vec::new();
-+                for reg in taps.regs() {
-+                    let g = groups[reg.group()];
-+                    for i in 0..reg.size() {
-+                        let back = reg.back(i);
-+                        let r = (row + steps - (back % steps)) % steps;
-+                        let v = g[reg.offset() * steps + r];
-+                        u.push(ExtVal::new(v, Val::ZERO, Val::ZERO, Val::ZERO));
-+                    }
-+                }
-+                let tot = circuit.poly_ext(&poly_mix, &u, &[o, m]).tot;
++                let tot = circuit.poly_ext(&poly_mix, &tap_vec(row), &[o, m]).tot;
 +                (tot != ExtVal::ZERO).then_some(row)
 +            })
 +            .collect();
