@@ -480,7 +480,9 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
                      f"bundle/witness and that `host method-id` matches reproduce/METHOD_ID)")
     sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {_err_tail(last)}")
 
-def cmd_prove(args):
+def cmd_prove(args, claimed=False):
+    """Prove `rng`. `claimed` is True only when `rng` came from POST /api/claim (the no-argument
+    `hazync run`): only then is there a claim for the heartbeat to keep alive (#251)."""
     rng = args[0]
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
@@ -521,7 +523,11 @@ def cmd_prove(args):
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
             _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}",
-                                _beat_range=rng, _beat_pk=_pk, _beat_sk=_sk)
+                                # #251: heartbeat ONLY a range we claimed. An explicit `run <range>` or
+                                # `prove <range>` holds no claim, so every beat was a doomed 409 -- 400+
+                                # of them from the first outside contributor, which made a healthy long
+                                # run look like a stuck worker hammering the coordinator.
+                                _beat_range=rng if claimed else None, _beat_pk=_pk, _beat_sk=_sk)
             parts.append(f"range_{h}.bin")
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
@@ -839,7 +845,7 @@ def cmd_run(args):
         rng = res["range"]
         print(f"claimed block {rng} (yours for {int(res.get('ttl', 3600) / 60)} min; "
               f"if you stop, it reopens by itself)")
-    cmd_prove([rng]); cmd_submit([rng])
+    cmd_prove([rng], claimed=not args); cmd_submit([rng])
 
 def cmd_fold(args):
     """Fold adjacent proven ranges into wider ones — a task in its own right, not a side effect (#37).

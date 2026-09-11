@@ -113,6 +113,19 @@ jobs:
         run: |
           cd coordinator
           python3 test_beat_log.py --control
+      - name: Worker heartbeats only a claimed range (#251)
+        run: cd coordinator && python3 test_worker_beat.py
+      - name: Worker heartbeat POSITIVE CONTROL (always-beat restored — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_worker_beat.py --control
+      - name: Coordinator does not jam under concurrent load (#265)
+        # WAL (a writer is not blocked by an open reader) + single-flight state/frontier caches.
+        run: cd coordinator && python3 test_coord_concurrency.py
+      - name: Concurrency POSITIVE CONTROL (rollback journal + old stampeding cache — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_coord_concurrency.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
@@ -233,6 +246,10 @@ jobs:
         run: ./scripts/check-versions.sh
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
+      - name: check-dist attestation path (#248)
+        # A CUDA host that cannot execute here must PASS when attested (no FAIL line), and FAIL when
+        # unattested or attested with the wrong id. Against the pre-#248 script it fails 2 checks.
+        run: ./scripts/test-check-dist.sh
       - name: Shellcheck (scripts run as root on the coordinator and as build tooling)
         # Caught a real one: check-test-surfaces.sh had an unguarded `cd`, so a failed cd would have
         # run every check against the wrong directory, found no test surfaces, and PASSED.
