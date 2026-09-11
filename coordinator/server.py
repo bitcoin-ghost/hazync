@@ -228,7 +228,6 @@ except Exception:
 _lock = threading.Lock()
 _rate = {}          # (kind, ip) -> [timestamps] sliding window, guarded by _rate_lock
 _rate_lock = threading.Lock()
-_state_cache = {}                      # short-TTL cache of the serialised /api/state, per slim/full, guarded by _state_lock
 # vranges is served separately (#35): it is ~99.9% of the old /api/state payload and changes only when a
 # range is verified, so a 10s cache + ETag turns a re-poll into a 304 instead of re-shipping the index.
 _vranges_cache = {"t": 0.0, "v": None, "etag": None}
@@ -296,13 +295,23 @@ def is_hex(s, nbytes):
     except Exception:
         return False
 
+DB_BUSY_TIMEOUT = float(os.environ.get("DB_BUSY_TIMEOUT", "15"))
+
 def db():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=DB_BUSY_TIMEOUT)
     c.row_factory = sqlite3.Row
     return c
 
 def init_db():
     c = db()
+    # #265: WAL, so readers never block writers. In the default rollback journal every /api/state,
+    # /api/meta and frontier read holds a SHARED lock that stops claim/submit/beat from writing; under a
+    # 10-card fleet the reads overlapped continuously, writers starved while holding _lock, and the board
+    # API jammed (148 threads, 504s). journal_mode=WAL is persistent in the file; setting it here means a
+    # fresh DB -- or one restored from a pre-WAL backup -- cannot bring the rollback journal back.
+    mode = c.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    if str(mode).lower() != "wal":
+        print(f"[hazync-coordinator] WARNING: journal_mode={mode}, not WAL -- reads will block writes (#265)", flush=True)
     c.executescript("""
       CREATE TABLE IF NOT EXISTS ranges(
         id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER,
@@ -679,6 +688,7 @@ def sync_from_peers(limit=200):
                            str(meta.get("range_work", "0")), str(meta.get("in_bhash", "")),
                            str(meta.get("out_bhash", ""))))
                 c.commit(); c.close()
+                _frontier_invalidate()        # #265: a new verified range can move the frontier
             try:
                 os.makedirs(PROOFS_DIR, exist_ok=True)
                 with open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb") as pf:
@@ -1124,6 +1134,58 @@ def foldable(limit=8):
                 return out
     return out
 
+FRONTIER_TTL = float(os.environ.get("FRONTIER_CACHE_TTL", "2"))
+_sf_lock = threading.Lock()
+_sf = {}            # key -> {"t": ts, "v": value} and key+":busy" -> threading.Event while recomputing
+
+
+def _single_flight(key, ttl, fn):
+    """#265: a TTL cache that recomputes on ONE thread. While a recompute is running, other callers get
+    the previous value (stale-while-revalidate); only a cold start makes them wait for the first value.
+    A plain TTL cache stampedes the moment a recompute takes longer than its TTL -- every request misses
+    and recomputes, which is exactly what piled 148 threads onto the coordinator."""
+    now = time.time()
+    with _sf_lock:
+        e = _sf.get(key)
+        if e is not None and now - e["t"] < ttl:
+            return e["v"]
+        ev = _sf.get(key + ":busy")
+        leader = ev is None
+        if leader:
+            ev = _sf[key + ":busy"] = threading.Event()
+    if not leader:
+        if e is not None:
+            return e["v"]
+        ev.wait(timeout=60)
+        with _sf_lock:
+            e = _sf.get(key)
+        if e is not None:
+            return e["v"]
+    try:
+        v = fn()
+        with _sf_lock:
+            _sf[key] = {"t": time.time(), "v": v}
+        return v
+    finally:
+        if leader:
+            with _sf_lock:
+                _sf.pop(key + ":busy", None)
+            ev.set()
+
+
+def _frontier_chain_cached():
+    """#265: the frontier walk for DISPLAY and pre-flight callers only (frontier_hi -> /api/meta, which every
+    worker hits; frontier_proof -> state). It loads all of vranges, so it is single-flight with a short TTL,
+    and invalidated whenever this server writes vranges. `_frontier_chain` itself stays uncached: it is the
+    S1/F1/H9 trust boundary that seam_fuzz drives directly, and a cache there would answer for other data."""
+    return _single_flight("frontier_chain", FRONTIER_TTL, _frontier_chain)
+
+
+def _frontier_invalidate():
+    with _sf_lock:
+        _sf.pop("frontier_chain", None)
+
+
 def _frontier_chain():
     """Select the MOST-WORK genesis-anchored chain (Bitcoin's rule), not merely the tallest one.
 
@@ -1181,7 +1243,7 @@ def _frontier_chain():
 
 def frontier_hi():
     """Highest block covered by a contiguous, boundary-continuous chain of verified ranges from genesis."""
-    return _frontier_chain()[0]
+    return _frontier_chain_cached()[0]
 
 def proven_count():
     """Distinct blocks covered by any verified range. A single block can legitimately be verified both
@@ -1235,7 +1297,7 @@ def distinct_blocks_by_pubkey():
 def frontier_proof():
     """The genesis-anchored frontier as a chain-state (the real committed proof output the hero panel
     shows). Empty (height 0) until the first genesis-anchored proof lands."""
-    hi, tip_hash, cum_work, leaves = _frontier_chain()
+    hi, tip_hash, cum_work, leaves = _frontier_chain_cached()
     return {"height": hi, "tip_hash": tip_hash, "cum_work": cum_work, "leaves": leaves}
 
 def timeline(fr, segs=240):
@@ -1420,16 +1482,10 @@ def state_cached(slim=False):
 
     Slim and full are cached SEPARATELY: they are different payloads, and sharing one slot would serve
     whichever was computed last to both callers."""
-    key = "slim" if slim else "full"
-    now = time.time()
-    with _state_lock:
-        e = _state_cache.get(key)
-        if e is not None and now - e["t"] < STATE_TTL:
-            return e["v"]
-    v = json.dumps(state(slim=slim)).encode()   # compute outside the lock; a rare cold-start double-compute is harmless
-    with _state_lock:
-        _state_cache[key] = {"t": time.time(), "v": v}
-    return v
+    # #265: single-flight. The old "a rare cold-start double-compute is harmless" stopped being rare once a
+    # recompute took longer than STATE_TTL under load: every request missed and recomputed at once.
+    return _single_flight("state:" + ("slim" if slim else "full"), STATE_TTL,
+                          lambda: json.dumps(state(slim=slim)).encode())
 
 _MID_CACHE = {"v": None}
 
@@ -1759,6 +1815,7 @@ def submit(body):
             except Exception:
                 pass
         c.commit(); c.close()
+        _frontier_invalidate()        # #265: a new verified range can move the frontier
     # `"ok": true` means the receipt verified and was accepted for THIS range — it does NOT mean the
     # range is genesis-anchored, and a client that reads it as "this proves the chain from genesis"
     # is wrong for every mid-chain receipt (which is most of them). Report the distinction instead of
