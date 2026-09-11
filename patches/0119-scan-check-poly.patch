@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,226 @@
+@@ -116,7 +244,260 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -342,11 +342,25 @@
 +                                        dc.last()
 +                                    );
 +
-+                                    let mut scores: Vec<(usize, usize)> = (0..pg.count)
-+                                        .into_par_iter()
-+                                        .map(|c2| {
-+                                            let cand = &w[c2 * n..(c2 + 1) * n];
-+                                            (c2, (0..n).filter(|&r| col[r] == cand[r]).count())
++                                    // ⛔ search EVERY group, not just this one. The previous
++                                    // cross-correlation only covered accum's 103 columns, so a
++                                    // committed column holding `data` or `code` content would not
++                                    // have been found.
++                                    let mut pairs: Vec<(usize, usize)> = Vec::new();
++                                    for (g2, pg2) in self.groups.iter().enumerate() {
++                                        let cnt = pg2.as_ref().unwrap().count;
++                                        for c2 in 0..cnt {
++                                            pairs.push((g2, c2));
++                                        }
++                                    }
++                                    let mut scores: Vec<(usize, usize)> = pairs
++                                        .par_iter()
++                                        .map(|&(g2, c2)| {
++                                            let cand = &wit[g2][c2 * n..(c2 + 1) * n];
++                                            (
++                                                g2 * 1000 + c2,
++                                                (0..n).filter(|&r| col[r] == cand[r]).count(),
++                                            )
 +                                        })
 +                                        .collect();
 +                                    scores.sort_by_key(|&(_, k)| std::cmp::Reverse(k));
@@ -364,9 +378,29 @@
 +                                            (k, m)
 +                                        })
 +                                        .collect();
++                                    // Is the committed column an AFFINE function of the
++                                    // witness? An equality test cannot see a scalar multiple or a
++                                    // constant offset, and either would be a strong signal.
++                                    let probe_rows: Vec<usize> =
++                                        (0..n).filter(|&r| want[r] != H::Elem::ZERO).take(8).collect();
++                                    let ratios: Vec<u32> = probe_rows
++                                        .iter()
++                                        .map(|&r| (col[r] * want[r].inv()).to_u32_words()[0])
++                                        .collect();
++                                    let diffs: Vec<u32> = probe_rows
++                                        .iter()
++                                        .map(|&r| (col[r] - want[r]).to_u32_words()[0])
++                                        .collect();
++                                    let const_ratio = ratios.windows(2).all(|w| w[0] == w[1]);
++                                    let const_diff = diffs.windows(2).all(|w| w[0] == w[1]);
 +                                    eprintln!(
-+                                        "[#119-XC] col={c} of {n} cells -- best_witness_cols\
-+                                         (col,matching)={:?} row_shifts(k,matching)={:?}",
++                                        "[#119-AFF] col={c} const_ratio={const_ratio} \
++                                         const_diff={const_diff} ratios={ratios:?} diffs={diffs:?}"
++                                    );
++
++                                    eprintln!(
++                                        "[#119-XC] col={c} of {n} cells -- best (g*1000+col,\
++                                         matching) over ALL groups={:?} row_shifts={:?}",
 +                                        &scores[..scores.len().min(4)],
 +                                        shifts
 +                                    );
@@ -387,7 +421,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +487,116 @@
+@@ -140,6 +521,116 @@
              self.cycles,
          );
  
@@ -504,7 +538,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +618,73 @@
+@@ -161,8 +652,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -578,7 +612,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +791,364 @@
+@@ -269,6 +825,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
