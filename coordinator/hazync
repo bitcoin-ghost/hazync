@@ -909,7 +909,19 @@ def cmd_run(args):
         # exactly. The objections that removed claims (#37) were objections to WIDE claims: at width 1
         # a failure costs seconds, not a 67-minute range.
         _, pub, handle = identity()
-        res = post("/api/claim", {"pubkey": pub, "handle": handle})
+        # #268: POST /api/claim is retried when its response is lost -- inside _open on a timeout or a
+        # dropped connection, and here on an unreadable reply (a proxy 5xx page). The server had usually
+        # committed the first claim, so every retry used to orphan a block for an hour. One nonce per
+        # claim, reused by all of its retries, makes the server hand back the block it already gave.
+        body = {"pubkey": pub, "handle": handle, "nonce": os.urandom(16).hex()}
+        for k in range(3):
+            try:
+                res = post("/api/claim", body)
+                break
+            except SystemExit:
+                if k == 2:
+                    raise
+                time.sleep(5 * (k + 1))
         if not res.get("ok"):
             sys.exit(f"nothing to claim: {res.get('error') or res}")
         rng = res["range"]

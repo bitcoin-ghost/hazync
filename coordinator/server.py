@@ -339,7 +339,8 @@ def init_db():
     try: c.execute("ALTER TABLE ranges ADD COLUMN last_beat REAL")  # migrate older DBs
     except Exception: pass
     for col in ("attempts INTEGER DEFAULT 0", "env_failures INTEGER DEFAULT 0", "last_error TEXT",
-                "last_failed_at REAL", "last_assignee TEXT"):   # failure tracking
+                "last_failed_at REAL", "last_assignee TEXT",    # failure tracking
+                "claim_nonce TEXT"):                             # #268: makes a retried claim idempotent
         try: c.execute(f"ALTER TABLE ranges ADD COLUMN {col}")
         except Exception: pass
     for col in ("out_leaves INTEGER", "range_work TEXT",
@@ -1446,6 +1447,15 @@ def expected_method_id():
     return _MID_CACHE["v"]
 
 
+def _claim_by_nonce(c, pk, nonce, now):
+    """The live claim this exact claim request already made, if any (#268) -- see claim()."""
+    if not nonce or not pk:
+        return None
+    r = c.execute("SELECT id FROM ranges WHERE status='claimed' AND assignee=? AND claim_nonce=?"
+                  " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
+                  (pk, nonce, now - CLAIM_TTL, now - CLAIM_MAX)).fetchone()
+    return r["id"] if r else None
+
 def claim(body):
     """Hand out the earliest block that is neither proven nor already claimed.
 
@@ -1466,9 +1476,22 @@ def claim(body):
     """
     pk = body.get("pubkey", "")
     handle = clean_handle(body.get("handle"))
+    nonce = str(body.get("nonce") or "")[:64] or None
     now = time.time()
     with _lock:
         c = db()
+        # #268: a claim whose RESPONSE was lost (client or proxy timeout, a dropped connection) is
+        # retried by the worker, and before this each retry took the next free block, orphaning the
+        # first for a full CLAIM_TTL -- 19 blocks under the frontier in the 2026-09-11 lock-up. The
+        # worker sends one nonce per claim and reuses it on every retry of THAT claim, so a retry gets
+        # the block it was already given. A later claim carries a fresh nonce and still cannot re-take
+        # its own block, so the 39,318 rule below is untouched. No nonce: exactly the old behaviour.
+        again = _claim_by_nonce(c, pk, nonce, now)
+        if again:
+            c.close()
+            return 200, {"ok": True, "range": again, "ttl": CLAIM_TTL,
+                         "note": "claimed for %d minutes; submissions are accepted for any height regardless"
+                                 % int(CLAIM_TTL / 60)}
         proven = set()
         for row in c.execute("SELECT lo, hi FROM vranges"):
             proven.update(range(row["lo"], row["hi"] + 1))
@@ -1509,8 +1532,8 @@ def claim(body):
         else:
             c.close()
             return 409, {"error": "nothing available to claim"}
-        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at)"
-                  " VALUES(?,?,?,'claimed',?,?,?)", (str(h), h, h, pk, handle, now))
+        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,claim_nonce)"
+                  " VALUES(?,?,?,'claimed',?,?,?,?)", (str(h), h, h, pk, handle, now, nonce))
         c.commit()
         c.close()
     return 200, {"ok": True, "range": str(h), "ttl": CLAIM_TTL,
