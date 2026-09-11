@@ -162,6 +162,26 @@ check((1, 16) in built and (1, 8) in built and (9, 16) in built,
 check(all(server._tree_node(lo, hi) for lo, hi in built),
       "every range it produced is an aligned power-of-two tree node — no stray widths")
 
+# THE SPINE'S FLOOR. The spine absorbs from hi+1 upward, so a node starting at or below its head can
+# never be absorbed. Offered lowest-first without a floor, that region is exactly where every folder
+# went: on the live board (2026-09-11) two cards folding bought the spine nothing, 228 blocks/hr
+# against 230 without them, while a 128-block node was finished 85 blocks behind the spine.
+_spine_json = os.path.join(server.SPINE_DIR, "spine.json")
+seed([(i, i) for i in range(1, 9)] + [(1, 2), (3, 4)])
+with open(_spine_json, "w") as f:
+    json.dump({"lo": 1, "hi": 4}, f)
+got = pairs()
+check(not any(p["lo"] <= 4 for p in server.foldable(32)),
+      "nothing starting at or below the spine's head is offered ([1..4] is not)")
+check(("5", "6") in got and ("7", "8") in got, "pairs above the spine still are")
+with open(_spine_json, "w") as f:
+    json.dump({"lo": 1, "hi": 5}, f)
+got = pairs()
+check(("5", "6") not in got and ("7", "8") in got,
+      "a node starting AT the head is held back too: the spine already absorbed its first block")
+os.remove(_spine_json)
+check(("1-2", "3-4") in pairs(), "with no spine yet, nothing is held back")
+
 
 # ── range ids: the collision that broke a real fold ───────────────────────────────────────────────
 print("== range ids ==")
