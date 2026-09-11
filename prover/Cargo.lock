@@ -3795,8 +3795,6 @@ dependencies = [
 [[package]]
 name = "risc0-circuit-rv32im-sys"
 version = "4.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e93ed1e691220660df5ac7af4864d8cf8a42e7fe615ef27171652658ec8cb9f1"
 dependencies = [
  "cc",
  "cust",

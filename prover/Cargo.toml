@@ -12,3 +12,9 @@ lto = true
 
 [patch.crates-io]
 risc0-zkvm = { path = "../vendor/risc0-zkvm" }
+# hazync#119: risc0-circuit-rv32im-sys 4.0.3 with ONE fix, in kernels/cxx/ffi.cpp and
+# kernels/cuda/ffi.cu (search HAZYNC_119_ACCUM_FIX). Phase 3 of the accum pass added prev[k] to LogUp
+# cells the instruction arm never wrote, which still hold INVALID; when prev[k] == 0 that produced
+# 0x87FFFFFE >= P, which breaks one NTT butterfly pair and yields a receipt that fails verify().
+# Prover-only: METHOD_ID, circuit and verifier are unchanged. Drop once upstream ships the fix.
+risc0-circuit-rv32im-sys = { path = "../vendor/risc0-circuit-rv32im-sys" }
