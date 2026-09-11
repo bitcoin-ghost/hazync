@@ -6105,8 +6105,22 @@ fn seg_serve_cmd() {
     let mut conditional = level.pop().expect("one left");
     let assumptions = server.session_assumptions_succinct(&session).expect("session assumptions");
     let nres = assumptions.len();
+    // hazync#252 lever 1: HAZYNC_RESOLVE_LOCAL=1 runs the chain HERE instead. Distributing it bought
+    // nothing but moving work off this box -- it is a chain, one step outstanding at a time -- and
+    // each step is a full round trip carrying a conditional receipt out and back. On a fleet spread
+    // across countries (milestone run 4) that is paid 27 times on the critical path, while this
+    // box's GPU sits idle: the join tree is done and the last segment was lifted long ago.
+    // OPT-IN, because it is only a win when this box has a GPU: a CPU-only segment coordinator would
+    // trade 27 round trips for 27 CPU resolves. Default stays the measured behaviour until a GPU run
+    // settles it (#252).
+    let res_local = std::env::var("HAZYNC_RESOLVE_LOCAL").map(|v| v == "1").unwrap_or(false);
     let t_res = Instant::now();
     for (k, a) in assumptions.iter().enumerate() {
+        if res_local {
+            conditional = server.resolve(&conditional, a).expect("resolve (local)");
+            println!("    resolve {}/{nres}  {:.0}s elapsed (local)", k + 1, t_res.elapsed().as_secs_f64());
+            continue;
+        }
         let tag = RESOLVE_TAG | k as u32;
         let cb = bincode::serialize(&conditional).expect("ser conditional");
         let ab = bincode::serialize(a).expect("ser assumption");
@@ -6132,7 +6146,9 @@ fn seg_serve_cmd() {
     println!("  execution      {exec_s:8.1} s");
     println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
     println!("  assembly       {asm_s:8.1} s   <- last segment + join tree + resolves");
-    if nres > 0 { println!("    of which resolves {res_s:6.1} s   <- {nres} pushed to workers"); }
+    if nres > 0 {
+        println!("    of which resolves {res_s:6.1} s   <- {nres} {}", if res_local { "run locally (HAZYNC_RESOLVE_LOCAL)" } else { "pushed to workers" });
+    }
     println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
     println!();
     println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
