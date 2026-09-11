@@ -1,6 +1,6 @@
 --- a/mod.rs
 +++ b/mod.rs
-@@ -212,14 +212,499 @@
+@@ -212,14 +212,535 @@
                  // Make the mixing values
                  let mix: [Val; REGCOUNT_MIX] = std::array::from_fn(|_| prover.iop().random_elem());
  
@@ -159,6 +159,42 @@
 +                code.view(|v| w[REGISTER_GROUP_CODE] = v.to_vec());
 +                data.view(|v| w[REGISTER_GROUP_DATA] = v.to_vec());
 +                witgen.accum.buf.view(|v| w[REGISTER_GROUP_ACCUM] = v.to_vec());
++                // hazync#119: does the witness still hold the INVALID sentinel anywhere?
++                //
++                // A handful of cells still carrying INVALID at commit time would make the
++                // interpolant differ at EVERY row -- exactly the observed shape (5 accum columns,
++                // 1048576 of 1048576 rows). eltwise_zeroize is meant to clear them and its OOB bug
++                // is already known-real in this codebase.
++                {
++                    let steps = 1usize << po2;
++                    for (gid, name) in [
++                        (REGISTER_GROUP_ACCUM, "accum"),
++                        (REGISTER_GROUP_DATA, "data"),
++                        (REGISTER_GROUP_CODE, "code"),
++                    ] {
++                        let cols = TAPSET.group_size(gid);
++                        let buf = &w[gid];
++                        let mut hits: Vec<(usize, usize)> = Vec::new();
++                        let mut total = 0usize;
++                        for c in 0..cols {
++                            let k = buf[c * steps..(c + 1) * steps]
++                                .iter()
++                                .filter(|v| **v == Val::INVALID)
++                                .count();
++                            if k > 0 {
++                                total += k;
++                                if hits.len() < 16 {
++                                    hits.push((c, k));
++                                }
++                            }
++                        }
++                        eprintln!(
++                            "[#119-SENT] po2={po2} group={name} cols={cols} \
++                             invalid_cells={total} per_col={hits:?}"
++                        );
++                    }
++                }
++
 +                prover.hazync_set_witness(w);
 +            }
 +
