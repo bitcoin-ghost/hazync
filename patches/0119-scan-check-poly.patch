@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,277 @@
+@@ -116,7 +244,284 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -307,9 +307,16 @@
 +                                        )
 +                                    })
 +                                    .collect();
++                                // ⛔ Report whether the witness column is TRIVIAL. A control on
++                                // an all-zero or constant column is vacuous: it reconstructs under
++                                // any broken transform. Columns 0,1,2 were chosen as controls
++                                // purely for being low-index, which is exactly that trap.
++                                let nz = want.iter().filter(|v| **v != H::Elem::ZERO).count();
++                                let constant = want.iter().all(|v| *v == want[0]);
 +                                eprintln!(
 +                                    "[#119-ROW] po2={} group={id} col={c} kind={} \
-+                                     differing_rows={} of {n} \
++                                     differing_rows={} of {n} witness_nonzero={nz} \
++                                     witness_constant={constant} \
 +                                     first_(row,witness,committed)={head:?}",
 +                                    self.po2,
 +                                    if is_bad { "SUSPECT" } else { "CONTROL" },
@@ -438,7 +445,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +538,116 @@
+@@ -140,6 +545,116 @@
              self.cycles,
          );
  
@@ -555,7 +562,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +669,73 @@
+@@ -161,8 +676,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -629,7 +636,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +842,364 @@
+@@ -269,6 +849,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
