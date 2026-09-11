@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,260 @@
+@@ -116,7 +244,277 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -259,8 +259,25 @@
 +                            // Running the NTT only on failing columns cannot distinguish "these
 +                            // columns really differ" from "the reconstruction is broken" -- a
 +                            // broken un-shift or NTT reports all-rows-differ for every column.
-+                            let good: Vec<usize> =
-+                                (0..pg.count).filter(|c| !bad.contains(c)).take(3).collect();
++                            // ⛔ CONTROLS must include the SIBLINGS of a failing column and the
++                            // high-index end. The previous controls were 0,1,2 -- all low-index,
++                            // none adjacent to a failure -- so a reconstruction that degrades by
++                            // index, or next to a bad column, would have gone unseen. 48/50/51 are
++                            // the other three components of the SAME ExtVal accumulator as 49.
++                            let passing: Vec<usize> =
++                                (0..pg.count).filter(|c| !bad.contains(c)).collect();
++                            let mut good: Vec<usize> = Vec::new();
++                            for &cand in bad.iter().take(1) {
++                                let base = (cand / 4) * 4;
++                                for k in 0..4 {
++                                    if base + k < pg.count && passing.contains(&(base + k)) {
++                                        good.push(base + k);
++                                    }
++                                }
++                            }
++                            good.extend(passing.iter().take(2).copied());
++                            good.extend(passing.iter().rev().take(2).copied());
++                            good.dedup();
 +                            let probe_cols: Vec<(usize, bool)> = bad
 +                                .iter()
 +                                .take(8)
@@ -421,7 +438,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +521,116 @@
+@@ -140,6 +538,116 @@
              self.cycles,
          );
  
@@ -538,7 +555,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +652,73 @@
+@@ -161,8 +669,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -612,7 +629,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +825,364 @@
+@@ -269,6 +842,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
