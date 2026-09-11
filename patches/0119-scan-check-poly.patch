@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,188 @@
+@@ -116,7 +244,226 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -274,6 +274,7 @@
 +                                    *e *= p;
 +                                    p *= inv3;
 +                                }
++                                let committed_coeffs: Vec<H::Elem> = col.clone();
 +                                hazync_119_ntt(&mut col, w_fwd);
 +                                let want = &w[c * n..(c + 1) * n];
 +                                let diff: Vec<usize> =
@@ -304,6 +305,43 @@
 +                                // Also test row shifts against its own column, which would catch
 +                                // an off-by-one in the row index rather than the column index.
 +                                if is_bad {
++                                    // hazync#119: diff in COEFFICIENT space.
++                                    //
++                                    // Cross-correlation found zero matching cells against every
++                                    // witness column at every row shift, so the values are
++                                    // computed rather than misread. A single wrong COEFFICIENT
++                                    // gives exactly that: every one of the N evaluations moves,
++                                    // uncorrelated with anything. Interpolate the witness column
++                                    // (inverse NTT) and diff against the un-shifted committed
++                                    // coefficients to name the ones that differ.
++                                    let mut wcoef: Vec<H::Elem> = want.to_vec();
++                                    hazync_119_ntt(&mut wcoef, H::Elem::ROU_REV[self.po2]);
++                                    let n_inv = H::Elem::from_u64(n as u64).inv();
++                                    for e in wcoef.iter_mut() {
++                                        *e *= n_inv;
++                                    }
++                                    let dc: Vec<usize> = (0..n)
++                                        .filter(|&i| wcoef[i] != committed_coeffs[i])
++                                        .collect();
++                                    let dhead: Vec<(usize, u32, u32)> = dc
++                                        .iter()
++                                        .take(6)
++                                        .map(|&i| {
++                                            (
++                                                i,
++                                                wcoef[i].to_u32_words()[0],
++                                                committed_coeffs[i].to_u32_words()[0],
++                                            )
++                                        })
++                                        .collect();
++                                    eprintln!(
++                                        "[#119-COEF] col={c} differing_coeffs={} of {n} \
++                                         first_(i,witness_interp,committed)={dhead:?} \
++                                         last_differing={:?}",
++                                        dc.len(),
++                                        dc.last()
++                                    );
++
 +                                    let mut scores: Vec<(usize, usize)> = (0..pg.count)
 +                                        .into_par_iter()
 +                                        .map(|c2| {
@@ -349,7 +387,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +449,116 @@
+@@ -140,6 +487,116 @@
              self.cycles,
          );
  
@@ -466,7 +504,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +580,73 @@
+@@ -161,8 +618,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -540,7 +578,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +753,364 @@
+@@ -269,6 +791,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
