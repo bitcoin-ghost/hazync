@@ -6157,14 +6157,15 @@ fn seg_serve_cmd() {
     }
 }
 
-// Survive hazync#119: the CUDA prover intermittently returns a segment proof that fails its own
-// internal verify. Reproduced this session at po2 22 on an idle card, with UNMODIFIED upstream
-// scheduling, so it is the prover and not anything layered on it. Filed upstream as risc0 #3798 /
-// #3799; no replies, repo dormant.
+// Survive hazync#119: the prover intermittently returned a segment proof that failed its own
+// internal verify. ROOT CAUSE FOUND AND FIXED (#245, v0.21.1): rv32im accum phase 3 added prev[k]
+// to LogUp cells the instruction never wrote (still INVALID); when prev[k] == 0 that gave
+// 0x87FFFFFE >= P, which broke one NTT butterfly pair. Fixed in vendor/risc0-circuit-rv32im-sys;
+// upstream risc0 #3804.
 //
-// We cannot fix it, but we do not have to lose work to it. The failure is DETECTABLE -- prove_segment
-// verifies before returning -- and it is intermittent, so re-proving the same segment almost always
-// succeeds. One bad segment killed a whole measurement run today; it should have cost one retry.
+// The retry STAYS, as defence in depth. The failure is DETECTABLE -- prove_segment verifies before
+// returning -- and re-proving a segment is cheap next to losing a chunk. With the root cause fixed,
+// a retry here is NEW information, not the old fault: which is exactly why it must stay loud.
 //
 // LOUD ON PURPOSE. A silent retry would turn a known prover fault into an invisible one and hide any
 // change in its rate, which is the number #119 actually needs. Every retry prints, and the total is

@@ -97,6 +97,9 @@ Core's number ever becomes load-bearing.
 sample, but it is the first L40S data on an open, unexplained fault, and without a retry that single
 occurrence costs the whole aggregate — `agg-chunks` needs all 16 receipts.
 
+> ✅ **Fixed in v0.21.1 (#245).** The cause was a non-canonical witness cell from rv32im accum phase 3,
+> at a measured ~1 in 2,200 po2=21 segments — not the card. Full chain in hazync#119.
+
 ## 2 · CORE — *Core's own code decides*
 
 ```bash
