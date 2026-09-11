@@ -105,6 +105,14 @@ jobs:
         run: |
           cd coordinator
           python3 test_spine_fold.py --control
+      - name: A lost claim response orphans no block (#268)
+        # The real worker against the real handler, with the first claim's response dropped after the
+        # server committed it. The retry must get the same block back, not orphan it for an hour.
+        run: cd coordinator && python3 test_claim_nonce.py
+      - name: Claim nonce POSITIVE CONTROL (worker sends no nonce — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_claim_nonce.py --control
       - name: Heartbeat rejection log (bip-448, 2026-09-11)
         # Drives the real HTTP handler: every rejected /api/beat must be logged with the caller, the
         # reason, and -- for a 409 -- what the DB really holds for that range.
