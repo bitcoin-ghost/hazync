@@ -1992,7 +1992,21 @@ class H(BaseHTTPRequestHandler):
                 pass                             # never let the log line cost the caller a response
         return self._send(code, obj)
 
+def install_stack_dump():
+    """`kill -USR1 <pid>` writes every thread's stack to stderr (the journal) and keeps serving.
+
+    #265 recurred on 2026-09-11 17:41 UTC: the listener stopped accepting (the kernel logged SYN
+    cookies on 8899) for 11 minutes, with nothing in the journal, and the restart that cleared it
+    also destroyed the only evidence of why. This box has no pip, so py-spy is not an option. Take
+    the dump BEFORE restarting a wedged coordinator:
+        kill -USR1 $(systemctl show -p MainPID --value hazync-coordinator)
+        journalctl -u hazync-coordinator --since -2min
+    """
+    import faulthandler, signal
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
 if __name__ == "__main__":
+    install_stack_dump()
     init_db()
     # Fail closed at startup: never serve on a public interface while the STARK check or signatures are
     # in a permissive/dev mode — a misconfigured redeploy would otherwise credit the public board for

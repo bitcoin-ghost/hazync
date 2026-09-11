@@ -95,6 +95,13 @@ jobs:
         run: cd coordinator && python3 seam_fuzz.py --control
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
+      - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)
+        # The only evidence of why a wedged coordinator is wedged, taken BEFORE the restart.
+        run: cd coordinator && python3 test_stack_dump.py
+      - name: Stack dump POSITIVE CONTROL (hook not installed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_stack_dump.py --control
       - name: Spine + fold logic (#30, #37)
         # foldable() pair selection, the range-id grammar, and the spine's store/monotonic/serve path.
         # NOT covered, deliberately and stated in the script: real STARK verification (needs the
