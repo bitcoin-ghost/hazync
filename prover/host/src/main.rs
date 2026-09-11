@@ -5476,12 +5476,27 @@ fn seg_connect_cmd(addr: &str) {
     let ctx = VerifierContext::default();
     let mut s = std::net::TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
     s.set_nodelay(true).ok();   // these are small frames; Nagle would add 40 ms for nothing
-    println!("[{id}] connected to {addr}");
+    // hazync#254: every line leads with epoch ms and every task gets one line. The old output printed
+    // every 25th task and carried no absolute time, so a fleet's aggregate timing could not be
+    // reconstructed from its workers (#235 had to wrap every worker's stdout in a timestamping shell
+    // loop). wait_s is how long this worker sat idle waiting for work -- the latency signal #252 needs.
+    // HAZYNC_SEG_QUIET=1 restores the old sparse, undated output.
+    let quiet = std::env::var("HAZYNC_SEG_QUIET").is_ok();
+    let now_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let say = |line: String| if quiet { println!("{line}") } else { println!("{} {line}", now_ms()) };
+    say(format!("[{id}] connected to {addr}"));
 
     let (mut done, t0) = (0usize, Instant::now());
+    let mut last_send_ms = now_ms();
+    let task_line = |kind: &str, detail: String, recv_ms: u128, wait_ms: u128, compute_s: f64, bytes_in: usize, bytes_out: usize, done: usize| {
+        say(format!("[{id}] task kind={kind} {detail} recv_ms={recv_ms} send_ms={} wait_s={:.3} compute_s={compute_s:.3} bytes_in={bytes_in} bytes_out={bytes_out} done={done}",
+                 now_ms(), wait_ms as f64 / 1000.0));
+    };
     loop {
-        let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { println!("[{id}] link closed: {e}"); break; } };
-        if idx == SEG_EOF { println!("[{id}] no more work"); break; }
+        let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { say(format!("[{id}] link closed: {e}")); break; } };
+        let recv_ms = now_ms();
+        let wait_ms = recv_ms.saturating_sub(last_send_ms);
+        if idx == SEG_EOF { say(format!("[{id}] no more work")); break; }
         let t = Instant::now();
 
         // A lift job carries a single SegmentReceipt whose claim the coordinator has already merged
@@ -5490,9 +5505,12 @@ fn seg_connect_cmd(addr: &str) {
             let sr: SegmentReceipt = bincode::deserialize(&body).expect("deserialize segment receipt");
             let lifted = server.lift(&sr).expect("lift");
             let out = bincode::serialize(&lifted).expect("serialize lift");
-            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            let compute_s = t.elapsed().as_secs_f64();
+            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
             done += 1;
-            println!("[{id}] lifted the merged last segment in {:.2}s", t.elapsed().as_secs_f64());
+            last_send_ms = now_ms();
+            if quiet { say(format!("[{id}] lifted the merged last segment in {:.2}s", t.elapsed().as_secs_f64())); }
+            else { task_line("lift", "idx=last".into(), recv_ms, wait_ms, compute_s, body.len(), out.len(), done); }
             continue;
         }
 
@@ -5509,9 +5527,12 @@ fn seg_connect_cmd(addr: &str) {
             let assum: SuccinctReceipt<risc0_zkvm::Unknown> = bincode::deserialize(ab).expect("deserialize assumption");
             let r = server.resolve(&cond, &assum).expect("resolve");
             let out = bincode::serialize(&r).expect("serialize resolve");
-            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            let compute_s = t.elapsed().as_secs_f64();
+            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
             done += 1;
-            println!("[{id}] resolve {} in {:.2}s ({done} done)", idx & !RESOLVE_TAG, t.elapsed().as_secs_f64());
+            last_send_ms = now_ms();
+            if quiet { say(format!("[{id}] resolve {} in {:.2}s ({done} done)", idx & !RESOLVE_TAG, t.elapsed().as_secs_f64())); }
+            else { task_line("resolve", format!("k={}", idx & !RESOLVE_TAG), recv_ms, wait_ms, compute_s, body.len(), out.len(), done); }
             continue;
         }
 
@@ -5525,9 +5546,17 @@ fn seg_connect_cmd(addr: &str) {
             let b: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(bb).expect("deserialize b");
             let j = server.join(&a, &b).expect("join");
             let out = bincode::serialize(&j).expect("serialize join");
-            if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+            let compute_s = t.elapsed().as_secs_f64();
+            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
             done += 1;
-            if done % 25 == 0 { println!("[{id}] join {} in {:.2}s ({done} done)", idx & !JOIN_TAG, t.elapsed().as_secs_f64()); }
+            last_send_ms = now_ms();
+            if quiet {
+                if done % 25 == 0 { say(format!("[{id}] join {} in {:.2}s ({done} done)", idx & !JOIN_TAG, t.elapsed().as_secs_f64())); }
+            } else {
+                // seg-serve packs a join as JOIN_TAG | (level << 16) | position
+                let v = idx & !JOIN_TAG;
+                task_line("join", format!("level={} pos={}", v >> 16, v & 0xFFFF), recv_ms, wait_ms, compute_s, body.len(), out.len(), done);
+            }
             continue;
         }
 
@@ -5539,19 +5568,26 @@ fn seg_connect_cmd(addr: &str) {
         // worker does not. Proving never needed the session, so it is done here like any other
         // segment and only the merge stays central (hazync#157).
         let out = if idx & NOLIFT_TAG != 0 {
-            println!("[{id}] segment {} proved, returned UNLIFTED (last)", idx & !NOLIFT_TAG);
+            say(format!("[{id}] segment {} proved, returned UNLIFTED (last)", idx & !NOLIFT_TAG));
             bincode::serialize(&sr).expect("serialize segment receipt")
         } else {
             let lifted = server.lift(&sr).expect("lift");
             bincode::serialize(&lifted).expect("serialize lift")
         };
-        if let Err(e) = write_frame(&mut s, idx, &out) { println!("[{id}] send failed: {e}"); break; }
+        let compute_s = t.elapsed().as_secs_f64();
+        if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
         done += 1;
-        if done % 25 == 0 || done < 3 {
-            println!("[{id}] segment {idx} in {:.2}s ({done} done, {:.1}s elapsed)", t.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64());
+        last_send_ms = now_ms();
+        if quiet {
+            if done % 25 == 0 || done < 3 {
+                say(format!("[{id}] segment {idx} in {:.2}s ({done} done, {:.1}s elapsed)", t.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64()));
+            }
+        } else {
+            let kind = if idx & NOLIFT_TAG != 0 { "segment_nolift" } else { "segment" };
+            task_line(kind, format!("idx={}", idx & !NOLIFT_TAG), recv_ms, wait_ms, compute_s, body.len(), out.len(), done);
         }
     }
-    println!("[{id}] PUSH DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64());
+    say(format!("[{id}] PUSH DONE {done} segments in {:.1}s", t0.elapsed().as_secs_f64()));
 }
 
 // Coordinator with a push transport. Executes, then serves segments to whoever connects, keeping
