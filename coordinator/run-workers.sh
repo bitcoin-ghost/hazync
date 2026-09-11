@@ -124,6 +124,24 @@ if [ -n "$want" ] && [ "$mine" != "$want" ]; then
 fi
 [ -z "$want" ] && echo "WARNING: coordinator unreachable — starting anyway, id NOT confirmed" >&2
 
+# #261: prove something on the GPU BEFORE any loop can claim. `method-id` never touches CUDA, so a box
+# with no usable device passed every check above -- then each loop claimed a block, failed in seconds,
+# and claimed the next: a RunPod 4090 claimed and abandoned 14 blocks in 15 minutes and froze the board
+# frontier. Block 170 proves in ~18 s on a GPU. Only on a box that has one; SKIP_GPU_SMOKE=1 to opt out.
+if [ -z "${SKIP_GPU_SMOKE:-}" ] && command -v nvidia-smi >/dev/null && nvidia-smi -L 2>/dev/null | grep -q '^GPU'; then
+    smoke_dir=$(mktemp -d)
+    if (cd "$smoke_dir" && timeout 600 "$HAZYNC_HOST" prove-block > smoke.log 2>&1) && grep -q "VERIFIED" "$smoke_dir/smoke.log"; then
+        echo "gpu smoke       : ok ($(grep -oE 'PROVED in [0-9.]+s' "$smoke_dir/smoke.log" | head -1))"
+    else
+        echo >&2
+        echo "FATAL: this box has a GPU but cannot prove on it -- nothing was claimed." >&2
+        echo "  $(grep -vE '^\s*$' "$smoke_dir/smoke.log" | tail -1 | cut -c1-200)" >&2
+        echo "  Fix the GPU/driver (or SKIP_GPU_SMOKE=1 to run anyway). Full log: $smoke_dir/smoke.log" >&2
+        exit 1
+    fi
+    rm -rf "$smoke_dir"
+fi
+
 # An unset handle is not an error, but it IS a decision, and here it is about to be made silently for
 # however long this fleet runs. A fleet once proved 29,676 blocks credited to `ghost:<pubkey[:6]>`
 # because nobody ran `hazync id` — nothing broke, the handle is only a display label, but the work
@@ -175,7 +193,7 @@ for i in $(seq 1 "$N"); do
                 "./$CLI_NAME" '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1
                 rc=$?
                 if [ "$rc" -eq 78 ]; then
-                    echo "worker '"$i"' stopped: guest id mismatch, see '"$LOG_DIR"'/worker_'"$i"'.log" >&2
+                    echo "worker '"$i"' stopped: unrecoverable (guest id mismatch, or no usable GPU), see '"$LOG_DIR"'/worker_'"$i"'.log" >&2
                     break
                 fi
                 [ "$rc" -ne 0 ] && sleep 3

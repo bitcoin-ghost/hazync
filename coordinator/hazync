@@ -295,6 +295,13 @@ def cmd_pick(args):
 
 _HARD_ERR = ("parse bundle", "invalid type", "deserialize", "missing field", "METHOD_ID", "image id",
              "read bundle", "No such file", "no such file")
+# #261: this box cannot run CUDA at all. Permanent for the box, so neither a smaller segment nor the next
+# block can help -- and retrying is actively harmful: every retry of `run` CLAIMS a new block and then
+# abandons it for CLAIM_TTL. A RunPod 4090 with no usable device claimed and abandoned 14 blocks in 15
+# minutes this way and froze the board frontier. Exit EX_CONFIG so run-workers.sh stops the loop.
+_DEVICE_FATAL = ("cudaErrorNoDevice", "no CUDA-capable device", "CUDA driver version is insufficient",
+                 "cudaErrorInsufficientDriver", "cudaErrorInitializationError", "CUDA_ERROR_NO_DEVICE",
+                 "forward compatibility was attempted on non supported HW")
 
 _SEG_MIN = 18                                       # below this the segments stop repartitioning usefully
 _SEG_TOP_CACHE = {"v": False}                       # False = not yet asked (None is a valid answer)
@@ -474,6 +481,12 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
         if r.returncode == 0:
             return
         last = (r.stderr or "").strip()
+        if any(h in last for h in _DEVICE_FATAL):
+            print(f"\nFATAL: {label}: this box has no usable CUDA device -- {_err_tail(last)}\n"
+                  f"  Every prove here fails, and each retry would claim (and abandon) another block.\n"
+                  f"  Stopping this worker. Fix the GPU/driver, or run a CPU build of the host.",
+                  file=sys.stderr, flush=True)
+            sys.exit(EX_CONFIG)
         if any(h in last for h in _HARD_ERR):           # smaller segments won't help — fail fast, loudly
             tail = _err_tail(last)
             sys.exit(f"{label}: {tail}\n(not a segment-size issue — retrying smaller won't help; check the "
