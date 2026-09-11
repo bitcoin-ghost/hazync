@@ -105,6 +105,14 @@ jobs:
         run: |
           cd coordinator
           python3 test_spine_fold.py --control
+      - name: Heartbeat rejection log (bip-448, 2026-09-11)
+        # Drives the real HTTP handler: every rejected /api/beat must be logged with the caller, the
+        # reason, and -- for a 409 -- what the DB really holds for that range.
+        run: cd coordinator && python3 test_beat_log.py
+      - name: Heartbeat rejection log POSITIVE CONTROL (hook disabled — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_beat_log.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
