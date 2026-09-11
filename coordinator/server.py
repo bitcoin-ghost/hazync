@@ -1595,6 +1595,66 @@ def beat(body):
         c.close()
     return 200, {"ok": True, "held_for": CLAIM_TTL}
 
+# ---- heartbeat rejection log ---------------------------------------------------------------------
+# The first third-party contributor (bip-448, 2026-09-11) sent 404 beats over ten hours and every one
+# was rejected 409 -- and nothing on this side recorded why. log_message() above silences the access
+# log, beat() never sees the client address, and the 409 text cannot say whether the range does not
+# exist, was never theirs, has been verified, or was theirs and expired. Diagnosing it took nginx logs
+# on another box and guesswork about the one question that mattered: WHICH claim did the worker think
+# it held? So every rejected beat is logged with the caller, the reason, and -- for a 409 -- what the
+# database actually holds for that range. The API response is unchanged.
+#
+# Identical rejections (same ip, pubkey, range, code, reason) are logged once per BEAT_LOG_WINDOW
+# seconds with a count of the ones suppressed in between: a stuck worker beating every 90 s must not
+# bury the journal, and neither can someone replaying bad beats inside the rate limit.
+BEAT_LOG_WINDOW = int(os.environ.get("BEAT_LOG_WINDOW", "600"))
+_beat_log_seen = {}                 # key -> [last_logged_ts, suppressed_since]
+_beat_log_lock = threading.Lock()
+
+def _beat_range_state(rid, pk):
+    """What the DB holds for a beaten range, relative to the caller: the fact a 409 cannot carry."""
+    try:
+        c = db()
+        r = c.execute("SELECT status, assignee, claimed_at, last_beat FROM ranges WHERE id=?",
+                      (rid,)).fetchone()
+        who = c.execute("SELECT handle FROM contributors WHERE pubkey=?", (pk,)).fetchone()
+        c.close()
+    except Exception as e:                       # a logging aid must never break the request
+        return f"state=<db error: {e}>"
+    tag = f"handle={who['handle']!r} " if who else "handle=<not a contributor> "
+    if not r:
+        return tag + "state=no-such-range"
+    now = time.time()
+    a = r["assignee"] or ""
+    holder = "caller" if a == pk else (a[:16] or "none")
+    age = lambda t: f"{now - t:.0f}s ago" if t else "never"
+    return (tag + f"state={r['status']} assignee={holder} claimed={age(r['claimed_at'])} "
+            f"last_beat={age(r['last_beat'])}")
+
+def log_beat_rejection(ip, body, code, obj):
+    if not isinstance(body, dict):
+        body = {}
+    rid = str(body.get("range", ""))[:48]
+    pk = str(body.get("pubkey", ""))[:64]
+    reason = str((obj or {}).get("error", ""))[:120]
+    key = (ip, pk, rid, code, reason)
+    now = time.time()
+    with _beat_log_lock:
+        e = _beat_log_seen.get(key)
+        if e and now - e[0] < BEAT_LOG_WINDOW:
+            e[1] += 1
+            return False
+        suppressed = e[1] if e else 0
+        _beat_log_seen[key] = [now, 0]
+        if len(_beat_log_seen) > 10000:          # bound memory against key churn
+            for k in [k for k, v in _beat_log_seen.items() if now - v[0] >= BEAT_LOG_WINDOW]:
+                del _beat_log_seen[k]
+    state = _beat_range_state(rid, pk) if code == 409 else ""
+    more = f" (+{suppressed} identical since the last line)" if suppressed else ""
+    print(f"[beat-rejected] {code} ip={ip} pubkey={pk[:16]} range={rid!r} ts={body.get('ts')!r} "
+          f"reason={reason!r} {state}{more}".rstrip(), flush=True)
+    return True
+
 def witness_available(blk):
     """True if a witness for `blk` can be served. Free-running proving needs arbitrary heights, and
     the bridge already provides them — the lookup is a direct file path with no frontier window."""
@@ -1845,6 +1905,11 @@ class H(BaseHTTPRequestHandler):
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
               "/api/beat": beat, "/api/rotate": rotate}[p]
         code, obj = fn(body)
+        if p == "/api/beat" and code != 200:
+            try:
+                log_beat_rejection(self._client_ip(), body, code, obj)
+            except Exception:
+                pass                             # never let the log line cost the caller a response
         return self._send(code, obj)
 
 if __name__ == "__main__":
