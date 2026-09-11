@@ -540,8 +540,20 @@ check("bundle_2.json" not in _files, "an oversized tar member is refused rather 
 check("bundle_1.json" in _files,
       "a normal member in the same archive is still written — the cap is not refusing everything")
 
+# The worker's half of the spine: each step absorbs the widest verified chunk, not one block. It loads
+# the CLI rather than the server, so it lives in its own file; it runs from here so the two CI steps
+# that already run this file (normal and --control) cover it too.
+import subprocess as _sp
+_sr = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_spine_ranges.py")]
+              + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_sr.returncode == 0, "the spine absorbs the widest chunk at each step (test_spine_ranges.py)")
+
 print()
 if CONTROL:
+    if _sr.returncode != 0:
+        print("CONTROL FAILED — test_spine_ranges.py did not catch one-block-per-step being restored.")
+        sys.exit(1)
     if fails:
         print(f"CONTROL OK — broke the already-folded check and {len(fails)} assertion(s) failed, as they must.")
         sys.exit(0)

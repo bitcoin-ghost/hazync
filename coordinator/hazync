@@ -10,7 +10,7 @@ hazync — Proof Party contributor CLI.
   hazync run [id]           # claim + prove + submit (id optional: takes the earliest free block)
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
   hazync fold [n]           # fold n adjacent proven ranges into wider ones (default 1) — helps everyone
-  hazync spine [n]          # advance the genesis-anchored spine by absorbing the next n chunks (default: all available)
+  hazync spine [n]          # advance the genesis-anchored spine n steps, each absorbing the widest chunk available (default: all)
 
 The party proves the chain forward from genesis, so you take a range near the current
 frontier. The coordinator serves a ready-made witness bundle for each block in its window,
@@ -920,16 +920,53 @@ def cmd_fold(args):
     if done:
         print(f"folded {done} pair(s).")
 
+# How long a spine run trusts its copy of /api/vranges before fetching it again. The fold tree grows
+# while the spine walks, and a stale copy only ever costs width (the single block is always offered),
+# so this is about noticing new wide ranges, not about correctness.
+SPINE_VRANGES_TTL = float(os.environ.get("HAZYNC_SPINE_VRANGES_TTL", "300"))
+
+def spine_index(vranges):
+    """`/api/vranges` -> {lo: [(hi, proof path), ...] widest first}, multi-block ranges only.
+
+    Only entries the coordinator serves a receipt for (a `/api/proof/` link) count. Anything else in
+    the list is skipped rather than trusted, because the path is fetched verbatim."""
+    idx = {}
+    for r in vranges or ():
+        try:
+            lo, hi, path = int(r["lo"]), int(r["hi"]), str(r.get("proof") or "")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if hi > lo and path.startswith("/api/proof/"):
+            idx.setdefault(lo, {})[hi] = path
+    return {lo: sorted(d.items(), reverse=True) for lo, d in idx.items()}
+
+def spine_chunks(index, nxt):
+    """The chunks the spine can absorb at block `nxt`, widest first, as (hi, proof path).
+
+    `extend-spine` takes `[1..N] + [N+1..M]` for ANY M, and costs the same whatever the width: the
+    guest verifies two succinct receipts and checks the seam, it never re-proves a block. So the
+    widest verified range starting at N+1 (usually a node of the fold tree) moves the spine M-N
+    blocks for the price of one. The single block always comes LAST, by the path that worked before
+    this existed, so a wide chunk that will not absorb costs one attempt, never the spine's progress.
+    """
+    return list(index.get(nxt, ())) + [(nxt, f"/api/proof/{nxt}")]
+
 def cmd_spine(args):
-    """Advance the genesis-anchored spine: `spine [1..N] + [N+1..N+1] -> [1..N+1]`, repeatedly (#30).
+    """Advance the genesis-anchored spine: `spine [1..N] + [N+1..M] -> [1..M]`, repeatedly (#30).
 
     This is the ONE serial job in the system. Proving is embarrassingly parallel and folding is
     opportunistic, but only the leftmost range can be anchored, because anchoring means lo == 1.
 
     It is also the cheap job: absorption folds two receipts and checks a seam, it does not re-prove
-    anything. Everything it consumes already exists — the retained per-block receipts (G1) — so a
-    spine can be rebuilt from scratch by anyone without re-proving a single block. Whoever runs this
-    is a liveness single point of failure, never a soundness one.
+    anything. Everything it consumes already exists — the retained per-block receipts (G1) and the
+    fold tree built from them — so a spine can be rebuilt from scratch by anyone without re-proving a
+    single block. Whoever runs this is a liveness single point of failure, never a soundness one.
+
+    Each step absorbs the WIDEST verified chunk that starts where the spine ends (`spine_chunks`).
+    It used to absorb one block per step whatever was available, so the one serial job ran at one
+    fold per block: ~92 blocks/hr sharing a card, ~230/hr on its own, against ~2,500/hr proven
+    (measured 2026-09-11), while the fold tree it could have swallowed whole sat beside it. Now the
+    spine moves as fast as folding does, and folding spreads across as many cards as there are.
     """
     if not HOSTBIN:
         sys.exit("no prover binary found — `hazync spine` folds receipts, which is a prove operation.\n"
@@ -941,12 +978,13 @@ def cmd_spine(args):
     shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True, exist_ok=True)
 
     def submit_head(path, absorbed_to):
+        """-> "ok", "ahead" (another extender got there first), "unsupported", or "rejected"."""
         receipt = path.read_bytes()
         res = post("/api/spine", {"pubkey": pub, "handle": handle, "sig": sk.sign(receipt).hex(),
                                   "receipt": base64.b64encode(receipt).decode()})
         if res.get("ok"):
             print(f"✓ spine now [1..{absorbed_to}] — genesis-anchored, {len(receipt)} bytes, as '{handle}'.")
-            return True
+            return "ok"
         err = str(res.get("error", ""))
         # "not found" here is the coordinator lacking /api/spine, not a judgement on the receipt.
         # Reporting it as "submission rejected" tells a contributor their proof was refused when
@@ -955,16 +993,32 @@ def cmd_spine(args):
             print("this coordinator does not support the spine yet (POST /api/spine -> 404).\n"
                   "  The endpoint ships in v0.13.0 but has to be deployed on the coordinator side.\n"
                   "  Nothing is wrong with your setup or your receipt.")
-            return False
+            return "unsupported"
         if "does not advance" in err:
             # Benign race: another extender got there first. Not a failure — duplicate spine work is
             # harmless by design, and their head is at least as long as ours.
             print(f"  another extender is ahead ({err}) — nothing to do.")
-            return False
+            return "ahead"
         print(f"✗ spine submission rejected: {err}")
-        return False
+        return "rejected"
 
-    done = 0
+    index, index_at = {}, None
+
+    def chunks_at(nxt):
+        nonlocal index, index_at
+        if index_at is None or time.monotonic() - index_at >= SPINE_VRANGES_TTL:
+            try:
+                index = spine_index(json.loads(get("/api/vranges")).get("vranges"))
+            except SystemExit:
+                raise
+            except Exception as e:
+                # An older coordinator or a hiccup: absorb one block at a time, exactly as before.
+                print(f"  could not read /api/vranges ({e}) — absorbing one block at a time for now")
+                index = {}
+            index_at = time.monotonic()
+        return spine_chunks(index, nxt)
+
+    done = blocks = 0
     try:
         while want is None or done < want:
             head = None
@@ -974,69 +1028,98 @@ def cmd_spine(args):
                 raise
             except Exception:
                 head = None
-            if head and "hi" in head:
-                nxt = int(head["hi"]) + 1
-            else:
-                nxt = 1        # bootstrap: no spine yet, so the first head IS the [1..1] receipt
 
-            # The chunk is a retained per-block receipt from the board — nothing is re-proved here.
-            try:
-                chunk_bytes = get(f"/api/proof/{nxt}")
-            except Exception:
-                print(f"  block {nxt} is not proven yet (no retained receipt) — the spine is up to date at "
-                      f"[1..{head['hi']}]." if head else f"  block {nxt} is not proven yet — nothing to absorb.")
-                break
-            chunk = work / f"chunk_{nxt}.bin"; chunk.write_bytes(chunk_bytes)
-
-            if not head:
-                # [1..1] is already genesis-anchored; it becomes the head with no fold at all.
-                print(f"no spine yet — seeding it with the block 1 receipt ({len(chunk_bytes)} bytes)")
-                if not submit_head(chunk, 1):
+            if not (head and "hi" in head):
+                # Bootstrap: no spine yet, so the first head IS the [1..1] receipt — already
+                # genesis-anchored, it becomes the head with no fold at all.
+                try:
+                    chunk_bytes = get("/api/proof/1")
+                except Exception:
+                    print("  block 1 is not proven yet — nothing to absorb.")
                     break
-                done += 1
+                chunk = work / "chunk_1.bin"; chunk.write_bytes(chunk_bytes)
+                print(f"no spine yet — seeding it with the block 1 receipt ({len(chunk_bytes)} bytes)")
+                if submit_head(chunk, 1) != "ok":
+                    break
+                done += 1; blocks += 1
                 continue
 
+            was = int(head["hi"]); nxt = was + 1
             cur = work / "spine_head.bin"
             cur.write_bytes(get("/api/spine/proof"))
-            out = work / f"spine_{nxt}.bin"
-            print(f"absorbing block {nxt} into [1..{head['hi']}] — one fold, no re-proving…")
-            with gpu_lock("absorb"):
-                r = subprocess.run([HOSTBIN, "extend-spine", str(cur), str(chunk), str(out)],
-                                   capture_output=True, text=True)
-            if r.returncode != 0 or not out.exists():
-                both = (r.stdout or "") + (r.stderr or "")
-                # hazync#220: a LOST RACE looks exactly like a guest mismatch, and the host's advice
-                # ("build a host that matches the proof's guest") sends you after a cause that is not
-                # there. Two spine workers against one spine is the usual way in: we fetched the head,
-                # waited on the GPU lock, and by the time the fold ran the head had moved — so the
-                # claim digest no longer matched a head that no longer exists.
-                #
-                # The two cases are distinguishable, and this is the only place that can tell them
-                # apart, because only the caller knows which head the fold was computed against.
-                # A genuine guest mismatch is deterministic; a lost race self-heals on the next pass.
-                moved = None
+            outcome, fetched = None, False
+            cands = chunks_at(nxt)
+            for i, (hi, path) in enumerate(cands):
+                narrower = i + 1 < len(cands)
+                # The chunk is a retained receipt from the board — nothing is re-proved here.
                 try:
-                    now = json.loads(get("/api/spine"))
-                    if now and "hi" in now:
-                        moved = int(now["hi"])
+                    chunk_bytes = get(path)
                 except Exception:
+                    continue          # not served; for the single block, that means not proven yet
+                fetched = True
+                span = f"[{nxt}..{hi}]" if hi > nxt else f"block {nxt}"
+                chunk = work / f"chunk_{nxt}_{hi}.bin"; chunk.write_bytes(chunk_bytes)
+                out = work / f"spine_{hi}.bin"
+                print(f"absorbing {span} into [1..{was}] — one fold, no re-proving…")
+                with gpu_lock("absorb"):
+                    r = subprocess.run([HOSTBIN, "extend-spine", str(cur), str(chunk), str(out)],
+                                       capture_output=True, text=True)
+                if r.returncode != 0 or not out.exists():
+                    both = (r.stdout or "") + (r.stderr or "")
+                    # hazync#220: a LOST RACE looks exactly like a guest mismatch, and the host's advice
+                    # ("build a host that matches the proof's guest") sends you after a cause that is not
+                    # there. Two spine workers against one spine is the usual way in: we fetched the head,
+                    # waited on the GPU lock, and by the time the fold ran the head had moved — so the
+                    # claim digest no longer matched a head that no longer exists.
+                    #
+                    # The two cases are distinguishable, and this is the only place that can tell them
+                    # apart, because only the caller knows which head the fold was computed against.
+                    # A genuine guest mismatch is deterministic; a lost race self-heals on the next pass.
                     moved = None
-                was = int(head["hi"]) if head and "hi" in head else None
-                if moved is not None and was is not None and moved != was:
-                    # Not an error. The other worker did the work we were about to do.
-                    print(f"  the spine advanced under us while this fold ran "
-                          f"([1..{was}] -> [1..{moved}]) — refolding from the new head")
+                    try:
+                        now = json.loads(get("/api/spine"))
+                        if now and "hi" in now:
+                            moved = int(now["hi"])
+                    except Exception:
+                        moved = None
+                    if moved is not None and moved != was:
+                        # Not an error. The other worker did the work we were about to do.
+                        print(f"  the spine advanced under us while this fold ran "
+                              f"([1..{was}] -> [1..{moved}]) — refolding from the new head")
+                        outcome = "moved"
+                        break
+                    if narrower:
+                        # A wide chunk that will not absorb (the host checks the seam before the GPU
+                        # runs, so this is cheap). Fall back to a narrower one rather than stall; the
+                        # single block, last in the list, is the path that worked before.
+                        last = (both.strip().splitlines() or ["no output"])[-1][:160]
+                        print(f"  {span} would not absorb ({last}) — trying a narrower chunk")
+                        continue
+                    # Head unchanged, so the host's build-mismatch advice is now actually the likely
+                    # cause, and a seam failure here is information rather than noise.
+                    sys.exit(f"extend-spine failed for {span}:\n{both[-400:]}")
+                outcome = submit_head(out, hi)
+                if outcome == "rejected" and narrower:
+                    print(f"  trying a narrower chunk than {span}")
                     continue
-                # Head unchanged, so the host's build-mismatch advice is now actually the likely
-                # cause, and a seam failure here is information rather than noise.
-                sys.exit(f"extend-spine failed for block {nxt}:\n{both[-400:]}")
-            if not submit_head(out, nxt):
+                if outcome == "ok":
+                    done += 1; blocks += hi - nxt + 1
                 break
-            done += 1
+            if outcome == "moved":
+                continue
+            if outcome is None:
+                if fetched:
+                    print(f"  nothing starting at block {nxt} would absorb — stopping at [1..{was}].")
+                else:
+                    print(f"  block {nxt} is not proven yet (no retained receipt) — the spine is up to "
+                          f"date at [1..{was}].")
+                break
+            if outcome != "ok":
+                break
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if done:
-        print(f"absorbed {done} block(s) into the spine.")
+        print(f"absorbed {blocks} block(s) into the spine in {done} step(s).")
 
 def main():
     # No signal handlers any more. They existed to hand a CLAIM back on SIGTERM, because Python's
