@@ -394,6 +394,104 @@ def gpu_lock(what="prove"):
             except Exception:
                 pass
 
+# #256: a prove is watched for PROGRESS, not silence. The host prints one line per completed segment
+# (HAZYNC_PROGRESS_EVERY=1, set below); a stall is "no segment finished for a long time", never "quiet".
+_PROGRESS_RE = re.compile(r"(segment \d+/\d+|executed, \d+ segments)")
+
+
+def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _beat_sk=None):
+    """Run one prove attempt, streaming its output. Returns (returncode, stderr_text, stalled, why).
+
+    `stalled` is True when the watchdog killed it: no progress line inside the allowed window.
+    """
+    # A prove used to be SILENT until it returned (stderr captured, nothing in the log while the GPU
+    # worked). That made a slow block and a hung one indistinguishable, and on 2026-08-01 it cost real
+    # work -- three healthy provers on block 39,318 (381 inputs, ~31 min of legitimate GPU) were
+    # mistaken for hangs and killed. So the watchdog below keys on COMPLETED SEGMENTS, which a healthy
+    # prove produces every few seconds on a GPU and a hung one never does.
+    # Only the prove commands report progress (#256). fold-range prints nothing until it returns, so it
+    # keeps the old outer bound alone -- a progress window on it would kill every healthy fold.
+    watch = bool(argv) and argv[0] in ("prove-range", "prove-range-bridge")
+    stall_min = float(os.environ.get("HAZYNC_STALL_MIN", "600"))           # 10 min without a segment
+    first_max = float(os.environ.get("HAZYNC_FIRST_PROGRESS", "1800"))    # execute + cold CUDA start
+    outer = float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "21600" if watch else "5400"))   # finite, not tight
+    tick_s = float(os.environ.get("HAZYNC_TICK", "60"))
+    # Own process group, so a kill takes the WHOLE prover down -- any child it spawned (an external r0vm,
+    # say) would otherwise survive holding GPU memory and the output pipes.
+    proc = subprocess.Popen([HOSTBIN, *argv], env=env, cwd=work, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
+    t0 = time.time()
+    st = {"last": None, "n": 0, "gaps": [], "line": ""}      # last progress time, count, inter-segment gaps
+    err_chunks = []
+
+    def _read_out():
+        for line in proc.stdout:
+            sys.stdout.write(line); sys.stdout.flush()           # keep the host's output in the worker log
+            if _PROGRESS_RE.search(line):
+                now = time.time()
+                if st["last"] is not None:
+                    st["gaps"].append(now - st["last"])
+                st["last"], st["n"], st["line"] = now, st["n"] + 1, line.strip()
+
+    def _read_err():
+        for line in proc.stderr:
+            err_chunks.append(line)
+
+    readers = [threading.Thread(target=_read_out, daemon=True), threading.Thread(target=_read_err, daemon=True)]
+    for t in readers:
+        t.start()
+    done = threading.Event()
+
+    def _tick():
+        beaten_at = 0
+        while not done.wait(tick_s):
+            mins = int(time.time() - t0) // 60
+            where = f" -- last: {st['line']}" if st["line"] else " -- no segment finished yet"
+            print(f"  … {label}: still proving, {mins}m elapsed{where}", flush=True)
+            # Beat the claim while we work -- but ONLY if a segment finished since the last beat. Without
+            # beats a prove longer than CLAIM_TTL has its block handed to someone else mid-flight (block
+            # 741,000: 55 min against a 60 min expiry). With beats on a timer alone, a HUNG prover kept its
+            # claim alive for hours (#256). Progress-gated: a stuck worker's claim lapses as designed.
+            # Signed (audit #5, L-2), INTEGER seconds (the coordinator rebuilds this exact string).
+            if _beat_range and st["n"] > beaten_at:
+                beaten_at = st["n"]
+                try:
+                    _bts = int(time.time())
+                    _bsig = _beat_sk.sign(f"{_beat_range}:{_bts}".encode()).hex()
+                    post("/api/beat", {"range": _beat_range, "pubkey": _beat_pk, "ts": _bts, "sig": _bsig})
+                except Exception:
+                    pass
+
+    threading.Thread(target=_tick, daemon=True).start()
+    stalled, why = False, ""
+    try:
+        while proc.poll() is None:
+            now = time.time()
+            if now - t0 > outer:
+                stalled, why = True, f"no result after {outer:.0f}s (HAZYNC_PROVE_TIMEOUT)"
+            elif watch and st["last"] is None and now - t0 > first_max:
+                stalled, why = True, f"no segment finished within {first_max:.0f}s of starting (HAZYNC_FIRST_PROGRESS)"
+            elif watch and st["last"] is not None:
+                g = sorted(st["gaps"])
+                window = max(stall_min, 20 * g[len(g) // 2]) if g else max(stall_min, first_max)
+                if now - st["last"] > window:
+                    stalled, why = True, (f"no progress for {now - st['last']:.0f}s (window {window:.0f}s) "
+                                          f"-- last: {st['line']}")
+            if stalled:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)      # the whole group; releases the GPU memory
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(0.5)
+        proc.wait()
+    finally:
+        done.set()
+        for t in readers:
+            t.join(timeout=5)
+    return proc.returncode, "".join(err_chunks), stalled, why
+
+
 def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None, _beat_sk=None):
     # risc0 4.0.5 panics on ~10% of workloads (a preflight segment-boundary bug) — on CPU AND cuda, and on
     # EVERY prove path (single-block prove-range/-bridge AND fold-range). Retry with progressively smaller
@@ -405,80 +503,39 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
     # a pure cost on a RAM-limited CPU box). Hardcoding the top rung would override that per-backend choice
     # and, on CPU, waste a full duplicate prove attempt at a size that just failed. An operator's explicit
     # HAZYNC_SEG_PO2 wins the first attempt for the same reason.
+    #
+    # #256: the ladder is for FAILURES. A stall (no progress) or the outer timeout is not a segment-size
+    # problem -- smaller segments mean MORE of them, so a slow prove only gets slower -- and walking the
+    # ladder on it cost up to 4 x 90 min per stuck block. A stall is retried ONCE at the same size, then
+    # the worker gives up loudly, naming how far it got.
     last = ""
-    for _po2 in _seg_ladder(env):
+    ladder = list(_seg_ladder(env))
+    i, stall_retried = 0, False
+    while i < len(ladder):
+        _po2 = ladder[i]
         _env = dict(env) if _po2 is None else dict(env, HAZYNC_SEG_PO2=str(_po2))
-        # TIMEOUT. Without one, a prover that hangs holds the worker forever — and one that hangs
-        # while holding the GPU lock holds every OTHER worker on the box too. Observed 2026-08-01:
-        # block 39,318 (bundle 1,098,218 bytes against ~4 KB for its neighbours) ran past 64 minutes
-        # with no output and no failure, and three such processes accumulated on one card. The CLI
-        # already learned this lesson for HTTP, where a missing timeout hung `run` on any network
-        # blip; the prove path never got the same treatment.
-        #
-        # Generous by default, because a big modern block legitimately takes ~55 minutes of GPU. The
-        # point is not to be tight, it is to be finite: a timeout turns "stuck forever, silently" into
-        # "failed, retried at a smaller segment, then moved on".
-        try:
-            with gpu_lock("prov"):
-                # A prove is SILENT until it returns: stderr is captured, so nothing reaches the log
-                # while the GPU works. That makes a slow block and a hung one indistinguishable, and
-                # on 2026-08-01 it cost real work — three healthy provers on block 39,318 (381 inputs,
-                # ~31 min of legitimate GPU) were mistaken for hangs and killed.
-                #
-                # A ticker is not progress from inside the prover, and does not pretend to be: it says
-                # "this process is alive and has been at it for N minutes", which is the fact that was
-                # missing. Compare the elapsed time against the block's input count before concluding
-                # anything is wrong — roughly 5 seconds per input on an L40S.
-                _done = threading.Event()
-                def _tick(t0=time.time()):
-                    while not _done.wait(60):
-                        mins = int(time.time() - t0) // 60
-                        print(f"  … {label}: still proving, {mins}m elapsed", flush=True)
-                        # Beat the claim while we work. Without this a prove longer than CLAIM_TTL
-                        # has its block handed to someone else mid-flight and the same GPU-hours are
-                        # spent twice — block 741,000 is a measured 55 min against a 60 min expiry,
-                        # so this is the normal path for real blocks, not an edge case.
-                        # Best-effort: a coordinator that predates /api/beat 404s, which is the old
-                        # behaviour and no worse than not trying.
-                        if _beat_range:
-                            try:
-                                # Sign the beat (audit #5, L-2) — REQUIRED by the coordinator. Without
-                                # it anyone who can read the board could renew anyone else's claim,
-                                # since pubkeys are public there. The timestamp is inside the signed
-                                # message so a captured beat cannot be replayed once it ages out; the
-                                # coordinator rejects anything outside its skew window.
-                                # INTEGER seconds — the coordinator rebuilds this exact string to
-                                # verify, so a float here would tie the wire format to Python's
-                                # float repr and lock out any client that renders it differently.
-                                _bts = int(time.time())
-                                _bsig = _beat_sk.sign(f"{_beat_range}:{_bts}".encode()).hex()
-                                post("/api/beat", {"range": _beat_range, "pubkey": _beat_pk,
-                                                   "ts": _bts, "sig": _bsig})
-                            except Exception:
-                                pass
-                threading.Thread(target=_tick, daemon=True).start()
-                try:
-                    r = subprocess.run([HOSTBIN, *argv], env=_env, cwd=work,
-                                       stderr=subprocess.PIPE, text=True,
-                                       timeout=float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "5400")))
-                finally:
-                    _done.set()
-        except subprocess.TimeoutExpired:
-            # subprocess.run kills the child on timeout, so the GPU memory is released with it.
-            print(f"  {label}: no result after "
-                  f"{os.environ.get('HAZYNC_PROVE_TIMEOUT', '5400')}s — abandoned (see HAZYNC_PROVE_TIMEOUT)",
-                  flush=True)
-            continue
-        if r.stderr:                                    # keep the host's real output in the worker log
-            sys.stderr.write(r.stderr); sys.stderr.flush()
-        if r.returncode == 0:
+        _env.setdefault("HAZYNC_PROGRESS_EVERY", "1")
+        with gpu_lock("prov"):
+            rc, err, stalled, why = _prove_watched(argv, _env, work, label, _beat_range, _beat_pk, _beat_sk)
+        if stalled:
+            if not stall_retried:
+                stall_retried = True
+                print(f"  {label}: {why} -- killed; retrying ONCE at the same segment size", flush=True)
+                continue
+            sys.exit(f"{label}: {why} -- gave up after one retry. A stall is not a segment-size problem, so "
+                     f"the segment ladder was not walked (#256).")
+        if err:                                         # keep the host's real error output in the worker log
+            sys.stderr.write(err); sys.stderr.flush()
+        if rc == 0:
             return
-        last = (r.stderr or "").strip()
+        last = err.strip()
         if any(h in last for h in _HARD_ERR):           # smaller segments won't help — fail fast, loudly
             tail = _err_tail(last)
             sys.exit(f"{label}: {tail}\n(not a segment-size issue — retrying smaller won't help; check the "
                      f"bundle/witness and that `host method-id` matches reproduce/METHOD_ID)")
+        i += 1
     sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {_err_tail(last)}")
+
 
 def cmd_prove(args):
     rng = args[0]

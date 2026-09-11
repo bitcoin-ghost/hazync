@@ -113,6 +113,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_beat_log.py --control
+      - name: Worker watches a prove for progress, not silence (#256)
+        run: cd coordinator && python3 test_worker_progress.py
+      - name: Progress watchdog POSITIVE CONTROL (progress lines unrecognised — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_worker_progress.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
