@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,284 @@
+@@ -116,7 +244,343 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -291,6 +291,65 @@
 +                                    *e *= p;
 +                                    p *= inv3;
 +                                }
++                                // ⛔ SELF-VALIDATING: my reconstruction only ever reproduced
++                                // all-zero columns, so its "control" was vacuous. Rather than
++                                // assume an ordering, try them and let a NON-TRIVIAL column say
++                                // which is right. `co` here is already batch_bit_reverse'd once.
++                                let wref = &w[c * n..(c + 1) * n];
++                                if !is_bad && wref.iter().any(|v| *v != H::Elem::ZERO) {
++                                    let raw: Vec<H::Elem> = co[c * n..(c + 1) * n].to_vec();
++                                    let inv3v = H::Elem::from_u64(3).inv();
++                                    let mut report: Vec<(&str, usize)> = Vec::new();
++                                    for (tag, unrev, pos_shift, rev_root) in [
++                                        ("rev,3^-i,fwd", false, false, false),
++                                        ("rev,3^+i,fwd", false, true, false),
++                                        ("rev,3^-i,inv", false, false, true),
++                                        ("norev,3^-i,fwd", true, false, false),
++                                        ("norev,3^+i,fwd", true, true, false),
++                                        ("norev,3^-i,inv", true, false, true),
++                                    ] {
++                                        let mut v = raw.clone();
++                                        if unrev {
++                                            // undo the extra batch_bit_reverse we applied
++                                            let bits = n.trailing_zeros();
++                                            let mut idx = 0usize;
++                                            for i in 1..n {
++                                                let mut bit = n >> 1;
++                                                while idx & bit != 0 {
++                                                    idx ^= bit;
++                                                    bit >>= 1;
++                                                }
++                                                idx |= bit;
++                                                if i < idx {
++                                                    v.swap(i, idx);
++                                                }
++                                            }
++                                            let _ = bits;
++                                        }
++                                        let step = if pos_shift {
++                                            H::Elem::from_u64(3)
++                                        } else {
++                                            inv3v
++                                        };
++                                        let mut pw = H::Elem::ONE;
++                                        for e in v.iter_mut() {
++                                            *e *= pw;
++                                            pw *= step;
++                                        }
++                                        let root = if rev_root {
++                                            H::Elem::ROU_REV[self.po2]
++                                        } else {
++                                            w_fwd
++                                        };
++                                        hazync_119_ntt(&mut v, root);
++                                        let d = (0..n).filter(|&r| v[r] != wref[r]).count();
++                                        report.push((tag, d));
++                                    }
++                                    eprintln!(
++                                        "[#119-VAR] col={c} (nonzero witness) variant_differing_rows={report:?}"
++                                    );
++                                }
++
 +                                let committed_coeffs: Vec<H::Elem> = col.clone();
 +                                hazync_119_ntt(&mut col, w_fwd);
 +                                let want = &w[c * n..(c + 1) * n];
@@ -445,7 +504,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +545,116 @@
+@@ -140,6 +604,116 @@
              self.cycles,
          );
  
@@ -562,7 +621,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +676,73 @@
+@@ -161,8 +735,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -636,7 +695,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +849,364 @@
+@@ -269,6 +908,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
