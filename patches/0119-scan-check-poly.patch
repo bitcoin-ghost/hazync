@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,350 @@
+@@ -116,7 +244,402 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -184,6 +184,58 @@
 +            if let Some(wit) = self.hazync_witness.as_ref() {
 +                use rayon::prelude::*;
 +                let n = self.cycles;
++                // hazync#119: NON-CANONICAL cells (raw >= P). Theory under test: phase 3 of the
++                // rv32im accum pass (`cpu_accum`/`cuda_accum`) adds prev[k] to LogUp columns that
++                // step_accum never STOREd, which still hold INVALID = 0xFFFFFFFF, and runs with
++                // `checked = false`. add(0xFFFFFFFF, 0) = 0xFFFFFFFF - P = 0x87FFFFFE >= P, which
++                // eltwise_zeroize (== INVALID only) cannot see. A butterfly sub with an input >= P
++                // is off by 2^32 mod P whenever the partner is < b - P.
++                {
++                    const P: u32 = 15 * (1 << 27) + 1;
++                    let half = n / 2;
++                    for (gid, g) in wit.iter().enumerate() {
++                        let cols = g.len() / n;
++                        let percol: Vec<(usize, usize, usize)> = (0..cols)
++                            .into_par_iter()
++                            .filter_map(|c| {
++                                let colv = &g[c * n..(c + 1) * n];
++                                let mut k = 0usize;
++                                let mut first = usize::MAX;
++                                for (r, v) in colv.iter().enumerate() {
++                                    let raw = v.to_u32_words()[0];
++                                    if raw >= P && raw != 0xffff_ffff {
++                                        k += 1;
++                                        first = first.min(r);
++                                    }
++                                }
++                                (k > 0).then_some((c, k, first))
++                            })
++                            .collect();
++                        let total: usize = percol.iter().map(|p| p.1).sum();
++                        eprintln!(
++                            "[#119-NONCANON] po2={} group={gid} cells={total} \
++                             per_col(col,count,first_row)={:?}",
++                            self.po2,
++                            &percol[..percol.len().min(40)]
++                        );
++                        if gid == 0 && !percol.is_empty() {
++                            let r = percol[0].2;
++                            let partner = (r + half) % n;
++                            let back1 = (r + n - 1) % n;
++                            let raw = |c: usize, row: usize| g[c * n + row].to_u32_words()[0];
++                            let row: Vec<u32> = (0..cols).map(|c| raw(c, r)).collect();
++                            let prow: Vec<u32> = (0..cols).map(|c| raw(c, partner)).collect();
++                            let prev: Vec<u32> = (cols - 4..cols).map(|c| raw(c, back1)).collect();
++                            eprintln!(
++                                "[#119-NONCANON] row={r} prev_total(row-1,cols {}..{})={prev:?}",
++                                cols - 4,
++                                cols - 1
++                            );
++                            eprintln!("[#119-NONCANON] row={r} raw={row:?}");
++                            eprintln!("[#119-NONCANON] partner_row={partner} raw={prow:?}");
++                        }
++                    }
++                }
 +                let w_n = H::Elem::ROU_FWD[self.po2];
 +                let three = H::ExtElem::from_subfield(&H::Elem::from_u64(3));
 +                // ⚠ an ARBITRARY probe point -- this runs before z is drawn, and any point off
@@ -511,7 +563,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +611,116 @@
+@@ -140,6 +663,116 @@
              self.cycles,
          );
  
@@ -628,7 +680,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +742,73 @@
+@@ -161,8 +794,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -702,7 +754,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +915,364 @@
+@@ -269,6 +967,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
