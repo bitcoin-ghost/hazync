@@ -1105,7 +1105,20 @@ def foldable(limit=8):
     Still unallocated and still advisory — several candidates are returned so concurrent workers spread
     out, and a duplicate fold is discarded as already proven. Cheap waste is fine; unbounded waste is
     not.
+
+    NOTHING AT OR BELOW THE SPINE'S HEAD. The spine absorbs from hi+1 upward, so a node that starts at
+    or below its head can never be absorbed, and the spine already proves every block it covers from
+    genesis. Offering lowest-first without this floor pointed every folder at exactly that region.
+    Measured on the live board, 2026-09-11: two cards folding bought the spine nothing, 228 blocks/hr
+    against 230 without them. The pairs on offer sat at or behind the spine (a 128-block node finished
+    85 blocks behind it), and where folders and spine met, the spine reached N+1 before (N+1, N+2) was
+    folded on 92 of 93 steps. With the floor, folding starts just above the spine and runs ahead of it.
     """
+    head = spine_head()
+    try:
+        floor = int(head.get("hi", 0)) if head else 0
+    except (TypeError, ValueError, AttributeError):
+        floor = 0
     with _lock:
         c = db()
         rows = c.execute("SELECT id, lo, hi FROM vranges ORDER BY lo").fetchall()
@@ -1117,6 +1130,8 @@ def foldable(limit=8):
     out = []
     for r in rows:
         lo, hi = r["lo"], r["hi"]
+        if lo <= floor:
+            continue                      # at or below the spine: it can never absorb this node
         if not _tree_node(lo, hi):
             continue                      # not a tree node — folding from it does not converge
         w = hi - lo + 1

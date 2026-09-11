@@ -93,7 +93,8 @@ into one with `fold-range`. You need no node of your own and no local witness da
   still open.
 - `GET /api/foldable` — aligned **sibling pairs of equal width** whose parent does not exist yet, for
   `hazync fold`. Not any adjacent pair: that does not converge, and on this board it once produced 581
-  folds covering 96 blocks where a tree needs 95.
+  folds covering 96 blocks where a tree needs 95. Nothing starting at or below the spine's head is
+  offered: the spine can never absorb it, so folding starts just above the spine and runs ahead of it.
   Advisory and stateless: several candidates are returned so concurrent workers spread out without
   anything being leased. A duplicate fold is wasteful, not incorrect — the loser's submission is
   discarded as already proven, and folding is far cheaper than proving.
