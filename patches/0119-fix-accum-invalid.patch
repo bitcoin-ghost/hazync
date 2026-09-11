@@ -1,0 +1,36 @@
+--- a/cxx/ffi.cpp
++++ b/cxx/ffi.cpp
+@@ -352,7 +352,14 @@
+         for (size_t j = 0; j < machineColumns - 1; j++) {
+           for (size_t k = 0; k < 4; k++) {
+             size_t col = kUserAccumSplit + j * 4 + k;
+-            buffers->accum.set(row, col, buffers->accum.get(row, col) + prev[k]);
++            // hazync#119: a LogUp column this row's instruction arm never STOREd still holds INVALID
++            // (0xFFFFFFFF) here -- `checked` is false. add(INVALID, prev) = prev - 1 is canonical garbage in an
++            // unconstrained cell, but when prev[k] == 0 it is 0xFFFFFFFF - P = 0x87FFFFFE >= P, which
++            // eltwise_zeroize (== INVALID only) cannot clear, and which breaks one butterfly pair of the
++            // interpolation, so the committed polynomial no longer matches the witness. Zeroize first.
++            Fp cur = buffers->accum.get(row, col);
++            cur.zeroize();
++            buffers->accum.set(row, col, cur + prev[k]);  // HAZYNC_119_ACCUM_FIX
+           }
+         }
+       });
+--- a/cuda/ffi.cu
++++ b/cuda/ffi.cu
+@@ -413,7 +413,14 @@
+   for (size_t j = 0; j < machineColumns - 1; j++) {
+     for (size_t k = 0; k < 4; k++) {
+       size_t col = kUserAccumSplit + j * 4 + k;
+-      accum.set(cycle, col, accum.get(cycle, col) + prev[k]);
++      // hazync#119: a LogUp column this row's instruction arm never STOREd still holds INVALID
++      // (0xFFFFFFFF) here -- `checked` is false. add(INVALID, prev) = prev - 1 is canonical garbage in an
++      // unconstrained cell, but when prev[k] == 0 it is 0xFFFFFFFF - P = 0x87FFFFFE >= P, which
++      // eltwise_zeroize (== INVALID only) cannot clear, and which breaks one butterfly pair of the
++      // interpolation, so the committed polynomial no longer matches the witness. Zeroize first.
++      Fp cur = accum.get(cycle, col);
++      cur.zeroize();
++      accum.set(cycle, col, cur + prev[k]);  // HAZYNC_119_ACCUM_FIX
+     }
+   }
+ }

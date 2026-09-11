@@ -19,3 +19,7 @@ risc0-circuit-rv32im = { path = "../vendor/risc0-circuit-rv32im" }
 # `circuit_debug` feature cannot be used -- it does not compile in 3.0.5 and it changes the
 # verifier's protocol (reads the DEEP point instead of deriving it).
 risc0-zkp = { path = "../vendor/risc0-zkp" }
+# hazync#119: vendored for the FIX. Phase 3 of the accum pass (cxx/ffi.cpp, cuda/ffi.cu) adds
+# prev[k] to LogUp cells the instruction arm never wrote, which still hold INVALID; with prev[k] == 0
+# that yields 0x87FFFFFE >= P and one corrupted butterfly pair. See patches/0119-fix-accum-invalid.patch.
+risc0-circuit-rv32im-sys = { path = "../vendor/risc0-circuit-rv32im-sys" }

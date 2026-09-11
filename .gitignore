@@ -52,3 +52,4 @@ fuzz-native/build-asan/
 # vendored diagnostically, see patches/README-0119.md
 vendor/risc0-circuit-rv32im/
 vendor/risc0-zkp/
+vendor/risc0-circuit-rv32im-sys/
