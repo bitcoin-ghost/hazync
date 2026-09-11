@@ -172,7 +172,10 @@ is the only job in the whole system that has to happen in order — anchoring me
 — so one machine at a time makes progress on it, and duplicate effort is harmless but wasted.
 
 Absorbing wide chunks is far better than absorbing single blocks: it is **one fold either way**. So
-folding first (above) and then absorbing is how the spine catches up quickly.
+folding first (above) and then absorbing is how the spine catches up quickly. `hazync spine` does this
+for you: each step absorbs the widest verified chunk that starts where the spine ends, and falls back
+to a narrower one, down to the single block, if a wide chunk will not absorb. More cards on `fold`
+therefore make the spine faster; a second card on `spine` does not.
 
 Whoever advances the spine cannot corrupt it. Every absorption is re-verified against the canonical
 guest id and pinned to genesis, and because every per-block receipt is retained, anyone can rebuild
