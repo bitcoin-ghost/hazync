@@ -1365,8 +1365,7 @@ fn prove_range_cmd(n: u32) {
     b.write(&w).unwrap();
     b.write(&METHOD_ID).unwrap();
     let t = Instant::now();
-    let receipt = default_prover()
-        .prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct()).expect("prove range").receipt;
+    let receipt = prove_env_with_progress(b.build().unwrap(), &format!("range [{n}..{n}]"));
     receipt.verify(METHOD_ID).expect("range verify");
     let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.bin"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
@@ -3733,8 +3732,7 @@ fn cmd_prove_range_bridge(n: u32) {
     b.write(&bd.witness).unwrap();
     b.write(&METHOD_ID).unwrap();
     let t = Instant::now();
-    let receipt = default_prover().prove_with_opts(b.build().unwrap(), METHOD_ELF, &ProverOpts::succinct())
-        .expect("prove range (bridge)").receipt;
+    let receipt = prove_env_with_progress(b.build().unwrap(), &format!("range [{n}..{n}] (bridge)"));
     receipt.verify(METHOD_ID).expect("verify");
     let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.bin"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
@@ -6282,6 +6280,21 @@ fn prove_segment_resilient(
 ///
 /// Assembly is NOT reimplemented. `assemble_from_segment_receipts` is the same code `prove_session`
 /// runs after its own loop, so this path and that one cannot drift.
+/// #256: prove a board block segment by segment instead of in one silent `prove_with_opts` call:
+/// every segment goes through the #119 retry (#240), and each prints a progress line the worker can
+/// watch. Same ProverOpts::succinct(), same receipt kind as before.
+fn prove_env_with_progress(env: ExecutorEnv, label: &str) -> risc0_zkvm::Receipt {
+    let opts = ProverOpts::succinct();
+    let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
+    let ctx = risc0_zkvm::VerifierContext::default();
+    let session = risc0_zkvm::ExecutorImpl::from_elf(env, METHOD_ELF)
+        .expect("executor")
+        .run()
+        .expect("execute");
+    println!("{label}: executed, {} segments at po2 {} -- proving", session.segments.len(), seg_po2());
+    prove_session_resilient(&server, &ctx, &session)
+}
+
 fn prove_session_resilient(
     server: &std::rc::Rc<dyn risc0_zkvm::ProverServer>,
     ctx: &risc0_zkvm::VerifierContext,
@@ -6292,7 +6305,11 @@ fn prove_session_resilient(
     // ~20 progress lines whatever the size, matching the cadence `FoldProgress` used when this went
     // through `prove_session`. The line format is deliberately unchanged: recorded benchmark logs
     // are parsed for it.
-    let every = (nseg / 20).max(1);
+    // #256: the board worker sets HAZYNC_PROGRESS_EVERY=1 and watches these lines -- a completed
+    // segment is the only honest "still making progress" signal (silence is not: healthy provers on
+    // block 39,318 were once killed for being quiet). Unset keeps the ~20-line cadence above.
+    let every = std::env::var("HAZYNC_PROGRESS_EVERY").ok().and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0).unwrap_or((nseg / 20).max(1));
     let t = Instant::now();
     let mut receipts: Vec<risc0_zkvm::SegmentReceipt> = Vec::with_capacity(nseg);
     for (i, sref) in session.segments.iter().enumerate() {
