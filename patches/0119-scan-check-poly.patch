@@ -160,7 +160,7 @@
      /// Accesses the prover's IOP to commit or read random data.
      pub fn iop(&mut self) -> &mut WriteIOP<H::Field> {
          &mut self.iop
-@@ -116,7 +244,402 @@
+@@ -116,7 +244,542 @@
  
          // Set the poly mix value, which is used for constraint compression in the
          // DEEP-ALI protocol.
@@ -235,6 +235,146 @@
 +                            eprintln!("[#119-NONCANON] partner_row={partner} raw={prow:?}");
 +                        }
 +                    }
++                }
++                // hazync#119: the per-segment FAULT RATE the mechanism implies, measured on this
++                // segment's real witness with the production NTT.
++                //
++                // A fault needs prev[k] == 0 at a row whose instruction arm left LogUp cells
++                // unwritten, AND the NTT must then mis-handle the resulting 0x87FFFFFE. The first
++                // is a 1/P event per (row, component); the second depends on the column data, so
++                // sample it: inject exactly what phase 3 would write if prev[k] were 0, interpolate
++                // with self.hal (the backend that proves), and compare against the same column
++                // with the canonical value. E[faults] = (1/P) * sum_{r,k} break(r,k).
++                //
++                // Unwritten cells are identified EXACTLY in the unfixed build: phase 3 leaves them
++                // at add(INVALID, prev) = prev - 1 in all 4 components (0x87FFFFFE if prev == 0);
++                // a written cell matches that by chance with probability ~1/P^4. CHECK: the
++                // generated code only ever leaves a SUFFIX {a..18} unwritten -- any other mask
++                // means the identification is wrong, and is counted.
++                if let Ok(sv) = std::env::var("HAZYNC_119_RATE") {
++                    const P: u32 = 15 * (1 << 27) + 1;
++                    const SPLIT: usize = 23; // kUserAccumSplit
++                    const BAD: u32 = 0x87FF_FFFE;
++                    let samples: usize = sv.parse().unwrap_or(48);
++                    let g = &wit[0]; // accum (group ids are alphabetical: accum=0)
++                    let cols = g.len() / n;
++                    let nphase3 = (cols - SPLIT) / 4 - 1; // LogUp columns phase 3 touches: 0..18
++                    let raw = |c: usize, r: usize| g[c * n + r].to_u32_words()[0];
++                    let last = (0..n)
++                        .rev()
++                        .find(|&r| (0..4).any(|k| raw(cols - 4 + k, r) != 0))
++                        .map(|r| r + 1)
++                        .unwrap_or(n);
++                    let expect = |p: u32| if p == 0 { BAD } else { p - 1 };
++                    let masks: Vec<u32> = (1..last)
++                        .into_par_iter()
++                        .map(|r| {
++                            let prev: [u32; 4] = core::array::from_fn(|k| raw(cols - 4 + k, r - 1));
++                            let mut m = 0u32;
++                            for j in 0..nphase3 {
++                                if (0..4).all(|k| raw(SPLIT + 4 * j + k, r) == expect(prev[k])) {
++                                    m |= 1 << j;
++                                }
++                            }
++                            m
++                        })
++                        .collect();
++                    let full = (1u32 << nphase3) - 1;
++                    let is_suffix = |m: u32| m == 0 || (m & (m + (m & m.wrapping_neg()))) == 0 && (m >> (nphase3 - 1)) & 1 == 1;
++                    let non_suffix = masks.iter().filter(|&&m| !is_suffix(m)).count();
++                    let rows: Vec<usize> =
++                        (0..masks.len()).filter(|&i| masks[i] != 0).map(|i| i + 1).collect();
++                    let mut hist: std::collections::BTreeMap<u32, usize> = Default::default();
++                    for &m in masks.iter() {
++                        *hist.entry(m).or_default() += 1;
++                    }
++                    let hist: Vec<(String, usize)> = hist
++                        .into_iter()
++                        .map(|(m, c)| {
++                            let lo = if m == 0 { nphase3 } else { m.trailing_zeros() as usize };
++                            (if m == 0 { "none".into() } else if m & full == m && is_suffix(m) { format!("{lo}..{}", nphase3 - 1) } else { format!("0x{m:05x}") }, c)
++                        })
++                        .collect();
++                    let zero_prev: usize = (1..last)
++                        .map(|r| (0..4).filter(|&k| raw(cols - 4 + k, r - 1) == 0).count())
++                        .sum();
++                    // deterministic xorshift, seeded per segment
++                    let mut s: u64 = 0x119_0000_0000 ^ ((self.po2 as u64) << 32) ^ last as u64;
++                    let mut rnd = || {
++                        s ^= s << 13;
++                        s ^= s >> 7;
++                        s ^= s << 17;
++                        s
++                    };
++                    // inject what phase 3 writes when prev[k] == 0 into row r's unwritten cells of
++                    // component k; returns (cells injected, columns whose interpolation changed)
++                    let inject = |r: usize, k: usize| -> (usize, usize) {
++                        let js: Vec<usize> =
++                            (0..nphase3).filter(|&j| masks[r - 1] >> j & 1 == 1).collect();
++                        let m = js.len();
++                        if m == 0 {
++                            return (0, 0);
++                        }
++                        let mut v: Vec<H::Elem> = Vec::with_capacity(2 * m * n);
++                        for val in [BAD, BAD - P] {
++                            for &j in js.iter() {
++                                let c = SPLIT + 4 * j + k;
++                                let start = v.len();
++                                v.extend_from_slice(&g[c * n..(c + 1) * n]);
++                                v[start + r] = H::Elem::from_u32_words(&[val]);
++                            }
++                        }
++                        let buf = self.hal.copy_from_elem("hz_rate", v.as_slice());
++                        self.hal.batch_interpolate_ntt(&buf, 2 * m);
++                        let mut broken = 0usize;
++                        buf.view(|x| {
++                            for i in 0..m {
++                                if x[i * n..(i + 1) * n] != x[(m + i) * n..(m + i + 1) * n] {
++                                    broken += 1;
++                                }
++                            }
++                        });
++                        (m, broken)
++                    };
++                    // POSITIVE CONTROL: where the witness really holds 0x87FFFFFE (the failing
++                    // segment), the same injection must reproduce the observed breakage.
++                    let real = (1..last).find_map(|r| {
++                        (0..4).find(|&k| (0..nphase3).any(|j| raw(SPLIT + 4 * j + k, r) == BAD)).map(|k| (r, k))
++                    });
++                    if let Some((r0, k0)) = real {
++                        let (m0, b0) = inject(r0, k0);
++                        eprintln!(
++                            "[#119-RATE] positive_control row={r0} comp={k0} mask={:?} cells={m0} cols_broken={b0}",
++                            (0..nphase3).filter(|&j| masks[r0 - 1] >> j & 1 == 1).collect::<Vec<_>>()
++                        );
++                    }
++                    let (mut lo_n, mut lo_b, mut hi_n, mut hi_b) = (0usize, 0usize, 0usize, 0usize);
++                    let mut cols_broken = 0usize;
++                    for _ in 0..samples.min(rows.len()) {
++                        let r = rows[(rnd() % rows.len() as u64) as usize];
++                        let k = (rnd() % 4) as usize;
++                        let (_, broken) = inject(r, k);
++                        cols_broken += broken;
++                        if r < n / 2 {
++                            lo_n += 1;
++                            lo_b += (broken > 0) as usize;
++                        } else {
++                            hi_n += 1;
++                            hi_b += (broken > 0) as usize;
++                        }
++                    }
++                    let taken = lo_n + hi_n;
++                    let f = if taken > 0 { (lo_b + hi_b) as f64 / taken as f64 } else { 0.0 };
++                    let e_seg = rows.len() as f64 * 4.0 * f / P as f64;
++                    eprintln!(
++                        "[#119-RATE] po2={} n={n} last={last} rows_unwritten={} non_suffix_masks={non_suffix} \
++                         zero_prev_cells={zero_prev} samples={taken} breaks={} f={f:.4} \
++                         lower_half(n,breaks)=({lo_n},{lo_b}) upper_half(n,breaks)=({hi_n},{hi_b}) \
++                         cols_broken={cols_broken} E_seg={e_seg:.4e} masks={hist:?}",
++                        self.po2,
++                        rows.len(),
++                        lo_b + hi_b
++                    );
 +                }
 +                let w_n = H::Elem::ROU_FWD[self.po2];
 +                let three = H::ExtElem::from_subfield(&H::Elem::from_u64(3));
@@ -563,7 +703,7 @@
          let domain = self.cycles * INV_RATE;
          let ext_size = H::ExtElem::EXT_SIZE;
  
-@@ -140,6 +663,116 @@
+@@ -140,6 +803,116 @@
              self.cycles,
          );
  
@@ -680,7 +820,7 @@
          #[cfg(feature = "circuit_debug")]
          let mut bad_z = None;
  
-@@ -161,8 +794,73 @@
+@@ -161,8 +934,73 @@
          // roots of unity (which are the only thing that and values get multiplied
          // by) are in Fp, FpExt values act like simple vectors of Fp for the
          // purposes of interpolate/evaluate.
@@ -754,7 +894,7 @@
          // The next step is to convert the degree 4*n check polynomial into 4 degree n
          // polynomials so that f(x) = g0(x^4) + g1(x^4) x + g2(x^4) x^2 + g3(x^4)
          // x^3.  To do this, we normally would grab all the coefficients of f(x) =
-@@ -269,6 +967,364 @@
+@@ -269,6 +1107,364 @@
              // Set the mix value, which is used for FRI batching.
          });
  
