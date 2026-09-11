@@ -77,14 +77,17 @@ for f in "$DIST"/*; do
             # Keep the LIBRARY name. "${err##*: }" trimmed it to "No such file or directory",
             # which names the symptom and hides the cause.
             lib=$(printf '%s' "$err" | grep -oE '[a-z0-9_.]+[.]so[0-9.]*' | head -1)
-            echo "FAIL $b cannot be verified on this machine (missing ${lib:-a shared library})"
-            echo "       This is NOT evidence the artifact is wrong — it cannot run here at all."
-            echo "       Verify on a capable host:  $b method-id   (want $CANON8...)"
-            echo "       Then record it:            HAZYNC_ATTEST_${b//[^A-Za-z0-9]/_}=<id> $0"
             att="HAZYNC_ATTEST_${b//[^A-Za-z0-9]/_}"
+            # #248: look at the attestation FIRST. This used to print the FAIL block and then accept the
+            # attestation on the next line, so an accepted artifact still carried a FAIL in the log --
+            # and anything grepping ^FAIL saw a failure that did not happen.
             if [ "${!att:-}" = "$CANON" ]; then
-                echo "  ok   $b attested canonical from a capable host (via $att)"
+                echo "  ok   $b attested canonical from a capable host (via $att; cannot execute here: missing ${lib:-a shared library})"
             else
+                echo "FAIL $b cannot be verified on this machine (missing ${lib:-a shared library})"
+                echo "       This is NOT evidence the artifact is wrong — it cannot run here at all."
+                echo "       Verify on a capable host:  $b method-id   (want $CANON8...)"
+                echo "       Then record it:            $att=<id> $0"
                 fail=1; unverified=$((unverified+1))
             fi
         else

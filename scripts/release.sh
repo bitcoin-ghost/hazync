@@ -213,8 +213,22 @@ for mode in cpu cuda; do
 done
 
 step "3. package worker, wasm and the x86_64 verifier"
-run ./scripts/package-release.sh >/dev/null || die "package-release failed"
-ok "worker + wasm packaged"
+# #247: package-release.sh SKIPS the wasm (stderr warning, exit 0) when this box has no wasm32
+# target -- which is every release from hazync-coord, which has no host Rust at all. This used to print
+# "ok worker + wasm packaged" regardless. Report what actually happened; step 4 still gates the file.
+PKG_ERR=$( { run ./scripts/package-release.sh >/dev/null; } 2>&1 ) || { printf '%s\n' "$PKG_ERR" >&2; die "package-release failed"; }
+[ -n "$PKG_ERR" ] && printf '%s\n' "$PKG_ERR" >&2
+if printf '%s' "$PKG_ERR" | grep -q "skipping hazync-verify.wasm"; then
+    ok "worker packaged"
+    if [ -f "$DIST/hazync-verify.wasm" ]; then
+        echo "  !    wasm NOT built here -- the staged $DIST/hazync-verify.wasm ($(sha256sum "$DIST/hazync-verify.wasm" | cut -c1-16)) is from elsewhere; step 4 checks its guest"
+    else
+        echo "  !    wasm NOT built here and none is staged -- build it where wasm32 exists (./verifier-wasm/build.sh)"
+        echo "       and copy it to $DIST/hazync-verify.wasm, or: rustup target add wasm32-unknown-unknown"
+    fi
+else
+    ok "worker + wasm packaged"
+fi
 if ! grep -aq "${CANON:0:8}" "$DIST/hazync-verify-x86_64-linux-gnu" 2>/dev/null; then
     run cargo build -q --release --manifest-path verifier/Cargo.toml || die "verifier build failed"
     run cp verifier/target/release/hazync-verify "$DIST/hazync-verify-x86_64-linux-gnu"

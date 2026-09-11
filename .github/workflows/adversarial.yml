@@ -246,6 +246,10 @@ jobs:
         run: ./scripts/check-versions.sh
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
+      - name: check-dist attestation path (#248)
+        # A CUDA host that cannot execute here must PASS when attested (no FAIL line), and FAIL when
+        # unattested or attested with the wrong id. Against the pre-#248 script it fails 2 checks.
+        run: ./scripts/test-check-dist.sh
       - name: Shellcheck (scripts run as root on the coordinator and as build tooling)
         # Caught a real one: check-test-surfaces.sh had an unguarded `cd`, so a failed cd would have
         # run every check against the wrong directory, found no test surfaces, and PASSED.
