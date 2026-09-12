@@ -271,6 +271,17 @@ jobs:
         run: ./scripts/check-workflow-injection.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
         run: ./scripts/check-versions.sh
+      - name: Guest lineage is append-only and matches git history (#244)
+        # A receipt stays verifiable only while we keep its method id AND can rebuild the risc0
+        # verifier that checked it, so the thing that destroys a back catalogue is a re-baseline
+        # sweep quietly taking a superseded row with it. reproduce/LINEAGE.tsv is a materialised
+        # view of git history, and this is the gate that says the view still matches the evidence.
+        # Needs the fetch-depth: 0 checkout above — on a shallow clone the check refuses to run.
+        run: ./scripts/lineage.sh --check
+      - name: Lineage gate still catches a deleted or rewritten row (positive control)
+        run: ./scripts/test-lineage.sh
+      - name: Lineage POSITIVE CONTROL (row COUNT compared instead of contents — must FAIL)
+        run: ./scripts/test-lineage.sh --control
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
       - name: check-dist attestation path (#248)
