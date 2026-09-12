@@ -191,9 +191,7 @@ host_is_current() {  # $1 = path; $2 = asset name; hosts store the id as [u32;8]
         # therefore rebuilt on EVERY release here, tens of minutes each time, with a correct binary
         # already staged. Fall back to reading the id out of its BYTES, exactly as step 4 does and
         # with the same strength: step 4 already trusts that check to gate publication.
-        command -v python3 >/dev/null || return 1
-        [ "$(python3 -c "import sys;print(open(sys.argv[1],'rb').read().count(bytes.fromhex(sys.argv[2])))" \
-             "$1" "$CANON" 2>/dev/null)" = "1" ]
+        ./scripts/embeds-method-id.sh "$1" "$CANON"
     fi
 }
 for mode in cpu cuda; do
@@ -244,19 +242,37 @@ for b in $BINS; do [ -f "$DIST/$b" ] || die "$DIST/$b is missing — nothing to 
 # bytes: the host stores it as [u32;8] LITTLE-ENDIAN, which puts the raw 32 bytes on disk in natural
 # order. NB `grep -P '\x..'` silently finds nothing here — it is a check that cannot pass. Use python.
 CU="$DIST/hazync-host-x86_64-linux-gnu-cuda"
-# ⛔ TWO arguments. `host_is_current` reads $2 for the .built-from-<asset> stamp, and this call
-# passed only the path — under `set -u` that aborts phase 4 with "$2: unbound variable", which
-# reads as a broken release rather than a one-word bug. The other call site (above) passes both.
-if ! host_is_current "$CU" hazync-host-x86_64-linux-gnu-cuda && command -v python3 >/dev/null; then
-    if [ "$(python3 -c "import sys;print(open(sys.argv[1],'rb').read().count(bytes.fromhex(sys.argv[2])))" "$CU" "$CANON" 2>/dev/null)" = "1" ]; then
-        ok "cuda host: cannot execute here, but embeds ${CANON:0:8} in its bytes"
-        # Build the variable name EXACTLY as check-dist.sh does. `tr -c 'A-Za-z0-9' '_'` looks
-        # equivalent and is not: it rewrites echo's trailing NEWLINE to an underscore too, yielding
-        # HAZYNC_ATTEST_..._cuda_ — a variable check-dist.sh never reads, so the attestation would
-        # be silently ignored and the gate would fail with the artifact sitting right there.
-        _cu=hazync-host-x86_64-linux-gnu-cuda
-        export "HAZYNC_ATTEST_${_cu//[^A-Za-z0-9]/_}=$CANON"
-    fi
+# ⛔ THE CONDITION IS "CAN THIS BINARY RUN HERE", NOT "IS IT STALE" (#275). This used to sit under
+# `! host_is_current "$CU" …`, which is TRUE for exactly the artifact that needs the fallback: a
+# freshly built CUDA host matches .built-from, and host_is_current's own byte fallback then finds the
+# id — so it reports current, the attestation is skipped, and check-dist.sh fails with "belongs to a
+# different guest" over a perfectly good binary. v0.21.1 and v0.21.2 were both published only because
+# the operator passed HAZYNC_ATTEST_… by hand. The dead branch could not be seen from either end:
+# step 4 looked like it had a fallback, and the message named the wrong problem.
+#
+# Build the variable name EXACTLY as check-dist.sh does. `tr -c 'A-Za-z0-9' '_'` looks equivalent and
+# is not: it rewrites echo's trailing NEWLINE to an underscore too, yielding HAZYNC_ATTEST_..._cuda_ —
+# a variable check-dist.sh never reads, so the attestation would be silently ignored and the gate
+# would fail with the artifact sitting right there.
+_cu=hazync-host-x86_64-linux-gnu-cuda
+_att="HAZYNC_ATTEST_${_cu//[^A-Za-z0-9]/_}"
+if timeout 120 "$CU" method-id >/dev/null 2>&1; then
+    :   # it runs here — check-dist.sh will ask it directly, which is the strongest evidence there is
+elif [ -n "${!_att:-}" ]; then
+    # An operator-supplied id is STRONGER than anything readable from the bytes: it was measured by
+    # running this binary on a real GPU. Never overwrite it — including when it is wrong, because
+    # check-dist.sh refusing a bad hand-typed attestation is the point of passing one.
+    ok "cuda host: cannot execute here; using the attestation you supplied (${!_att:0:8}…)"
+elif ./scripts/embeds-method-id.sh "$CU" "$CANON"; then
+    ok "cuda host: cannot execute here, but embeds ${CANON:0:8} in its bytes"
+    echo "  !    that is a BYTE check, not a run. Nothing here has proved this binary works on a GPU —"
+    echo "       smoke it on a real card and pass $_att=<measured id> to gate on that instead."
+    export "$_att=$CANON"
+else
+    # Say which of the two failures this is. "belongs to a different guest" is what check-dist.sh
+    # prints next, and it is wrong for a binary that is simply unreadable here.
+    echo "  !    cuda host: cannot execute here AND does not carry ${CANON:0:8} in its bytes exactly once."
+    echo "       Either it was built from a different guest, or it is not the artifact you think it is."
 fi
 ./scripts/check-dist.sh "$DIST" || die "a staged artifact belongs to a different guest — do NOT publish"
 
