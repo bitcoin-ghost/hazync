@@ -82,8 +82,8 @@ being the constraint — it exists to price that trade honestly, not to replace 
 ```bash
 curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl -f https://bitcoinghost.org/hazync/api/spine/proof -o proof.bin
-./hazync-verify-x86_64-linux-gnu proof.bin
+curl -fLO https://bitcoinghost.org/hazync/api/spine/proof   # lands as hazync-spine-1-<hi>.hzk
+./hazync-verify-x86_64-linux-gnu hazync-spine-1-*.hzk
 ```
 
 ```
@@ -196,7 +196,7 @@ rather than only genesis-anchored ones.
 ```bash
 curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
 chmod +x hazync-host-x86_64-linux-gnu
-./hazync-host-x86_64-linux-gnu verify-any proof.bin   # prints a line starting with RANGE-OK
+./hazync-host-x86_64-linux-gnu verify-any proof.hzk   # prints a line starting with RANGE-OK
 ```
 
 `RANGE-OK` means the STARK checks out and the receipt proves block *n* is a correct consensus

@@ -29,7 +29,7 @@ Two levels of parallelism exist below a block, and neither is wired for distribu
 | level | artifacts | orchestration | ceiling |
 |---|---|---|---|
 | block range | yes | yes — coordinator `/api/claim` | throughput only, latency unchanged |
-| chunk | yes — `chunk_i.bin` | **no** | ~32 min/block at N=16 |
+| chunk | yes — `chunk_i.hzk` | **no** | ~32 min/block at N=16 |
 | **segment** | primitives only | **no** | **~9 min at N=30** |
 
 Chunk distribution is the cheap win and tops out around 32 min. Segment distribution is
@@ -111,7 +111,7 @@ HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
 
 ### The aggregate (#153)
 
-Same commands, plus `HAZYNC_AGG=1`, and the chunk receipts must already exist as `chunk_0.bin` …
+Same commands, plus `HAZYNC_AGG=1`, and the chunk receipts must already exist as `chunk_0.hzk` …
 `chunk_N.bin` in the segment coordinator's working directory. They are verified against `METHOD_ID` on the
 way in, so a receipt from a different guest is refused by name rather than failing later inside the
 prover.

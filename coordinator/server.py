@@ -1908,14 +1908,28 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/spine/proof":                        # the receipt itself; check it with `hazync-verify`
             f = os.path.join(SPINE_DIR, "spine.bin")
             if os.path.exists(f):
-                return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
+                # Served name, not the name at rest (#278). On disk this stays spine.bin: check-retention.py
+                # parses the stored prefix/suffix, and a user never sees the on-disk name anyway.
+                head = spine_head()
+                hi = head.get("hi") if head else None
+                name = f"hazync-spine-1-{int(hi)}.hzk" if isinstance(hi, int) else "hazync-spine.hzk"
+                return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream",
+                                  headers={"Content-Disposition": f'attachment; filename="{name}"'})
             return self._send(404, {"error": "no spine yet"})
         if p.startswith("/api/proof/"):                    # download a verified proof receipt (re-verify with `host verify-any`)
             rid = p.rsplit("/", 1)[-1]
-            if parse_any_range(rid):
+            rng = parse_any_range(rid)
+            if rng:
                 f = os.path.join(PROOFS_DIR, f"proof_{rid}.bin")
                 if os.path.exists(f):
-                    return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream")
+                    # `curl -O` otherwise names the file after the URL path -- i.e. "1", no extension at
+                    # all. The name is built from the PARSED (lo, hi), never from the raw path segment:
+                    # a header is not a path, and parse_any_range's shape check is not a header-injection
+                    # check. Ints cannot carry CR/LF (#278).
+                    lo, hi = rng
+                    name = f"hazync-{lo}.hzk" if lo == hi else f"hazync-{lo}-{hi}.hzk"
+                    return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream",
+                                      headers={"Content-Disposition": f'attachment; filename="{name}"'})
             return self._send(404, {"error": "proof not available"})
         if p == "/api/witnesses":
             # Bulk bundle sync (#69). Seeding a new coordinator from a peer is ~220,000 bundles; with
