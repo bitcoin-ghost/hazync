@@ -569,6 +569,14 @@ _sr = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__fi
 if not CONTROL:
     check(_sr.returncode == 0, "the spine absorbs the widest chunk at each step (test_spine_ranges.py)")
 
+# #281: the submit-time guard against a wide range that starts inside existing coverage without being
+# backed by it. Same arrangement as above — it drives submit() rather than the fold helpers, so it
+# lives in its own file and runs from here, and the two CI steps already on this file cover it.
+_og = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_overlap_guard.py")]
+              + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_og.returncode == 0, "overlapping ranges are refused at submit (test_overlap_guard.py)")
+
 print()
 if CONTROL:
     if _sr.returncode != 0:

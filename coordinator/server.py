@@ -1759,6 +1759,36 @@ def witness_available(blk):
     return False
 
 
+def _overlapping_vrange(c, lo, hi):
+    """The lowest verified range sharing at least one block with [lo..hi], or None."""
+    return c.execute("SELECT id,lo,hi FROM vranges WHERE lo <= ? AND hi >= ? ORDER BY lo LIMIT 1",
+                     (hi, lo)).fetchone()
+
+
+def _tiled_by_verified(c, lo, hi):
+    """True if verified ranges lying INSIDE [lo..hi] tile it exactly, leaving no gap (H9 contiguity).
+
+    This is the "genuine fold" test. A fold re-expresses work the board has already verified, so its
+    span is always tiled by its own children. A leaf proof of fresh territory is not tiled at all, and
+    does not need to be. The shape that is NEITHER — a wide range starting INSIDE existing coverage
+    but not backed by it — is the one that can never seam, and this is what separates it from the
+    other two.
+
+    Height contiguity only. The full boundary seam (in_bhash/out_bhash) is enforced where it actually
+    decides something, in `_frontier_chain`; requiring it here would reject a legitimate re-fold for
+    no gain, since the receipt itself has already been STARK-verified for exactly this [lo..hi].
+    """
+    rows = [dict(r) for r in c.execute(
+        "SELECT lo,hi FROM vranges WHERE lo >= ? AND hi <= ? ORDER BY lo", (lo, hi)).fetchall()]
+    reach = lo - 1
+    while reach < hi:
+        nxt = max((r["hi"] for r in rows if r["lo"] <= reach + 1 and r["hi"] > reach), default=None)
+        if nxt is None:
+            return False
+        reach = nxt
+    return True
+
+
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
@@ -1766,6 +1796,36 @@ def submit(body):
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
     if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
     if not parse_any_range(rid): return 400, {"error": "invalid range id"}
+    # #281: refuse a wide range that starts INSIDE existing coverage without being backed by it.
+    #
+    # `_frontier_chain` needs `prev.hi + 1 == lo` EXACTLY (H9), so such a range can never join the
+    # genesis chain. Accepting it is worse than useless: the blocks it covers then look proven to
+    # `claim()`, which is coverage-based, so the gap is never handed out again and the frontier stops
+    # permanently. That is how [30000..30050] followed by [30050..30100] — inclusive bounds, one block
+    # of overlap — froze the board at 30,050 for thirteen hours on 2026-09-11, while `proven` kept
+    # climbing and `stalled_for` reported 0 because a VERIFIED row sat over the blocker.
+    #
+    # Two shapes are legitimate and both stay accepted:
+    #   * fresh territory — nothing verified overlaps [lo..hi] at all;
+    #   * a genuine fold  — verified ranges already tile [lo..hi] exactly (they are its own children).
+    # Rejecting here, before the prover has spent anything more, is the whole point: the contributor
+    # learns their bounds are wrong while they can still fix them, instead of collecting VERIFIED on
+    # work that lands in a branch nothing can ever reach.
+    _lo, _hi = parse_any_range(rid)
+    if _hi > _lo and _lo > 0:          # width 1 cannot overlap-without-backing; lo==0 is the genesis seed
+        with _lock:
+            c = db()
+            _clash = _overlapping_vrange(c, _lo, _hi)
+            _backed = _tiled_by_verified(c, _lo, _hi) if _clash else True
+            c.close()
+        if _clash and not _backed:
+            _msg = (f"range [{_lo}..{_hi}] overlaps verified range [{_clash['lo']}..{_clash['hi']}] but is "
+                    f"not backed by it, so it can never link to genesis and would stall the frontier. "
+                    f"A range must either cover blocks nobody has proven, or re-fold blocks already on "
+                    f"the board.")
+            if _clash["lo"] <= _lo <= _clash["hi"]:
+                _msg += f" Start at {_clash['hi'] + 1}, not {_lo} — range bounds are INCLUSIVE."
+            return 409, {"error": _msg}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
     if len(receipt_b64) > MAX_BODY: return 413, {"error": "receipt too large"}
