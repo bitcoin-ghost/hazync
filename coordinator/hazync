@@ -403,7 +403,18 @@ def gpu_lock(what="prove"):
 
 # #256: a prove is watched for PROGRESS, not silence. The host prints one line per completed segment
 # (HAZYNC_PROGRESS_EVERY=1, set below); a stall is "no segment finished for a long time", never "quiet".
-_PROGRESS_RE = re.compile(r"(segment \d+/\d+|executed, \d+ segments)")
+#
+# `assembling N segment receipts` is the ASSEMBLY phase heartbeat. #256 taught the watchdog about the
+# segment phase and left assembly — lift + join over every segment receipt — completely silent, which
+# is where block 39,318 actually died: 880/880 segments proved, then nothing, killed at 600s, retried,
+# killed again, re-claimed, forever. Hosts that predate the heartbeat print nothing here, so the
+# silent-assembly budget in `_prove_watched` covers them; this pattern is what makes a NEW host's
+# assembly self-reporting, and then the ordinary progress window applies to it like any other phase.
+_PROGRESS_RE = re.compile(r"(segment \d+/\d+|executed, \d+ segments|assembling \d+ segment receipts)")
+
+# Captures "segment 880/880" so the watchdog knows when the LAST segment lands — the moment the prove
+# stops producing progress lines through no fault of its own.
+_SEG_N_RE = re.compile(r"segment (\d+)/(\d+)")
 
 
 def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _beat_sk=None):
@@ -421,6 +432,7 @@ def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _bea
     watch = bool(argv) and argv[0] in ("prove-range", "prove-range-bridge")
     stall_min = float(os.environ.get("HAZYNC_STALL_MIN", "600"))           # 10 min without a segment
     first_max = float(os.environ.get("HAZYNC_FIRST_PROGRESS", "1800"))    # execute + cold CUDA start
+    asm_min = float(os.environ.get("HAZYNC_ASSEMBLY_MIN", "1800"))        # floor for silent lift+join
     outer = float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "21600" if watch else "5400"))   # finite, not tight
     tick_s = float(os.environ.get("HAZYNC_TICK", "60"))
     # Own process group, so a kill takes the WHOLE prover down -- any child it spawned (an external r0vm,
@@ -428,7 +440,8 @@ def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _bea
     proc = subprocess.Popen([HOSTBIN, *argv], env=env, cwd=work, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
     t0 = time.time()
-    st = {"last": None, "n": 0, "gaps": [], "line": ""}      # last progress time, count, inter-segment gaps
+    st = {"last": None, "n": 0, "gaps": [], "line": "",      # last progress time, count, inter-segment gaps
+          "assembly_at": None, "nseg": 0}                   # when the final segment landed, and how many
     err_chunks = []
 
     def _read_out():
@@ -439,6 +452,12 @@ def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _bea
                 if st["last"] is not None:
                     st["gaps"].append(now - st["last"])
                 st["last"], st["n"], st["line"] = now, st["n"] + 1, line.strip()
+                m = _SEG_N_RE.search(line)
+                if m and int(m.group(1)) >= int(m.group(2)) and st["assembly_at"] is None:
+                    # Last segment done. Everything after this is lift + join, which an older host
+                    # does not report at all -- so from here the progress window is measuring the
+                    # wrong thing and would kill a perfectly healthy prove.
+                    st["assembly_at"], st["nseg"] = now, int(m.group(2))
 
     def _read_err():
         for line in proc.stderr:
@@ -478,6 +497,25 @@ def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _bea
                 stalled, why = True, f"no result after {outer:.0f}s (HAZYNC_PROVE_TIMEOUT)"
             elif watch and st["last"] is None and now - t0 > first_max:
                 stalled, why = True, f"no segment finished within {first_max:.0f}s of starting (HAZYNC_FIRST_PROGRESS)"
+            elif watch and st["assembly_at"] and (st["last"] or 0) <= st["assembly_at"]:
+                # ASSEMBLY, running silently. All segments are proved; the host is lifting and joining
+                # them into one receipt and (on a host without the heartbeat) says nothing while it
+                # does. There is no progress signal to wait for, so a progress window cannot be the
+                # test -- it just kills the prove. This is the block 39,318 loop: 880/880 proved in
+                # 3,102s, silence, killed at 600s, retried, killed, re-claimed, forever. Assembly cost
+                # scales with segment count, so above roughly 600 segments EVERY block died this way.
+                #
+                # Bound it by a BUDGET instead, self-calibrated to this machine and this block: allow
+                # assembly at least as long as the segment phase itself took. Assembly is ~one lift and
+                # ~one join per segment against a full segment prove each, so that is a generous
+                # multiple of the real cost while still being finite -- and it needs no constant tuned
+                # to particular hardware, which is what would rot. HAZYNC_PROVE_TIMEOUT remains the
+                # outer bound in every case.
+                budget = max(asm_min, st["assembly_at"] - t0)
+                if now - st["assembly_at"] > budget:
+                    stalled, why = True, (f"assembly (lift + join of {st['nseg']} segment receipts) produced "
+                                          f"no result in {now - st['assembly_at']:.0f}s (budget {budget:.0f}s, "
+                                          f"HAZYNC_ASSEMBLY_MIN) -- every segment was proved")
             elif watch and st["last"] is not None:
                 g = sorted(st["gaps"])
                 window = max(stall_min, 20 * g[len(g) // 2]) if g else max(stall_min, first_max)

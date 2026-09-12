@@ -6329,10 +6329,38 @@ fn prove_session_resilient(
             println!("    segment {n}/{nseg}  {el:.0}s elapsed, ~{eta:.0}s left");
         }
     }
-    server
-        .assemble_from_segment_receipts(ctx, session, receipts)
-        .expect("assemble from segment receipts")
-        .receipt
+    // ASSEMBLY: lift every segment receipt and join them into one. #256 taught the board worker's
+    // watchdog about the segment loop above and left THIS phase silent, which is where block 39,318
+    // actually died -- 880/880 segments proved in 3,102s, then no output at all, killed at 600s,
+    // retried, killed again, re-claimed, forever. Assembly is ~one lift and ~one join per segment, so
+    // its cost scales with segment count: above roughly 600 segments every block died this way and the
+    // frontier could not pass one. Silence was the bug, not the duration.
+    //
+    // A heartbeat thread rather than a callback because `assemble_from_segment_receipts` is a single
+    // blocking call with no progress hook. It prints on the same stdout the worker already parses;
+    // Rust's stdout is a LineWriter, so each line flushes through the pipe as it is written.
+    let asm_t = Instant::now();
+    let asm_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asm_flag = asm_done.clone();
+    let every = std::env::var("HAZYNC_ASSEMBLY_TICK").ok()
+        .and_then(|v| v.parse::<u64>().ok()).filter(|&v| v > 0).unwrap_or(30);
+    let hb = std::thread::spawn(move || {
+        let t = Instant::now();
+        let mut next = every;
+        while !asm_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let el = t.elapsed().as_secs();
+            if el >= next {
+                println!("    assembling {nseg} segment receipts (lift + join)  {el}s elapsed");
+                next = el + every;
+            }
+        }
+    });
+    let assembled = server.assemble_from_segment_receipts(ctx, session, receipts);
+    asm_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = hb.join();
+    println!("    assembled {nseg} segment receipts in {:.0}s", asm_t.elapsed().as_secs_f64());
+    assembled.expect("assemble from segment receipts").receipt
 }
 
 static RETRIES_119: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
