@@ -125,6 +125,17 @@ check("gpu smoke       : ok" in r.stdout, "run-workers: a host that proves block
 subprocess.run(["bash", os.path.join(rw, "run-workers.sh"), "1", "--stop"], env=dict(env, HAZYNC_HOST=good),
                capture_output=True, text=True, timeout=60)
 
+# #281 follow-up: the coordinator half of the same failure this file is about. A claim black hole and
+# a frontier frozen behind an unseamable cover both end as "the board stops and every signal stays
+# green"; this file already owns the worker side, so the coordinator side runs from here and the two
+# CI steps already on this file cover it — no workflow change (the coord token has no `workflow` scope).
+_fb = subprocess.run([sys.executable,
+                      os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_frontier_blocker.py")]
+                     + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_fb.returncode == 0,
+          "the frontier's blocker is offered and reported (test_frontier_blocker.py)")
+
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)

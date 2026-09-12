@@ -1456,16 +1456,35 @@ def state(slim=False):
     # when nothing covers it (genuinely open, which is the interesting stall case).
     nb = fr + 1
     blocker = c.execute(
-        "SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges "
+        "SELECT id,status,attempts,last_failed_at,claimed_at,verified_at FROM ranges "
         "WHERE lo <= ? AND hi >= ? AND status IN ('claimed','verified','failed') "
         "ORDER BY (hi-lo) ASC LIMIT 1", (nb, nb)).fetchone()
     if blocker is None:
-        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at FROM ranges WHERE id=?",
-                            (str(nb),)).fetchone()
+        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at,verified_at FROM ranges"
+                            " WHERE id=?", (str(nb),)).fetchone()
+    # #281: measure the stall from when the FRONTIER last moved, not from the blocking row's own
+    # timestamp.
+    #
+    # Two separate reasons the old reading could not work. It exempted `verified` rows, so a range
+    # sitting over the blocker reported 0 — even though a verified range covering fr+1 is a stall BY
+    # DEFINITION: if it could advance the frontier, fr would already be past it. And the row is the
+    # wrong clock anyway, because `claim()` does INSERT OR REPLACE on it: every time a worker takes
+    # the blocking block the timestamp resets, so a blocker re-claimed every CLAIM_TTL would look
+    # permanently fresh while nothing at all advanced.
+    #
+    # The frontier's own high-water mark has neither problem. It moves only on real progress, and
+    # nothing else writes it.
+    row = c.execute("SELECT v FROM meta WHERE k='frontier_mark'").fetchone()
     stalled_for = 0
-    if blocker is not None and blocker["status"] != "verified":
-        mark = blocker["last_failed_at"] or blocker["claimed_at"]
-        stalled_for = int(now - mark) if mark else 0
+    try:
+        prev_hi, prev_ts = str(row["v"]).split(":", 1) if row else (None, None)
+    except Exception:
+        prev_hi, prev_ts = None, None          # malformed mark: re-stamp rather than report nonsense
+    if prev_hi is None or int(prev_hi) != fr:
+        c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('frontier_mark',?)", (f"{fr}:{now}",))
+        c.commit()
+    else:
+        stalled_for = max(0, int(now - float(prev_ts)))
     c.close()
     return {
         # spine_hi sits NEXT TO frontier deliberately. The spine is the only shippable artifact — the
@@ -1482,6 +1501,18 @@ def state(slim=False):
         # `block` is the block the frontier needs next; `id` is the RANGE responsible for it, which is
         # not the same thing once ranges can be wide — reporting str(fr+1) as the id hid a claimed
         # 38000-38999 behind an untouched single-block row of the same name.
+        #
+        # #281: THIS KEY DID NOT EXIST. `blocker` and `stalled_for` were computed a few lines above and
+        # then dropped on the floor — the comment describing them survived, the value never reached the
+        # API. So the one signal built to make a frozen frontier visible could not be read by anything:
+        # not the board, not a monitor, not a human with curl. The thirteen-hour freeze on 2026-09-11
+        # went unreported for two compounding reasons: the `verified` exemption above returned 0, and
+        # even that 0 was never published. A signal nobody can read is not a signal.
+        "blocked": {"block": nb,
+                    "id": blocker["id"] if blocker else None,
+                    "status": blocker["status"] if blocker else "open",
+                    "attempts": (blocker["attempts"] if blocker else 0) or 0,
+                    "stalled_for": stalled_for},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
@@ -1549,6 +1580,7 @@ def claim(body):
     handle = clean_handle(body.get("handle"))
     nonce = str(body.get("nonce") or "")[:64] or None
     now = time.time()
+    _blocker = frontier_hi() + 1        # read OUTSIDE the lock — see the note at its use below
     with _lock:
         c = db()
         # #268: a claim whose RESPONSE was lost (client or proxy timeout, a dropped connection) is
@@ -1594,15 +1626,43 @@ def claim(body):
             "SELECT lo FROM ranges WHERE status='claimed'"
             " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
             (now - CLAIM_TTL, now - CLAIM_MAX))}
-        h = 1
         _ceiling = provable_tip()          # what the bridge can serve, not a hardcoded chain height
-        while h < _ceiling:
-            if h not in proven and h not in held and witness_available(h):
-                break
-            h += 1
+        # #281: the block the CHAIN needs comes before the block the board merely lacks.
+        #
+        # `proven` above is COVERAGE, and coverage is a different question from "does the frontier
+        # advance". A range can cover frontier+1 and still be unable to seam onto it: a bad-bounds
+        # range (refused at submit since #283), or — still possible, and not fixable at submit — a
+        # proof of the right HEIGHT against the wrong predecessor state. A fork, or a stale bundle
+        # after a reorg. Width 1 makes that trivial to submit and nothing rejects it, because proving
+        # out of order is the whole design and the coordinator cannot know which predecessor is real.
+        #
+        # Whenever that happens the scan below walks straight past the one block that would unstick
+        # the board — it is "proven", after all — and the frontier stops for good while `proven` keeps
+        # climbing. That is the 30,050 freeze, and it cost thirteen hours.
+        #
+        # If frontier+1 is COVERED and the frontier still has not moved past it, the cover cannot
+        # seam: if it could, the frontier would already be beyond it. So hand that block out again.
+        # `held` still applies, so this re-offers at most once per CLAIM_TTL — the same hour-long rate
+        # limit that stops one bad block consuming a worker, and the reason this cannot become a
+        # re-prove loop. A block proved twice costs one prove; a frontier frozen on a bad cover costs
+        # everything above it.
+        #
+        # `_blocker` is read BEFORE the lock, deliberately: _frontier_chain scans every vrange on a
+        # cache miss (41k rows on the live board) and holding the global write lock across that would
+        # jam every claim, beat and submit — the #265 failure. A stale frontier here is harmless; the
+        # worst case is re-offering a block that has just been seamed, which `held` already bounds.
+        if (_blocker < _ceiling and _blocker in proven and _blocker not in held
+                and witness_available(_blocker)):
+            h = _blocker
         else:
-            c.close()
-            return 409, {"error": "nothing available to claim"}
+            h = 1
+            while h < _ceiling:
+                if h not in proven and h not in held and witness_available(h):
+                    break
+                h += 1
+            else:
+                c.close()
+                return 409, {"error": "nothing available to claim"}
         c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,claim_nonce)"
                   " VALUES(?,?,?,'claimed',?,?,?,?)", (str(h), h, h, pk, handle, now, nonce))
         c.commit()
