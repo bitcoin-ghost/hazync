@@ -1356,6 +1356,63 @@ def build_vranges(c, blk):
         out.append(v)
     return out
 
+def spine_segments():
+    """Who absorbed each block into the spine, as runs of [lo..hi] by one contributor.
+
+    Every absorption already writes a permanent row — `spine:1-<hi>`, with the absorbing pubkey and
+    handle — so this invents nothing; it re-reads rows the coordinator has kept all along. The feed
+    showed them (`recent` is the same table, `LIMIT 40`) but only for about as long as it took the
+    next forty submissions to arrive, so the site could name who proved and who folded a block and
+    then went silent on who anchored it — the step that actually made it checkable in one go.
+
+    The spine only ever moves forward, so a row is exactly "this contributor took the head from where
+    it was to <hi>", and the blocks in between are theirs. Consecutive rows by the same pubkey are one
+    run, which is why this is a handful of segments rather than one entry per advance.
+
+    ⛔ Keyed on PUBKEY, not handle. Two anonymous contributors both present as null and merging them
+    would credit one person with the other's work; a rename mid-run would split it for no reason.
+
+    A row at or below the head it already had covers no new blocks — a re-advertised head, or two
+    submissions racing — and is skipped rather than emitted as an empty or backwards segment.
+
+    ⛔ THE FIRST ROW IS THE ONE ASSUMPTION HERE. A row says the head reached <hi>; it does not say
+    where it came from, so the earliest surviving row is taken to have started at block 1. If the log
+    were ever truncated at the bottom, that assumption hands its contributor every block below their
+    advance — one silent, plausible-looking, wrong segment. It cannot happen by ordinary operation
+    (nothing deletes from `submissions`, and a re-baseline invalidates the spine receipt itself, so a
+    rebuilt spine starts from 0 with a fresh log), but it is an assumption rather than a fact, so the
+    first recorded advance is published as `first_advance_hi` for a caller that wants to check it
+    rather than discovering the over-credit by reading a name that looks odd."""
+    c = db()
+    try:
+        blk = blocked_pubkeys()      # the moderation list state() and recent apply, so handles agree
+        rows = c.execute("SELECT range_id,pubkey,handle FROM submissions"
+                         " WHERE range_id LIKE 'spine:1-%' ORDER BY ts ASC, rowid ASC").fetchall()
+    finally:
+        c.close()
+    segs, prev_hi, prev_pk, first_hi = [], 0, None, None
+    for s in rows:
+        try:
+            hi = int(s["range_id"].split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue                 # not a head this understands; skip rather than guess a height
+        if hi <= prev_hi:
+            continue
+        pk = (s["pubkey"] or "").lower()
+        if segs and pk == prev_pk:
+            segs[-1]["hi"] = hi
+            # Someone who names themselves partway through a run, or renames, is shown under the name
+            # they use NOW — carrying the first row's handle would leave a run reading "anonymous"
+            # under a contributor who has since said who they are.
+            segs[-1]["handle"] = "[removed]" if pk in blk else s["handle"]
+        else:
+            segs.append({"lo": prev_hi + 1, "hi": hi,
+                         "handle": "[removed]" if pk in blk else s["handle"]})
+        if first_hi is None:
+            first_hi = hi
+        prev_hi, prev_pk = hi, pk
+    return segs, first_hi
+
 def vranges_cached():
     """Serialised /api/vranges with a TTL and an ETag, returned as (bytes, etag).
 
@@ -2053,6 +2110,13 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no spine yet — nothing has been folded from genesis",
                                         "hint": "extend one with `host extend-spine` and POST it here"})
             return self._send(200, head)
+        if p == "/api/spine/segments":                     # who absorbed each block into the spine (#244)
+            return self._send(200, raw=_single_flight(
+                "spine:segments", VRANGES_TTL,
+                lambda: (lambda sg: json.dumps(
+                    {"segments": sg[0], "first_advance_hi": sg[1],
+                     "hi": (spine_head() or {}).get("hi")}).encode())(spine_segments())),
+                ctype="application/json")
         if p == "/api/spine/proof":                        # the receipt itself; check it with `hazync-verify`
             f = os.path.join(SPINE_DIR, "spine.bin")
             if os.path.exists(f):

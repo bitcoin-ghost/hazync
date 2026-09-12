@@ -169,6 +169,14 @@ jobs:
         run: ./scripts/test-release-attest.sh
       - name: CUDA attestation POSITIVE CONTROL (staleness gate restored — must FAIL)
         run: ./scripts/test-release-attest.sh --control
+      - name: Who absorbed each block into the spine (#244)
+        # The record was never lost — every absorption writes a permanent spine:1-<hi> row — but the
+        # only thing reading it was the 40-row `recent` feed, so attribution aged out in minutes.
+        run: cd coordinator && python3 test_spine_segments.py
+      - name: Spine segments POSITIVE CONTROL (runs keyed on handle — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_spine_segments.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
