@@ -33,7 +33,7 @@ timeout 120 ssh -n -o ConnectTimeout=20 -i $K -p "$SPORT" root@"$SIP"  'for d in
   mkdir -p /workspace/agg3 && cd /workspace && ([ -x hazync-host-cuda ] || curl -fsSL -o hazync-host-cuda https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda) && chmod +x hazync-host-cuda
   ([ -f block_966256.json ] || { curl -fsSLO https://bitcoinghost.org/hazync/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; })
   cp hazync-host-cuda block_966256.json agg3/ && echo ready' >/dev/null 2>&1
-for f in $D/receipts/chunk_*.bin; do
+for f in $D/receipts/chunk_*.bin $D/receipts/chunk_*.hzk; do
   ( b=$(basename $f)
     for _ in 1 2 3; do
       timeout 120 scp -q -o ConnectTimeout=20 -i $K -P "$SPORT" "$f" root@"$SIP":/workspace/agg3/ 2>/dev/null
@@ -42,7 +42,7 @@ for f in $D/receipts/chunk_*.bin; do
     done ) &
 done
 wait
-say "staged $(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $SPORT root@$SIP 'ls /workspace/agg3/chunk_*.bin | wc -l')/27 on the regen card"
+say "staged $(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $SPORT root@$SIP 'ls /workspace/agg3/chunk_*.bin /workspace/agg3/chunk_*.hzk 2>/dev/null | wc -l')/27 on the regen card"
 timeout 45 ssh -n -o ConnectTimeout=15 -i $K -p "$SPORT" root@"$SIP"  "cd /workspace/agg3 && HAZYNC_LIFTX_HINT=1 HAZYNC_FIELD_BIGINT2=1 HAZYNC_ECMULT_WINDOW=21   HAZYNC_BLOCK=/workspace/agg3/block_966256.json HAZYNC_CHUNKS=27 HAZYNC_OUT=/workspace/agg3/block_966256_run3_receipt.bin   nohup setsid ./hazync-host-cuda agg-chunks > regen3.log 2>&1 < /dev/null & disown; exit 0" >/dev/null 2>&1
 say "regeneration started"
 for _ in $(seq 1 200); do

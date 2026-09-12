@@ -560,7 +560,7 @@ def cmd_prove(args, claimed=False):
     lo, hi = parse_range(rng)                            # "n" (single block) or "lo-hi" (range)
     RCPTDIR.mkdir(parents=True, exist_ok=True)
     out = RCPTDIR / f"{rng}.bin"
-    # Prove + fold in a dedicated per-range work dir (under ~/.hazync) so the host's range_*.bin /
+    # Prove + fold in a dedicated per-range work dir (under ~/.hazync) so the host's range_*.hzk /
     # fold_*.bin intermediates never litter the CWD, never collide with a concurrent prove, and the final
     # os.replace stays on one filesystem (no EXDEV).
     work = RCPTDIR / f".work-{rng}"
@@ -598,7 +598,7 @@ def cmd_prove(args, claimed=False):
                                 # of them from the first outside contributor, which made a healthy long
                                 # run look like a stuck worker hammering the coordinator.
                                 _beat_range=rng if claimed else None, _beat_pk=_pk, _beat_sk=_sk)
-            parts.append(f"range_{h}.bin")
+            parts.append(_prover_out(work, f"range_{h}").name)
             if total > 1 and (i % 50 == 0 or i == total):
                 print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
         _fold_and_save(parts, out, work, env)
@@ -666,6 +666,21 @@ def _fold_level(parts, rnd, work, env, conc):
         # non-adjacent ranges together at the next level and produce a receipt with a bogus seam.
         sys.exit(f"{len(errs)} of {len(jobs)} folds failed at level {rnd}; first error:\n{errs[0]}")
     return nxt
+
+def _prover_out(work, stem):
+    """Resolve the prover's DEFAULT output for `stem` — `.hzk` since #278, `.bin` before it.
+
+    The per-block proves deliberately do not pass HAZYNC_OUT, so this filename is a CONTRACT with
+    the host binary rather than a local choice. Resolving it instead of assuming it means a worker
+    and a host from different releases still fold. The pair is normally rolled together, but
+    "normally" is not a guarantee, and guessing wrong fails AFTER the expensive step is paid for:
+    the prove succeeds, the fold cannot find its input, and the block is lost.
+
+    scripts/check-proof-names.sh keeps this in step with the host's own defaults.
+    """
+    hzk = pathlib.Path(work) / f"{stem}.hzk"
+    return hzk if hzk.exists() else pathlib.Path(work) / f"{stem}.bin"
+
 
 def _fold_and_save(parts, out, work, env):
     # Guard first: if a prove failed, its receipt is absent and the rename below raises a
@@ -834,9 +849,10 @@ def cmd_selftest(args):
         print("… proving block 1 as a real pre-flight (this is the step that actually exercises the prover)")
         r = subprocess.run([HOSTBIN, "prove-range-bridge", "1"], cwd=str(work), env=env,
                            capture_output=True, text=True, timeout=1800)
-        if r.returncode == 0 and (work / "range_1.bin").exists():
+        proved = _prover_out(work, "range_1")
+        if r.returncode == 0 and proved.exists():
             print("✓ proved a real block end to end — your prover works")
-            try: (work / "range_1.bin").unlink()
+            try: proved.unlink()
             except OSError: pass
         else:
             tail = _err_tail(r.stderr or r.stdout)

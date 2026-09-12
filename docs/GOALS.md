@@ -26,7 +26,7 @@ NOT A GENESIS-ANCHORED CHAIN PROOF
 
   The SNARK is VALID and was produced by guest 37987b85.
   It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
-$ host verify-any range_500.bin
+$ host verify-any range_500.hzk
 RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
 ```
 
@@ -39,7 +39,7 @@ proof store rather than of this document, and quoting it goes stale on every re-
 `coordinator/check-retention.py` reports it against the ledger, and CI now proves that checker can
 still fail (`coordinator/test-check-retention.sh`).
 
-The risk is that folding deletes them. `coordinator/hazync` proved `range_{h}.bin` per height and
+The risk is that folding deletes them. `coordinator/hazync` proved `range_{h}.hzk` per height and
 discarded the leaves after folding, so at any claim width above 1 the per-block proofs were produced
 and thrown away. Since v0.13.0 folding is a separate task over already-submitted receipts
 (`hazync fold`), so the leaves it consumes are retained ones — but nothing prevents a future scheme
