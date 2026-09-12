@@ -131,6 +131,11 @@ check((blk.get("stalled_for") or 0) > 0,
 check((blk.get("stalled_for") or 0) >= 1,
       "the stall keeps counting even though claim() just rewrote the blocking row")
 
+# #285: stalled_for alone stops meaning "wrong" as the frontier climbs -- above ~block 180,000 the
+# MEDIAN block is tens of minutes of healthy proving. The judgement has to be published separately.
+check(blk.get("needs_attention") is False,
+      f"a blocker a live worker is proving does NOT need attention (why={blk.get('why')!r})")
+
 print("== a healthy board is not disturbed ==")
 c = server.db()
 c.execute("DELETE FROM vranges")
@@ -151,6 +156,15 @@ code, got = server.claim({"pubkey": "q" * 64, "handle": "tester2", "nonce": "n2"
 check(got.get("range") == "9", "the next block is offered exactly once — no re-proving of covered work")
 check((server.state().get("blocked") or {}).get("stalled_for") == 0,
       "and a board that is merely working reports no stall")
+
+print("== the unseamable cover DOES need attention ==")
+seed_fork_at(6)
+# Nobody claims it this time: the fork range sits over the blocker as `verified`, which is the #281
+# shape -- the one case that can never resolve itself no matter how long anyone waits.
+blk = (server.state().get("blocked") or {})
+check(blk.get("needs_attention") is True,
+      f"a VERIFIED range over the blocker needs attention (why={blk.get('why')!r})")
+check("seam" in (blk.get("why") or ""), "...and says why, in terms of the seam that cannot form")
 
 print()
 if CONTROL:

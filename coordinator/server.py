@@ -1278,13 +1278,49 @@ def proven_count():
     if cur_hi is not None: total += cur_hi - cur_lo + 1
     return total
 
-def distinct_blocks_by_pubkey():
-    """Per-contributor DISTINCT blocks proven, computed the SAME way as proven_count (interval-merge) so
-    the leaderboard always reconciles with the headline 'proven' number. A stored per-submit counter can
-    drift (e.g. a block proved both as a single and inside an overlapping range double-counts); deriving
-    from vranges makes that impossible. Cheap: vranges are RANGE_SIZE-coarse + a few singles.
+def is_fold_seam(lo, hi, by_start, ends_at):
+    """Was [lo..hi] made by FOLDING two ranges that were already verified, or by proving it outright?
 
-    Keyed by RESOLVED pubkey (#113), so a rotated key's blocks land on its current head.
+    Both shapes are legitimate and the submit gate says so in as many words: a range either covers
+    fresh territory, or is exactly tiled by ranges already on the board. Only the second is a fold, and
+    until now the leaderboard could not tell them apart — so a fold was credited as if its blocks had
+    been proven by whoever folded them, and the columns summed to more chain than exists.
+
+    `fold-range` is BINARY — [lo..m] + [m+1..hi] — so the test is exact rather than heuristic: does some
+    earlier range start at `lo` and end at an `m` whose successor range ends exactly at `hi`. Measured
+    against a slower rule that asks whether strictly-narrower earlier ranges tile the span at all: same
+    verdict on every row, 0.18s instead of minutes.
+
+    It matters for seven ranges today, all of them from the #281 overlap: bip-448's five that broke new
+    ground with bad bounds, and the two G H O S T proved to repair the frontier over blocks that already
+    looked covered. Calling those folds would take ~250 blocks of real proving off two people."""
+    for m in ends_at.get(lo, ()):               # earlier ranges [lo..m]
+        if by_start.get(m + 1) == hi:           # and an earlier [m+1..hi] meeting it at the seam
+            return True
+    return False
+
+def contributions_by_pubkey():
+    """Per-contributor work, split by KIND: proved / folded / anchored.
+
+    `blocks` alone was never the full story and quietly overstated itself. It counted distinct blocks
+    covered by ANY range someone submitted, so folding a wide range credited the folder with blocks
+    other people proved: measured on the live board, the columns summed to 43,868 against 42,711 blocks
+    actually proven — 1,157 counted twice, once for the prover and once for the folder. Splitting the
+    kinds stops that, and gives folding and anchoring their own numbers instead of dissolving them into
+    somebody else's.
+
+    ⚠ The proved column still does not SUM to the headline, and should not be made to. Two people can
+    prove the same block: during the #281 overlap repair, G H O S T re-proved [30051..30100] and
+    [30101..30149] over bounds bip-448 had already covered, so the columns run exactly 99 blocks above
+    `proven` today. Both did that work. What was wrong before was crediting a FOLDER with blocks someone
+    else proved; genuine duplicate proving is not the same thing and is not hidden here.
+
+    ANCHORING counts spine absorptions. It deliberately adds no blocks: an absorption covers nothing
+    new, it re-expresses blocks already proven as one checkable file. That is why it could never be
+    folded into `blocks` without inflating the headline, and why it needs a column of its own — the
+    open question the spine-write comment records.
+
+    Keyed by RESOLVED pubkey (#113), so a rotated key's work lands on its current head.
 
     The resolve has to happen BEFORE the sort, and that is the whole subtlety. Two keys belonging to
     the same person interleave — the old box proved 100-199 and the new one 150-249 — so summing their
@@ -1292,8 +1328,25 @@ def distinct_blocks_by_pubkey():
     only overlap-safe over a single ordered sequence, so the merged identity must be re-sorted as one."""
     rmap = rotation_map()
     c = db()
-    rows = c.execute("SELECT pubkey,lo,hi FROM vranges").fetchall()
+    # ts order, because "already verified when this arrived" is what separates a fold from a proof.
+    vr = c.execute("SELECT pubkey,lo,hi FROM vranges ORDER BY ts ASC, rowid ASC").fetchall()
+    spine = c.execute("SELECT pubkey FROM submissions WHERE range_id LIKE 'spine:1-%'").fetchall()
     c.close()
+
+    folded, anchored, by_start, ends_at, rows = {}, {}, {}, {}, []
+    for r in vr:
+        lo, hi = r["lo"], r["hi"]
+        if hi > lo and is_fold_seam(lo, hi, by_start, ends_at):
+            pk = resolve_pubkey(r["pubkey"], rmap)
+            folded[pk] = folded.get(pk, 0) + 1
+        else:
+            rows.append(r)                      # a proof: its blocks count toward `proved`
+        ends_at.setdefault(lo, set()).add(hi)
+        if by_start.get(lo, -1) < hi:
+            by_start[lo] = hi
+    for s in spine:
+        pk = resolve_pubkey(s["pubkey"], rmap)
+        anchored[pk] = anchored.get(pk, 0) + 1
     items = sorted((resolve_pubkey(r["pubkey"], rmap), r["lo"], r["hi"]) for r in rows)
     out, cur_pk, cur_lo, cur_hi = {}, None, None, None
     for pk, lo, hi in items:
@@ -1307,7 +1360,8 @@ def distinct_blocks_by_pubkey():
         else:
             cur_hi = max(cur_hi, hi)
     if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
-    return out
+    return {pk: {"proved": out.get(pk, 0), "folded": folded.get(pk, 0), "anchored": anchored.get(pk, 0)}
+            for pk in set(out) | set(folded) | set(anchored)}
 
 def frontier_proof():
     """The genesis-anchored frontier as a chain-state (the real committed proof output the hero panel
@@ -1355,6 +1409,63 @@ def build_vranges(c, blk):
             v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
         out.append(v)
     return out
+
+def spine_segments():
+    """Who absorbed each block into the spine, as runs of [lo..hi] by one contributor.
+
+    Every absorption already writes a permanent row — `spine:1-<hi>`, with the absorbing pubkey and
+    handle — so this invents nothing; it re-reads rows the coordinator has kept all along. The feed
+    showed them (`recent` is the same table, `LIMIT 40`) but only for about as long as it took the
+    next forty submissions to arrive, so the site could name who proved and who folded a block and
+    then went silent on who anchored it — the step that actually made it checkable in one go.
+
+    The spine only ever moves forward, so a row is exactly "this contributor took the head from where
+    it was to <hi>", and the blocks in between are theirs. Consecutive rows by the same pubkey are one
+    run, which is why this is a handful of segments rather than one entry per advance.
+
+    ⛔ Keyed on PUBKEY, not handle. Two anonymous contributors both present as null and merging them
+    would credit one person with the other's work; a rename mid-run would split it for no reason.
+
+    A row at or below the head it already had covers no new blocks — a re-advertised head, or two
+    submissions racing — and is skipped rather than emitted as an empty or backwards segment.
+
+    ⛔ THE FIRST ROW IS THE ONE ASSUMPTION HERE. A row says the head reached <hi>; it does not say
+    where it came from, so the earliest surviving row is taken to have started at block 1. If the log
+    were ever truncated at the bottom, that assumption hands its contributor every block below their
+    advance — one silent, plausible-looking, wrong segment. It cannot happen by ordinary operation
+    (nothing deletes from `submissions`, and a re-baseline invalidates the spine receipt itself, so a
+    rebuilt spine starts from 0 with a fresh log), but it is an assumption rather than a fact, so the
+    first recorded advance is published as `first_advance_hi` for a caller that wants to check it
+    rather than discovering the over-credit by reading a name that looks odd."""
+    c = db()
+    try:
+        blk = blocked_pubkeys()      # the moderation list state() and recent apply, so handles agree
+        rows = c.execute("SELECT range_id,pubkey,handle FROM submissions"
+                         " WHERE range_id LIKE 'spine:1-%' ORDER BY ts ASC, rowid ASC").fetchall()
+    finally:
+        c.close()
+    segs, prev_hi, prev_pk, first_hi = [], 0, None, None
+    for s in rows:
+        try:
+            hi = int(s["range_id"].split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue                 # not a head this understands; skip rather than guess a height
+        if hi <= prev_hi:
+            continue
+        pk = (s["pubkey"] or "").lower()
+        if segs and pk == prev_pk:
+            segs[-1]["hi"] = hi
+            # Someone who names themselves partway through a run, or renames, is shown under the name
+            # they use NOW — carrying the first row's handle would leave a run reading "anonymous"
+            # under a contributor who has since said who they are.
+            segs[-1]["handle"] = "[removed]" if pk in blk else s["handle"]
+        else:
+            segs.append({"lo": prev_hi + 1, "hi": hi,
+                         "handle": "[removed]" if pk in blk else s["handle"]})
+        if first_hi is None:
+            first_hi = hi
+        prev_hi, prev_pk = hi, pk
+    return segs, first_hi
 
 def vranges_cached():
     """Serialised /api/vranges with a TTL and an ETag, returned as (bytes, etag).
@@ -1405,7 +1516,7 @@ def state(slim=False):
         board.append(b)
     # DISTINCT blocks per contributor (interval-merge) — reconciles with the headline 'proven' by
     # construction; a stored per-submit counter can drift on overlapping submissions.
-    _dbp = distinct_blocks_by_pubkey()
+    _dbp = contributions_by_pubkey()
     _rmap = rotation_map()
     # Moderation has to follow rotations too, or a takedown is trivially escaped by rotating to a fresh
     # key: the blocked key's blocks would reappear on a head that is not itself on the list. rotate()
@@ -1415,12 +1526,18 @@ def state(slim=False):
     # One row per RESOLVED identity. Iterating `contributors` would emit a rotated-away key as well,
     # and rotate() guarantees the head has a row, so key off the resolved totals instead.
     _handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
-    ncontrib = sum(1 for v in _dbp.values() if v > 0)
+    # A contributor counts if they did ANY of the three. Someone who only folds or only anchors was
+    # invisible here before, which is the whole point of splitting the kinds.
+    ncontrib = sum(1 for v in _dbp.values() if v["proved"] or v["folded"] or v["anchored"])
     leaders = sorted(
-        (dict(id=pk[:10], handle=_handles.get(pk), blocks=n)
-         for pk, n in _dbp.items()
-         if pk.lower() not in _blk_resolved and n > 0),
-        key=lambda d: d["blocks"], reverse=True)[:8]
+        (dict(id=pk[:10], handle=_handles.get(pk), blocks=v["proved"],
+              proved=v["proved"], folded=v["folded"], anchored=v["anchored"])
+         for pk, v in _dbp.items()
+         if pk.lower() not in _blk_resolved and (v["proved"] or v["folded"] or v["anchored"])),
+        # Ranked on blocks proved, the headline number; folds and absorptions break ties beneath it
+        # rather than competing with it, since one fold is not worth one block and nothing here says
+        # what it is worth. `blocks` is kept as an alias so an existing client does not break.
+        key=lambda d: (d["proved"], d["folded"], d["anchored"]), reverse=True)[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
               # 40, not 8: the feed now carries three kinds of work (proved / folded / spine) and the
@@ -1485,6 +1602,33 @@ def state(slim=False):
         c.commit()
     else:
         stalled_for = max(0, int(now - float(prev_ts)))
+
+    # #285: `stalled_for` alone stops meaning "something is wrong" as the frontier climbs. Measured
+    # across all 230,000 bundles on 2026-09-12, the median bundle grows 354x with height -- 6 KB near
+    # genesis, 2.16 MB by block 220,000 -- and a 1.88 MB block is ~880 segments and ~52 minutes of
+    # entirely healthy proving. Above roughly block 180,000 the MEDIAN block takes tens of minutes, so
+    # a healthy board would sit at stalled_for 1,800-3,600 permanently and the number added to make a
+    # frozen frontier visible would stop distinguishing one.
+    #
+    # So publish the judgement too, rather than leaving every consumer to infer it. The frontier is
+    # merely WAITING when a live worker holds the blocker; it needs a human when:
+    #   * a VERIFIED range covers it -- it can never seam onto the frontier (the #281 case);
+    #   * nobody holds it and nobody has for longer than a claim cycle -- the work is not being done;
+    #   * it has failed its way to MAX_ATTEMPTS.
+    _st = blocker["status"] if blocker else "open"
+    _att = (blocker["attempts"] if blocker else 0) or 0
+    if _st == "verified":
+        _attn, _attn_why = True, ("a verified range covers this block but cannot seam onto the frontier; "
+                                  "it will never advance until the block is re-proved")
+    elif _att >= MAX_ATTEMPTS:
+        _attn, _attn_why = True, f"the blocking range has failed {_att} times (MAX_ATTEMPTS={MAX_ATTEMPTS})"
+    elif _st == "claimed":
+        _attn, _attn_why = False, "a live worker is proving it"
+    elif stalled_for > CLAIM_TTL:
+        _attn, _attn_why = True, (f"nobody has held this block for {stalled_for}s, longer than a claim "
+                                  f"cycle (CLAIM_TTL={CLAIM_TTL})")
+    else:
+        _attn, _attn_why = False, "open and waiting for a prover to take it"
     c.close()
     return {
         # spine_hi sits NEXT TO frontier deliberately. The spine is the only shippable artifact — the
@@ -1512,7 +1656,8 @@ def state(slim=False):
                     "id": blocker["id"] if blocker else None,
                     "status": blocker["status"] if blocker else "open",
                     "attempts": (blocker["attempts"] if blocker else 0) or 0,
-                    "stalled_for": stalled_for},
+                    "stalled_for": stalled_for,
+                    "needs_attention": _attn, "why": _attn_why},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
@@ -2025,6 +2170,13 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no spine yet — nothing has been folded from genesis",
                                         "hint": "extend one with `host extend-spine` and POST it here"})
             return self._send(200, head)
+        if p == "/api/spine/segments":                     # who absorbed each block into the spine (#244)
+            return self._send(200, raw=_single_flight(
+                "spine:segments", VRANGES_TTL,
+                lambda: (lambda sg: json.dumps(
+                    {"segments": sg[0], "first_advance_hi": sg[1],
+                     "hi": (spine_head() or {}).get("hi")}).encode())(spine_segments())),
+                ctype="application/json")
         if p == "/api/spine/proof":                        # the receipt itself; check it with `hazync-verify`
             f = os.path.join(SPINE_DIR, "spine.bin")
             if os.path.exists(f):
