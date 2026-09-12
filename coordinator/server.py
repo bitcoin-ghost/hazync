@@ -1485,6 +1485,33 @@ def state(slim=False):
         c.commit()
     else:
         stalled_for = max(0, int(now - float(prev_ts)))
+
+    # #285: `stalled_for` alone stops meaning "something is wrong" as the frontier climbs. Measured
+    # across all 230,000 bundles on 2026-09-12, the median bundle grows 354x with height -- 6 KB near
+    # genesis, 2.16 MB by block 220,000 -- and a 1.88 MB block is ~880 segments and ~52 minutes of
+    # entirely healthy proving. Above roughly block 180,000 the MEDIAN block takes tens of minutes, so
+    # a healthy board would sit at stalled_for 1,800-3,600 permanently and the number added to make a
+    # frozen frontier visible would stop distinguishing one.
+    #
+    # So publish the judgement too, rather than leaving every consumer to infer it. The frontier is
+    # merely WAITING when a live worker holds the blocker; it needs a human when:
+    #   * a VERIFIED range covers it -- it can never seam onto the frontier (the #281 case);
+    #   * nobody holds it and nobody has for longer than a claim cycle -- the work is not being done;
+    #   * it has failed its way to MAX_ATTEMPTS.
+    _st = blocker["status"] if blocker else "open"
+    _att = (blocker["attempts"] if blocker else 0) or 0
+    if _st == "verified":
+        _attn, _attn_why = True, ("a verified range covers this block but cannot seam onto the frontier; "
+                                  "it will never advance until the block is re-proved")
+    elif _att >= MAX_ATTEMPTS:
+        _attn, _attn_why = True, f"the blocking range has failed {_att} times (MAX_ATTEMPTS={MAX_ATTEMPTS})"
+    elif _st == "claimed":
+        _attn, _attn_why = False, "a live worker is proving it"
+    elif stalled_for > CLAIM_TTL:
+        _attn, _attn_why = True, (f"nobody has held this block for {stalled_for}s, longer than a claim "
+                                  f"cycle (CLAIM_TTL={CLAIM_TTL})")
+    else:
+        _attn, _attn_why = False, "open and waiting for a prover to take it"
     c.close()
     return {
         # spine_hi sits NEXT TO frontier deliberately. The spine is the only shippable artifact — the
@@ -1512,7 +1539,8 @@ def state(slim=False):
                     "id": blocker["id"] if blocker else None,
                     "status": blocker["status"] if blocker else "open",
                     "attempts": (blocker["attempts"] if blocker else 0) or 0,
-                    "stalled_for": stalled_for},
+                    "stalled_for": stalled_for,
+                    "needs_attention": _attn, "why": _attn_why},
         "board": board, "leaderboard": leaders, "recent": recent,
         "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
