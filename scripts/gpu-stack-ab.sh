@@ -247,7 +247,7 @@ prove_arm() {
   local now; now=$(cat "$OUT/method_id.$arm" 2>/dev/null)
   if [ -n "$now" ] && [ -f "$idfile" ] && [ "$(cat "$idfile")" != "$now" ]; then
     say "arm $arm: METHOD_ID changed ($(cut -c1-16 "$idfile") -> $(echo "$now" | cut -c1-16)) — discarding stale receipts"
-    rm -f "$dir"/chunk_*.bin
+    rm -f "$dir"/chunk_*.bin "$dir"/chunk_*.hzk
   fi
   [ -n "$now" ] && echo "$now" > "$idfile"
   for i in $(seq 0 $((CHUNKS-1))); do

@@ -13,7 +13,7 @@ export HAZYNC_BASE=/root/hazync-build CUDA_PATH=/usr/local/cuda-12.6 RISC0_HOME=
 export HAZYNC_WITNESS_DIR=${HAZYNC_WITNESS_DIR:-/root/witnesses_bridge}
 HOST=./target/release/host
 NGPU=${NGPU:-2}; LO=${LO:-1}; HI=${HI:-8}
-rm -f range_*.bin fold_*.bin
+rm -f range_*.bin range_*.hzk fold_*.bin
 T0=$(date +%s)
 echo "=== LEVEL 0: prove blocks $LO..$HI as ranges across $NGPU GPUs ($HAZYNC_WITNESS_DIR) ==="
 for ((base=LO; base<=HI; base+=NGPU)); do

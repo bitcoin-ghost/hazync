@@ -134,6 +134,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_beat.py --control
+      - name: A downloaded proof is named, with its own extension (#278)
+        # `curl -O` names a file after the URL path, so /api/proof/1 landed as an extensionless "1".
+        # Also pins the host<->worker filename contract: the worker does not pass HAZYNC_OUT, so it
+        # has to know what the host called the file, and that break costs a whole prove.
+        run: cd coordinator && python3 test_proof_names.py
+      - name: Proof naming POSITIVE CONTROL (Content-Disposition stripped — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_proof_names.py --control
       - name: Coordinator does not jam under concurrent load (#265)
         # WAL (a writer is not blocked by an open reader) + single-flight state/frontier caches.
         run: cd coordinator && python3 test_coord_concurrency.py

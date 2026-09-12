@@ -7,7 +7,7 @@ export RUST_LOG=${RUST_LOG:-error}
 export HAZYNC_BLOCK=${HAZYNC_BLOCK:?set HAZYNC_BLOCK to the block JSON}
 NGPU=${NGPU:-1}; NCHUNKS=${HAZYNC_CHUNKS:-8}; export HAZYNC_CHUNKS=$NCHUNKS
 echo "CLUSTER: $NCHUNKS chunks across $NGPU GPU(s)"
-rm -f chunk_*.bin
+rm -f chunk_*.bin chunk_*.hzk
 for ((base=0; base<NCHUNKS; base+=NGPU)); do          # waves of NGPU concurrent chunk proofs
   for ((g=0; g<NGPU && base+g<NCHUNKS; g++)); do
     i=$((base+g)); CUDA_VISIBLE_DEVICES=$g ./target/release/host prove-chunk $i &
