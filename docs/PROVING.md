@@ -102,8 +102,8 @@ adjacent ranges in a log-depth tree. A fold verifies two range receipts and chec
 
 ```
 ./target/release/host prove-range <n>                 # one block as range [n..n]
-./target/release/host fold-range <left.bin> <right.bin> <out.bin>
-./target/release/host verify-range <out.bin>          # verify + PIN the leftmost boundary to genesis
+./target/release/host fold-range <left.hzk> <right.hzk> <out.hzk>
+./target/release/host verify-range <out.hzk>          # verify + PIN the leftmost boundary to genesis
 ./target/release/host verify-any <bin>                 # verify without the genesis pin (coordinator's per-range check)
 NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-out -> one genesis-anchored receipt
 ```
