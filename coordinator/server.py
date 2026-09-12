@@ -1278,13 +1278,49 @@ def proven_count():
     if cur_hi is not None: total += cur_hi - cur_lo + 1
     return total
 
-def distinct_blocks_by_pubkey():
-    """Per-contributor DISTINCT blocks proven, computed the SAME way as proven_count (interval-merge) so
-    the leaderboard always reconciles with the headline 'proven' number. A stored per-submit counter can
-    drift (e.g. a block proved both as a single and inside an overlapping range double-counts); deriving
-    from vranges makes that impossible. Cheap: vranges are RANGE_SIZE-coarse + a few singles.
+def is_fold_seam(lo, hi, by_start, ends_at):
+    """Was [lo..hi] made by FOLDING two ranges that were already verified, or by proving it outright?
 
-    Keyed by RESOLVED pubkey (#113), so a rotated key's blocks land on its current head.
+    Both shapes are legitimate and the submit gate says so in as many words: a range either covers
+    fresh territory, or is exactly tiled by ranges already on the board. Only the second is a fold, and
+    until now the leaderboard could not tell them apart — so a fold was credited as if its blocks had
+    been proven by whoever folded them, and the columns summed to more chain than exists.
+
+    `fold-range` is BINARY — [lo..m] + [m+1..hi] — so the test is exact rather than heuristic: does some
+    earlier range start at `lo` and end at an `m` whose successor range ends exactly at `hi`. Measured
+    against a slower rule that asks whether strictly-narrower earlier ranges tile the span at all: same
+    verdict on every row, 0.18s instead of minutes.
+
+    It matters for seven ranges today, all of them from the #281 overlap: bip-448's five that broke new
+    ground with bad bounds, and the two G H O S T proved to repair the frontier over blocks that already
+    looked covered. Calling those folds would take ~250 blocks of real proving off two people."""
+    for m in ends_at.get(lo, ()):               # earlier ranges [lo..m]
+        if by_start.get(m + 1) == hi:           # and an earlier [m+1..hi] meeting it at the seam
+            return True
+    return False
+
+def contributions_by_pubkey():
+    """Per-contributor work, split by KIND: proved / folded / anchored.
+
+    `blocks` alone was never the full story and quietly overstated itself. It counted distinct blocks
+    covered by ANY range someone submitted, so folding a wide range credited the folder with blocks
+    other people proved: measured on the live board, the columns summed to 43,868 against 42,711 blocks
+    actually proven — 1,157 counted twice, once for the prover and once for the folder. Splitting the
+    kinds stops that, and gives folding and anchoring their own numbers instead of dissolving them into
+    somebody else's.
+
+    ⚠ The proved column still does not SUM to the headline, and should not be made to. Two people can
+    prove the same block: during the #281 overlap repair, G H O S T re-proved [30051..30100] and
+    [30101..30149] over bounds bip-448 had already covered, so the columns run exactly 99 blocks above
+    `proven` today. Both did that work. What was wrong before was crediting a FOLDER with blocks someone
+    else proved; genuine duplicate proving is not the same thing and is not hidden here.
+
+    ANCHORING counts spine absorptions. It deliberately adds no blocks: an absorption covers nothing
+    new, it re-expresses blocks already proven as one checkable file. That is why it could never be
+    folded into `blocks` without inflating the headline, and why it needs a column of its own — the
+    open question the spine-write comment records.
+
+    Keyed by RESOLVED pubkey (#113), so a rotated key's work lands on its current head.
 
     The resolve has to happen BEFORE the sort, and that is the whole subtlety. Two keys belonging to
     the same person interleave — the old box proved 100-199 and the new one 150-249 — so summing their
@@ -1292,8 +1328,25 @@ def distinct_blocks_by_pubkey():
     only overlap-safe over a single ordered sequence, so the merged identity must be re-sorted as one."""
     rmap = rotation_map()
     c = db()
-    rows = c.execute("SELECT pubkey,lo,hi FROM vranges").fetchall()
+    # ts order, because "already verified when this arrived" is what separates a fold from a proof.
+    vr = c.execute("SELECT pubkey,lo,hi FROM vranges ORDER BY ts ASC, rowid ASC").fetchall()
+    spine = c.execute("SELECT pubkey FROM submissions WHERE range_id LIKE 'spine:1-%'").fetchall()
     c.close()
+
+    folded, anchored, by_start, ends_at, rows = {}, {}, {}, {}, []
+    for r in vr:
+        lo, hi = r["lo"], r["hi"]
+        if hi > lo and is_fold_seam(lo, hi, by_start, ends_at):
+            pk = resolve_pubkey(r["pubkey"], rmap)
+            folded[pk] = folded.get(pk, 0) + 1
+        else:
+            rows.append(r)                      # a proof: its blocks count toward `proved`
+        ends_at.setdefault(lo, set()).add(hi)
+        if by_start.get(lo, -1) < hi:
+            by_start[lo] = hi
+    for s in spine:
+        pk = resolve_pubkey(s["pubkey"], rmap)
+        anchored[pk] = anchored.get(pk, 0) + 1
     items = sorted((resolve_pubkey(r["pubkey"], rmap), r["lo"], r["hi"]) for r in rows)
     out, cur_pk, cur_lo, cur_hi = {}, None, None, None
     for pk, lo, hi in items:
@@ -1307,7 +1360,8 @@ def distinct_blocks_by_pubkey():
         else:
             cur_hi = max(cur_hi, hi)
     if cur_hi is not None: out[cur_pk] = out.get(cur_pk, 0) + (cur_hi - cur_lo + 1)
-    return out
+    return {pk: {"proved": out.get(pk, 0), "folded": folded.get(pk, 0), "anchored": anchored.get(pk, 0)}
+            for pk in set(out) | set(folded) | set(anchored)}
 
 def frontier_proof():
     """The genesis-anchored frontier as a chain-state (the real committed proof output the hero panel
@@ -1462,7 +1516,7 @@ def state(slim=False):
         board.append(b)
     # DISTINCT blocks per contributor (interval-merge) — reconciles with the headline 'proven' by
     # construction; a stored per-submit counter can drift on overlapping submissions.
-    _dbp = distinct_blocks_by_pubkey()
+    _dbp = contributions_by_pubkey()
     _rmap = rotation_map()
     # Moderation has to follow rotations too, or a takedown is trivially escaped by rotating to a fresh
     # key: the blocked key's blocks would reappear on a head that is not itself on the list. rotate()
@@ -1472,12 +1526,18 @@ def state(slim=False):
     # One row per RESOLVED identity. Iterating `contributors` would emit a rotated-away key as well,
     # and rotate() guarantees the head has a row, so key off the resolved totals instead.
     _handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
-    ncontrib = sum(1 for v in _dbp.values() if v > 0)
+    # A contributor counts if they did ANY of the three. Someone who only folds or only anchors was
+    # invisible here before, which is the whole point of splitting the kinds.
+    ncontrib = sum(1 for v in _dbp.values() if v["proved"] or v["folded"] or v["anchored"])
     leaders = sorted(
-        (dict(id=pk[:10], handle=_handles.get(pk), blocks=n)
-         for pk, n in _dbp.items()
-         if pk.lower() not in _blk_resolved and n > 0),
-        key=lambda d: d["blocks"], reverse=True)[:8]
+        (dict(id=pk[:10], handle=_handles.get(pk), blocks=v["proved"],
+              proved=v["proved"], folded=v["folded"], anchored=v["anchored"])
+         for pk, v in _dbp.items()
+         if pk.lower() not in _blk_resolved and (v["proved"] or v["folded"] or v["anchored"])),
+        # Ranked on blocks proved, the headline number; folds and absorptions break ties beneath it
+        # rather than competing with it, since one fold is not worth one block and nothing here says
+        # what it is worth. `blocks` is kept as an alias so an existing client does not break.
+        key=lambda d: (d["proved"], d["folded"], d["anchored"]), reverse=True)[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
               # 40, not 8: the feed now carries three kinds of work (proved / folded / spine) and the

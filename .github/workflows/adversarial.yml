@@ -177,6 +177,14 @@ jobs:
         run: |
           cd coordinator
           python3 test_spine_segments.py --control
+      - name: Leaderboard splits proved / folded / anchored (#244)
+        # A fold submits a WIDE range, so crediting it as blocks handed the folder work somebody else
+        # did — the columns summed to 1,157 blocks more than the chain had. Anchoring counted nothing.
+        run: cd coordinator && python3 test_contributions.py
+      - name: Contribution split POSITIVE CONTROL (every wide range read as a fold — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_contributions.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
