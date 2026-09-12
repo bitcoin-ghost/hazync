@@ -162,6 +162,13 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_progress.py --control
+      - name: release.sh attests the CUDA host it cannot run (#275)
+        # The fallback that lets a GPU-less release box publish the CUDA host sat under a STALENESS
+        # check, which is true for exactly the fresh artifact that needs it — so it never ran, and
+        # v0.21.1 and v0.21.2 were published only because the operator passed the id by hand.
+        run: ./scripts/test-release-attest.sh
+      - name: CUDA attestation POSITIVE CONTROL (staleness gate restored — must FAIL)
+        run: ./scripts/test-release-attest.sh --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
