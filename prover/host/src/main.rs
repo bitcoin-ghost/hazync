@@ -1367,7 +1367,7 @@ fn prove_range_cmd(n: u32) {
     let t = Instant::now();
     let receipt = prove_env_with_progress(b.build().unwrap(), &format!("range [{n}..{n}]"));
     receipt.verify(METHOD_ID).expect("range verify");
-    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.bin"));
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.hzk"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
     println!("proved range [{n}..{n}] in {:.1}s -> {out}", t.elapsed().as_secs_f64());
 }
@@ -2471,7 +2471,7 @@ fn nchunks_env() -> usize {
     std::env::var("HAZYNC_CHUNKS").ok().and_then(|s| s.parse().ok()).unwrap_or(2).max(1)
 }
 
-// `prove-chunk <i>`: prove chunk i's scripts, write the receipt to chunk_<i>.bin (or $HAZYNC_OUT).
+// `prove-chunk <i>`: prove chunk i's scripts, write the receipt to chunk_<i>.hzk (or $HAZYNC_OUT).
 fn prove_chunk(idx: usize) {
     use std::time::Instant;
     let (_anchor, w) = build_full();
@@ -2505,7 +2505,7 @@ fn prove_chunk(idx: usize) {
     // cost the whole chunk; it now costs one segment.
     let receipt = prove_session_resilient(&server, &ctx, &session);
     receipt.verify(METHOD_ID).unwrap();
-    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("chunk_{idx}.bin"));
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("chunk_{idx}.hzk"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
     println!("chunk {idx} ({} inputs) proved in {:.0}s -> {out}", hi - lo, t.elapsed().as_secs_f64());
 }
@@ -2614,7 +2614,12 @@ fn read_chunk_receipts(nchunks: usize) -> Vec<risc0_zkvm::Receipt> {
     let dir = std::env::var("HAZYNC_RECEIPTS").unwrap_or_else(|_| ".".into());
     let mut receipts: Vec<risc0_zkvm::Receipt> = Vec::with_capacity(nchunks);
     for i in 0..nchunks {
-        let f = format!("{dir}/chunk_{i}.bin");
+        // #278 renamed the WRITER's default to .hzk. This reader accepts either, because chunk
+        // receipts outlive the run that made them: a box with a staged set from an older host must
+        // still aggregate. Preferring .hzk and falling back keeps both directions working, and a
+        // missing chunk still panics by name rather than aggregating a short set.
+        let hzk = format!("{dir}/chunk_{i}.hzk");
+        let f = if std::path::Path::new(&hzk).exists() { hzk } else { format!("{dir}/chunk_{i}.bin") };
         let r: risc0_zkvm::Receipt =
             bincode::deserialize(&std::fs::read(&f).unwrap_or_else(|e| panic!("chunk receipt {f}: {e}"))).unwrap();
         r.verify(METHOD_ID).unwrap_or_else(|e| panic!("chunk receipt {f} does not verify: {e}"));
@@ -3734,7 +3739,7 @@ fn cmd_prove_range_bridge(n: u32) {
     let t = Instant::now();
     let receipt = prove_env_with_progress(b.build().unwrap(), &format!("range [{n}..{n}] (bridge)"));
     receipt.verify(METHOD_ID).expect("verify");
-    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.bin"));
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| format!("range_{n}.hzk"));
     std::fs::write(&out, bincode::serialize(&receipt).unwrap()).unwrap();
     println!("proved range [{n}..{n}] from bridge bundle in {:.1}s -> {out}", t.elapsed().as_secs_f64());
 }

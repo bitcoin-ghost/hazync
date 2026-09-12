@@ -175,7 +175,7 @@ while read -r PID IP PORT LOC CHUNK _ _; do
     fi ) &
 done < $S/assign_opt.txt
 wait
-STAGED=$(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $COORD_SSH root@$COORD_IP 'ls /workspace/chunk_*.bin 2>/dev/null | wc -l')
+STAGED=$(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $COORD_SSH root@$COORD_IP 'ls /workspace/chunk_*.bin /workspace/chunk_*.hzk 2>/dev/null | wc -l')
 say "staged $STAGED/$N at +$(python3 -c "print(round($(date +%s.%N)-$T0,1))")s"
 [ "$STAGED" -lt $N ] && { say "⛔ ABORT: coordinator has $STAGED/22"; exit 1; }
 

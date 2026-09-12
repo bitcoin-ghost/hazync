@@ -138,7 +138,7 @@ awk -F'wall_s=' '/wall_s=/{split($2,a," ");w[n++]=a[1];s+=a[1];if(a[1]>m)m=a[1]}
 
 # ⛔ agg-chunks needs the chunk receipts to exist. Without proving they do not, and it dies with
 # "chunk receipt chunk_0.bin: No such file or directory" -- which is what happened first time.
-ls "$OUT/receipts"/chunk_*.bin >/dev/null 2>&1 || die "no chunk receipts — proving did not produce them"
+ls "$OUT/receipts"/chunk_*.bin "$OUT/receipts"/chunk_*.hzk >/dev/null 2>&1 || die "no chunk receipts — proving did not produce them"
 say "=== 3. aggregate — the term worth 25% of Ghost's budget and 12% of Core's ==="
 say "    ⏰ issue #207: does it still saturate at N=2? That ceiling has never been re-measured"
 ( cd "$P" && export HAZYNC_CHUNKS=16 HAZYNC_RECEIPTS="$OUT/receipts"; "$BIN" agg-chunks ) >"$OUT/agg.log" 2>&1; say "agg REAL_EXIT=$?"

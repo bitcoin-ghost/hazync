@@ -223,15 +223,15 @@ ln -sf hazync-host-x86_64-linux-gnu host   # shorter to type; the real file keep
                                            # which is what SHA256SUMS.txt lists
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code
-curl -f https://bitcoinghost.org/hazync/api/proof/1 -o proof.bin
-./host verify-any proof.bin
+curl -fLO https://bitcoinghost.org/hazync/api/proof/1   # lands as hazync-1.hzk
+./host verify-any hazync-1.hzk
 ```
 
 (Want to check the verifier binary itself before trusting it? SHA256 + PGP signature steps are in [`SECURITY.md`](SECURITY.md#verifying-releases); or confirm `./host method-id` equals `reproduce/METHOD_ID`.)
 
 If it prints a line starting with `RANGE-OK`, the proof is genuine — with one nuance: `verify-any` attests *that single step* (this block is a correct consensus transition between its stated boundaries); `verify-chain` / `verify-range` (or the board's connected frontier) are what pin it back to the genesis anchor. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
 
-The `.bin` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
+The `.hzk` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
 
 If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instead of `RANGE-OK`, that is **not** a bad proof — your host was built from a different guest than made the proof, so their image ids differ. The prebuilt binary above avoids this (it's the canonical guest). If you built from source, run `host method-id` to see yours and reproduce the canonical id with the container (`docker build -f reproduce/Dockerfile .`) — it's pinned in [`reproduce/METHOD_ID`](reproduce/METHOD_ID). See [`docs/PROVING.md`](docs/PROVING.md).
 

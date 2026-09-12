@@ -17,8 +17,8 @@ while read -r _ IP PORT _ CHUNK _ _; do
    done ) &
 done < $S/assign_opt.txt
 wait
-say "chunk receipts on laptop: $(ls $D/receipts/chunk_*.bin 2>/dev/null | wc -l)/27"
-say "coordinator staged: $(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $CPORT root@$CIP 'ls /workspace/chunk_*.bin 2>/dev/null | wc -l')/27"
+say "chunk receipts on laptop: $(ls $D/receipts/chunk_*.bin $D/receipts/chunk_*.hzk 2>/dev/null | wc -l)/27"
+say "coordinator staged: $(timeout 30 ssh -n -o ConnectTimeout=12 -i $K -p $CPORT root@$CIP 'ls /workspace/chunk_*.bin /workspace/chunk_*.hzk 2>/dev/null | wc -l')/27"
 timeout 45 ssh -n -o ConnectTimeout=15 -i $K -p $CPORT root@$CIP \
  "cd /workspace && rm -f regen.log regen.err && HAZYNC_LIFTX_HINT=1 HAZYNC_FIELD_BIGINT2=1 HAZYNC_ECMULT_WINDOW=21 \
   HAZYNC_BLOCK=/workspace/block_966256.json HAZYNC_CHUNKS=27 \

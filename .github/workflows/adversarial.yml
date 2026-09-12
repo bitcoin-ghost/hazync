@@ -134,6 +134,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_beat.py --control
+      - name: A downloaded proof is named, with its own extension (#278)
+        # `curl -O` names a file after the URL path, so /api/proof/1 landed as an extensionless "1".
+        # Also pins the host<->worker filename contract: the worker does not pass HAZYNC_OUT, so it
+        # has to know what the host called the file, and that break costs a whole prove.
+        run: cd coordinator && python3 test_proof_names.py
+      - name: Proof naming POSITIVE CONTROL (Content-Disposition stripped — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_proof_names.py --control
       - name: Coordinator does not jam under concurrent load (#265)
         # WAL (a writer is not blocked by an open reader) + single-flight state/frontier caches.
         run: cd coordinator && python3 test_coord_concurrency.py
@@ -153,6 +162,13 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_progress.py --control
+      - name: release.sh attests the CUDA host it cannot run (#275)
+        # The fallback that lets a GPU-less release box publish the CUDA host sat under a STALENESS
+        # check, which is true for exactly the fresh artifact that needs it — so it never ran, and
+        # v0.21.1 and v0.21.2 were published only because the operator passed the id by hand.
+        run: ./scripts/test-release-attest.sh
+      - name: CUDA attestation POSITIVE CONTROL (staleness gate restored — must FAIL)
+        run: ./scripts/test-release-attest.sh --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
@@ -271,6 +287,17 @@ jobs:
         run: ./scripts/check-workflow-injection.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
         run: ./scripts/check-versions.sh
+      - name: Guest lineage is append-only and matches git history (#244)
+        # A receipt stays verifiable only while we keep its method id AND can rebuild the risc0
+        # verifier that checked it, so the thing that destroys a back catalogue is a re-baseline
+        # sweep quietly taking a superseded row with it. reproduce/LINEAGE.tsv is a materialised
+        # view of git history, and this is the gate that says the view still matches the evidence.
+        # Needs the fetch-depth: 0 checkout above — on a shallow clone the check refuses to run.
+        run: ./scripts/lineage.sh --check
+      - name: Lineage gate still catches a deleted or rewritten row (positive control)
+        run: ./scripts/test-lineage.sh
+      - name: Lineage POSITIVE CONTROL (row COUNT compared instead of contents — must FAIL)
+        run: ./scripts/test-lineage.sh --control
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
       - name: check-dist attestation path (#248)
