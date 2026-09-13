@@ -247,8 +247,9 @@ _rate = {}          # (kind, ip) -> [timestamps] sliding window, guarded by _rat
 _rate_lock = threading.Lock()
 # vranges is served separately (#35): it is ~99.9% of the old /api/state payload and changes only when a
 # range is verified, so a 10s cache + ETag turns a re-poll into a 304 instead of re-shipping the index.
-_vranges_cache = {"t": 0.0, "v": None, "etag": None}
-VRANGES_TTL = float(os.environ.get("VRANGES_CACHE_TTL", "10"))
+# 120 s, not 10. A rebuild of the full index takes ~25 s at 69k rows (5.8 MB), so a 10 s cache under
+# ordinary board traffic was rebuilding back to back; see vranges_cached. Also the TTL of /api/spine/segments.
+VRANGES_TTL = float(os.environ.get("VRANGES_CACHE_TTL", "120"))
 _state_lock = threading.Lock()
 # Bound concurrent STARK verifications. submit() runs verify-any OUTSIDE _lock (so it can't stall
 # claims/heartbeats), but without a cap a burst of submits would spawn unlimited concurrent `host
@@ -338,6 +339,25 @@ def db():
     c = sqlite3.connect(DB, timeout=DB_BUSY_TIMEOUT)
     c.row_factory = sqlite3.Row
     return c
+
+def raise_open_file_limit(want=65536):
+    """Lift the soft open-file limit towards the hard one, and say what it ended up as.
+
+    systemd hands a service a SOFT limit of 1024 however high the hard limit is (524288 on the box), and
+    Python never raises it. Every in-flight request holds a socket, and every one touching the database
+    holds the DB, its -wal and often a temp file: on 2026-09-13 a stampede of /api/vranges rebuilds took
+    the process to exactly 1024 descriptors, after which `sqlite3.connect` failed with "unable to open
+    database file" and every claim and submit timed out. Raising the soft limit is always permitted."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = want if hard == resource.RLIM_INFINITY else min(want, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        return resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except Exception as e:                    # not fatal: the service still runs at its old limit
+        print(f"[hazync-coordinator] WARNING: could not raise the open-file limit: {e}", flush=True)
+        return None
 
 def init_db():
     c = db()
@@ -1597,19 +1617,24 @@ def vranges_cached():
     This is ~99.9% of what /api/state used to ship (3,393,853 of 3,397,846 bytes at 38,507 entries) and
     it only changes when a range is verified — but the board polled it every 10 seconds, and it grows
     with the chain. Splitting it out takes the steady-state poll from ~313 KB gzipped to a few KB, and
-    the ETag makes an unchanged index a 304 rather than a re-download."""
-    now = time.time()
-    with _state_lock:
-        if _vranges_cache["v"] is not None and now - _vranges_cache["t"] < VRANGES_TTL:
-            return _vranges_cache["v"], _vranges_cache["etag"]
-    c = db()
-    blk = blocked_pubkeys()          # same moderation list state() applies, so handles match exactly
-    payload = {"vranges": build_vranges(c, blk), "range_size": RANGE_SIZE}
-    v = json.dumps(payload).encode()
-    etag = '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
-    with _state_lock:
-        _vranges_cache["t"] = time.time(); _vranges_cache["v"] = v; _vranges_cache["etag"] = etag
-    return v, etag
+    the ETag makes an unchanged index a 304 rather than a re-download.
+
+    Single-flight, like state_cached (#265). It was a plain TTL cache, and on 2026-09-13 that took the
+    board down for ~20 minutes: a rebuild had grown to ~25 s, so under ordinary traffic every request that
+    arrived during one missed the cache and started its own. ~350 threads ended up rebuilding at once, each
+    holding a connection, the -wal and a temp file, until the process hit its 1024 open files and nothing
+    could open the database -- claims and submits included. Now one thread rebuilds and everyone else gets
+    the previous index meanwhile; only a cold start waits."""
+    def build():
+        c = db()
+        try:
+            blk = blocked_pubkeys()      # same moderation list state() applies, so handles match exactly
+            payload = {"vranges": build_vranges(c, blk), "range_size": RANGE_SIZE}
+        finally:
+            c.close()                    # explicitly: a connection must not depend on the GC to be released
+        v = json.dumps(payload).encode()
+        return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
+    return _single_flight("vranges", VRANGES_TTL, build)
 
 def state(slim=False):
     now = time.time()
@@ -1661,6 +1686,10 @@ def state(slim=False):
     # A contributor counts if they did ANY of the three. Someone who only folds or only anchors was
     # invisible here before, which is the whole point of splitting the kinds.
     ncontrib = sum(1 for v in _dbp.values() if v["proved"] or v["folded"] or v["anchored"])
+    # Fold OPERATIONS chain-wide, the leaderboard's column summed. `folded` above counts BLOCKS inside a
+    # fold; this counts folds, which is what "N of the proven - 1 folds it takes to make one proof" needs.
+    # The site used to count them from /api/vranges, a full-index download per visitor.
+    folds = sum(v["folded"] for v in _dbp.values())
     leaders = sorted(
         (dict(id=pk[:10], handle=_handles.get(pk), blocks=v["proved"],
               proved=v["proved"], folded=v["folded"], anchored=v["anchored"],
@@ -1796,7 +1825,7 @@ def state(slim=False):
         # green, and only this number quietly stops. Reporting it beside frontier makes the gap
         # (frontier - spine_hi) a thing you can see rather than something you have to notice.
         # None means no spine at all, which is different from a stale one and should read differently.
-        "progress": {"proven": proven, "folded": folded, "frontier": fr, "tip": _tip_now,
+        "progress": {"proven": proven, "folded": folded, "folds": folds, "frontier": fr, "tip": _tip_now,
                      "pct": round(100.0*fr/_tip_now, 3) if _tip_now else 0, "contributors": ncontrib,
                      "spine_hi": (spine_head() or {}).get("hi")},
         "failed": failed,
@@ -2484,6 +2513,7 @@ def install_stack_dump():
 
 if __name__ == "__main__":
     install_stack_dump()
+    print(f"[hazync-coordinator] open-file limit {raise_open_file_limit()}", flush=True)
     init_db()
     # Fail closed at startup: never serve on a public interface while the STARK check or signatures are
     # in a permissive/dev mode — a misconfigured redeploy would otherwise credit the public board for
