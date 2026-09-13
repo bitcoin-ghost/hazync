@@ -949,6 +949,17 @@ def cmd_run(args):
     if args:
         rng = args[0]
         lo, hi = parse_range(rng)
+        # ⛔ SAY THE SPAN OUT LOUD, BEFORE ANYTHING EXPENSIVE (#281). `hazync run 30000-30050` proves
+        # FIFTY-ONE blocks, and on 2026-09-11 a contributor read it as fifty: each chunk then began on
+        # the block its predecessor ended on. Every proof was valid and every one verified, but from
+        # the second chunk none could ever seam onto the genesis chain, and the board froze for
+        # thirteen hours. #283 now refuses those bounds at submit — after the proving is paid for.
+        # This is the half that costs nothing: the count is what makes an off-by-one visible, because
+        # "30000-30050" reads as fifty to almost everyone and "51 blocks" reads as fifty-one to
+        # everyone.
+        n = hi - lo + 1
+        print(f"proving {n} block{'' if n == 1 else 's'}: {lo}..{hi} inclusive"
+              + ("" if n == 1 else f" — the next range starts at {hi + 1}"))
         # Still worth checking up front: proving a block whose witness cannot be fetched wastes the
         # whole prove, and the coordinator serves witnesses by direct file lookup so this is cheap.
         for probe in sorted({max(lo, 1), hi}):

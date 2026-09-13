@@ -116,7 +116,21 @@ It confirms your prover is present, its guest `METHOD_ID` matches the coordinato
 ```
 ./hazync run              # takes the coordinator's suggestion
 ./hazync run 5            # or name any block you like
+./hazync run 30000-30049  # or a span — BOTH ENDS INCLUSIVE: this is 50 blocks
 ```
+
+> ⛔ **Range bounds are inclusive at both ends, so the next range starts at `hi + 1`.**
+> `30000-30050` is **51** blocks, not 50, and the range after it begins at `30051`.
+>
+> This is worth a warning because getting it wrong is silent and expensive. On 2026-09-11 a
+> contributor submitted 50-block chunks as `30000-30050`, `30050-30100`, `30100-30149` — each one
+> starting on the block its predecessor ended on. Every proof was valid and every one verified, but
+> a genesis-anchored chain needs each range to begin exactly one block after the last, so from the
+> second chunk onwards none of them could ever join it. The board's frontier froze for thirteen
+> hours while the total kept climbing.
+>
+> The coordinator now refuses those bounds at submit, and `hazync run` prints the span and the block
+> count before it starts proving — check that line if you are proving a span by hand.
 
 **Nothing is reserved and nothing is allocated.** The coordinator will *suggest* a block that would be
 most useful next, but you may prove any height you want and submit it — the suggestion is advisory.

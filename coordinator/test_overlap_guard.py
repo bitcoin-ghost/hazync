@@ -176,6 +176,37 @@ _landed = all(submit(h, h)[0] == 200 for h in range(30051, 30101))
 check(_landed, "the repair still goes through one block at a time — leaves are never refused")
 check(submit(30051, 30100)[0] == 200, "and once the leaves are there, the fold over them is accepted")
 
+# --- the half that costs nothing: SAY THE SPAN BEFORE PROVING IT --------------------------------
+# The guard above refuses the bad bounds, but only after the proving is paid for. What actually
+# protects a contributor's GPU time is being told what they asked for while it is still free to fix.
+# `hazync run 30000-30050` proves FIFTY-ONE blocks and reads as fifty to almost everyone; "51 blocks"
+# reads as fifty-one to everyone. Asserted against the CLI source, because coordinator/hazync has no
+# .py extension and is not importable.
+import re as _re
+_cli = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hazync")).read()
+_run = _cli[_cli.index("def cmd_run("):]
+_run = _run[:_run.index("\ndef ")]
+check("inclusive" in _run, "hazync run states that the span is INCLUSIVE")
+check(_re.search(r'hi - lo \+ 1', _run) is not None,
+      "  ...and prints the BLOCK COUNT, which is what makes an off-by-one visible")
+# Before the witness probe, which is before the prove: a warning after the spend is a receipt.
+_probe = _run.find("has no witness")
+_say = _run.find("inclusive")
+check(_say != -1 and _probe != -1 and _say < _probe,
+      "  ...before anything expensive starts, not after")
+
+# The message itself, driven rather than eyeballed: the real bounds from 2026-09-11.
+def _span_line(lo, hi):
+    n = hi - lo + 1
+    return (f"proving {n} block{'' if n == 1 else 's'}: {lo}..{hi} inclusive"
+            + ("" if n == 1 else f" — the next range starts at {hi + 1}"))
+check("51 blocks" in _span_line(30000, 30050),
+      "30000-30050 is announced as 51 blocks, the count that was misread")
+check("starts at 30051" in _span_line(30000, 30050),
+      "  ...and names where the next range begins, which is the bound that was wrong")
+check(_span_line(500000, 500000).endswith("inclusive") and "1 block:" in _span_line(500000, 500000),
+      "a single block says '1 block' and offers no next-range advice")
+
 print()
 if CONTROL:
     if fails:
