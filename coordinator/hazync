@@ -58,6 +58,23 @@ RCPTDIR = HOME / "receipts"
 DEFAULT_COORD = "https://bitcoinghost.org/hazync"
 COORD   = os.environ.get("COORD_URL", DEFAULT_COORD).rstrip("/")
 
+# The release this CLI came from, reported to the coordinator on every request (#293).
+#
+# ⛔ STAMPED AT PACKAGE TIME, NOT MAINTAINED BY HAND. scripts/package-release.sh rewrites this line
+# with the tag it is building, so it cannot drift: there is no constant anyone has to remember to
+# bump, and no gate needed to catch them forgetting. A checkout says "dev" because a checkout IS not
+# a release, and that is worth reporting too — "dev" is a real answer to "what are you running".
+#
+# WHY THE COORDINATOR NEEDS THIS. Block 39,413 pinned the frontier for five hours. The server's whole
+# record of it was: claimed, heartbeating, zero submissions, zero attempts, no error. Every
+# worker-side failure we have fixed leaves exactly that trace — #261 (no usable GPU), #256 (a stall),
+# #268 (a lost claim response), #286 (assembly read as a hang) — and they are indistinguishable from
+# each other without knowing what the worker is running. 39,413 turned out to be #286: assembling
+# 1,012 segment receipts took 757s against a 600s silence timeout that #286 removed. A version string
+# would have said so in one query instead of an hour of proving it.
+VERSION = "dev"
+UA      = f"hazync-worker/{VERSION}"
+
 
 def _find_host():
     """Locate the prover binary without making the contributor state a path.
@@ -169,9 +186,49 @@ def _open(req, timeout, tries=4):
                 raise SystemExit(f"coordinator {COORD} unreachable after {tries} tries: {e}")
             time.sleep(2 * (k + 1))                       # 2s, 4s, 6s backoff
 
+def _guard_dev_writes(path):
+    """Refuse to WRITE to the public board from a source checkout unless explicitly allowed.
+
+    `COORD_URL` defaults to production on purpose, and that default is right: a contributor who
+    downloaded a release wants to join the party, and pointing them at localhost would send them to a
+    connection error that reads like the project is broken.
+
+    It is also a footgun for anyone working ON hazync, because the same default applies to a test run.
+    On 2026-09-13 a single fold of blocks 1-2 landed on the live board from a key nobody recognised,
+    under the auto-generated handle `ghost:ff0376`, with no claim and nothing before or after it —
+    the exact signature of someone running the CLI to see if it worked. The board is append-only and
+    public: the registry of who proved what, first, is the asset (#244), so a stray row is not a
+    tidy-up, it is a permanent entry about a person who may not exist.
+
+    The test is VERSION, which package-release.sh stamps and a checkout leaves as "dev" (#293). So a
+    RELEASE writes to production silently, exactly as a contributor expects, and only a checkout has
+    to say it means it. Reads are never blocked — browsing the board from source is harmless.
+
+    Deliberately a refusal, not a warning, and this is the one place that differs from how the default
+    HANDLE is handled. A wrong handle is a display label on your own work and is fixable by rotating
+    (#113); a stray submission is a public record about someone else's board that cannot be taken back
+    without deleting a row. Warnings are for what can be undone."""
+    if VERSION != "dev" or COORD != DEFAULT_COORD:
+        return
+    if os.environ.get("HAZYNC_ALLOW_DEV_WRITES") in ("1", "true", "yes"):
+        return
+    sys.exit(
+        f"refusing to POST {path} to the PUBLIC board from a source checkout.\n"
+        f"  coordinator : {COORD}\n"
+        f"  this CLI    : hazync-worker/dev (not a release — you are running from a checkout)\n"
+        f"\n"
+        f"  The board is public and append-only, so a test submission is a permanent record.\n"
+        f"  Pick one:\n"
+        f"    COORD_URL=http://127.0.0.1:8899 ...   # point at your own coordinator (what you want)\n"
+        f"    HAZYNC_ALLOW_DEV_WRITES=1 ...         # you really do mean the public board\n"
+        f"\n"
+        f"  A RELEASE build never sees this — it is only a checkout that has to say it means it.")
+
+
 def post(path, body):
+    _guard_dev_writes(path)
     req = urllib.request.Request(COORD + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", "User-Agent": UA})
     try:
         return json.load(_open(req, timeout=180))        # submit triggers verification — allow time
     except urllib.error.HTTPError as e:                  # coordinator returns JSON {"error": ...} with a 4xx/5xx
@@ -179,7 +236,7 @@ def post(path, body):
         except Exception: raise SystemExit(f"coordinator error {e.code}: {e.reason}")
 
 def get(path):
-    return _open(urllib.request.Request(COORD + path), timeout=60).read()
+    return _open(urllib.request.Request(COORD + path, headers={"User-Agent": UA}), timeout=60).read()
 
 def witness_in_window(blk):
     # True if the coordinator currently serves the witness for `blk` (i.e. the block is inside the rolling

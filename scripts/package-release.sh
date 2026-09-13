@@ -26,6 +26,21 @@ python3 -c "import ast,sys; ast.parse(open('coordinator/hazync').read())" \
 cp coordinator/hazync "$OUT/hazync-worker"
 chmod +x "$OUT/hazync-worker"
 
+# Stamp the release into the SHIPPED copy (#293). The source keeps VERSION = "dev", because a
+# checkout is not a release and saying so is the honest answer; only the artifact claims a version.
+# That is what makes drift impossible: nothing to bump by hand, so nothing to forget.
+#
+# ⛔ ASSERT THE STAMP LANDED. A `sed` that matches nothing exits 0, and the release would then ship a
+# binary reporting "dev" for ever — a silent failure of the exact mechanism built to end silent
+# failures. TAG is optional: running this script by hand leaves "dev", which is correct.
+if [ -n "${TAG:-}" ]; then
+    sed -i "s|^VERSION = \"dev\"$|VERSION = \"${TAG#v}\"|" "$OUT/hazync-worker"
+    grep -q "^VERSION = \"${TAG#v}\"$" "$OUT/hazync-worker" \
+        || { echo "::error::could not stamp VERSION=${TAG#v} into hazync-worker — did the line move?"; exit 1; }
+    python3 -c "import ast,sys; ast.parse(open('$OUT/hazync-worker').read())" \
+        || { echo "::error::hazync-worker does not parse after stamping"; exit 1; }
+fi
+
 # It must run. A syntax check passes on a script whose entry point is broken, and the first thing a
 # contributor does is run it — `--help` exercises argument handling and the discovery path without
 # touching the network or claiming anything.

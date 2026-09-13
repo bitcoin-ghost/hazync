@@ -190,6 +190,15 @@ jobs:
       # --control mode, so it runs once.
       - name: Key rotation carries a contributor's proved blocks to the new key (#113)
         run: cd coordinator && python3 test_rotation.py
+      - name: Client versions are recorded and surfaced (#293)
+        # Block 39,413 pinned the frontier for 5h and the server could only say "a live worker is
+        # proving it". It was #286 — 757s of assembly against a 600s silence timeout that release
+        # removed — and the holder's version was the one fact nobody had.
+        run: cd coordinator && python3 test_client_version.py
+      - name: Client version POSITIVE CONTROL (recorded only on submit — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_client_version.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so

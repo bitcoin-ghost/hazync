@@ -214,7 +214,7 @@ step "3. package worker, wasm and the x86_64 verifier"
 # #247: package-release.sh SKIPS the wasm (stderr warning, exit 0) when this box has no wasm32
 # target -- which is every release from hazync-coord, which has no host Rust at all. This used to print
 # "ok worker + wasm packaged" regardless. Report what actually happened; step 4 still gates the file.
-PKG_ERR=$( { run ./scripts/package-release.sh >/dev/null; } 2>&1 ) || { printf '%s\n' "$PKG_ERR" >&2; die "package-release failed"; }
+PKG_ERR=$( { run env TAG="$TAG" ./scripts/package-release.sh >/dev/null; } 2>&1 ) || { printf '%s\n' "$PKG_ERR" >&2; die "package-release failed"; }
 [ -n "$PKG_ERR" ] && printf '%s\n' "$PKG_ERR" >&2
 if printf '%s' "$PKG_ERR" | grep -q "skipping hazync-verify.wasm"; then
     ok "worker packaged"
