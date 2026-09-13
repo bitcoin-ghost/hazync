@@ -161,6 +161,23 @@ def is_genesis_anchored(in_tip, lo):
 # heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "3600"))    # 1 hour, then anyone may take it
 CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a claim after this long regardless
+# #296: a claim that has NEVER heartbeat is released after this, not after CLAIM_TTL.
+#
+# Liveness is COALESCE(last_beat, claimed_at), which is right and deliberate — workers predating the
+# beat send none, and falling back to claimed_at keeps them working (#251). But it gives a claim that
+# has never beaten the full hour, identical to one being actively proved. Measured on the live board
+# 2026-09-13: 237 blocks held by two contributors who were not proving them, while the most productive
+# prover on the board held TWO claims, because a healthy claim turns over in seconds.
+#
+# 600s is not a guess. Measured over 55,920 successful ranges, claim -> VERIFIED is p50 27s, p90 101s,
+# p99 319s — so this is nearly double the p99 of a whole completed prove, and the grace only has to
+# cover claim -> FIRST beat, which is shorter still: the beat is progress-gated and segment 1 lands in
+# about 4s even on a 1,012-segment block. The headroom is for a slow witness fetch on a poor link.
+#
+# ⚠ Releasing a claim CANCELS NOTHING. Submission is free-running, so a worker that finishes after its
+# claim lapsed still submits successfully; the cost of being wrong here is duplicate work, not lost
+# work. That is what makes a short grace safe.
+CLAIM_GRACE = int(os.environ.get("CLAIM_GRACE", "600"))  # never-beaten claims: released after this
 # How far a signed beat's timestamp may sit from ours. It bounds REPLAY of a captured beat, so it
 # wants to be small; it also has to absorb ordinary clock drift on a contributor's box plus request
 # latency, so it cannot be tiny. Two minutes is comfortably above NTP-corrected drift and well under
@@ -743,10 +760,13 @@ def coverage_and_held(c, now):
     proven = set()
     for row in c.execute("SELECT lo, hi FROM vranges"):
         proven.update(range(row["lo"], row["hi"] + 1))
+    # #296: a claim that has never beaten is held only for CLAIM_GRACE. One that HAS beaten keeps the
+    # full CLAIM_TTL, however slow it is — the test is progress, not speed.
     held = {r["lo"] for r in c.execute(
         "SELECT lo FROM ranges WHERE status='claimed'"
-        " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
-        (now - CLAIM_TTL, now - CLAIM_MAX))}
+        " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
+        " AND (last_beat IS NOT NULL OR claimed_at > ?)",
+        (now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE))}
     return proven, held
 
 def pick(body):
