@@ -58,6 +58,23 @@ RCPTDIR = HOME / "receipts"
 DEFAULT_COORD = "https://bitcoinghost.org/hazync"
 COORD   = os.environ.get("COORD_URL", DEFAULT_COORD).rstrip("/")
 
+# The release this CLI came from, reported to the coordinator on every request (#293).
+#
+# ⛔ STAMPED AT PACKAGE TIME, NOT MAINTAINED BY HAND. scripts/package-release.sh rewrites this line
+# with the tag it is building, so it cannot drift: there is no constant anyone has to remember to
+# bump, and no gate needed to catch them forgetting. A checkout says "dev" because a checkout IS not
+# a release, and that is worth reporting too — "dev" is a real answer to "what are you running".
+#
+# WHY THE COORDINATOR NEEDS THIS. Block 39,413 pinned the frontier for five hours. The server's whole
+# record of it was: claimed, heartbeating, zero submissions, zero attempts, no error. Every
+# worker-side failure we have fixed leaves exactly that trace — #261 (no usable GPU), #256 (a stall),
+# #268 (a lost claim response), #286 (assembly read as a hang) — and they are indistinguishable from
+# each other without knowing what the worker is running. 39,413 turned out to be #286: assembling
+# 1,012 segment receipts took 757s against a 600s silence timeout that #286 removed. A version string
+# would have said so in one query instead of an hour of proving it.
+VERSION = "dev"
+UA      = f"hazync-worker/{VERSION}"
+
 
 def _find_host():
     """Locate the prover binary without making the contributor state a path.
@@ -171,7 +188,7 @@ def _open(req, timeout, tries=4):
 
 def post(path, body):
     req = urllib.request.Request(COORD + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", "User-Agent": UA})
     try:
         return json.load(_open(req, timeout=180))        # submit triggers verification — allow time
     except urllib.error.HTTPError as e:                  # coordinator returns JSON {"error": ...} with a 4xx/5xx
@@ -179,7 +196,7 @@ def post(path, body):
         except Exception: raise SystemExit(f"coordinator error {e.code}: {e.reason}")
 
 def get(path):
-    return _open(urllib.request.Request(COORD + path), timeout=60).read()
+    return _open(urllib.request.Request(COORD + path, headers={"User-Agent": UA}), timeout=60).read()
 
 def witness_in_window(blk):
     # True if the coordinator currently serves the witness for `blk` (i.e. the block is inside the rolling

@@ -263,6 +263,26 @@ def rate_ok(ip, kind="w", limit=RATE_MAX):
         q.append(now); _rate[key] = q
         return True
 
+def note_client_version(c, pk, body):
+    """Record the release a contributor's worker is running (#293). Advisory: nothing is refused for it.
+
+    Written on claim AND on submit, because the two answer different questions. A worker that claims
+    and never submits is the failure this exists to diagnose — block 39,413 pinned the frontier for
+    five hours with claims, heartbeats, zero submissions and no error — so recording only on submit
+    would be silent for exactly the case that needs it.
+
+    Never overwrites a known version with an unknown one: a contributor running several boxes may
+    have one on an old CLI that sends no User-Agent at all, and letting that erase what the others
+    reported would make the field flicker between a version and nothing."""
+    v = (body or {}).get("_client_version")
+    if not v:
+        return
+    try:
+        c.execute("UPDATE contributors SET last_version=?, last_version_at=? WHERE pubkey=?",
+                  (str(v)[:32], time.time(), pk))
+    except Exception:
+        pass          # a column that is not there yet must never cost someone their proof
+
 def blocked_pubkeys():
     """Takedown list: pubkeys (hex, lowercased) to hide from the public board. One per line in
     MOD_BLOCK_FILE ('#' comments allowed). Re-read each call so a moderator edit takes effect without a
@@ -319,7 +339,11 @@ def init_db():
         assignee TEXT, handle TEXT,
         receipt_sha TEXT, claimed_at REAL, verified_at REAL, last_beat REAL);
       CREATE TABLE IF NOT EXISTS contributors(
-        pubkey TEXT PRIMARY KEY, handle TEXT, blocks INTEGER DEFAULT 0, first_seen REAL);
+        pubkey TEXT PRIMARY KEY, handle TEXT, blocks INTEGER DEFAULT 0, first_seen REAL,
+        -- #293: the client release last seen from this contributor, and when. Nullable on purpose:
+        -- every worker in the field predates this, so "unknown" is the honest answer for them and
+        -- must not be confused with "old". Advisory only — nothing is ever refused for its version.
+        last_version TEXT, last_version_at REAL);
       CREATE TABLE IF NOT EXISTS submissions(
         id INTEGER PRIMARY KEY AUTOINCREMENT, range_id TEXT, pubkey TEXT, handle TEXT,
         receipt_sha TEXT, sig TEXT, verified INTEGER, note TEXT, ts REAL);
@@ -355,6 +379,12 @@ def init_db():
     for col in ("out_leaves INTEGER", "range_work TEXT",
                 "in_bhash TEXT", "out_bhash TEXT"):  # H7/S1: full-boundary continuity digest
         try: c.execute(f"ALTER TABLE vranges ADD COLUMN {col}")
+        except Exception: pass
+    # #293: the live board's contributors table predates these, and CREATE TABLE IF NOT EXISTS does
+    # not add a column to a table that already exists — so the running coordinator would keep the old
+    # shape and every read of last_version would raise. Migrated the same way as the columns above.
+    for col in ("last_version TEXT", "last_version_at REAL"):
+        try: c.execute(f"ALTER TABLE contributors ADD COLUMN {col}")
         except Exception: pass
     c.commit(); c.close()
 
@@ -1526,12 +1556,20 @@ def state(slim=False):
     # One row per RESOLVED identity. Iterating `contributors` would emit a rotated-away key as well,
     # and rotate() guarantees the head has a row, so key off the resolved totals instead.
     _handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
+    # #293: the release each contributor was last seen running, so they can notice their own worker is
+    # stale without having to ask anyone. None until they run a CLI new enough to say.
+    try:
+        _versions = {r["pubkey"]: r["last_version"]
+                     for r in c.execute("SELECT pubkey,last_version FROM contributors")}
+    except Exception:
+        _versions = {}
     # A contributor counts if they did ANY of the three. Someone who only folds or only anchors was
     # invisible here before, which is the whole point of splitting the kinds.
     ncontrib = sum(1 for v in _dbp.values() if v["proved"] or v["folded"] or v["anchored"])
     leaders = sorted(
         (dict(id=pk[:10], handle=_handles.get(pk), blocks=v["proved"],
-              proved=v["proved"], folded=v["folded"], anchored=v["anchored"])
+              proved=v["proved"], folded=v["folded"], anchored=v["anchored"],
+              version=_versions.get(pk))
          for pk, v in _dbp.items()
          if pk.lower() not in _blk_resolved and (v["proved"] or v["folded"] or v["anchored"])),
         # Ranked on blocks proved, the headline number; folds and absorptions break ties beneath it
@@ -1573,12 +1611,12 @@ def state(slim=False):
     # when nothing covers it (genuinely open, which is the interesting stall case).
     nb = fr + 1
     blocker = c.execute(
-        "SELECT id,status,attempts,last_failed_at,claimed_at,verified_at FROM ranges "
+        "SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle FROM ranges "
         "WHERE lo <= ? AND hi >= ? AND status IN ('claimed','verified','failed') "
         "ORDER BY (hi-lo) ASC LIMIT 1", (nb, nb)).fetchone()
     if blocker is None:
-        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at,verified_at FROM ranges"
-                            " WHERE id=?", (str(nb),)).fetchone()
+        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle"
+                            " FROM ranges WHERE id=?", (str(nb),)).fetchone()
     # #281: measure the stall from when the FRONTIER last moved, not from the blocking row's own
     # timestamp.
     #
@@ -1623,7 +1661,32 @@ def state(slim=False):
     elif _att >= MAX_ATTEMPTS:
         _attn, _attn_why = True, f"the blocking range has failed {_att} times (MAX_ATTEMPTS={MAX_ATTEMPTS})"
     elif _st == "claimed":
-        _attn, _attn_why = False, "a live worker is proving it"
+        # ⛔ "a live worker is proving it" was the whole answer, and for block 39,413 it was the whole
+        # answer for FIVE HOURS: claimed, re-claimed, heartbeating, zero submissions, needs_attention
+        # false. The claim was live every time it was looked at; what nobody could see was that the
+        # same worker kept taking it and never finishing.
+        #
+        # So say WHO holds it and WHAT THEY ARE RUNNING (#293), and stop calling it benign once the
+        # frontier has sat through several claim cycles. 39,413 turned out to be #286 — assembling
+        # 1,012 segment receipts took 757s against a 600s silence timeout that release removed — and
+        # the holder's version is the single fact that would have said so without proving it again.
+        _vrow = None
+        try:
+            if blocker["assignee"]:
+                _vrow = c.execute("SELECT last_version FROM contributors WHERE pubkey=?",
+                                  (blocker["assignee"],)).fetchone()
+        except Exception:
+            _vrow = None
+        _ver = (_vrow["last_version"] if _vrow else None) or "unknown"
+        _who = (blocker["handle"] or "an anonymous prover")
+        if stalled_for > 2 * CLAIM_TTL:
+            _attn = True
+            _attn_why = (f"{_who} has held or re-taken this block for {stalled_for}s — over two claim "
+                         f"cycles — without ever submitting it; their worker is running "
+                         f"hazync-worker/{_ver} and may be failing on a bug already fixed")
+        else:
+            _attn = False
+            _attn_why = f"a live worker is proving it ({_who}, hazync-worker/{_ver})"
     elif stalled_for > CLAIM_TTL:
         _attn, _attn_why = True, (f"nobody has held this block for {stalled_for}s, longer than a claim "
                                   f"cycle (CLAIM_TTL={CLAIM_TTL})")
@@ -1810,6 +1873,12 @@ def claim(body):
                 return 409, {"error": "nothing available to claim"}
         c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,claim_nonce)"
                   " VALUES(?,?,?,'claimed',?,?,?,?)", (str(h), h, h, pk, handle, now, nonce))
+        # A contributor may claim long before they ever submit — and if their worker cannot finish,
+        # they never submit at all. That is the case this whole thing exists to diagnose, so the
+        # version is recorded HERE as well, on a row that may not exist until their first proof.
+        c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
+                  (pk, handle, now))
+        note_client_version(c, pk, body)
         c.commit()
         c.close()
     return 200, {"ok": True, "range": str(h), "ttl": CLAIM_TTL,
@@ -2088,6 +2157,7 @@ def submit(body):
                       (pk, handle, time.time()))
             c.execute("UPDATE contributors SET blocks=blocks+?, handle=? WHERE pubkey=?",
                       (v_hi-v_lo+1, handle, pk))
+            note_client_version(c, pk, body)
             try:                                          # keep the receipt so anyone can re-verify it
                 os.makedirs(PROOFS_DIR, exist_ok=True)
                 with open(os.path.join(PROOFS_DIR, f"proof_{rid}.bin"), "wb") as pf:
@@ -2283,6 +2353,12 @@ class H(BaseHTTPRequestHandler):
         body = self._body()
         if body is None:
             return self._send(413, {"error": "request body too large"})
+        # #293: the client's release rides in on the User-Agent. Injected into the body rather than
+        # threaded through five signatures — the body is already where the caller's identity lives,
+        # and a client that sends nothing simply has no key here.
+        ua = self.headers.get("User-Agent") or ""
+        if isinstance(body, dict) and ua.startswith("hazync-worker/"):
+            body["_client_version"] = ua[len("hazync-worker/"):][:32]
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
               "/api/beat": beat, "/api/rotate": rotate}[p]
         code, obj = fn(body)
