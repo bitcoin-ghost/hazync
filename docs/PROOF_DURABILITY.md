@@ -55,6 +55,11 @@ Gates: `scripts/lineage.sh --check` and `scripts/test-lineage.sh` (+ `--control`
 
 ## 2. Accepting more than one method id — **an open decision, not pending code**
 
+> ⚖ The position we would take, and the two constraints that make it defensible, are in
+> [`METHOD_ID_DURABILITY.md`](METHOD_ID_DURABILITY.md): a set that **starts at the id we are moving
+> to** and **only ever tightens**. That is not scheduled work — it is what would ride along the day
+> something forces a new guest id, since the back catalogue is written off that day regardless.
+
 The shape suggested in #244 is `(method_id, risc0_version, valid_from, valid_to)`, append-only, with
 a verifier accepting any listed entry rather than only the current one. Layer 1 supplies the first
 three columns already.
