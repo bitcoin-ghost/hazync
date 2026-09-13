@@ -75,11 +75,14 @@ sponsor was quoted.
 | `POST /api/sponsor` `{"lo", "hi", "name", "amount_sats"}` | `503` while closed or unpriced. `400` (with `min_sats`) below the minimum. Open: records a `requested` row, `202` with `id, token, status, lo, hi, blocks, name, min_sats, pledged_sats, message` |
 | `GET /api/sponsor/status/<token>` | one sponsorship: `id, lo, hi, blocks, name, status, min_sats, pledged_sats, paid_sats, created_at, paid_at, proven_at, proven_blocks, queue_ahead, public`; `404` for an unknown link |
 | `GET /api/sponsors` | `{"sponsorships": [{id, name, lo, hi, blocks, status, paid_sats, min_sats, paid_at, proven_at, proven_blocks, queue_ahead}], "open", "priced"}`, public rows only |
-| `GET /api/block/<n>` | includes `sponsor` (name, span, status) for a public sponsorship covering the block, else `null` |
+| `GET /api/block/<n>` | includes `sponsor` (id, name, span, status) for a public sponsorship covering the block, else `null` |
 
 Validation (the quote and the request share it): `1 <= lo <= hi <= tip`, at most `SPONSOR_MAX_BLOCKS`
 (default 1000) blocks, and not a span that is already anchored (`409`). The request also needs a name of 1 to
-40 visible characters with no control or formatting characters, and `amount_sats`, a whole number of sats,
+40 characters (`name_max` in `GET /api/sponsor`; code points, after whitespace is collapsed) with no
+control, formatting, surrogate or private-use character (a zero-width joiner is formatting, so joined emoji are
+refused; an emoji newer than the coordinator's Python is not). The site's form applies the same rule before
+sending, so a name it allows is never refused here, and `amount_sats`, a whole number of sats,
 at least the minimum.
 
 `queue_ahead` counts public `paid` sponsorships paid earlier; it is `null` unless the sponsorship is itself

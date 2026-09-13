@@ -1772,6 +1772,7 @@ def _parse_price_bands(raw):
 
 SPONSOR_OPEN = os.environ.get("SPONSOR_OPEN", "0") == "1"
 SPONSOR_MAX_BLOCKS = int(os.environ.get("SPONSOR_MAX_BLOCKS", "1000"))
+SPONSOR_NAME_MAX = 40                               # characters (code points); the site's form reads it from GET /api/sponsor
 SPONSOR_PRICE_BANDS = _parse_price_bands(os.environ.get("SPONSOR_PRICE_BANDS", ""))
 SPONSOR_PUBLIC = ("paid", "proving", "proven")     # the only statuses that ever show a sponsor's name
 # A name is public only when BOTH hold: the status says paid, and what settled covers the minimum. Every
@@ -1802,12 +1803,12 @@ def _public_sponsor(c, n):
     """The sponsor shown on block n, if any. Only a sponsorship PAID AT LEAST ITS MINIMUM is shown: an
     unpaid request is text anyone can type, and showing it would let anyone put a name on any block."""
     try:
-        r = c.execute("SELECT name,lo,hi,status FROM sponsorships WHERE lo<=? AND hi>=? AND "
+        r = c.execute("SELECT id,name,lo,hi,status FROM sponsorships WHERE lo<=? AND hi>=? AND "
                       + SPONSOR_PUBLIC_SQL + " ORDER BY paid_at ASC, id ASC LIMIT 1",
                       (n, n)).fetchone()
     except sqlite3.OperationalError:          # a database from before the table; init_db adds it on start
         return None
-    return dict(name=r["name"], lo=r["lo"], hi=r["hi"], status=r["status"]) if r else None
+    return dict(id=r["id"], name=r["name"], lo=r["lo"], hi=r["hi"], status=r["status"]) if r else None
 
 def block_detail(n):
     """Everything about one block, for the block map's pop-up and the explorer's block page: every proof
@@ -1861,19 +1862,26 @@ def block_detail(n):
                  "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
                  "sponsor": sponsor}
 
+# Control, formatting, surrogate and private-use characters: where a right-to-left override, a zero-width
+# joiner that makes "Jo<ZWJ>hn" look like "John", or an invisible letter would hide. NOT unassigned (Cn):
+# this Python's Unicode tables are older than browsers', so refusing Cn refused emoji newer than it (U+1FAE0
+# is unassigned to Python 3.10) that the site's form, checking the same rule, had already accepted.
+_SPONSOR_NAME_HIDDEN = ("Cc", "Cf", "Cs", "Co")
+
 def _clean_sponsor_name(v):
-    """1-40 visible characters, inner whitespace collapsed; no control or formatting characters, which
-    is where a right-to-left override or a zero-width trick would hide."""
+    """1 to SPONSOR_NAME_MAX characters, counted in code points after inner whitespace is collapsed, with
+    no hidden character. The site's form (assets/board.js nameCheck) applies exactly this rule, so a name
+    it lets through is never refused here."""
     if not isinstance(v, str):
         return None
     t = " ".join(v.split())
-    if not 1 <= len(t) <= 40 or any(unicodedata.category(ch)[0] == "C" for ch in t):
+    if not 1 <= len(t) <= SPONSOR_NAME_MAX or any(unicodedata.category(ch) in _SPONSOR_NAME_HIDDEN for ch in t):
         return None
     return t
 
 def sponsor_info():
     return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": False,
-            "priced": bool(SPONSOR_PRICE_BANDS)}
+            "priced": bool(SPONSOR_PRICE_BANDS), "name_max": SPONSOR_NAME_MAX}
 
 def _sponsor_span(lo, hi):
     """Validate a span to sponsor: (code, error) on a bad one, else (None, (lo, hi)). Shared by the quote
@@ -1917,7 +1925,7 @@ def sponsor_request(body):
     lo, hi = v
     name = _clean_sponsor_name(body.get("name"))
     if not name:
-        return 400, {"error": "a name of 1 to 40 visible characters is required"}
+        return 400, {"error": f"a name of 1 to {SPONSOR_NAME_MAX} visible characters is required"}
     min_sats = sponsor_min_sats(lo, hi)
     if min_sats is None:
         return 503, {"error": "No minimum is set for these blocks yet, so they cannot be sponsored."}

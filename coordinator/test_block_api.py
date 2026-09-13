@@ -223,6 +223,17 @@ for payload, why in bad:
 code, _ = server.sponsor_request({"lo": 1, "hi": 2, "name": "late", "amount_sats": 5000})
 check(code == 409, f"refused: blocks already anchored (got {code})")
 
+print("== sponsorship: the name rule the site's form copies ==")
+clean = server._clean_sponsor_name
+check(server.sponsor_info()["name_max"] == server.SPONSOR_NAME_MAX == 40, "GET /api/sponsor tells the form the name limit")
+check(clean("\U0001F525" * 40) is not None and clean("\U0001F525" * 41) is None,
+      "40 emoji fit and 41 do not: characters are code points, not bytes or UTF-16 units")
+check(clean("Melt \U0001FAE0") == "Melt \U0001FAE0",
+      "an emoji newer than this Python's Unicode tables is accepted (unassigned is not hidden)")
+check(clean("Jo\u200dhn") is None, "a zero-width joiner is refused: it would make 'Jo<ZWJ>hn' look like 'John'")
+check(clean("John\t Doe") == "John Doe", "a tab inside a name collapses like any other whitespace")
+check(clean("\ufeffJohn") is None, "a byte-order mark is formatting, not whitespace, and is refused")
+
 print("== sponsorship: the private link ==")
 c = server.db()
 row = c.execute("SELECT token_hash FROM sponsorships WHERE id=?", (sid,)).fetchone()
@@ -268,7 +279,8 @@ check(d55["sponsor"] is None and public_names() == [] and sponsor_bot.queue(_tmp
       "a row marked paid but one sat short shows no name and is not in the bot's queue")
 set_row(sid, status="paid", paid_sats=2100)
 _, d55 = server.block_detail(55)
-check(d55["sponsor"] and d55["sponsor"]["name"] == "John Doe", f"paid the minimum: the block shows the name, whitespace tidied (got {d55['sponsor']})")
+check(d55["sponsor"] and d55["sponsor"]["name"] == "John Doe" and d55["sponsor"].get("id") == sid,
+      f"paid the minimum: the block shows the name, whitespace tidied, and the sponsorship's number (got {d55['sponsor']})")
 set_row(sid2, status="paid", paid_sats=9999, paid_at=t1 + 5)
 lst = server.sponsors_public()
 check([r["id"] for r in lst["sponsorships"]] == [sid2, sid], f"the public list is newest payment first (got {[r['id'] for r in lst['sponsorships']]})")
@@ -358,8 +370,9 @@ check(code == 200 and body["status"] == "folded", f"GET /api/block/3 (got {code}
 code, _, _ = call("/api/block/abc")
 check(code == 400, f"GET /api/block/abc is 400 (got {code})")
 code, body, _ = call("/api/sponsor")
-check(code == 200 and body == {"open": False, "max_blocks": server.SPONSOR_MAX_BLOCKS, "payments": False, "priced": True},
-      f"GET /api/sponsor says closed, and priced (got {code} {body})")
+check(code == 200 and body == {"open": False, "max_blocks": server.SPONSOR_MAX_BLOCKS, "payments": False, "priced": True,
+                                "name_max": server.SPONSOR_NAME_MAX},
+      f"GET /api/sponsor says closed, priced, and the name limit (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=50&hi=60")
 check(code == 200 and body["min_sats"] == 2100, f"GET /api/sponsor/quote answers while closed (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=abc")
