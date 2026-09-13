@@ -136,6 +136,54 @@ check((blk.get("stalled_for") or 0) >= 1,
 check(blk.get("needs_attention") is False,
       f"a blocker a live worker is proving does NOT need attention (why={blk.get('why')!r})")
 
+print("== a big block held continuously is waiting, not stuck (55,862) ==")
+# Block 55,862 (3,261 segments) held the frontier 2h43m under ONE claim, beating throughout, and was
+# flagged "may be failing on a bug already fixed". Over two claim cycles is not enough on its own: the
+# claim's age and the heartbeat say which of the two shapes this is.
+
+
+def seed_held_blocker(claim_age, beat_age, stall):
+    """A clean chain 1..5, block 6 claimed `claim_age` s ago with its last beat `beat_age` s ago, and a
+    frontier that has not moved for `stall` s."""
+    c = server.db()
+    c.execute("DELETE FROM vranges")
+    c.execute("DELETE FROM ranges")
+    prev_tip, prev_b = server.GENESIS_TIP, "b0"
+    for h in range(1, 6):
+        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')", (str(h), h, h))
+        c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,"
+                  "range_work,in_bhash,out_bhash) VALUES(?,?,?,?,?,'','t',0,0,'1',?,?)",
+                  (str(h), h, h, prev_tip, f"t{h}", prev_b, f"b{h}"))
+        prev_tip, prev_b = f"t{h}", f"b{h}"
+    now = time.time()
+    c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,last_beat) "
+              "VALUES('6',6,6,'claimed',?,'bigblock',?,?)", ("h" * 64, now - claim_age, now - beat_age))
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('frontier_mark',?)", (f"5:{now - stall}",))
+    c.commit()
+    c.close()
+    server._frontier_invalidate()
+    return server.state().get("blocked") or {}
+
+
+TTL = server.CLAIM_TTL
+blk = seed_held_blocker(claim_age=3 * TTL + 60, beat_age=6, stall=3 * TTL)
+check(blk.get("block") == 6 and (blk.get("stalled_for") or 0) >= 3 * TTL - 5,
+      f"the frontier really has waited over two claim cycles (stalled_for={blk.get('stalled_for')})")
+check(blk.get("needs_attention") is False,
+      f"ONE claim, still heartbeating, does NOT need attention (why={blk.get('why')!r})")
+check("large block" in (blk.get("why") or "") and "bug" not in (blk.get("why") or ""),
+      "...and says it is a large block, without blaming a bug")
+
+blk = seed_held_blocker(claim_age=600, beat_age=6, stall=3 * TTL)
+check(blk.get("needs_attention") is True,
+      f"a block RE-TAKEN over and over without a submission still needs attention -- 39,413 (why={blk.get('why')!r})")
+check("re-taken" in (blk.get("why") or ""), "...and says it was re-taken")
+
+blk = seed_held_blocker(claim_age=3 * TTL + 60, beat_age=TTL + 60, stall=3 * TTL)
+check(blk.get("needs_attention") is True,
+      f"a continuous claim whose heartbeat has lapsed needs attention -- a hung prover (why={blk.get('why')!r})")
+check("heartbeat" in (blk.get("why") or ""), "...and names the lapsed heartbeat")
+
 print("== a healthy board is not disturbed ==")
 c = server.db()
 c.execute("DELETE FROM vranges")

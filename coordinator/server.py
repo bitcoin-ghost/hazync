@@ -2157,11 +2157,11 @@ def state(slim=False):
     # when nothing covers it (genuinely open, which is the interesting stall case).
     nb = fr + 1
     blocker = c.execute(
-        "SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle FROM ranges "
+        "SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle,last_beat FROM ranges "
         "WHERE lo <= ? AND hi >= ? AND status IN ('claimed','verified','failed') "
         "ORDER BY (hi-lo) ASC LIMIT 1", (nb, nb)).fetchone()
     if blocker is None:
-        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle"
+        blocker = c.execute("SELECT id,status,attempts,last_failed_at,claimed_at,verified_at,assignee,handle,last_beat"
                             " FROM ranges WHERE id=?", (str(nb),)).fetchone()
     # #281: measure the stall from when the FRONTIER last moved, not from the blocking row's own
     # timestamp.
@@ -2225,11 +2225,37 @@ def state(slim=False):
             _vrow = None
         _ver = (_vrow["last_version"] if _vrow else None) or "unknown"
         _who = (blocker["handle"] or "an anonymous prover")
-        if stalled_for > 2 * CLAIM_TTL:
+        # ⛔ But "over two claim cycles" alone cannot tell 39,413 from a block that is simply big. Block
+        # 55,862 (3,261 segments) held the frontier 2h43m on 2026-09-13 under ONE claim — claimed once,
+        # beating until 6 s before its only submission, verified 9,830 s after the claim — and was
+        # flagged "may be failing on a bug already fixed" while running the latest release.
+        #
+        # What separates them is already in the row. `claim()` does INSERT OR REPLACE with
+        # claimed_at=now, so a worker stuck in 39,413's kill-retry-reclaim loop carries a claim far
+        # YOUNGER than the stall. A worker grinding through a big block carries one about as old as the
+        # stall itself: it took the block at most one claim cycle after the frontier stopped. And the
+        # worker only beats when a segment finishes (#256), so a HUNG prover's beat goes stale and its
+        # claim lapses after CLAIM_TTL; a fresh beat means work is still landing. CLAIM_MAX still caps a
+        # continuous hold outright. So a continuous claim with a live beat is waiting, not stuck.
+        _claim_age = int(now - (blocker["claimed_at"] or now))
+        _beat_age = int(now - (blocker["last_beat"] or blocker["claimed_at"] or now))
+        _continuous = _claim_age >= stalled_for - CLAIM_TTL
+        _live = _beat_age <= CLAIM_TTL
+        if stalled_for > 2 * CLAIM_TTL and not (_continuous and _live):
             _attn = True
-            _attn_why = (f"{_who} has held or re-taken this block for {stalled_for}s — over two claim "
-                         f"cycles — without ever submitting it; their worker is running "
-                         f"hazync-worker/{_ver} and may be failing on a bug already fixed")
+            if not _continuous:
+                _attn_why = (f"{_who} has re-taken this block over {stalled_for}s — over two claim cycles — "
+                             f"without ever submitting it (this claim is {_claim_age}s old); their worker "
+                             f"is running hazync-worker/{_ver} and may be failing on a bug already fixed")
+            else:
+                _attn_why = (f"{_who} has held this block for {_claim_age}s but its last heartbeat was "
+                             f"{_beat_age}s ago, so no proving progress is landing "
+                             f"(hazync-worker/{_ver})")
+        elif stalled_for > 2 * CLAIM_TTL:
+            _attn = False
+            _attn_why = (f"{_who} has held this block continuously for {_claim_age // 3600}h "
+                         f"{_claim_age % 3600 // 60}m and is still heartbeating ({_beat_age}s ago, "
+                         f"hazync-worker/{_ver}) — a large block, not a stall")
         else:
             _attn = False
             _attn_why = f"a live worker is proving it ({_who}, hazync-worker/{_ver})"
