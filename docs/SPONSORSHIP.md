@@ -15,7 +15,7 @@ guest commits changes the prover program ID.
 
 ```
 requested -> invoiced -> paid -> proving -> proven
-          |           \-> underpaid          \-> refunded
+          |           \-> underpaid (kept as a donation)   \-> refunded
           \-> expired / cancelled
 ```
 
@@ -24,7 +24,7 @@ requested -> invoiced -> paid -> proving -> proven
 | `requested` | `POST /api/sponsor` | yes, when `SPONSOR_OPEN=1` and the span is priced |
 | `invoiced` | payment integration (BTCPay: Lightning and on-chain) | no |
 | `paid` | payment integration, on settlement of **at least** `min_sats` | no |
-| `underpaid` | payment integration, on settlement **below** `min_sats` | status only |
+| `underpaid` | payment integration, on settlement **below** `min_sats`; the payment is kept as a donation | status only |
 | `proving` | sponsor bot, when it starts pods | no |
 | `proven` | sponsor bot, when every block in the span is verified | no |
 | `expired` | payment integration, invoice not paid in time | no |
@@ -35,8 +35,9 @@ A sponsor's name is published **only** when both hold: the status is `paid`, `pr
 by the bot's queue). An unpaid request is text anyone can type; showing it would let anyone put a name on
 any block. A row set to `paid` by hand below its minimum still shows nothing.
 
-⚠ **Open question, not decided:** what happens to an `underpaid` payment — the sponsor tops it up, it is
-refunded, or it is kept as a general donation. Only the status exists; nothing acts on it.
+**An `underpaid` payment is kept as a donation** (decided 2026-09-13). No name is shown and its blocks are
+not proven for it; the money funds proving time in general. The site says so on the Sponsor form before
+anyone pays, on the sponsor's private page, and on the sponsors page.
 
 ## The minimum
 
@@ -94,9 +95,10 @@ as `/api/blockstatus`.
 1. **Measure what a block costs.** Run the bot on the project's own budget first. Cost rises steeply with
    height (a median bundle is 354x larger at 220k than at the start), and a milestone night spent $95.34
    of RunPod credit for one $1.39 proof. A price has to come from measured cost per height band,
-   overhead included, and `SPONSOR_PRICE_BANDS` set from it with a safety margin.
-2. **Payments.** BTCPay invoices, settlement moving a row to `paid` (or `underpaid`), expiry, refunds, and a
-   decision on what an underpaid payment becomes.
+   overhead included, and `SPONSOR_PRICE_BANDS` set at **twice** that estimated cost (decided 2026-09-13):
+   rented GPU prices move, and a sponsorship that pays its minimum must always be enough to prove its blocks.
+2. **Payments.** BTCPay invoices, settlement moving a row to `paid` (or `underpaid`, kept as a donation),
+   expiry, and refunds.
 3. **The bot** (`coordinator/sponsor_bot.py` is a dry-run skeleton): RunPod pods, a spending limit, the
    normal worker under the bot's key, `proving` and `proven` updates.
 4. **Priority.** Paid spans claimed ahead of open work. The claim path is not touched until then.
