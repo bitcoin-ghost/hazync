@@ -157,6 +157,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_vranges_cache.py --control
+      - name: Block map API (blockstatus, block detail, sponsorship, weak ETags)
+        run: cd coordinator && python3 test_block_api.py
+      - name: Block map API POSITIVE CONTROL (strong-only ETag, unpaid sponsor names — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_block_api.py --control
       - name: A box with no usable GPU stops instead of claiming block after block (#261)
         run: cd coordinator && python3 test_worker_device.py
       - name: No-usable-GPU POSITIVE CONTROL (device errors treated as ordinary — must FAIL)
