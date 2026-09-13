@@ -58,7 +58,7 @@ hz._run_with_seg_retry = lambda argv, env, work, label, _beat_range=None, _beat_
 
 if CONTROL:
     _orig = hz.cmd_prove
-    hz.cmd_prove = lambda args, claimed=False: _orig(args, claimed=True)   # the pre-#251 behaviour
+    hz.cmd_prove = lambda args, claimed=False, submit_leaves=False: _orig(args, claimed=True)   # the pre-#251 behaviour
     print("CONTROL: every prove heartbeats its range -- the checks below MUST fail")
 
 fails = 0

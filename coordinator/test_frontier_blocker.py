@@ -157,6 +157,39 @@ check(got.get("range") == "9", "the next block is offered exactly once — no re
 check((server.state().get("blocked") or {}).get("stalled_for") == 0,
       "and a board that is merely working reports no stall")
 
+print("== pick() and claim() read availability the same way ==")
+# They did not, and that is what made the 30,050 freeze read as self-healing. `pick` asked whether a
+# RANGE ID str(n) existed; `claim` asked whether the HEIGHT was covered. A wide range covers heights
+# whose ids never existed, so /api/pick returned block 30,051 all day -- a block claim() would never
+# hand out. Anyone debugging from the endpoint saw a board already recovering.
+#
+# They still differ on ONE thing, deliberately: claim() re-offers the frontier's own blocker, because
+# that is an allocation decision. So this seeds a board with no stuck blocker, where the only question
+# left is availability -- and there they must agree exactly.
+c = server.db()
+c.execute("DELETE FROM vranges"); c.execute("DELETE FROM ranges")
+prev_tip, prev_b = server.GENESIS_TIP, "b0"
+for h in range(1, 6):                                  # an unbroken, seamable run 1..5
+    c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')", (str(h), h, h))
+    c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,"
+              "range_work,in_bhash,out_bhash) VALUES(?,?,?,?,?,'','t',0,0,'1',?,?)",
+              (str(h), h, h, prev_tip, f"t{h}", prev_b, f"b{h}"))
+    prev_tip, prev_b = f"t{h}", f"b{h}"
+# a WIDE range covering 6..9, whose ids 6/7/8/9 do not exist as rows
+c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES('6-9',6,9,'verified')")
+c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work,"
+          "in_bhash,out_bhash) VALUES('6-9',6,9,?,'t9','','w',0,0,'1',?,'b9')", (prev_tip, prev_b))
+c.commit(); c.close()
+server._frontier_invalidate()
+
+_, pk_r = server.pick(None)
+_, cl_r = server.claim({"pubkey": "z" * 64, "handle": "t", "nonce": "n9"})
+_cl_block = int(cl_r["range"]) if cl_r.get("range") else None
+check(pk_r.get("lo") == _cl_block,
+      f"pick and claim name the same block (pick={pk_r.get('lo')}, claim={_cl_block})")
+check(pk_r.get("lo") not in (6, 7, 8, 9),
+      f"neither offers a block a WIDE range already covers, id or no id (offered {pk_r.get('lo')})")
+
 print("== the unseamable cover DOES need attention ==")
 seed_fork_at(6)
 # Nobody claims it this time: the fork range sits over the blocker as `verified`, which is the #281

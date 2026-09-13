@@ -185,6 +185,11 @@ jobs:
         run: |
           cd coordinator
           python3 test_contributions.py --control
+      # Not in CI until now, which is how hazync#289's rename of distinct_blocks_by_pubkey broke it
+      # silently: it has been failing on main since that merged, and nothing said so. It has no
+      # --control mode, so it runs once.
+      - name: Key rotation carries a contributor's proved blocks to the new key (#113)
+        run: cd coordinator && python3 test_rotation.py
       - name: Client versions are recorded and surfaced (#293)
         # Block 39,413 pinned the frontier for 5h and the server could only say "a live worker is
         # proving it". It was #286 — 757s of assembly against a 600s silence timeout that release

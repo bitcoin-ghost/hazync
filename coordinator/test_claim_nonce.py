@@ -119,7 +119,7 @@ class _Sk:
 got = []
 hz.HOSTBIN = sys.executable
 hz.identity = lambda: (_Sk(), PK_A, "tester")
-hz.cmd_prove = lambda args, claimed=False: got.append(args[0])
+hz.cmd_prove = lambda args, claimed=False, submit_leaves=False: got.append(args[0])
 hz.cmd_submit = lambda args: None
 hz.time.sleep = lambda s: None                   # the retry backoff, not what is under test
 
