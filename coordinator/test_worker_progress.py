@@ -144,6 +144,36 @@ code = attempt(h)
 check(isinstance(code, str) and "no progress for" in code,
       f"a hang BEFORE the last segment is still caught by the progress window ({str(code)[:80]!r})")
 
+# A long-lived worker's log must be written line by line. `spine` runs as one process for hours with
+# stdout pointed at a file; block-buffered, its log trailed the board by ~140 absorptions on
+# hz-board-30 (2026-09-13) and looked stalled. Tested in a REAL child whose stdout is a real file,
+# because an in-process check cannot see the buffering that only a file-backed stream has.
+import subprocess
+import time
+print("== a long-lived worker's log is written line by line ==")
+check("_line_buffer_output()" in open(os.path.join(HERE, "hazync")).read().split("def main():", 1)[1],
+      "main() line-buffers its output before running any command")
+_child = os.path.join(T, "linebuf_child.py")
+with open(_child, "w") as f:
+    f.write("import importlib.machinery, importlib.util, os, sys, time\n"
+            "ld = importlib.machinery.SourceFileLoader('hz', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('hz', ld))\n"
+            "ld.exec_module(m)\n"
+            "if sys.argv[2] != 'control':\n"
+            "    m._line_buffer_output()\n"
+            "print('spine now [1..2] -- genesis-anchored')\n"
+            "time.sleep(30)\n")
+_log = os.path.join(T, "linebuf.log")
+with open(_log, "w") as _out:
+    _p = subprocess.Popen([sys.executable, _child, os.path.join(HERE, "hazync"), "control" if CONTROL else "real"],
+                          stdout=_out, stderr=subprocess.STDOUT, env=dict(os.environ))
+_seen, _t0 = False, time.time()
+while time.time() - _t0 < 10 and not _seen:
+    time.sleep(0.2)
+    _seen = "spine now [1..2]" in open(_log).read()
+_p.kill(); _p.wait()
+check(_seen, f"a line printed by a still-running worker reaches its log file straight away ({time.time() - _t0:.1f}s)")
+
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)
