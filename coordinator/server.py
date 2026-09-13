@@ -1308,6 +1308,52 @@ def proven_count():
     if cur_hi is not None: total += cur_hi - cur_lo + 1
     return total
 
+def fold_spans(c):
+    """Every verified range that was MADE BY FOLDING, in submission order, as (lo, hi) spans.
+
+    One walk, one definition, two callers: `folded_count` (how much of the chain has been folded) and
+    `build_vranges` (which rows to flag so a client need not guess). Before this each caller invented
+    its own test and they disagreed -- the block map called any wide range a fold, which credits the
+    #281 overlap ranges with 250 blocks that were proved outright, not folded.
+
+    ⛔ ORDER IS LOAD-BEARING. `is_fold_seam` asks what was ALREADY VERIFIED when a range arrived, so
+    the walk must be in `ts` order. /api/vranges is served ORDER BY lo, and computing this from that
+    payload yields ZERO folds -- a fold's children sort after it, so every seam test fails. That is why
+    the flag is published rather than left to the client to work out.
+    """
+    by_start, ends_at, spans = {}, {}, []
+    for r in c.execute("SELECT id,lo,hi FROM vranges ORDER BY ts ASC, rowid ASC"):
+        lo, hi = r["lo"], r["hi"]
+        if hi > lo and is_fold_seam(lo, hi, by_start, ends_at):
+            spans.append((r["id"], lo, hi))
+        ends_at.setdefault(lo, set()).add(hi)
+        if by_start.get(lo, -1) < hi:
+            by_start[lo] = hi
+    return spans
+
+def folded_count():
+    """Distinct blocks inside at least one range that was made by folding.
+
+    BLOCKS, not fold operations. The leaderboard's `folded` column counts operations (8,393 today);
+    the home page states a percentage of the chain, so it needs the 9,854 blocks those operations
+    cover. Merged the same way as `proven_count`, because a block is folded into several nodes as the
+    tree deepens and must count once.
+
+    Measured on the live board: 0.146s over 54,667 rows, and `state()` is cached.
+    """
+    c = db()
+    spans = [(lo, hi) for _id, lo, hi in fold_spans(c)]
+    c.close()
+    total, cur_lo, cur_hi = 0, None, None
+    for lo, hi in sorted(spans):
+        if cur_hi is None or lo > cur_hi + 1:
+            if cur_hi is not None: total += cur_hi - cur_lo + 1
+            cur_lo, cur_hi = lo, hi
+        else:
+            cur_hi = max(cur_hi, hi)
+    if cur_hi is not None: total += cur_hi - cur_lo + 1
+    return total
+
 def is_fold_seam(lo, hi, by_start, ends_at):
     """Was [lo..hi] made by FOLDING two ranges that were already verified, or by proving it outright?
 
@@ -1431,10 +1477,16 @@ def timeline(fr, segs=240):
 def build_vranges(c, blk):
     """The full verified-range index, so a client can browse or search ANY block, not just the frontier
     window. Extracted from state() so /api/state and /api/vranges cannot drift into two answers."""
+    # Which rows are folds can only be decided in ts order (see fold_spans), and this is served in lo
+    # order -- so the answer is computed here and published. `fold` is emitted only when true: it is
+    # ~8k of 55k rows, and a false on every row would add a quarter of a megabyte to a 4 MB payload.
+    folds = {rid for rid, _lo, _hi in fold_spans(c)}
     out = []
     for r in c.execute("SELECT id,lo,hi,handle,pubkey FROM vranges ORDER BY lo"):
         v = dict(lo=r["lo"], hi=r["hi"],
                  handle=(r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]"))
+        if r["id"] in folds:
+            v["fold"] = 1
         if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")):
             v["proof"] = f"/api/proof/{r['id']}"      # downloadable receipt, re-verifiable by anyone
         out.append(v)
@@ -1522,6 +1574,7 @@ def state(slim=False):
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
     c = db()
     proven = proven_count()   # distinct covered blocks (overlap-safe), not SUM(hi-lo+1) which double-counts
+    folded = folded_count()   # blocks inside a range made by FOLDING -- see fold_spans
     blk = blocked_pubkeys()   # moderation takedown list — hide these pubkeys from the public board
     # board window: all verified + claimed, then a few open around the frontier
     fr = frontier_hi()
@@ -1701,7 +1754,7 @@ def state(slim=False):
         # green, and only this number quietly stops. Reporting it beside frontier makes the gap
         # (frontier - spine_hi) a thing you can see rather than something you have to notice.
         # None means no spine at all, which is different from a stale one and should read differently.
-        "progress": {"proven": proven, "frontier": fr, "tip": _tip_now,
+        "progress": {"proven": proven, "folded": folded, "frontier": fr, "tip": _tip_now,
                      "pct": round(100.0*fr/_tip_now, 3) if _tip_now else 0, "contributors": ncontrib,
                      "spine_hi": (spine_head() or {}).get("hi")},
         "failed": failed,
