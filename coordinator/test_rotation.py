@@ -101,11 +101,18 @@ reset()
 a, b = Key(), Key()
 add_range(a.pk, 100, 199)
 add_range(b.pk, 150, 249)
-before = server.distinct_blocks_by_pubkey()
+# hazync#289 renamed distinct_blocks_by_pubkey to contributions_by_pubkey and made it return a dict of
+# kinds per contributor rather than a block count. This file is not in CI, so the rename broke it
+# silently and it has been failing on main since. Rotation is about the PROVED total following a key,
+# which is the `proved` member.
+def _proved_by_pubkey():
+    return {pk: v["proved"] for pk, v in server.contributions_by_pubkey().items()}
+
+before = _proved_by_pubkey()
 check(before.get(a.pk) == 100 and before.get(b.pk) == 100, "pre-rotation each key counts its own 100")
 code, _ = do_rotate(a, b)
 check(code == 200, "rotation accepted for the overlap case")
-after = server.distinct_blocks_by_pubkey()
+after = _proved_by_pubkey()
 check(a.pk not in after, "the rotated-away key no longer holds a total of its own")
 check(after.get(b.pk) == 150,
       f"merged total is the UNION 100..249 = 150, not the sum 200 (got {after.get(b.pk)})")
@@ -115,14 +122,14 @@ reset()
 a, b = Key(), Key()
 add_range(a.pk, 0, 99); add_range(b.pk, 500, 599)
 do_rotate(a, b)
-check(server.distinct_blocks_by_pubkey().get(b.pk) == 200, "disjoint ranges merge to the plain sum")
+check(_proved_by_pubkey().get(b.pk) == 200, "disjoint ranges merge to the plain sum")
 
 # Exactly-adjacent ranges are one run, not two.
 reset()
 a, b = Key(), Key()
 add_range(a.pk, 0, 99); add_range(b.pk, 100, 199)
 do_rotate(a, b)
-check(server.distinct_blocks_by_pubkey().get(b.pk) == 200, "adjacent ranges merge without a gap")
+check(_proved_by_pubkey().get(b.pk) == 200, "adjacent ranges merge without a gap")
 
 # ---------------------------------------------------------------- consent + replay ----------------
 reset()

@@ -185,6 +185,11 @@ jobs:
         run: |
           cd coordinator
           python3 test_contributions.py --control
+      # Not in CI until now, which is how hazync#289's rename of distinct_blocks_by_pubkey broke it
+      # silently: it has been failing on main since that merged, and nothing said so. It has no
+      # --control mode, so it runs once.
+      - name: Key rotation carries a contributor's proved blocks to the new key (#113)
+        run: cd coordinator && python3 test_rotation.py
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
