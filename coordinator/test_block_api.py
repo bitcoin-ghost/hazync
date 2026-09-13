@@ -244,10 +244,22 @@ check(code == 202 and body["status"] == "requested" and body["min_sats"] == 2100
       f"exactly the minimum is accepted, with a status link token (got {code} {body})")
 sid, token = body.get("id"), body.get("token")
 code, body2 = server.sponsor_request({"lo": 12, "hi": 30, "name": "Big Giver", "amount_sats": 99999})
-check(code == 202 and body2["min_sats"] == 19 * 1000 and body2["min_usd"] == 19 and body2["pledged_sats"] == 99999,
+check(code == 409 and "already proven" in body2.get("error", ""),
+      f"a span with a proven block in it is refused: 12-20 and 30 are proven (got {code} {body2})")
+code, body2 = server.sponsor_request({"lo": 21, "hi": 29, "name": "Big Giver", "amount_sats": 99999})
+check(code == 202 and body2["min_sats"] == 9 * 1000 and body2["min_usd"] == 9 and body2["pledged_sats"] == 99999,
       f"more than the minimum is accepted (got {code} {body2})")
 sid2, token2 = body2.get("id"), body2.get("token")
 check(token != token2, "every sponsorship gets its own link")
+# Blocks 21-25 are proven AFTER the request (a sponsorship can only be made while its blocks are open), so
+# the status link and the public list have progress to report.
+c = server.db()
+for h in range(21, 26):
+    c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')", (str(h), h, h))
+    c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,range_work)"
+              " VALUES(?,?,?,?,?,?,?,?,0,'0')", (str(h), h, h, f"in{h}", f"out{h}", "ee" * 32, "erin", 100 + h))
+c.commit()
+c.close()
 bad = [({"lo": 50, "hi": 60, "name": "", "amount_sats": 5000}, "an empty name"),
        ({"lo": 50, "hi": 60, "name": "x" * 41, "amount_sats": 5000}, "a 41-character name"),
        ({"lo": 50, "hi": 60, "name": "evil\u202ename", "amount_sats": 5000}, "a right-to-left override"),
@@ -324,9 +336,9 @@ set_row(sid2, status="paid", paid_sats=99999, paid_at=t1 + 5)
 lst = server.sponsors_public()
 check([r["id"] for r in lst["sponsorships"]] == [sid2, sid], f"the public list is newest payment first (got {[r['id'] for r in lst['sponsorships']]})")
 first = lst["sponsorships"][0]
-check(first["paid_sats"] == 99999 and first["min_sats"] == 19000 and first["min_usd"] == 19 and first["blocks"] == 19,
+check(first["paid_sats"] == 99999 and first["min_sats"] == 9000 and first["min_usd"] == 9 and first["blocks"] == 9,
       f"the public list shows what was paid (got {first})")
-check(first["proven_blocks"] == 10, f"blocks 12-30: 12-20 and 30 are proven, 10 of 19 (got {first['proven_blocks']})")
+check(first["proven_blocks"] == 5, f"blocks 21-29: 21-25 were proven after the request, 5 of 9 (got {first['proven_blocks']})")
 check(first["queue_ahead"] == 1 and lst["sponsorships"][1]["queue_ahead"] == 0,
       "the later payment has one sponsorship ahead of it, the first none")
 check(not ({"token_hash", "pledged_sats", "note", "invoice_id", "token"} & set(first)),
@@ -335,7 +347,7 @@ check(lst["open"] is True and lst["priced"] is True, "the list says whether spon
 check(server.sponsor_status(token)[1]["public"] is True, "the link says the sponsorship is now public")
 check(sponsor_bot.plan(sponsor_bot.queue(_tmpdb.name)) == [
       "sponsorship #%d: would prove blocks 50 to 60 (11 blocks) for John Doe" % sid,
-      "sponsorship #%d: would prove blocks 12 to 30 (19 blocks) for Big Giver" % sid2],
+      "sponsorship #%d: would prove blocks 21 to 29 (9 blocks) for Big Giver" % sid2],
       "the bot's dry run reads the paid queue, oldest payment first")
 set_row(sid2, status="proven", proven_at=t1 + 60)
 check(server.sponsors_public()["sponsorships"][0]["queue_ahead"] is None, "a proven sponsorship is not waiting in the queue")
@@ -412,8 +424,11 @@ code, body, _ = call("/api/sponsor")
 check(code == 200 and body == {"open": False, "max_blocks": server.SPONSOR_MAX_BLOCKS, "payments": False, "priced": True,
                                 "bands": [[1, 55, 1], [56, 1000, 3]], "btc_usd": 100000, "name_max": server.SPONSOR_NAME_MAX},
       f"GET /api/sponsor says closed, priced, the bands, the bitcoin price and the name limit (got {code} {body})")
+# 50-60 is paid and HELD by now, so quote blocks that are still open.
+code, body, _ = call("/api/sponsor/quote?lo=31&hi=39")
+check(code == 200 and body["min_sats"] == 9000 and body["min_usd"] == 9, f"GET /api/sponsor/quote answers while closed (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=50&hi=60")
-check(code == 200 and body["min_sats"] == 21000 and body["min_usd"] == 21, f"GET /api/sponsor/quote answers while closed (got {code} {body})")
+check(code == 409 and "already sponsored" in body.get("error", ""), f"GET /api/sponsor/quote refuses held blocks (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=abc")
 check(code == 400, f"GET /api/sponsor/quote?lo=abc is 400 (got {code})")
 code, body, _ = call("/api/sponsor/status/" + token)

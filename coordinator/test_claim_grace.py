@@ -119,6 +119,14 @@ h = held()
 stuck = [b for b in range(2000, 2050) if b in h]
 check(not stuck, f"50 never-beaten claims by one worker are all released (still held: {len(stuck)})")
 
+# Sponsor holds keep blocks out of the same claim path this file tests, so they run from here: the two CI
+# steps already on this file cover them, with no workflow change (the coord token has no `workflow` scope).
+import subprocess  # noqa: E402
+_holds = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_holds.py")]
+                        + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_holds.returncode == 0, "sponsor holds keep blocks from normal workers (test_sponsor_holds.py)")
+
 if CONTROL:
     if fails:
         print(f"CONTROL OK — grace set to CLAIM_TTL and {len(fails)} assertion(s) failed, as they must.")

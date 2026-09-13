@@ -424,9 +424,9 @@ def init_db():
     for col in ("last_version TEXT", "last_version_at REAL"):
         try: c.execute(f"ALTER TABLE contributors ADD COLUMN {col}")
         except Exception: pass
-    # Sponsorship (docs/SPONSORSHIP.md). Records only: nothing reads this table to decide what gets
-    # claimed or proven, and a name is published only once a sponsorship is PAID AT LEAST ITS MINIMUM,
-    # which nothing can do yet. `requested` -> `invoiced` -> `paid` -> `proving` -> `proven`; a payment
+    # Sponsorship (docs/SPONSORSHIP.md). A sponsorship paid at least its minimum HOLDS its blocks until
+    # they are proven: coverage_and_held() keeps them out of every claim (SPONSOR_HOLD_SQL). Its name is
+    # published only then too, and nothing can set a paid status until payments are connected. `requested` -> `invoiced` -> `paid` -> `proving` -> `proven`; a payment
     # below the minimum settles as `underpaid`; or `expired` / `cancelled` / `refunded`.
     # min_usd is the minimum in whole dollars and min_sats the sats it came to at the bitcoin price when
     # it was requested (the public rule compares against min_sats), pledged_sats what the sponsor said
@@ -814,6 +814,11 @@ def coverage_and_held(c, now):
         " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
         " AND (last_beat IS NOT NULL OR claimed_at > ?)",
         (now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE))}
+    # Sponsor holds (SPONSOR_HOLD_SQL) are held whoever asks. Adding them HERE is what keeps them out of every
+    # path that hands out blocks: claim()'s scan, its frontier-blocker re-offer (#284), and pick(). The
+    # sponsor bot does not claim; it proves its blocks with `hazync-worker run <n>`.
+    for sp in _sponsor_holds(c):
+        held.update(range(sp["lo"], sp["hi"] + 1))
     return proven, held
 
 def pick(body):
@@ -1806,6 +1811,44 @@ SPONSOR_PUBLIC = ("paid", "proving", "proven")     # the only statuses that ever
 SPONSOR_PUBLIC_SQL = ("status IN ('paid','proving','proven') AND paid_sats IS NOT NULL"
                       " AND min_sats IS NOT NULL AND paid_sats >= min_sats")
 
+# A HOLD (docs/SPONSORSHIP.md, "Holds"): a sponsorship paid at least its minimum and not yet proven keeps
+# its blocks for the sponsor proving bot. No claim or pick ever offers a held block to anyone, and a proof of
+# a held block is still accepted from anyone, as every proof is. The hold ends when the whole span is covered
+# (submit() moves the sponsorship to `proven`) or it is cancelled or refunded. It has no expiry, so /api/state
+# reports a hold on the frontier's next block once it is older than SPONSOR_HOLD_ALERT.
+SPONSOR_HOLD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL"
+                    " AND min_sats IS NOT NULL AND paid_sats >= min_sats")
+SPONSOR_HOLD_ALERT = int(os.environ.get("SPONSOR_HOLD_ALERT", str(6 * 3600)))
+
+def _sponsor_holds(c, lo=None, hi=None):
+    """Held sponsorships, oldest payment first; only those overlapping lo..hi when given."""
+    q, args = "SELECT id,lo,hi,status,paid_at FROM sponsorships WHERE " + SPONSOR_HOLD_SQL, ()
+    if lo is not None:
+        q, args = q + " AND lo<=? AND hi>=?", (hi, lo)
+    try:
+        return c.execute(q + " ORDER BY paid_at ASC, id ASC", args).fetchall()
+    except sqlite3.OperationalError:          # a database from before the table; init_db adds it on start
+        return []
+
+def _sponsor_mark_proven(c, lo, hi, now=None):
+    """Every held sponsorship overlapping lo..hi whose WHOLE span is now covered by verified ranges becomes
+    `proven`, which ends its hold. Covered by anyone counts. Called by submit() under the lock, on the
+    connection that has just recorded the range, before it commits. Returns the ids it moved."""
+    done = []
+    for sp in _sponsor_holds(c, lo, hi):
+        need = sp["lo"]
+        for r in c.execute("SELECT lo, hi FROM vranges WHERE lo<=? AND hi>=? ORDER BY lo", (sp["hi"], sp["lo"])):
+            if r["lo"] > need:
+                break
+            need = max(need, r["hi"] + 1)
+            if need > sp["hi"]:
+                break
+        if need > sp["hi"]:
+            c.execute("UPDATE sponsorships SET status='proven', proven_at=? WHERE id=? AND status IN ('paid','proving')",
+                      (now or time.time(), sp["id"]))
+            done.append(sp["id"])
+    return done
+
 def _is_public_sponsorship(r):
     return (r["status"] in SPONSOR_PUBLIC and r["paid_sats"] is not None and r["min_sats"] is not None
             and r["paid_sats"] >= r["min_sats"])
@@ -1861,6 +1904,7 @@ def block_detail(n):
         claim = c.execute("SELECT lo,hi,handle,assignee,claimed_at,last_beat FROM ranges"
                           " WHERE status='claimed' AND lo<=? AND hi>=? ORDER BY lo LIMIT 1", (n, n)).fetchone()
         sponsor = _public_sponsor(c, n)
+        hold = _sponsor_holds(c, n, n)
     finally:
         c.close()
     proofs = [{"lo": r["lo"], "hi": r["hi"], "ts": r["ts"], "fold": r["id"] in folds,
@@ -1892,7 +1936,10 @@ def block_detail(n):
         anchored_by = seg["handle"] if seg else None
     return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
                  "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
-                 "sponsor": sponsor}
+                 "sponsor": sponsor,
+                 # A paid sponsorship keeps this block for the sponsor bot: normal workers are never offered it.
+                 "held": ({"sponsorship": hold[0]["id"], "since": int(now - (hold[0]["paid_at"] or now))}
+                          if hold else None)}
 
 # Control, formatting, surrogate and private-use characters: where a right-to-left override, a zero-width
 # joiner that makes "Jo<ZWJ>hn" look like "John", or an invisible letter would hide. NOT unassigned (Cn):
@@ -1931,6 +1978,26 @@ def _sponsor_span(lo, hi):
         return 400, {"error": f"at most {SPONSOR_MAX_BLOCKS} blocks in one sponsorship"}
     if hi <= ((spine_head() or {}).get("hi") or 0):
         return 409, {"error": "those blocks are already proven and anchored"}
+    # Every block must still be OPEN: not proven, not being proven right now, not already sponsored. Paying
+    # for a block the chain already has, or that a worker is minutes from finishing, buys nothing; and two
+    # sponsors cannot hold the same block. An unpaid request holds nothing, so it does not block anyone.
+    now = time.time()
+    c = db()
+    try:
+        pr = c.execute("SELECT lo FROM vranges WHERE lo<=? AND hi>=? ORDER BY lo LIMIT 1", (hi, lo)).fetchone()
+        cl = c.execute("SELECT lo FROM ranges WHERE status='claimed' AND lo<=? AND hi>=?"
+                       " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
+                       " AND (last_beat IS NOT NULL OR claimed_at > ?) ORDER BY lo LIMIT 1",
+                       (hi, lo, now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE)).fetchone()
+        sp = _sponsor_holds(c, lo, hi)
+    finally:
+        c.close()
+    if pr:
+        return 409, {"error": f"block {max(pr['lo'], lo):,} is already proven, so it cannot be sponsored"}
+    if cl:
+        return 409, {"error": f"block {cl['lo']:,} is being proven right now, so it cannot be sponsored"}
+    if sp:
+        return 409, {"error": f"block {max(sp[0]['lo'], lo):,} is already sponsored, so it cannot be sponsored again"}
     return None, (lo, hi)
 
 def sponsor_quote(lo, hi):
@@ -2201,6 +2268,7 @@ def state(slim=False):
     #   * it has failed its way to MAX_ATTEMPTS.
     _st = blocker["status"] if blocker else "open"
     _att = (blocker["attempts"] if blocker else 0) or 0
+    _hold = next(iter(_sponsor_holds(c, nb, nb)), None)
     if _st == "verified":
         _attn, _attn_why = True, ("a verified range covers this block but cannot seam onto the frontier; "
                                   "it will never advance until the block is re-proved")
@@ -2233,6 +2301,16 @@ def state(slim=False):
         else:
             _attn = False
             _attn_why = f"a live worker is proving it ({_who}, hazync-worker/{_ver})"
+    elif _hold:
+        # Normal workers are kept off a held block, so "nobody has held it for a claim cycle" would be a false
+        # alarm; the real question is whether the sponsor bot is getting to it.
+        _held_for = int(now - (_hold["paid_at"] or now))
+        if _held_for > SPONSOR_HOLD_ALERT:
+            _attn, _attn_why = True, (f"held for sponsorship #{_hold['id']} for {_held_for}s, longer than "
+                                      f"SPONSOR_HOLD_ALERT={SPONSOR_HOLD_ALERT}; normal workers are kept off it, "
+                                      f"so only the sponsor bot can move the frontier, and it has not")
+        else:
+            _attn, _attn_why = False, f"held for sponsorship #{_hold['id']}; the sponsor bot proves it"
     elif stalled_for > CLAIM_TTL:
         _attn, _attn_why = True, (f"nobody has held this block for {stalled_for}s, longer than a claim "
                                   f"cycle (CLAIM_TTL={CLAIM_TTL})")
@@ -2265,6 +2343,7 @@ def state(slim=False):
                     "id": blocker["id"] if blocker else None,
                     "status": blocker["status"] if blocker else "open",
                     "attempts": (blocker["attempts"] if blocker else 0) or 0,
+                    "sponsorship": _hold["id"] if _hold else None,
                     "stalled_for": stalled_for,
                     "needs_attention": _attn, "why": _attn_why},
         "board": board, "leaderboard": leaders, "recent": recent,
@@ -2715,6 +2794,7 @@ def submit(body):
                     pf.write(receipt)
             except Exception:
                 pass
+            _sponsor_mark_proven(c, v_lo, v_hi)           # a sponsorship now fully covered ends its hold
         c.commit(); c.close()
         _frontier_invalidate()        # #265: a new verified range can move the frontier
     # `"ok": true` means the receipt verified and was accepted for THIS range — it does NOT mean the
