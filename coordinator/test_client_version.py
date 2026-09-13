@@ -123,6 +123,45 @@ check(parsed("hazync-worker/dev") == "dev",
 check(parsed("curl/8.0.1") is None, "an unrelated User-Agent is ignored, not stored as a version")
 check(parsed("Python-urllib/3.11") is None, "  ...including the default an older CLI sends")
 
+# --- the COORD_URL footgun: a checkout must not write to the public board -------------------------
+# COORD_URL defaults to production ON PURPOSE — a contributor who downloaded a release should not be
+# sent to localhost. The same default also applies to a test run, and on 2026-09-13 a single fold of
+# blocks 1-2 landed on the live board from an unrecognised key under the auto-generated handle
+# `ghost:ff0376`, with no claim and nothing before or after it. The board is public and append-only,
+# so that row cannot be taken back without deleting somebody's contribution.
+#
+# The test is VERSION: a release writes silently, a checkout has to say it means it.
+_cli_ns = {"__name__": "hazynccli", "__file__": os.path.join(os.path.dirname(os.path.abspath(__file__)), "hazync")}
+try:
+    exec(compile(open(_cli_ns["__file__"]).read(), "hazync", "exec"), _cli_ns)
+except SystemExit:
+    pass
+
+def _guard_allows(version, coord, optin):
+    _cli_ns["VERSION"], _cli_ns["COORD"] = version, coord
+    had = os.environ.pop("HAZYNC_ALLOW_DEV_WRITES", None)
+    if optin:
+        os.environ["HAZYNC_ALLOW_DEV_WRITES"] = "1"
+    try:
+        _cli_ns["_guard_dev_writes"]("/api/submit")
+        return True
+    except SystemExit:
+        return False
+    finally:
+        os.environ.pop("HAZYNC_ALLOW_DEV_WRITES", None)
+        if had is not None:
+            os.environ["HAZYNC_ALLOW_DEV_WRITES"] = had
+
+_PROD = _cli_ns["DEFAULT_COORD"]
+check(not _guard_allows("dev", _PROD, False),
+      "a CHECKOUT is refused when writing to the public board")
+check(_guard_allows("dev", _PROD, True),
+      "  ...unless it explicitly opts in, so the escape hatch exists")
+check(_guard_allows("dev", "http://127.0.0.1:8899", False),
+      "a checkout writing to its OWN coordinator is untouched")
+check(_guard_allows("0.21.3", _PROD, False),
+      "a RELEASE writes to the public board silently — contributors see none of this")
+
 if CONTROL:
     if fails:
         print(f"CONTROL OK — recorded only on submit and {len(fails)} assertion(s) failed, as they must.")
