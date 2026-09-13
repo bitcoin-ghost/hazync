@@ -55,6 +55,7 @@ export WITNESS_DIR=/path/to/witnesses
 ./hazync id  my-handle          # create your ed25519 identity
 ./hazync pick                   # ask the coordinator which range to take next
 ./hazync run 45000-45999        # claim + prove (GPU) + sign + submit, end to end
+                                # bounds are INCLUSIVE: that is 1,000 blocks, next range starts 46000
 ./hazync run                    # no range → picks the next open one for you
 ```
 
