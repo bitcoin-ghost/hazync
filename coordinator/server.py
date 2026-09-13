@@ -17,7 +17,8 @@ Config via env:
 The full submit→verify→credit loop is real; VERIFY_MODE=mock only stubs the STARK check so the rest
 can be tested without a GPU.
 """
-import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata, secrets, bisect
+import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata, secrets, bisect, math
+from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 from urllib.parse import urlparse, parse_qs
@@ -427,8 +428,9 @@ def init_db():
     # claimed or proven, and a name is published only once a sponsorship is PAID AT LEAST ITS MINIMUM,
     # which nothing can do yet. `requested` -> `invoiced` -> `paid` -> `proving` -> `proven`; a payment
     # below the minimum settles as `underpaid`; or `expired` / `cancelled` / `refunded`.
-    # min_sats is the minimum quoted when it was requested, pledged_sats what the sponsor said they
-    # would pay, paid_sats what actually settled. The private status link is stored only as its sha256.
+    # min_usd is the minimum in whole dollars and min_sats the sats it came to at the bitcoin price when
+    # it was requested (the public rule compares against min_sats), pledged_sats what the sponsor said
+    # they would pay, paid_sats what actually settled. The private status link is stored only as its sha256.
     c.executescript("""
       CREATE TABLE IF NOT EXISTS sponsorships(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -436,15 +438,15 @@ def init_db():
         name TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'requested',
         created_at REAL NOT NULL,
-        min_sats INTEGER, pledged_sats INTEGER, paid_sats INTEGER,
+        min_usd INTEGER, min_sats INTEGER, pledged_sats INTEGER, paid_sats INTEGER,
         invoice_id TEXT, paid_at REAL, proven_at REAL, token_hash TEXT, note TEXT);
       CREATE INDEX IF NOT EXISTS sponsorships_span ON sponsorships(lo, hi);
     """)
     # A table from before the minimum and the link (a preview copy made on 2026-09-13) has neither, and
     # CREATE TABLE IF NOT EXISTS leaves it as it is. Add what is missing before indexing token_hash.
     have = {r[1] for r in c.execute("PRAGMA table_info(sponsorships)")}
-    for col, decl in (("min_sats", "INTEGER"), ("pledged_sats", "INTEGER"), ("paid_sats", "INTEGER"),
-                      ("token_hash", "TEXT")):
+    for col, decl in (("min_usd", "INTEGER"), ("min_sats", "INTEGER"), ("pledged_sats", "INTEGER"),
+                      ("paid_sats", "INTEGER"), ("token_hash", "TEXT")):
         if col not in have:
             c.execute(f"ALTER TABLE sponsorships ADD COLUMN {col} {decl}")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_token ON sponsorships(token_hash)")
@@ -1747,10 +1749,10 @@ def block_status_cached(prover=None):
     return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build)
 
 def _parse_price_bands(raw):
-    """SPONSOR_PRICE_BANDS: a JSON list of [lo, hi, sats_per_block], heights inclusive. There is NO
-    default price: a price has to come from measured cost per height band times a safety margin
-    (docs/SPONSORSHIP.md), so unset, unparseable, a negative or zero price, or two bands that overlap
-    all mean unpriced (None), and nothing can be sponsored."""
+    """SPONSOR_PRICE_BANDS: a JSON list of [lo, hi, usd_per_block], heights inclusive, the price a WHOLE
+    number of dollars. Set but unparseable, empty, a zero, negative or fractional price, a band starting
+    below block 1, or two bands that overlap all mean unpriced (None), and nothing can be sponsored. Unset
+    means SPONSOR_PRICE_BANDS_DEFAULT."""
     if not raw:
         return None
     try:
@@ -1773,7 +1775,30 @@ def _parse_price_bands(raw):
 SPONSOR_OPEN = os.environ.get("SPONSOR_OPEN", "0") == "1"
 SPONSOR_MAX_BLOCKS = int(os.environ.get("SPONSOR_MAX_BLOCKS", "1000"))
 SPONSOR_NAME_MAX = 40                               # characters (code points); the site's form reads it from GET /api/sponsor
-SPONSOR_PRICE_BANDS = _parse_price_bands(os.environ.get("SPONSOR_PRICE_BANDS", ""))
+# The minimum per block, in whole dollars, by height (decided 2026-09-13). Each band is twice the estimated
+# GPU cost of the heaviest 1% of its blocks at $0.74 per RTX 4090 card-hour (the dearer of two RunPod
+# prices paid), from measured bundle sizes and the middle bytes-per-segment estimate, rounded UP to whole
+# dollars: 1-100k about $0.31 or less, 100k-150k $0.81, 150k-180k $1.26. The ladder stops at $5, so the top
+# two bands are about 1.85x rather than 2x ($4 against $4.31, $5 against $5.43). Above 230,000 there is no
+# price: the bridge cannot prove those blocks yet (bundles stop at 230k) and nothing there is measured.
+# docs/SPONSORSHIP.md has the figures and where they come from.
+SPONSOR_PRICE_BANDS_DEFAULT = [(1, 100000, 1), (100001, 150000, 2), (150001, 180000, 3),
+                               (180001, 200000, 4), (200001, 230000, 5)]
+SPONSOR_PRICE_BANDS = (_parse_price_bands(os.environ["SPONSOR_PRICE_BANDS"]) if "SPONSOR_PRICE_BANDS" in os.environ
+                       else list(SPONSOR_PRICE_BANDS_DEFAULT))
+
+def _parse_btc_usd(raw):
+    """SPONSOR_BTC_USD: dollars per bitcoin, to turn a dollar minimum into sats. No default: a bitcoin price
+    written into the code would be wrong within the day. Unset or not a positive finite number -> None."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v <= 0:
+        return None
+    return int(v) if v.is_integer() else v
+
+SPONSOR_BTC_USD = _parse_btc_usd(os.environ.get("SPONSOR_BTC_USD"))
 SPONSOR_PUBLIC = ("paid", "proving", "proven")     # the only statuses that ever show a sponsor's name
 # A name is public only when BOTH hold: the status says paid, and what settled covers the minimum. Every
 # query that returns a sponsor's name to anyone but the sponsor uses this, so an `underpaid` row, or a
@@ -1785,19 +1810,26 @@ def _is_public_sponsorship(r):
     return (r["status"] in SPONSOR_PUBLIC and r["paid_sats"] is not None and r["min_sats"] is not None
             and r["paid_sats"] >= r["min_sats"])
 
-def sponsor_min_sats(lo, hi):
-    """The minimum for blocks lo..hi: the sum of each block's band price, or None if any block is in no
-    band. The bands are a deliberate OVERESTIMATE of compute, so paying the minimum means the blocks
-    can be proven whatever cards cost that day; anyone may pay more."""
+def sponsor_min_usd(lo, hi):
+    """The minimum for blocks lo..hi in whole dollars: the sum of each block's band price, or None if any
+    block is in no band. The bands are a deliberate OVERESTIMATE of compute, so paying the minimum means
+    the blocks can be proven whatever cards cost that day; anyone may pay more."""
     if not SPONSOR_PRICE_BANDS:
         return None
     total, covered = 0, 0
-    for blo, bhi, sats in SPONSOR_PRICE_BANDS:
+    for blo, bhi, usd in SPONSOR_PRICE_BANDS:
         a, b = max(lo, blo), min(hi, bhi)
         if a <= b:
-            total += (b - a + 1) * sats
+            total += (b - a + 1) * usd
             covered += b - a + 1
     return total if covered == hi - lo + 1 else None
+
+def sponsor_min_sats(min_usd):
+    """A dollar minimum in sats at SPONSOR_BTC_USD, rounded UP so it never falls short; None without both.
+    Exact arithmetic: a float division would turn exactly 1,000 sats into 1,000.0000000001 and round up."""
+    if min_usd is None or SPONSOR_BTC_USD is None:
+        return None
+    return math.ceil(Fraction(min_usd * 100_000_000) / Fraction(str(SPONSOR_BTC_USD)))
 
 def _public_sponsor(c, n):
     """The sponsor shown on block n, if any. Only a sponsorship PAID AT LEAST ITS MINIMUM is shown: an
@@ -1881,7 +1913,8 @@ def _clean_sponsor_name(v):
 
 def sponsor_info():
     return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": False,
-            "priced": bool(SPONSOR_PRICE_BANDS), "name_max": SPONSOR_NAME_MAX}
+            "priced": bool(SPONSOR_PRICE_BANDS), "bands": [list(b) for b in SPONSOR_PRICE_BANDS or []],
+            "btc_usd": SPONSOR_BTC_USD, "name_max": SPONSOR_NAME_MAX}
 
 def _sponsor_span(lo, hi):
     """Validate a span to sponsor: (code, error) on a bad one, else (None, (lo, hi)). Shared by the quote
@@ -1907,8 +1940,9 @@ def sponsor_quote(lo, hi):
     if code:
         return code, v
     lo, hi = v
-    m = sponsor_min_sats(lo, hi)
-    return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_sats": m, "priced": m is not None}
+    usd = sponsor_min_usd(lo, hi)
+    return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_usd": usd, "min_sats": sponsor_min_sats(usd),
+                 "btc_usd": SPONSOR_BTC_USD, "priced": usd is not None}
 
 def sponsor_request(body):
     """POST /api/sponsor {lo, hi, name, amount_sats}. Closed unless SPONSOR_OPEN=1, and even open it only
@@ -1926,26 +1960,30 @@ def sponsor_request(body):
     name = _clean_sponsor_name(body.get("name"))
     if not name:
         return 400, {"error": f"a name of 1 to {SPONSOR_NAME_MAX} visible characters is required"}
-    min_sats = sponsor_min_sats(lo, hi)
-    if min_sats is None:
+    min_usd = sponsor_min_usd(lo, hi)
+    if min_usd is None:
         return 503, {"error": "No minimum is set for these blocks yet, so they cannot be sponsored."}
+    min_sats = sponsor_min_sats(min_usd)
+    if min_sats is None:
+        return 503, {"error": "No bitcoin price is set to turn the minimum into sats, so these blocks cannot be sponsored yet."}
     amount = body.get("amount_sats")
     if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
-        return 400, {"error": "amount_sats must be a whole number of sats", "min_sats": min_sats}
+        return 400, {"error": "amount_sats must be a whole number of sats", "min_sats": min_sats, "min_usd": min_usd}
     if amount < min_sats:
-        return 400, {"error": f"the minimum for these blocks is {min_sats} sats", "min_sats": min_sats}
+        return 400, {"error": f"the minimum for these blocks is ${min_usd}, {min_sats} sats", "min_sats": min_sats,
+                     "min_usd": min_usd}
     token = secrets.token_urlsafe(24)
     c = db()
     try:
-        cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at,min_sats,pledged_sats,token_hash)"
-                        " VALUES(?,?,?,'requested',?,?,?,?)",
-                        (lo, hi, name, time.time(), min_sats, amount, hashlib.sha256(token.encode()).hexdigest()))
+        cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,token_hash)"
+                        " VALUES(?,?,?,'requested',?,?,?,?,?)",
+                        (lo, hi, name, time.time(), min_usd, min_sats, amount, hashlib.sha256(token.encode()).hexdigest()))
         c.commit()
         sid = cur.lastrowid
     finally:
         c.close()
     return 202, {"id": sid, "token": token, "status": "requested", "lo": lo, "hi": hi, "blocks": hi - lo + 1,
-                 "name": name, "min_sats": min_sats, "pledged_sats": amount,
+                 "name": name, "min_usd": min_usd, "min_sats": min_sats, "pledged_sats": amount,
                  "message": "Recorded. Payments are not connected yet, so nothing has been charged and nothing"
                             " is queued. Keep your status link: it is the only way back to this sponsorship."}
 
@@ -1973,7 +2011,7 @@ def _queue_ahead(c, r):
                      + " AND (paid_at < ? OR (paid_at = ? AND id < ?))",
                      (r["paid_at"], r["paid_at"], r["id"])).fetchone()[0]
 
-_SPONSOR_COLS = "id,lo,hi,name,status,created_at,min_sats,pledged_sats,paid_sats,paid_at,proven_at"
+_SPONSOR_COLS = "id,lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,paid_sats,paid_at,proven_at"
 
 def sponsor_status(token):
     """GET /api/sponsor/status/<token> -- one sponsorship, for whoever holds its private link."""
@@ -1991,7 +2029,7 @@ def sponsor_status(token):
         ahead = _queue_ahead(c, r)
     finally:
         c.close()
-    out = {k: r[k] for k in ("id", "lo", "hi", "name", "status", "min_sats", "pledged_sats", "paid_sats",
+    out = {k: r[k] for k in ("id", "lo", "hi", "name", "status", "min_usd", "min_sats", "pledged_sats", "paid_sats",
                              "created_at", "paid_at", "proven_at")}
     out.update(blocks=r["hi"] - r["lo"] + 1, proven_blocks=_proven_in(r["lo"], r["hi"], _status_runs()),
                queue_ahead=ahead, public=_is_public_sponsorship(r))
@@ -2014,7 +2052,8 @@ def sponsors_public():
     runs = _status_runs() if rows else None
     return {"sponsorships": [{"id": r["id"], "name": r["name"], "lo": r["lo"], "hi": r["hi"],
                               "blocks": r["hi"] - r["lo"] + 1, "status": r["status"],
-                              "paid_sats": r["paid_sats"], "min_sats": r["min_sats"], "paid_at": r["paid_at"],
+                              "paid_sats": r["paid_sats"], "min_usd": r["min_usd"], "min_sats": r["min_sats"],
+                              "paid_at": r["paid_at"],
                               "proven_at": r["proven_at"], "proven_blocks": _proven_in(r["lo"], r["hi"], runs),
                               "queue_ahead": ahead} for r, ahead in zip(rows, aheads)],
             "open": SPONSOR_OPEN, "priced": bool(SPONSOR_PRICE_BANDS)}

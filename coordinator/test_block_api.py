@@ -42,6 +42,8 @@ os.environ["COORD_ALLOW_MOCK"] = "1"
 os.environ["TIP_CACHE_TTL"] = "0"
 os.environ["VRANGES_CACHE_TTL"] = "0"
 os.environ.setdefault("TIP_HEIGHT", "1000")
+os.environ.pop("SPONSOR_PRICE_BANDS", None)          # unset: the default ladder applies
+os.environ["SPONSOR_BTC_USD"] = "100000"               # $1 = 1,000 sats
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -156,23 +158,52 @@ with open(_tmpblock.name, "w") as f:
     f.write("")
 
 print("== sponsorship: price bands ==")
-check(server._parse_price_bands("") is None, "no SPONSOR_PRICE_BANDS: unpriced, there is no default price")
+check(server.SPONSOR_PRICE_BANDS_DEFAULT == [(1, 100000, 1), (100001, 150000, 2), (150001, 180000, 3),
+                                             (180001, 200000, 4), (200001, 230000, 5)],
+      "the default ladder is the approved one: $1, $2, $3, $4, $5 a block up to block 230,000")
+check(server.SPONSOR_PRICE_BANDS == server.SPONSOR_PRICE_BANDS_DEFAULT, "with SPONSOR_PRICE_BANDS unset, the default ladder applies")
+check(server.SPONSOR_BTC_USD == 100000, "SPONSOR_BTC_USD is read from the environment")
+check(server._parse_price_bands("") is None, "SPONSOR_PRICE_BANDS set but empty: unpriced")
 for raw, why in (("not json", "unparseable"), ("[[1,10,0]]", "a zero price"), ("[[10,1,5]]", "hi below lo"),
-                 ("[[1,10,5],[10,20,5]]", "two bands that overlap"), ('[[1,10,"5"]]', "a price that is not a whole number"),
+                 ("[[1,10,5],[10,20,5]]", "two bands that overlap"), ('[[1,10,"5"]]', "a price that is text"),
+                 ("[[1,10,1.5]]", "a price that is not whole dollars"),
                  ("[]", "an empty list"), ("[[0,10,5]]", "a band starting below block 1")):
     check(server._parse_price_bands(raw) is None, f"bands refused: {why}")
 check(server._parse_price_bands("[[11,20,7],[1,10,5]]") == [(1, 10, 5), (11, 20, 7)], "valid bands parse, sorted")
-BANDS = server._parse_price_bands("[[1,55,100],[56,1000,300]]")
+for raw, why in ((None, "unset"), ("", "empty"), ("abc", "not a number"), ("0", "zero"), ("-5", "negative"),
+                 ("nan", "not a number (nan)"), ("inf", "infinite")):
+    check(server._parse_btc_usd(raw) is None, f"bitcoin price refused: {why}")
+check(server._parse_btc_usd("77400") == 77400 and server._parse_btc_usd("77400.5") == 77400.5, "a bitcoin price parses")
+server.SPONSOR_PRICE_BANDS = server.SPONSOR_PRICE_BANDS_DEFAULT
+check(server.sponsor_min_usd(99999, 100001) == 1 + 1 + 2 and server.sponsor_min_usd(229999, 230000) == 10,
+      "the default ladder sums across its bands ($1 + $1 + $2 at 99,999-100,001; $5 + $5 at 229,999-230,000)")
+check(server.sponsor_min_usd(230000, 230001) is None and server.sponsor_min_usd(230001, 230001) is None,
+      "with the default ladder, nothing above block 230,000 has a price")
+BANDS = server._parse_price_bands("[[1,55,1],[56,1000,3]]")
 
 print("== sponsorship: the quote ==")
 server.SPONSOR_PRICE_BANDS = None
 code, q = server.sponsor_quote(50, 60)
-check(code == 200 and q["min_sats"] is None and q["priced"] is False, f"no bands: the quote has no minimum (got {code} {q})")
+check(code == 200 and q["min_usd"] is None and q["min_sats"] is None and q["priced"] is False,
+      f"no bands: the quote has no minimum (got {code} {q})")
 server.SPONSOR_PRICE_BANDS = BANDS
 code, q = server.sponsor_quote(50, 60)
-check(code == 200 and q == {"lo": 50, "hi": 60, "blocks": 11, "min_sats": 6 * 100 + 5 * 300, "priced": True},
-      f"blocks 50-60 across two bands: 6 x 100 + 5 x 300 = 2100 sats (got {code} {q})")
-server.SPONSOR_PRICE_BANDS = server._parse_price_bands("[[1,55,100]]")
+check(code == 200 and q == {"lo": 50, "hi": 60, "blocks": 11, "min_usd": 6 * 1 + 5 * 3, "min_sats": 21000,
+                            "btc_usd": 100000, "priced": True},
+      f"blocks 50-60 across two bands: 6 x $1 + 5 x $3 = $21, 21,000 sats at $100,000 (got {code} {q})")
+server.SPONSOR_BTC_USD = 77400
+code, q = server.sponsor_quote(50, 50)
+check(code == 200 and q["min_usd"] == 1 and q["min_sats"] == 1292,
+      f"sats round UP: $1 at $77,400 is 1,291.99 sats, so 1,292 (got {q})")
+server.SPONSOR_BTC_USD = 100000
+code, q = server.sponsor_quote(50, 50)
+check(q["min_sats"] == 1000, f"an exact conversion does not round up past itself: $1 at $100,000 is 1,000 sats (got {q})")
+server.SPONSOR_BTC_USD = None
+code, q = server.sponsor_quote(50, 60)
+check(code == 200 and q["min_usd"] == 21 and q["min_sats"] is None and q["btc_usd"] is None and q["priced"] is True,
+      f"no bitcoin price: the quote gives dollars and no sats (got {q})")
+server.SPONSOR_BTC_USD = 100000
+server.SPONSOR_PRICE_BANDS = server._parse_price_bands("[[1,55,1]]")
 code, q = server.sponsor_quote(50, 60)
 check(code == 200 and q["min_sats"] is None, f"a span partly outside every band is unpriced (got {q})")
 server.SPONSOR_PRICE_BANDS = BANDS
@@ -190,23 +221,30 @@ server.SPONSOR_PRICE_BANDS = None
 code, body = server.sponsor_request({"lo": 50, "hi": 60, "name": "John Doe", "amount_sats": 5000})
 check(code == 503 and "No minimum" in body.get("error", ""), f"open but unpriced: 503, nothing recorded (got {code} {body})")
 server.SPONSOR_PRICE_BANDS = BANDS
-for amount, why in ((2099, "one sat below the minimum"), (None, "no amount"), ("3000", "an amount that is text"),
-                    (True, "an amount that is true"), (0, "zero"), (2100.5, "a fraction of a sat")):
+server.SPONSOR_BTC_USD = None
+code, body = server.sponsor_request({"lo": 50, "hi": 60, "name": "John Doe", "amount_sats": 10 ** 9})
+check(code == 503 and body.get("error") == "No bitcoin price is set to turn the minimum into sats, so these blocks cannot be sponsored yet.",
+      f"priced but no bitcoin price: 503, nothing recorded (got {code} {body})")
+server.SPONSOR_BTC_USD = 100000
+for amount, why in ((20999, "one sat below the minimum"), (None, "no amount"), ("30000", "an amount that is text"),
+                    (True, "an amount that is true"), (0, "zero"), (21000.5, "a fraction of a sat")):
     payload = {"lo": 50, "hi": 60, "name": "John Doe"}
     if amount is not None:
         payload["amount_sats"] = amount
     code, body = server.sponsor_request(payload)
-    check(code == 400 and body.get("min_sats") == 2100, f"refused: {why}, and told the minimum (got {code} {body})")
+    check(code == 400 and body.get("min_sats") == 21000 and body.get("min_usd") == 21,
+          f"refused: {why}, and told the minimum in sats and dollars (got {code} {body})")
 c = server.db()
 check(c.execute("SELECT COUNT(*) FROM sponsorships").fetchone()[0] == 0, "nothing refused was recorded")
 c.close()
-code, body = server.sponsor_request({"lo": 50, "hi": 60, "name": "  John   Doe ", "amount_sats": 2100})
-check(code == 202 and body["status"] == "requested" and body["min_sats"] == 2100 and body["pledged_sats"] == 2100
+code, body = server.sponsor_request({"lo": 50, "hi": 60, "name": "  John   Doe ", "amount_sats": 21000})
+check(code == 202 and body["status"] == "requested" and body["min_sats"] == 21000 and body["min_usd"] == 21
+      and body["pledged_sats"] == 21000
       and body["name"] == "John Doe" and body["blocks"] == 11 and isinstance(body.get("token"), str) and len(body["token"]) >= 32,
       f"exactly the minimum is accepted, with a status link token (got {code} {body})")
 sid, token = body.get("id"), body.get("token")
-code, body2 = server.sponsor_request({"lo": 12, "hi": 30, "name": "Big Giver", "amount_sats": 9999})
-check(code == 202 and body2["min_sats"] == 19 * 100 and body2["pledged_sats"] == 9999,
+code, body2 = server.sponsor_request({"lo": 12, "hi": 30, "name": "Big Giver", "amount_sats": 99999})
+check(code == 202 and body2["min_sats"] == 19 * 1000 and body2["min_usd"] == 19 and body2["pledged_sats"] == 99999,
       f"more than the minimum is accepted (got {code} {body2})")
 sid2, token2 = body2.get("id"), body2.get("token")
 check(token != token2, "every sponsorship gets its own link")
@@ -245,7 +283,8 @@ raw_db = open(_tmpdb.name, "rb").read() + (open(_tmpdb.name + "-wal", "rb").read
 check(token.encode() not in raw_db, "not even in the database file's bytes")
 code, st = server.sponsor_status(token)
 check(code == 200 and st["id"] == sid and st["name"] == "John Doe" and st["status"] == "requested" and st["public"] is False
-      and st["min_sats"] == 2100 and st["pledged_sats"] == 2100 and st["paid_sats"] is None and st["blocks"] == 11
+      and st["min_sats"] == 21000 and st["min_usd"] == 21 and st["pledged_sats"] == 21000 and st["paid_sats"] is None
+      and st["blocks"] == 11
       and st["proven_blocks"] == 0 and st["queue_ahead"] is None,
       f"the link shows the request, not yet public (got {code} {st})")
 for t, why in (("A" * 32, "an unknown link"), ("../../etc", "a malformed link"), ("", "an empty link")):
@@ -273,19 +312,19 @@ set_row(sid, status="underpaid", paid_sats=1000, paid_at=t1)
 _, d55 = server.block_detail(55)
 check(d55["sponsor"] is None and public_names() == [] and server.sponsor_status(token)[1]["public"] is False,
       "an underpaid one shows no name anywhere")
-set_row(sid, status="paid", paid_sats=2099)
+set_row(sid, status="paid", paid_sats=20999)
 _, d55 = server.block_detail(55)
 check(d55["sponsor"] is None and public_names() == [] and sponsor_bot.queue(_tmpdb.name) == [],
       "a row marked paid but one sat short shows no name and is not in the bot's queue")
-set_row(sid, status="paid", paid_sats=2100)
+set_row(sid, status="paid", paid_sats=21000)
 _, d55 = server.block_detail(55)
 check(d55["sponsor"] and d55["sponsor"]["name"] == "John Doe" and d55["sponsor"].get("id") == sid,
       f"paid the minimum: the block shows the name, whitespace tidied, and the sponsorship's number (got {d55['sponsor']})")
-set_row(sid2, status="paid", paid_sats=9999, paid_at=t1 + 5)
+set_row(sid2, status="paid", paid_sats=99999, paid_at=t1 + 5)
 lst = server.sponsors_public()
 check([r["id"] for r in lst["sponsorships"]] == [sid2, sid], f"the public list is newest payment first (got {[r['id'] for r in lst['sponsorships']]})")
 first = lst["sponsorships"][0]
-check(first["paid_sats"] == 9999 and first["min_sats"] == 1900 and first["blocks"] == 19,
+check(first["paid_sats"] == 99999 and first["min_sats"] == 19000 and first["min_usd"] == 19 and first["blocks"] == 19,
       f"the public list shows what was paid (got {first})")
 check(first["proven_blocks"] == 10, f"blocks 12-30: 12-20 and 30 are proven, 10 of 19 (got {first['proven_blocks']})")
 check(first["queue_ahead"] == 1 and lst["sponsorships"][1]["queue_ahead"] == 0,
@@ -325,7 +364,7 @@ except Exception as e:  # noqa: BLE001
 finally:
     server.DB = saved_db
 check(started, "init_db starts on a database with the first sponsorships table")
-check({"min_sats", "pledged_sats", "paid_sats", "token_hash"} <= cols, f"and adds the new columns (got {sorted(cols)})")
+check({"min_usd", "min_sats", "pledged_sats", "paid_sats", "token_hash"} <= cols, f"and adds the new columns (got {sorted(cols)})")
 check(old_public == [], "an old 'paid' row with no amount and no minimum is not public")
 
 print("== the routes, over HTTP ==")
@@ -371,10 +410,10 @@ code, _, _ = call("/api/block/abc")
 check(code == 400, f"GET /api/block/abc is 400 (got {code})")
 code, body, _ = call("/api/sponsor")
 check(code == 200 and body == {"open": False, "max_blocks": server.SPONSOR_MAX_BLOCKS, "payments": False, "priced": True,
-                                "name_max": server.SPONSOR_NAME_MAX},
-      f"GET /api/sponsor says closed, priced, and the name limit (got {code} {body})")
+                                "bands": [[1, 55, 1], [56, 1000, 3]], "btc_usd": 100000, "name_max": server.SPONSOR_NAME_MAX},
+      f"GET /api/sponsor says closed, priced, the bands, the bitcoin price and the name limit (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=50&hi=60")
-check(code == 200 and body["min_sats"] == 2100, f"GET /api/sponsor/quote answers while closed (got {code} {body})")
+check(code == 200 and body["min_sats"] == 21000 and body["min_usd"] == 21, f"GET /api/sponsor/quote answers while closed (got {code} {body})")
 code, body, _ = call("/api/sponsor/quote?lo=abc")
 check(code == 400, f"GET /api/sponsor/quote?lo=abc is 400 (got {code})")
 code, body, _ = call("/api/sponsor/status/" + token)
