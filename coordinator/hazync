@@ -588,7 +588,7 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
     sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {_err_tail(last)}")
 
 
-def cmd_prove(args, claimed=False):
+def cmd_prove(args, claimed=False, submit_leaves=False):
     """Prove `rng`. `claimed` is True only when `rng` came from POST /api/claim (the no-argument
     `hazync run`): only then is there a claim for the heartbeat to keep alive (#251)."""
     rng = args[0]
@@ -637,8 +637,32 @@ def cmd_prove(args, claimed=False):
                                 # run look like a stuck worker hammering the coordinator.
                                 _beat_range=rng if claimed else None, _beat_pk=_pk, _beat_sk=_sk)
             parts.append(_prover_out(work, f"range_{h}").name)
+            # LEAVES FIRST. Each block is submitted the moment it is proved, before the fold that will
+            # eventually cover it. A wide range used to send nothing until every block was proved AND
+            # the whole fold tree had collapsed -- so a failure at block 49 of 50 threw away all 49,
+            # and on 2026-09-12 a 99-block repair sat unsubmitted for two hours while it folded.
+            #
+            # It is also what lets the coordinator require that a wide range be a FOLD over work
+            # already on the board: the blocks are there by the time the fold arrives.
+            #
+            # A leaf that fails does not abort the range. Another prover landing it first is the common
+            # case and is already an `ok`; anything else is worth saying out loud and carrying on,
+            # because the fold at the end is checked on its own merits.
+            if submit_leaves:
+                try:
+                    _lf = _prover_out(work, f"range_{h}")
+                    (RCPTDIR / f"{h}.bin").write_bytes(_lf.read_bytes())
+                    _sk, _pub2, _handle = identity()
+                    _ok, _err = _post_receipt(str(h), _lf.read_bytes(), _sk, _pub2, _handle)
+                    if not _ok:
+                        print(f"  block {h}: not accepted ({_err[:120]}) — carrying on", flush=True)
+                except Exception as _e:
+                    print(f"  block {h}: could not submit ({_e}) — carrying on", flush=True)
             if total > 1 and (i % 50 == 0 or i == total):
-                print(f"  …proved {i}/{total} blocks — the board frontier advances once the whole range is proved + submitted", flush=True)
+                print(f"  \u2026proved {i}/{total} blocks"
+                      + (" \u2014 each one is already on the board" if submit_leaves else
+                         " \u2014 the board frontier advances once the whole range is proved + submitted"),
+                      flush=True)
         _fold_and_save(parts, out, work, env)
         print("receipt:", out)
     finally:
@@ -738,6 +762,26 @@ def _fold_and_save(parts, out, work, env):
               f"  ({time.time() - t0:.0f}s, concurrency {conc})", flush=True)
     os.replace(os.path.join(work, parts[0]), out)
 
+def _post_receipt(rng, receipt, sk, pub, handle):
+    """POST one receipt and report (ok, error). Does NOT exit.
+
+    Extracted from `cmd_submit` so a range can submit its blocks AS THEY ARE PROVED and still let
+    cmd_submit turn the outcome into an exit code. Everything that used to be a `sys.exit(0)` here is
+    an `ok` now, including "already proven": another prover landing a block first is a benign race and
+    was never a failure.
+    """
+    res = post("/api/submit", {"range": rng, "pubkey": pub, "handle": handle,
+                               "sig": sk.sign(receipt).hex(),
+                               "receipt": base64.b64encode(receipt).decode()})
+    if res.get("ok"):
+        print(f"\u2713 range {rng}: the coordinator re-verified your proof and put it on the board as '{handle}'.")
+        return True, ""
+    err = str(res.get("error") or res)
+    if "already proven" in err:
+        print(f"\u2713 range {rng} was already proved by someone else \u2014 nothing to do.")
+        return True, ""
+    return False, err
+
 def cmd_submit(args):
     # Warn HERE, not only at startup: this is the moment work gets attributed, and it is the path a
     # long-running worker loop takes every time. `hazync run` calls straight through to it, so keep it
@@ -753,18 +797,9 @@ def cmd_submit(args):
     f = RCPTDIR / f"{rng}.bin"
     if not f.exists(): sys.exit(f"no receipt at {f} — run `hazync prove {rng}` first")
     receipt = f.read_bytes()
-    sig = sk.sign(receipt).hex()
-    res = post("/api/submit", {"range": rng, "pubkey": pub, "handle": handle,
-                               "sig": sig, "receipt": base64.b64encode(receipt).decode()})
-    if res.get("ok"):
-        print(f"✓ range {rng}: the coordinator re-verified your proof and put it on the board as '{handle}'.")
+    ok, err = _post_receipt(rng, receipt, sk, pub, handle)
+    if ok:
         sys.exit(0)
-    if "already proven" in str(res.get("error", "")):
-        # Benign race: another prover landed this block first. Not a failure — don't alarm the contributor
-        # (and cmd_run, seeing exit 0, won't release: the block is already verified).
-        print(f"✓ range {rng} was already proved by someone else — nothing to do.")
-        sys.exit(0)
-    err = str(res.get("error") or res)
     print("✗ submit rejected:", err)
     # A guest-id mismatch is not a bad block, it is a worker that can never land anything (#99). Left
     # as a plain exit 1 the loop sleeps 3s and claims the next block forever: three GPUs once ran flat
@@ -992,7 +1027,11 @@ def cmd_run(args):
         rng = res["range"]
         print(f"claimed block {rng} (yours for {int(res.get('ttl', 3600) / 60)} min; "
               f"if you stop, it reopens by itself)")
-    cmd_prove([rng], claimed=not args); cmd_submit([rng])
+    # An explicit wide range submits its blocks as it proves them; a single block has nothing to send
+    # first, and a claimed block is one block by construction.
+    _lo2, _hi2 = parse_range(rng)
+    cmd_prove([rng], claimed=not args, submit_leaves=bool(args) and _hi2 > _lo2)
+    cmd_submit([rng])
 
 def cmd_fold(args):
     """Fold adjacent proven ranges into wider ones — a task in its own right, not a side effect (#37).

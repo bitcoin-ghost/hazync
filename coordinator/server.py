@@ -699,13 +699,33 @@ def sync_from_peers(limit=200):
             adopted += 1
     return {"adopted": adopted, "rejected": rejected, "peers": len(PEERS)}
 
+def coverage_and_held(c, now):
+    """The two sets `claim` and `pick` must agree on: blocks already COVERED, and blocks HELD.
+
+    They did not agree, and the disagreement is what made the 30,050 freeze read as self-healing while
+    it was not. `pick` asked whether a RANGE ID `str(n)` existed; `claim` asked whether the HEIGHT n was
+    covered by any verified range. A wide range covers heights whose ids never existed, so `/api/pick`
+    returned block 30,051 all day -- a block `claim()` would never hand out. Anyone debugging from the
+    endpoint concluded the board was already recovering.
+
+    One function, so the two answers cannot drift again.
+    """
+    proven = set()
+    for row in c.execute("SELECT lo, hi FROM vranges"):
+        proven.update(range(row["lo"], row["hi"] + 1))
+    held = {r["lo"] for r in c.execute(
+        "SELECT lo FROM ranges WHERE status='claimed'"
+        " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
+        (now - CLAIM_TTL, now - CLAIM_MAX))}
+    return proven, held
+
 def pick(body):
     """Suggest the next open BLOCK after the frontier. Per-block is the DEFAULT proving unit: one block
     per `hazync run` — no fold, low memory, and it matches the board's per-block proofs (so `/api/proof/<n>`
     stays valid). Block 1 pins to genesis. A bigger aligned chunk is opt-in via `hazync run <lo>-<hi>`."""
     fr = frontier_hi()
     c = db()
-    taken = set(r["id"] for r in c.execute("SELECT id FROM ranges WHERE status IN ('claimed','verified')"))
+    proven, held = coverage_and_held(c, time.time())
     c.close()
     peers = peer_proven_heights()          # empty unless PEER_COORDINATORS is set
     busy = peer_busy_heights()             # ditto — heights a peer is proving RIGHT NOW (#69)
@@ -728,10 +748,12 @@ def pick(body):
         for _ in range(2_000_000):
             if n >= _ceiling:
                 break
-            rid = str(n)
-            if rid not in taken and n not in peers and not (avoid_busy and n in busy) \
-               and witness_available(n):
-                return 200, {"range": rid, "lo": n, "hi": n, "cmd": f"hazync run {rid}"}
+            # The SAME test claim() applies, so what this suggests is what that would hand out. The
+            # frontier's own blocker is the one exception, and it belongs to claim(): re-offering a
+            # covered block is an allocation decision, and pick is advice.
+            if n not in proven and n not in held and n not in peers \
+               and not (avoid_busy and n in busy) and witness_available(n):
+                return 200, {"range": str(n), "lo": n, "hi": n, "cmd": f"hazync run {n}"}
             n += 1
         if not busy:
             break                          # pass 2 would ask exactly the same question
@@ -1793,9 +1815,7 @@ def claim(body):
             return 200, {"ok": True, "range": again, "ttl": CLAIM_TTL,
                          "note": "claimed for %d minutes; submissions are accepted for any height regardless"
                                  % int(CLAIM_TTL / 60)}
-        proven = set()
-        for row in c.execute("SELECT lo, hi FROM vranges"):
-            proven.update(range(row["lo"], row["hi"] + 1))
+        proven, held = coverage_and_held(c, now)
         # A claim blocks EVERY worker for CLAIM_TTL, including the one that made it. That looks like a
         # bug — a worker locked out of retrying its own failed block — and on 2026-08-01 it was
         # "fixed" so a worker could re-pick its own claim. That was wrong, and reverted the same day.
@@ -1820,10 +1840,6 @@ def claim(body):
         # A worker that dies stops beating and the block reopens in CLAIM_TTL, exactly as before.
         # Workers that predate the beat send none, so COALESCE falls back to claimed_at and they keep
         # the old behaviour rather than breaking.
-        held = {r["lo"] for r in c.execute(
-            "SELECT lo FROM ranges WHERE status='claimed'"
-            " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?",
-            (now - CLAIM_TTL, now - CLAIM_MAX))}
         _ceiling = provable_tip()          # what the bridge can serve, not a hardcoded chain height
         # #281: the block the CHAIN needs comes before the block the board merely lacks.
         #
@@ -2063,26 +2079,37 @@ def submit(body):
     # of overlap — froze the board at 30,050 for thirteen hours on 2026-09-11, while `proven` kept
     # climbing and `stalled_for` reported 0 because a VERIFIED row sat over the blocker.
     #
-    # Two shapes are legitimate and both stay accepted:
-    #   * fresh territory — nothing verified overlaps [lo..hi] at all;
-    #   * a genuine fold  — verified ranges already tile [lo..hi] exactly (they are its own children).
-    # Rejecting here, before the prover has spent anything more, is the whole point: the contributor
-    # learns their bounds are wrong while they can still fix them, instead of collecting VERIFIED on
-    # work that lands in a branch nothing can ever reach.
+    # #281, the structural half: A WIDE RANGE MUST BE A FOLD. Only a single block may introduce new
+    # coverage; anything wider has to be backed by ranges already verified, tiling it exactly.
+    #
+    # #283 allowed a second shape -- a wide range over fresh territory -- and that is what made bad
+    # bounds expressible at all. It cannot produce the 30,050 freeze on its own (a fresh range above
+    # the frontier leaves an ordinary hole, which claim() hands out), but it lets `proven` count blocks
+    # no single proof ever covered, so coverage and per-block work drift apart and every consumer of
+    # coverage has to be defensive about it. With this rule they do not: covered == proved, one block
+    # at a time, and the fold tree only ever re-expresses what is already there.
+    #
+    # The worker submits its blocks as it proves them (`submit_leaves`), so a wide `hazync run lo-hi`
+    # still works end to end -- the leaves land first and the fold that follows is backed by them.
+    #
+    # ⚠ A worker OLDER than this sends the wide range alone and will be refused. That is a protocol
+    # break, taken deliberately and with a message that says exactly what to do, rather than leaving a
+    # shape whose only legitimate use is one the current client no longer needs.
     _lo, _hi = parse_any_range(rid)
-    if _hi > _lo and _lo > 0:          # width 1 cannot overlap-without-backing; lo==0 is the genesis seed
+    if _hi > _lo and _lo > 0:          # width 1 introduces coverage; lo==0 is the genesis seed
         with _lock:
             c = db()
-            _clash = _overlapping_vrange(c, _lo, _hi)
-            _backed = _tiled_by_verified(c, _lo, _hi) if _clash else True
+            _backed = _tiled_by_verified(c, _lo, _hi)
+            _clash = None if _backed else _overlapping_vrange(c, _lo, _hi)
             c.close()
-        if _clash and not _backed:
-            _msg = (f"range [{_lo}..{_hi}] overlaps verified range [{_clash['lo']}..{_clash['hi']}] but is "
-                    f"not backed by it, so it can never link to genesis and would stall the frontier. "
-                    f"A range must either cover blocks nobody has proven, or re-fold blocks already on "
-                    f"the board.")
-            if _clash["lo"] <= _lo <= _clash["hi"]:
-                _msg += f" Start at {_clash['hi'] + 1}, not {_lo} — range bounds are INCLUSIVE."
+        if not _backed:
+            _msg = (f"range [{_lo}..{_hi}] is {_hi - _lo + 1} blocks wide but the board does not hold "
+                    f"proofs for all of them, so this is not a fold. Submit each block on its own "
+                    f"first, then the range that folds them -- `hazync run {_lo}-{_hi}` does that for "
+                    f"you from v0.21.4. Only a single block may cover ground nothing has covered yet.")
+            if _clash and _clash["lo"] <= _lo <= _clash["hi"]:
+                _msg += (f" Note [{_clash['lo']}..{_clash['hi']}] is already verified: start at "
+                         f"{_clash['hi'] + 1}, not {_lo} — range bounds are INCLUSIVE.")
             return 409, {"error": _msg}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}

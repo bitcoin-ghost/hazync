@@ -103,46 +103,44 @@ if CONTROL:
     server._overlapping_vrange = lambda c, lo, hi: None
 
 # ── the incident, reproduced exactly ──────────────────────────────────────────────────────────────
-print("== the 30,050 freeze ==")
+print("== the 30,050 freeze cannot be expressed any more ==")
 reset()
 
-code, _ = submit(30000, 30050)
-check(code == 200, "the first chunk [30000..30050] lands — it overlaps nothing")
+# The incident began with [30000..30050] landing on an empty board. Under the structural rule it never
+# gets that far: a wide range must be a FOLD, and there is nothing beneath it to fold.
+code, obj = submit(30000, 30050)
+check(code == 409, "a 51-block range on an empty board is REFUSED — it is not a fold")
+check("51 blocks wide" in str(obj.get("error", "")),
+      "the error says how wide the range actually is, which is the number that was misread")
+check("each block on its own first" in str(obj.get("error", "")),
+      "...and what to do instead, rather than only what was wrong")
 
+# The bad SECOND chunk cannot arrive either, for the same reason plus the overlap.
+for h in range(30000, 30051):
+    submit(h, h)
+check(submit(30000, 30050)[0] == 200, "with its 51 blocks on the board, the same range IS a fold")
 code, obj = submit(30050, 30100)
-check(code == 409, "the overlapping chunk [30050..30100] is REFUSED, not verified")
-check("30051" in str(obj.get("error", "")),
-      "the error names the bound the contributor should have used (30051)")
-check("INCLUSIVE" in str(obj.get("error", "")),
-      "the error says why the bounds were wrong, not just that they were")
+check(code == 409, "the overlapping chunk is still refused — its later blocks are not proven")
+check("30051" in str(obj.get("error", "")) and "INCLUSIVE" in str(obj.get("error", "")),
+      "the error still names the bound that was meant, and why")
 
-# And here is the part that makes the whole thing self-heal. With the bad chunk refused, the NEXT one
-# no longer overlaps anything, so it is accepted on its own merits — and the blocks between become an
-# ordinary HOLE. A hole is the benign failure: claim() hands it straight out and the fleet fills it.
-# The original bug was never "a gap"; it was a gap that LOOKED FULL.
-code, _ = submit(30100, 30149)
-check(code == 200, "the chunk after it is accepted — with the bad one refused it overlaps nothing")
-
-# The property that actually broke. claim() is coverage-based, so the ONE thing that must stay true is
-# that the blocks the frontier needs are still open for someone to take.
-gap = covered()
-check(30051 not in gap and 30099 not in gap,
-      "the blocks between stay an ordinary HOLE, uncovered, so claim() hands them out")
-
-# ── and the correct bounds still work ─────────────────────────────────────────────────────────────
-print("== what must still be accepted ==")
+# ── what the rule requires instead ────────────────────────────────────────────────────────────────
+print("== leaves first, then the fold ==")
 reset()
-check(submit(30000, 30050)[0] == 200, "chunk one lands")
-check(submit(30051, 30100)[0] == 200, "the CORRECT next chunk [30051..30100] is accepted")
+check(submit(500, 599)[0] == 409,
+      "a wide range over FRESH ground is refused too — this is the shape #283 still allowed")
+for h in range(500, 600):
+    submit(h, h)
+check(submit(500, 599)[0] == 200, "...and accepted once its blocks are on the board")
+check(covered() >= set(range(500, 600)),
+      "every block it covers was proved on its own, so coverage never runs ahead of real work")
 
-reset()
-check(submit(500, 599)[0] == 200, "a wide range over fresh territory is accepted — it overlaps nothing")
-
-# A genuine fold re-expresses blocks the board already holds, so it is tiled by its own children.
+print("== folds, and things that only look like folds ==")
 reset()
 for h in range(100, 104):
     submit(h, h)
 check(submit(100, 103)[0] == 200, "a fold whose leaves are all on the board is accepted")
+check(submit(100, 101)[0] == 200, "and so is a narrower fold over the same leaves")
 
 reset()
 for h in (100, 101):
