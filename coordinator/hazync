@@ -1364,7 +1364,24 @@ def cmd_spine(args):
     if done:
         print(f"absorbed {blocks} block(s) into the spine in {done} step(s).")
 
+def _line_buffer_output():
+    """Write every printed line to the log as it happens.
+
+    run-workers.sh points stdout at a FILE, and Python block-buffers a file (~8 KB). `run` and `fold`
+    exit after each task, which flushes them, so their logs look live. `spine` is ONE process that
+    runs for hours: on hz-board-30 (2026-09-13) its log trailed the board by ~140 absorptions and
+    sat unchanged for 13+ minutes while the spine advanced normally, which reads exactly like a
+    stall. The eight explicit flush=True prints elsewhere cover prove progress; none are in the
+    spine loop, and chasing every print is the fragile fix. Line-buffering the streams is not.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass    # not a TextIOWrapper (embedded, redirected by a test harness): leave it alone
+
 def main():
+    _line_buffer_output()
     # No signal handlers any more. They existed to hand a CLAIM back on SIGTERM, because Python's
     # default SIGTERM kills the interpreter outright and an orphaned claim then stalled the board
     # until a ~30 minute reap. Free-running proving has nothing to hand back: a worker that dies

@@ -17,7 +17,8 @@ Config via env:
 The full submit→verify→credit loop is real; VERIFY_MODE=mock only stubs the STARK check so the rest
 can be tested without a GPU.
 """
-import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io
+import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata, secrets, bisect, math
+from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 from urllib.parse import urlparse, parse_qs
@@ -423,6 +424,32 @@ def init_db():
     for col in ("last_version TEXT", "last_version_at REAL"):
         try: c.execute(f"ALTER TABLE contributors ADD COLUMN {col}")
         except Exception: pass
+    # Sponsorship (docs/SPONSORSHIP.md). Records only: nothing reads this table to decide what gets
+    # claimed or proven, and a name is published only once a sponsorship is PAID AT LEAST ITS MINIMUM,
+    # which nothing can do yet. `requested` -> `invoiced` -> `paid` -> `proving` -> `proven`; a payment
+    # below the minimum settles as `underpaid`; or `expired` / `cancelled` / `refunded`.
+    # min_usd is the minimum in whole dollars and min_sats the sats it came to at the bitcoin price when
+    # it was requested (the public rule compares against min_sats), pledged_sats what the sponsor said
+    # they would pay, paid_sats what actually settled. The private status link is stored only as its sha256.
+    c.executescript("""
+      CREATE TABLE IF NOT EXISTS sponsorships(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lo INTEGER NOT NULL, hi INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'requested',
+        created_at REAL NOT NULL,
+        min_usd INTEGER, min_sats INTEGER, pledged_sats INTEGER, paid_sats INTEGER,
+        invoice_id TEXT, paid_at REAL, proven_at REAL, token_hash TEXT, note TEXT);
+      CREATE INDEX IF NOT EXISTS sponsorships_span ON sponsorships(lo, hi);
+    """)
+    # A table from before the minimum and the link (a preview copy made on 2026-09-13) has neither, and
+    # CREATE TABLE IF NOT EXISTS leaves it as it is. Add what is missing before indexing token_hash.
+    have = {r[1] for r in c.execute("PRAGMA table_info(sponsorships)")}
+    for col, decl in (("min_usd", "INTEGER"), ("min_sats", "INTEGER"), ("pledged_sats", "INTEGER"),
+                      ("paid_sats", "INTEGER"), ("token_hash", "TEXT")):
+        if col not in have:
+            c.execute(f"ALTER TABLE sponsorships ADD COLUMN {col} {decl}")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_token ON sponsorships(token_hash)")
     c.commit(); c.close()
 
 def parse_any_range(rid):
@@ -1636,6 +1663,401 @@ def vranges_cached():
         return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
     return _single_flight("vranges", VRANGES_TTL, build)
 
+def _etag_matches(header, etag):
+    """True when an If-None-Match header names this ETag, weak or strong.
+
+    nginx gzips responses on the way out and turns the ETag into a WEAK one, `W/"..."`, and that is
+    what a browser sends back. Comparing the raw header with the strong tag never matched, so every
+    revalidation of /api/vranges re-downloaded the whole index. Measured 2026-09-13 through hazync.org:
+    `W/"..."` answered 200 and 572 KB, the bare `"..."` answered 304."""
+    if not header or not etag:
+        return False
+    want = etag[2:] if etag.startswith("W/") else etag
+    for t in header.split(","):
+        t = t.strip()
+        if t == "*" or (t[2:] if t.startswith("W/") else t) == want:
+            return True
+    return False
+
+def fold_ids_cached():
+    """Ids of every verified range that is a FOLD (see fold_spans), cached like the index it is read from."""
+    def build():
+        c = db()
+        try:
+            return frozenset(rid for rid, _lo, _hi in fold_spans(c))
+        finally:
+            c.close()
+    return _single_flight("fold:ids", VRANGES_TTL, build)
+
+def known_handles_cached():
+    """Every handle that has a verified range, moderation applied. Bounds the per-prover cache keys."""
+    def build():
+        c = db()
+        try:
+            blk = blocked_pubkeys()
+            return frozenset(r["handle"] for r in c.execute("SELECT DISTINCT handle,pubkey FROM vranges")
+                             if r["handle"] and (r["pubkey"] or "").lower() not in blk)
+        finally:
+            c.close()
+    return _single_flight("handles", VRANGES_TTL, build)
+
+def spine_segments_cached():
+    return _single_flight("spine:segs:list", VRANGES_TTL, lambda: spine_segments()[0])
+
+def block_status(prover=None):
+    """Every block's furthest state, as runs, for the block map: [[lo, hi, status], ...] with 3 proven,
+    4 folded and 5 anchored (the numbers blockmap.js already uses). A block in no run is open.
+
+    The map used to build this from /api/vranges, every verified range with its handle (5.8 MB, 568 KB
+    gzipped at 70k rows), on every load and every five minutes. Runs are a few thousand entries. Claims
+    are not included: they change by the second and already ride on /api/state.
+
+    With `prover`, only the ranges that prover PROVED -- not the folds they made -- so the map can light
+    up one prover's blocks. A blocked contributor never matches."""
+    tip = chain_tip()
+    spine_hi = (spine_head() or {}).get("hi") or 0
+    folds = fold_ids_cached()
+    c = db()
+    try:
+        blk = blocked_pubkeys()
+        if prover is None:
+            rows = c.execute("SELECT id,lo,hi FROM vranges").fetchall()
+        else:
+            rows = [r for r in c.execute("SELECT id,lo,hi,pubkey FROM vranges WHERE handle=?", (prover,))
+                    if (r["pubkey"] or "").lower() not in blk and r["id"] not in folds]
+    finally:
+        c.close()
+    top = max([tip, spine_hi] + [r["hi"] for r in rows])
+    st = bytearray(top + 1)
+    # A fold outranks a single proof, and the genesis proof outranks both: proofs first, folds over them.
+    for want_fold, code in ((False, b"\x03"), (True, b"\x04")):
+        for r in rows:
+            if (r["id"] in folds) == want_fold:
+                lo, hi = max(1, r["lo"]), r["hi"]
+                if hi >= lo:
+                    st[lo:hi + 1] = code * (hi - lo + 1)
+    if prover is None and spine_hi:
+        st[1:spine_hi + 1] = b"\x05" * spine_hi
+    runs = [[m.start(), m.end() - 1, m.group(1)[0]] for m in re.finditer(rb"([\x01-\xff])\1*", bytes(st))]
+    return {"tip": tip, "spine_hi": spine_hi, "frontier": frontier_hi(), "prover": prover, "runs": runs}
+
+def block_status_cached(prover=None):
+    """(bytes, etag) for /api/blockstatus, single-flight like the index it replaces for the map."""
+    def build():
+        v = json.dumps(block_status(prover)).encode()
+        return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
+    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build)
+
+def _parse_price_bands(raw):
+    """SPONSOR_PRICE_BANDS: a JSON list of [lo, hi, usd_per_block], heights inclusive, the price a WHOLE
+    number of dollars. Set but unparseable, empty, a zero, negative or fractional price, a band starting
+    below block 1, or two bands that overlap all mean unpriced (None), and nothing can be sponsored. Unset
+    means SPONSOR_PRICE_BANDS_DEFAULT."""
+    if not raw:
+        return None
+    try:
+        bands = json.loads(raw)
+        out = []
+        for b in bands:
+            lo, hi, sats = b
+            if not all(isinstance(v, int) and not isinstance(v, bool) for v in (lo, hi, sats)):
+                return None
+            if lo < 1 or hi < lo or sats < 1:
+                return None
+            out.append((lo, hi, sats))
+    except (ValueError, TypeError):
+        return None
+    out.sort()
+    if not out or any(out[i][0] <= out[i - 1][1] for i in range(1, len(out))):
+        return None
+    return out
+
+SPONSOR_OPEN = os.environ.get("SPONSOR_OPEN", "0") == "1"
+SPONSOR_MAX_BLOCKS = int(os.environ.get("SPONSOR_MAX_BLOCKS", "1000"))
+SPONSOR_NAME_MAX = 40                               # characters (code points); the site's form reads it from GET /api/sponsor
+# The minimum per block, in whole dollars, by height (decided 2026-09-13). Each band is twice the estimated
+# GPU cost of the heaviest 1% of its blocks at $0.74 per RTX 4090 card-hour (the dearer of two RunPod
+# prices paid), from measured bundle sizes and the middle bytes-per-segment estimate, rounded UP to whole
+# dollars: 1-100k about $0.31 or less, 100k-150k $0.81, 150k-180k $1.26. The ladder stops at $5, so the top
+# two bands are about 1.85x rather than 2x ($4 against $4.31, $5 against $5.43). Above 230,000 there is no
+# price: the bridge cannot prove those blocks yet (bundles stop at 230k) and nothing there is measured.
+# docs/SPONSORSHIP.md has the figures and where they come from.
+SPONSOR_PRICE_BANDS_DEFAULT = [(1, 100000, 1), (100001, 150000, 2), (150001, 180000, 3),
+                               (180001, 200000, 4), (200001, 230000, 5)]
+SPONSOR_PRICE_BANDS = (_parse_price_bands(os.environ["SPONSOR_PRICE_BANDS"]) if "SPONSOR_PRICE_BANDS" in os.environ
+                       else list(SPONSOR_PRICE_BANDS_DEFAULT))
+
+def _parse_btc_usd(raw):
+    """SPONSOR_BTC_USD: dollars per bitcoin, to turn a dollar minimum into sats. No default: a bitcoin price
+    written into the code would be wrong within the day. Unset or not a positive finite number -> None."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v <= 0:
+        return None
+    return int(v) if v.is_integer() else v
+
+SPONSOR_BTC_USD = _parse_btc_usd(os.environ.get("SPONSOR_BTC_USD"))
+SPONSOR_PUBLIC = ("paid", "proving", "proven")     # the only statuses that ever show a sponsor's name
+# A name is public only when BOTH hold: the status says paid, and what settled covers the minimum. Every
+# query that returns a sponsor's name to anyone but the sponsor uses this, so an `underpaid` row, or a
+# `paid` row set by hand below its minimum, never shows.
+SPONSOR_PUBLIC_SQL = ("status IN ('paid','proving','proven') AND paid_sats IS NOT NULL"
+                      " AND min_sats IS NOT NULL AND paid_sats >= min_sats")
+
+def _is_public_sponsorship(r):
+    return (r["status"] in SPONSOR_PUBLIC and r["paid_sats"] is not None and r["min_sats"] is not None
+            and r["paid_sats"] >= r["min_sats"])
+
+def sponsor_min_usd(lo, hi):
+    """The minimum for blocks lo..hi in whole dollars: the sum of each block's band price, or None if any
+    block is in no band. The bands are a deliberate OVERESTIMATE of compute, so paying the minimum means
+    the blocks can be proven whatever cards cost that day; anyone may pay more."""
+    if not SPONSOR_PRICE_BANDS:
+        return None
+    total, covered = 0, 0
+    for blo, bhi, usd in SPONSOR_PRICE_BANDS:
+        a, b = max(lo, blo), min(hi, bhi)
+        if a <= b:
+            total += (b - a + 1) * usd
+            covered += b - a + 1
+    return total if covered == hi - lo + 1 else None
+
+def sponsor_min_sats(min_usd):
+    """A dollar minimum in sats at SPONSOR_BTC_USD, rounded UP so it never falls short; None without both.
+    Exact arithmetic: a float division would turn exactly 1,000 sats into 1,000.0000000001 and round up."""
+    if min_usd is None or SPONSOR_BTC_USD is None:
+        return None
+    return math.ceil(Fraction(min_usd * 100_000_000) / Fraction(str(SPONSOR_BTC_USD)))
+
+def _public_sponsor(c, n):
+    """The sponsor shown on block n, if any. Only a sponsorship PAID AT LEAST ITS MINIMUM is shown: an
+    unpaid request is text anyone can type, and showing it would let anyone put a name on any block."""
+    try:
+        r = c.execute("SELECT id,name,lo,hi,status FROM sponsorships WHERE lo<=? AND hi>=? AND "
+                      + SPONSOR_PUBLIC_SQL + " ORDER BY paid_at ASC, id ASC LIMIT 1",
+                      (n, n)).fetchone()
+    except sqlite3.OperationalError:          # a database from before the table; init_db adds it on start
+        return None
+    return dict(id=r["id"], name=r["name"], lo=r["lo"], hi=r["hi"], status=r["status"]) if r else None
+
+def block_detail(n):
+    """Everything about one block, for the block map's pop-up and the explorer's block page: every proof
+    that covers it (with who made it and whether it is a fold), who anchored it, a live claim, and a
+    paid sponsor. Replaces downloading the whole index to look up one block."""
+    tip = chain_tip()
+    if n > tip:
+        return 404, {"error": "not mined yet", "block": n, "tip": tip}
+    spine_hi = (spine_head() or {}).get("hi") or 0
+    fr = frontier_hi()
+    folds = fold_ids_cached()
+    now = time.time()
+    c = db()
+    try:
+        blk = blocked_pubkeys()
+        rows = c.execute("SELECT id,lo,hi,handle,pubkey,ts FROM vranges WHERE lo<=? AND hi>=?"
+                         " ORDER BY (hi-lo) ASC, ts ASC", (n, n)).fetchall()
+        claim = c.execute("SELECT lo,hi,handle,assignee,claimed_at,last_beat FROM ranges"
+                          " WHERE status='claimed' AND lo<=? AND hi>=? ORDER BY lo LIMIT 1", (n, n)).fetchone()
+        sponsor = _public_sponsor(c, n)
+    finally:
+        c.close()
+    proofs = [{"lo": r["lo"], "hi": r["hi"], "ts": r["ts"], "fold": r["id"] in folds,
+               "handle": r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]",
+               "proof": f"/api/proof/{r['id']}"
+               if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")) else None}
+              for r in rows]
+    cl = None
+    if claim:
+        beat = int(now - (claim["last_beat"] or claim["claimed_at"] or now))
+        cl = {"lo": claim["lo"], "hi": claim["hi"], "elapsed": int(now - (claim["claimed_at"] or now)),
+              "stale": beat > CLAIM_TTL,
+              "handle": claim["handle"] if (claim["assignee"] or "").lower() not in blk else "[removed]"}
+    if n == 0:
+        status = "genesis"
+    elif n <= spine_hi:
+        status = "spined"
+    elif any(p["fold"] for p in proofs):
+        status = "folded"
+    elif proofs:
+        status = "proved"
+    elif cl and not cl["stale"]:
+        status = "claimed"
+    else:
+        status = "open"
+    anchored_by = None
+    if 0 < n <= spine_hi:
+        seg = next((sg for sg in spine_segments_cached() if sg["lo"] <= n <= sg["hi"]), None)
+        anchored_by = seg["handle"] if seg else None
+    return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
+                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
+                 "sponsor": sponsor}
+
+# Control, formatting, surrogate and private-use characters: where a right-to-left override, a zero-width
+# joiner that makes "Jo<ZWJ>hn" look like "John", or an invisible letter would hide. NOT unassigned (Cn):
+# this Python's Unicode tables are older than browsers', so refusing Cn refused emoji newer than it (U+1FAE0
+# is unassigned to Python 3.10) that the site's form, checking the same rule, had already accepted.
+_SPONSOR_NAME_HIDDEN = ("Cc", "Cf", "Cs", "Co")
+
+def _clean_sponsor_name(v):
+    """1 to SPONSOR_NAME_MAX characters, counted in code points after inner whitespace is collapsed, with
+    no hidden character. The site's form (assets/board.js nameCheck) applies exactly this rule, so a name
+    it lets through is never refused here."""
+    if not isinstance(v, str):
+        return None
+    t = " ".join(v.split())
+    if not 1 <= len(t) <= SPONSOR_NAME_MAX or any(unicodedata.category(ch) in _SPONSOR_NAME_HIDDEN for ch in t):
+        return None
+    return t
+
+def sponsor_info():
+    return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": False,
+            "priced": bool(SPONSOR_PRICE_BANDS), "bands": [list(b) for b in SPONSOR_PRICE_BANDS or []],
+            "btc_usd": SPONSOR_BTC_USD, "name_max": SPONSOR_NAME_MAX}
+
+def _sponsor_span(lo, hi):
+    """Validate a span to sponsor: (code, error) on a bad one, else (None, (lo, hi)). Shared by the quote
+    and the request, so the form hears the same refusal whichever it asked first."""
+    try:
+        lo = int(lo)
+        hi = int(lo if hi is None else hi)
+    except (TypeError, ValueError):
+        return 400, {"error": "lo and hi must be block heights"}
+    tip = chain_tip()
+    if lo < 1 or hi < lo or hi > tip:
+        return 400, {"error": f"blocks must run from 1 to {tip}, lowest first"}
+    if hi - lo + 1 > SPONSOR_MAX_BLOCKS:
+        return 400, {"error": f"at most {SPONSOR_MAX_BLOCKS} blocks in one sponsorship"}
+    if hi <= ((spine_head() or {}).get("hi") or 0):
+        return 409, {"error": "those blocks are already proven and anchored"}
+    return None, (lo, hi)
+
+def sponsor_quote(lo, hi):
+    """GET /api/sponsor/quote?lo=&hi= -- the minimum for a span. Answers while sponsorship is closed too,
+    so the form can show the minimum before anyone can pay it."""
+    code, v = _sponsor_span(lo, hi)
+    if code:
+        return code, v
+    lo, hi = v
+    usd = sponsor_min_usd(lo, hi)
+    return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_usd": usd, "min_sats": sponsor_min_sats(usd),
+                 "btc_usd": SPONSOR_BTC_USD, "priced": usd is not None}
+
+def sponsor_request(body):
+    """POST /api/sponsor {lo, hi, name, amount_sats}. Closed unless SPONSOR_OPEN=1, and even open it only
+    RECORDS a request: payments are not connected, so nothing is charged, queued or proven
+    (docs/SPONSORSHIP.md). The pledge must be at least the span's minimum. The answer carries the private
+    status link's token, once: only its sha256 is kept."""
+    if not SPONSOR_OPEN:
+        return 503, {"error": "Sponsorship is not open yet.", "open": False}
+    if not isinstance(body, dict):
+        return 400, {"error": "expected a JSON object with lo, hi, name and amount_sats"}
+    code, v = _sponsor_span(body.get("lo"), body.get("hi"))
+    if code:
+        return code, v
+    lo, hi = v
+    name = _clean_sponsor_name(body.get("name"))
+    if not name:
+        return 400, {"error": f"a name of 1 to {SPONSOR_NAME_MAX} visible characters is required"}
+    min_usd = sponsor_min_usd(lo, hi)
+    if min_usd is None:
+        return 503, {"error": "No minimum is set for these blocks yet, so they cannot be sponsored."}
+    min_sats = sponsor_min_sats(min_usd)
+    if min_sats is None:
+        return 503, {"error": "No bitcoin price is set to turn the minimum into sats, so these blocks cannot be sponsored yet."}
+    amount = body.get("amount_sats")
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 1:
+        return 400, {"error": "amount_sats must be a whole number of sats", "min_sats": min_sats, "min_usd": min_usd}
+    if amount < min_sats:
+        return 400, {"error": f"the minimum for these blocks is ${min_usd}, {min_sats} sats", "min_sats": min_sats,
+                     "min_usd": min_usd}
+    token = secrets.token_urlsafe(24)
+    c = db()
+    try:
+        cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,token_hash)"
+                        " VALUES(?,?,?,'requested',?,?,?,?,?)",
+                        (lo, hi, name, time.time(), min_usd, min_sats, amount, hashlib.sha256(token.encode()).hexdigest()))
+        c.commit()
+        sid = cur.lastrowid
+    finally:
+        c.close()
+    return 202, {"id": sid, "token": token, "status": "requested", "lo": lo, "hi": hi, "blocks": hi - lo + 1,
+                 "name": name, "min_usd": min_usd, "min_sats": min_sats, "pledged_sats": amount,
+                 "message": "Recorded. Payments are not connected yet, so nothing has been charged and nothing"
+                            " is queued. Keep your status link: it is the only way back to this sponsorship."}
+
+def _status_runs():
+    """The block map's runs, from the same cache /api/blockstatus serves, with their upper ends for bisect."""
+    runs = json.loads(block_status_cached()[0])["runs"]
+    return runs, [r[1] for r in runs]
+
+def _proven_in(lo, hi, runs):
+    """Blocks in lo..hi that are proven, folded or anchored (every run is one of those)."""
+    runs, ends = runs
+    n, i = 0, bisect.bisect_left(ends, lo)
+    while i < len(runs) and runs[i][0] <= hi:
+        a, b, code = runs[i]
+        if code >= 3:
+            n += min(b, hi) - max(a, lo) + 1
+        i += 1
+    return n
+
+def _queue_ahead(c, r):
+    """Public paid sponsorships paid before this one, still waiting; None unless this one is waiting."""
+    if r["status"] != "paid" or r["paid_at"] is None:
+        return None
+    return c.execute("SELECT COUNT(*) FROM sponsorships WHERE status='paid' AND " + SPONSOR_PUBLIC_SQL
+                     + " AND (paid_at < ? OR (paid_at = ? AND id < ?))",
+                     (r["paid_at"], r["paid_at"], r["id"])).fetchone()[0]
+
+_SPONSOR_COLS = "id,lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,paid_sats,paid_at,proven_at"
+
+def sponsor_status(token):
+    """GET /api/sponsor/status/<token> -- one sponsorship, for whoever holds its private link."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", token or ""):
+        return 404, {"error": "no sponsorship with that link"}
+    c = db()
+    try:
+        try:
+            r = c.execute(f"SELECT {_SPONSOR_COLS} FROM sponsorships WHERE token_hash=?",
+                          (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+        except sqlite3.OperationalError:
+            r = None
+        if not r:
+            return 404, {"error": "no sponsorship with that link"}
+        ahead = _queue_ahead(c, r)
+    finally:
+        c.close()
+    out = {k: r[k] for k in ("id", "lo", "hi", "name", "status", "min_usd", "min_sats", "pledged_sats", "paid_sats",
+                             "created_at", "paid_at", "proven_at")}
+    out.update(blocks=r["hi"] - r["lo"] + 1, proven_blocks=_proven_in(r["lo"], r["hi"], _status_runs()),
+               queue_ahead=ahead, public=_is_public_sponsorship(r))
+    return 200, out
+
+def sponsors_public():
+    """GET /api/sponsors -- every public sponsorship, newest payment first, for the sponsors page. Only
+    what the block map would show anyway plus the amount: never the pledge, the invoice, the note or the
+    link."""
+    c = db()
+    try:
+        try:
+            rows = c.execute(f"SELECT {_SPONSOR_COLS} FROM sponsorships WHERE {SPONSOR_PUBLIC_SQL}"
+                             " ORDER BY paid_at DESC, id DESC").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        aheads = [_queue_ahead(c, r) for r in rows]
+    finally:
+        c.close()
+    runs = _status_runs() if rows else None
+    return {"sponsorships": [{"id": r["id"], "name": r["name"], "lo": r["lo"], "hi": r["hi"],
+                              "blocks": r["hi"] - r["lo"] + 1, "status": r["status"],
+                              "paid_sats": r["paid_sats"], "min_usd": r["min_usd"], "min_sats": r["min_sats"],
+                              "paid_at": r["paid_at"],
+                              "proven_at": r["proven_at"], "proven_blocks": _proven_in(r["lo"], r["hi"], runs),
+                              "queue_ahead": ahead} for r, ahead in zip(rows, aheads)],
+            "open": SPONSOR_OPEN, "priced": bool(SPONSOR_PRICE_BANDS)}
+
 def state(slim=False):
     now = time.time()
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
@@ -2375,10 +2797,36 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, raw=state_cached(), ctype="application/json")
         if p == "/api/vranges":
             raw, etag = vranges_cached()
-            if self.headers.get("If-None-Match") == etag:
+            if _etag_matches(self.headers.get("If-None-Match"), etag):
                 return self._send(304, raw=b"", headers={"ETag": etag, "Cache-Control": "no-cache"})
             return self._send(200, raw=raw, ctype="application/json",
                               headers={"ETag": etag, "Cache-Control": "no-cache"})
+        if p == "/api/blockstatus":                        # every block's state as runs, for the block map
+            who = parse_qs(urlparse(self.path).query).get("prover", [None])[0]
+            if who is not None and who not in known_handles_cached():
+                return self._send(404, {"error": "no prover by that name"})
+            raw, etag = block_status_cached(who)
+            if _etag_matches(self.headers.get("If-None-Match"), etag):
+                return self._send(304, raw=b"", headers={"ETag": etag, "Cache-Control": "no-cache"})
+            return self._send(200, raw=raw, ctype="application/json",
+                              headers={"ETag": etag, "Cache-Control": "no-cache"})
+        if p.startswith("/api/block/"):                    # everything about one block
+            seg = p.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[0-9]{1,9}", seg):
+                return self._send(400, {"error": "a block height, for example /api/block/170"})
+            code, obj = block_detail(int(seg))
+            return self._send(code, obj)
+        if p == "/api/sponsor":                            # is sponsorship open; see docs/SPONSORSHIP.md
+            return self._send(200, sponsor_info())
+        if p == "/api/sponsor/quote":                      # the minimum for a span
+            q = parse_qs(urlparse(self.path).query)
+            code, obj = sponsor_quote(q.get("lo", [None])[0], q.get("hi", [None])[0])
+            return self._send(code, obj)
+        if p.startswith("/api/sponsor/status/"):           # one sponsorship, by its private link
+            code, obj = sponsor_status(p[len("/api/sponsor/status/"):])
+            return self._send(code, obj)
+        if p == "/api/sponsors":                           # the public table of paid sponsorships
+            return self._send(200, sponsors_public())
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
@@ -2501,7 +2949,7 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate", "/api/sponsor"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
@@ -2515,7 +2963,7 @@ class H(BaseHTTPRequestHandler):
         if isinstance(body, dict) and ua.startswith("hazync-worker/"):
             body["_client_version"] = ua[len("hazync-worker/"):][:32]
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
-              "/api/beat": beat, "/api/rotate": rotate}[p]
+              "/api/beat": beat, "/api/rotate": rotate, "/api/sponsor": sponsor_request}[p]
         code, obj = fn(body)
         if p == "/api/beat" and code != 200:
             try:
