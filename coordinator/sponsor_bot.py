@@ -20,12 +20,18 @@ DB = os.environ.get("COORD_DB", os.path.join(os.path.dirname(os.path.abspath(__f
 
 
 def queue(db_path=DB):
-    """Paid sponsorships, oldest payment first. Read-only; an older database without the table is empty."""
+    """Paid sponsorships, oldest payment first. Read-only; an older database without the table is empty.
+
+    Paid means paid AT LEAST THE MINIMUM, the same rule that decides whether a name is public
+    (server.SPONSOR_PUBLIC_SQL): an `underpaid` row, or a `paid` row below its minimum, is never proven
+    on the sponsorship budget."""
     c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
     try:
         return [dict(r) for r in c.execute(
-            "SELECT id,lo,hi,name,status,paid_at FROM sponsorships WHERE status='paid' ORDER BY paid_at ASC, id ASC")]
+            "SELECT id,lo,hi,name,status,paid_at,paid_sats,min_sats FROM sponsorships WHERE status='paid'"
+            " AND paid_sats IS NOT NULL AND min_sats IS NOT NULL AND paid_sats >= min_sats"
+            " ORDER BY paid_at ASC, id ASC")]
     except sqlite3.OperationalError:
         return []
     finally:
