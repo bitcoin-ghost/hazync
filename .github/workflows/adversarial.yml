@@ -150,6 +150,13 @@ jobs:
         run: |
           cd coordinator
           python3 test_coord_concurrency.py --control
+      - name: /api/vranges does not stampede or exhaust open files (2026-09-13 outage)
+        # Single-flight rebuild, explicit close, soft open-file limit raised, fold count in /api/state.
+        run: cd coordinator && python3 test_vranges_cache.py
+      - name: vranges POSITIVE CONTROL (old plain-TTL cache, no limit raise — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_vranges_cache.py --control
       - name: A box with no usable GPU stops instead of claiming block after block (#261)
         run: cd coordinator && python3 test_worker_device.py
       - name: No-usable-GPU POSITIVE CONTROL (device errors treated as ordinary — must FAIL)
