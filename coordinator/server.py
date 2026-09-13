@@ -17,7 +17,7 @@ Config via env:
 The full submit→verify→credit loop is real; VERIFY_MODE=mock only stubs the STARK check so the rest
 can be tested without a GPU.
 """
-import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io
+import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 from urllib.parse import urlparse, parse_qs
@@ -423,6 +423,19 @@ def init_db():
     for col in ("last_version TEXT", "last_version_at REAL"):
         try: c.execute(f"ALTER TABLE contributors ADD COLUMN {col}")
         except Exception: pass
+    # Sponsorship (docs/SPONSORSHIP.md). Records only: nothing reads this table to decide what gets
+    # claimed or proven, and a name is published only once a sponsorship is PAID, which nothing can do
+    # yet. `requested` -> `invoiced` -> `paid` -> `proving` -> `proven`, or `cancelled` / `refunded`.
+    c.executescript("""
+      CREATE TABLE IF NOT EXISTS sponsorships(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lo INTEGER NOT NULL, hi INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'requested',
+        created_at REAL NOT NULL,
+        amount_sats INTEGER, invoice_id TEXT, paid_at REAL, proven_at REAL, note TEXT);
+      CREATE INDEX IF NOT EXISTS sponsorships_span ON sponsorships(lo, hi);
+    """)
     c.commit(); c.close()
 
 def parse_any_range(rid):
@@ -1636,6 +1649,204 @@ def vranges_cached():
         return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
     return _single_flight("vranges", VRANGES_TTL, build)
 
+def _etag_matches(header, etag):
+    """True when an If-None-Match header names this ETag, weak or strong.
+
+    nginx gzips responses on the way out and turns the ETag into a WEAK one, `W/"..."`, and that is
+    what a browser sends back. Comparing the raw header with the strong tag never matched, so every
+    revalidation of /api/vranges re-downloaded the whole index. Measured 2026-09-13 through hazync.org:
+    `W/"..."` answered 200 and 572 KB, the bare `"..."` answered 304."""
+    if not header or not etag:
+        return False
+    want = etag[2:] if etag.startswith("W/") else etag
+    for t in header.split(","):
+        t = t.strip()
+        if t == "*" or (t[2:] if t.startswith("W/") else t) == want:
+            return True
+    return False
+
+def fold_ids_cached():
+    """Ids of every verified range that is a FOLD (see fold_spans), cached like the index it is read from."""
+    def build():
+        c = db()
+        try:
+            return frozenset(rid for rid, _lo, _hi in fold_spans(c))
+        finally:
+            c.close()
+    return _single_flight("fold:ids", VRANGES_TTL, build)
+
+def known_handles_cached():
+    """Every handle that has a verified range, moderation applied. Bounds the per-prover cache keys."""
+    def build():
+        c = db()
+        try:
+            blk = blocked_pubkeys()
+            return frozenset(r["handle"] for r in c.execute("SELECT DISTINCT handle,pubkey FROM vranges")
+                             if r["handle"] and (r["pubkey"] or "").lower() not in blk)
+        finally:
+            c.close()
+    return _single_flight("handles", VRANGES_TTL, build)
+
+def spine_segments_cached():
+    return _single_flight("spine:segs:list", VRANGES_TTL, lambda: spine_segments()[0])
+
+def block_status(prover=None):
+    """Every block's furthest state, as runs, for the block map: [[lo, hi, status], ...] with 3 proven,
+    4 folded and 5 anchored (the numbers blockmap.js already uses). A block in no run is open.
+
+    The map used to build this from /api/vranges, every verified range with its handle (5.8 MB, 568 KB
+    gzipped at 70k rows), on every load and every five minutes. Runs are a few thousand entries. Claims
+    are not included: they change by the second and already ride on /api/state.
+
+    With `prover`, only the ranges that prover PROVED -- not the folds they made -- so the map can light
+    up one prover's blocks. A blocked contributor never matches."""
+    tip = chain_tip()
+    spine_hi = (spine_head() or {}).get("hi") or 0
+    folds = fold_ids_cached()
+    c = db()
+    try:
+        blk = blocked_pubkeys()
+        if prover is None:
+            rows = c.execute("SELECT id,lo,hi FROM vranges").fetchall()
+        else:
+            rows = [r for r in c.execute("SELECT id,lo,hi,pubkey FROM vranges WHERE handle=?", (prover,))
+                    if (r["pubkey"] or "").lower() not in blk and r["id"] not in folds]
+    finally:
+        c.close()
+    top = max([tip, spine_hi] + [r["hi"] for r in rows])
+    st = bytearray(top + 1)
+    # A fold outranks a single proof, and the genesis proof outranks both: proofs first, folds over them.
+    for want_fold, code in ((False, b"\x03"), (True, b"\x04")):
+        for r in rows:
+            if (r["id"] in folds) == want_fold:
+                lo, hi = max(1, r["lo"]), r["hi"]
+                if hi >= lo:
+                    st[lo:hi + 1] = code * (hi - lo + 1)
+    if prover is None and spine_hi:
+        st[1:spine_hi + 1] = b"\x05" * spine_hi
+    runs = [[m.start(), m.end() - 1, m.group(1)[0]] for m in re.finditer(rb"([\x01-\xff])\1*", bytes(st))]
+    return {"tip": tip, "spine_hi": spine_hi, "frontier": frontier_hi(), "prover": prover, "runs": runs}
+
+def block_status_cached(prover=None):
+    """(bytes, etag) for /api/blockstatus, single-flight like the index it replaces for the map."""
+    def build():
+        v = json.dumps(block_status(prover)).encode()
+        return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
+    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build)
+
+SPONSOR_OPEN = os.environ.get("SPONSOR_OPEN", "0") == "1"
+SPONSOR_MAX_BLOCKS = int(os.environ.get("SPONSOR_MAX_BLOCKS", "1000"))
+SPONSOR_PUBLIC = ("paid", "proving", "proven")     # the only statuses that ever show a sponsor's name
+
+def _public_sponsor(c, n):
+    """The sponsor shown on block n, if any. Only a PAID sponsorship is shown: an unpaid request is text
+    anyone can type, and showing it would let anyone put a name on any block."""
+    try:
+        r = c.execute("SELECT name,lo,hi,status FROM sponsorships WHERE lo<=? AND hi>=?"
+                      " AND status IN ('paid','proving','proven') ORDER BY paid_at ASC, id ASC LIMIT 1",
+                      (n, n)).fetchone()
+    except sqlite3.OperationalError:          # a database from before the table; init_db adds it on start
+        return None
+    return dict(name=r["name"], lo=r["lo"], hi=r["hi"], status=r["status"]) if r else None
+
+def block_detail(n):
+    """Everything about one block, for the block map's pop-up and the explorer's block page: every proof
+    that covers it (with who made it and whether it is a fold), who anchored it, a live claim, and a
+    paid sponsor. Replaces downloading the whole index to look up one block."""
+    tip = chain_tip()
+    if n > tip:
+        return 404, {"error": "not mined yet", "block": n, "tip": tip}
+    spine_hi = (spine_head() or {}).get("hi") or 0
+    fr = frontier_hi()
+    folds = fold_ids_cached()
+    now = time.time()
+    c = db()
+    try:
+        blk = blocked_pubkeys()
+        rows = c.execute("SELECT id,lo,hi,handle,pubkey,ts FROM vranges WHERE lo<=? AND hi>=?"
+                         " ORDER BY (hi-lo) ASC, ts ASC", (n, n)).fetchall()
+        claim = c.execute("SELECT lo,hi,handle,assignee,claimed_at,last_beat FROM ranges"
+                          " WHERE status='claimed' AND lo<=? AND hi>=? ORDER BY lo LIMIT 1", (n, n)).fetchone()
+        sponsor = _public_sponsor(c, n)
+    finally:
+        c.close()
+    proofs = [{"lo": r["lo"], "hi": r["hi"], "ts": r["ts"], "fold": r["id"] in folds,
+               "handle": r["handle"] if (r["pubkey"] or "").lower() not in blk else "[removed]",
+               "proof": f"/api/proof/{r['id']}"
+               if os.path.exists(os.path.join(PROOFS_DIR, f"proof_{r['id']}.bin")) else None}
+              for r in rows]
+    cl = None
+    if claim:
+        beat = int(now - (claim["last_beat"] or claim["claimed_at"] or now))
+        cl = {"lo": claim["lo"], "hi": claim["hi"], "elapsed": int(now - (claim["claimed_at"] or now)),
+              "stale": beat > CLAIM_TTL,
+              "handle": claim["handle"] if (claim["assignee"] or "").lower() not in blk else "[removed]"}
+    if n == 0:
+        status = "genesis"
+    elif n <= spine_hi:
+        status = "spined"
+    elif any(p["fold"] for p in proofs):
+        status = "folded"
+    elif proofs:
+        status = "proved"
+    elif cl and not cl["stale"]:
+        status = "claimed"
+    else:
+        status = "open"
+    anchored_by = None
+    if 0 < n <= spine_hi:
+        seg = next((sg for sg in spine_segments_cached() if sg["lo"] <= n <= sg["hi"]), None)
+        anchored_by = seg["handle"] if seg else None
+    return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
+                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
+                 "sponsor": sponsor}
+
+def _clean_sponsor_name(v):
+    """1-40 visible characters, inner whitespace collapsed; no control or formatting characters, which
+    is where a right-to-left override or a zero-width trick would hide."""
+    if not isinstance(v, str):
+        return None
+    t = " ".join(v.split())
+    if not 1 <= len(t) <= 40 or any(unicodedata.category(ch)[0] == "C" for ch in t):
+        return None
+    return t
+
+def sponsor_info():
+    return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": False}
+
+def sponsor_request(body):
+    """POST /api/sponsor {lo, hi, name}. Closed unless SPONSOR_OPEN=1, and even open it only RECORDS a
+    request: payments are not connected, so nothing is charged, queued or proven (docs/SPONSORSHIP.md)."""
+    if not SPONSOR_OPEN:
+        return 503, {"error": "Sponsorship is not open yet.", "open": False}
+    if not isinstance(body, dict):
+        return 400, {"error": "expected a JSON object with lo, hi and name"}
+    try:
+        lo = int(body.get("lo"))
+        hi = int(body.get("hi", body.get("lo")))
+    except (TypeError, ValueError):
+        return 400, {"error": "lo and hi must be block heights"}
+    tip = chain_tip()
+    if lo < 1 or hi < lo or hi > tip:
+        return 400, {"error": f"blocks must run from 1 to {tip}, lowest first"}
+    if hi - lo + 1 > SPONSOR_MAX_BLOCKS:
+        return 400, {"error": f"at most {SPONSOR_MAX_BLOCKS} blocks in one sponsorship"}
+    name = _clean_sponsor_name(body.get("name"))
+    if not name:
+        return 400, {"error": "a name of 1 to 40 visible characters is required"}
+    if hi <= ((spine_head() or {}).get("hi") or 0):
+        return 409, {"error": "those blocks are already proven and anchored"}
+    c = db()
+    try:
+        cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at) VALUES(?,?,?,'requested',?)",
+                        (lo, hi, name, time.time()))
+        c.commit()
+        sid = cur.lastrowid
+    finally:
+        c.close()
+    return 202, {"id": sid, "status": "requested", "lo": lo, "hi": hi,
+                 "message": "Recorded. Payments are not connected yet, so nothing has been charged and nothing is queued."}
+
 def state(slim=False):
     now = time.time()
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
@@ -2349,10 +2560,27 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, raw=state_cached(), ctype="application/json")
         if p == "/api/vranges":
             raw, etag = vranges_cached()
-            if self.headers.get("If-None-Match") == etag:
+            if _etag_matches(self.headers.get("If-None-Match"), etag):
                 return self._send(304, raw=b"", headers={"ETag": etag, "Cache-Control": "no-cache"})
             return self._send(200, raw=raw, ctype="application/json",
                               headers={"ETag": etag, "Cache-Control": "no-cache"})
+        if p == "/api/blockstatus":                        # every block's state as runs, for the block map
+            who = parse_qs(urlparse(self.path).query).get("prover", [None])[0]
+            if who is not None and who not in known_handles_cached():
+                return self._send(404, {"error": "no prover by that name"})
+            raw, etag = block_status_cached(who)
+            if _etag_matches(self.headers.get("If-None-Match"), etag):
+                return self._send(304, raw=b"", headers={"ETag": etag, "Cache-Control": "no-cache"})
+            return self._send(200, raw=raw, ctype="application/json",
+                              headers={"ETag": etag, "Cache-Control": "no-cache"})
+        if p.startswith("/api/block/"):                    # everything about one block
+            seg = p.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[0-9]{1,9}", seg):
+                return self._send(400, {"error": "a block height, for example /api/block/170"})
+            code, obj = block_detail(int(seg))
+            return self._send(code, obj)
+        if p == "/api/sponsor":                            # is sponsorship open; see docs/SPONSORSHIP.md
+            return self._send(200, sponsor_info())
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),
@@ -2475,7 +2703,7 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate", "/api/sponsor"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
@@ -2489,7 +2717,7 @@ class H(BaseHTTPRequestHandler):
         if isinstance(body, dict) and ua.startswith("hazync-worker/"):
             body["_client_version"] = ua[len("hazync-worker/"):][:32]
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
-              "/api/beat": beat, "/api/rotate": rotate}[p]
+              "/api/beat": beat, "/api/rotate": rotate, "/api/sponsor": sponsor_request}[p]
         code, obj = fn(body)
         if p == "/api/beat" and code != 200:
             try:
