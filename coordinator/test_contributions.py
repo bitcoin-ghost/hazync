@@ -115,6 +115,14 @@ if CONTROL:
     print("These tests cannot detect the thing they exist to detect.")
     sys.exit(1)
 
+# The chain-wide folded count uses the SAME fold test as the columns above, so the two can never
+# disagree about what a fold is. It runs from here so the CI steps already on this file cover it.
+import subprocess as _sp
+_fc = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_folded_count.py")]
+              + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_fc.returncode == 0, "the chain-wide folded count agrees (test_folded_count.py)")
+
 if fails:
     print(f"{len(fails)} failure(s).")
     sys.exit(1)

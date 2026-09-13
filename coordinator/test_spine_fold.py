@@ -306,7 +306,16 @@ try:
 
     c = server.db(); c.execute("DELETE FROM ranges"); c.commit(); c.close()
     _, r2 = server.claim({"pubkey": A, "handle": "A"})
-    _t.sleep(3)                                   # stops beating: the worker died
+    # AGE the claim rather than sleeping for it -- the same fix the assertion above already carries,
+    # and for the same reason. Sleeping 3s against CLAIM_TTL=2 leaves a one-second margin, and this
+    # failed about one run in five: the claim was observed only 0.6s old after the sleep, so B saw it
+    # as still held and took the next block. The property under test is "a claim nobody beats is
+    # released", which is about the claim's AGE and not about the wall clock, so the wall clock has no
+    # business in it. Setting claimed_at directly also takes 3 seconds out of every run of this file.
+    _c3 = server.db()
+    _c3.execute("UPDATE ranges SET claimed_at=?, last_beat=NULL WHERE id=?",
+                (_t.time() - (server.CLAIM_TTL + 60), r2.get("range")))
+    _c3.commit(); _c3.close()
     _, rc = server.claim({"pubkey": Bk, "handle": "B"})
     check(rc.get("range") == r2.get("range"), "a worker that stops beating releases it")
 
