@@ -5796,7 +5796,17 @@ fn seg_serve_cmd() {
 
                         // Sent-but-unanswered work, so a dropped connection returns exactly what it owed.
                         let inflight: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(VecDeque::new()));
-                        let injobs: Arc<Mutex<VecDeque<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
+                        // hazync#252: the send INSTANT rides with the job. Assembly's cost was
+                        // attributed to geography by inference — run 4 measured 128.7 s where compute
+                        // alone predicts ~17 s — and the issue says so in as many words: "that part is
+                        // inference, not measured (no RTTs were recorded)". Every join and resolve is
+                        // a round trip carrying receipts, so the round trip is the thing to time.
+                        //
+                        // Timed on the SERVER's clock at both ends, which is what makes it trustworthy:
+                        // the worker already logs its own recv/send (#254/#267), but comparing those to
+                        // ours needs the two clocks to agree, and across rented boxes in several
+                        // countries they do not. round_trip - compute needs no such assumption.
+                        let injobs: Arc<Mutex<VecDeque<(u32, Vec<u8>, Instant)>>> = Arc::new(Mutex::new(VecDeque::new()));
                         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
                         let reader = {
@@ -5828,6 +5838,21 @@ fn seg_serve_cmd() {
                                         // The worker proves serially and answers in order, so the
                                         // front of injobs is the job this reply belongs to.
                                         let owed = { injobs.lock().unwrap().pop_front() };
+                                        // One line per job, timed on the SERVER's clock at both
+                                        // ends. The worker's own line for the same task carries
+                                        // compute_s (#254/#267), and compute_s is a DURATION, not a
+                                        // timestamp — so rtt_ms - compute_s*1000 is transport and
+                                        // queueing without the two clocks ever having to agree.
+                                        // That subtraction is the number #252 has been reasoning
+                                        // about and has never measured.
+                                        if let Some((_, ref sent_body, at)) = owed {
+                                            let kind = if i & RESOLVE_TAG != 0 { "resolve" }
+                                                       else if i & LIFT_TAG != 0 { "lift" } else { "join" };
+                                            println!("  [rtt] peer={peer} kind={kind} tag={i:#x} \
+rtt_ms={:.1} bytes_out={} bytes_in={}",
+                                                     at.elapsed().as_secs_f64() * 1000.0,
+                                                     sent_body.len(), body.len());
+                                        }
                                         match bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(&body) {
                                             Ok(r) if r.verify_integrity_with_context(ctx).is_ok() => {
                                                 jout.lock().unwrap().insert(i, r);
@@ -5841,7 +5866,7 @@ fn seg_serve_cmd() {
                                                 // injobs, so the teardown requeue will not cover it.
                                                 // Dropping it would lose a join for ever and the tree
                                                 // would wait on it until the run died.
-                                                if let Some(j) = owed { jobs.lock().unwrap().push_back(j); }
+                                                if let Some((t, b, _)) = owed { jobs.lock().unwrap().push_back((t, b)); }
                                             }
                                         }
                                         continue;
@@ -5909,7 +5934,7 @@ fn seg_serve_cmd() {
                             if !stop.load(std::sync::atomic::Ordering::Relaxed) {
                                 let job = { jobs.lock().unwrap().pop_front() };
                                 if let Some((tag, body)) = job {
-                                    injobs.lock().unwrap().push_back((tag, body.clone()));
+                                    injobs.lock().unwrap().push_back((tag, body.clone(), Instant::now()));
                                     if write_frame(&mut ws, tag, &body).is_err() {
                                         injobs.lock().unwrap().pop_back();
                                         jobs.lock().unwrap().push_front((tag, body));
@@ -5932,7 +5957,7 @@ fn seg_serve_cmd() {
                         }
                         {
                             let mut j = jobs.lock().unwrap();
-                            for it in injobs.lock().unwrap().drain(..) { j.push_front(it); }
+                            for (t, b, _) in injobs.lock().unwrap().drain(..) { j.push_front((t, b)); }
                         }
                     }));
                 }
