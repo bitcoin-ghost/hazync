@@ -199,6 +199,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_client_version.py --control
+      - name: A claim nobody is working on is released in minutes (#296)
+        # 237 blocks were held by two contributors who were not proving them, while the most
+        # productive prover on the board held TWO claims. Liveness could not tell "working" from
+        # "gone": a never-beaten claim got the same hour as one being actively proved.
+        run: cd coordinator && python3 test_claim_grace.py
+      - name: Claim grace POSITIVE CONTROL (grace = CLAIM_TTL, the old behaviour — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_claim_grace.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
