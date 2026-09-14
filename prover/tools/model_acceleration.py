@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Model the acceleration stack (#136, #137, #139) on block 962,000 using #138's fitted
-# coefficients. Sources the G-cycle ladder in docs/ACCELERATION.md 'The board'.
+# coefficients. Sources the G-cycle ladder in docs/history/ACCELERATION.md 'The board'.
 # Usage: python3 prover/tools/model_acceleration.py
 import json
 d=json.load(open('prover/block_962000.json'))

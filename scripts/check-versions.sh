@@ -33,8 +33,19 @@ echo "canonical METHOD_ID: $CANON  (short $CANON8)"
 # Superseded ids are the documented lineage inside the comments — legitimate to mention historically.
 KNOWN=$(grep -oE '\b[0-9a-f]{8}\b' "$CANON_FILE" | sort -u)
 
+# DATED HISTORICAL RECORDS are exempt from the currency checks (7 and 8), and rebaseline-id.sh never
+# rewrites them either (its own HISTORY_RE also adds prover/evidence and prover/testdata). A dated record states what was true when it was written:
+# an overnight log naming that night's container id, a release body naming the id it shipped. Demanding the
+# canonical id there does not fix a reference, it falsifies the record — and demanding it is exactly how
+# one got falsified: the b161735a re-baseline rewrote the id the 2026-08-03 overnight log had measured
+# (now docs/history/OVERNIGHT_2026-08-03.md). Checks 2-6 still cover these files: an id that matches no
+# lineage entry is a typo in any document, historical or not.
+HISTORY_RE='^(docs/history/|docs/RELEASE_NOTES_|CHANGELOG\.md$)'
+
 # ── 1. the canonical id must appear in every doc that states it ────────────────────────────────────
-for f in docs/PROVING.md SECURITY.md docs/ROADMAP.md; do
+# docs/ROADMAP.md was the third until 2026-09-14, when it became a historical record under docs/history/;
+# README.md states the canonical id in its place.
+for f in docs/PROVING.md SECURITY.md README.md; do
     [ -f "$f" ] || continue
     if grep -q "$CANON8" "$f"; then
         note "ok   $f references the canonical id"
@@ -175,7 +186,7 @@ while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     f=${hit%%:*}; rest=${hit#*:}; ln=${rest%%:*}; tok=${rest##*:}
     bad "$f:$ln shows superseded id '$tok' inside a code block — evidence quoting a retired guest reads as current"
-done < <(git ls-files '*.md' 2>/dev/null | while read -r f; do
+done < <(git ls-files '*.md' 2>/dev/null | grep -Ev "$HISTORY_RE" | while read -r f; do
              awk -v known="$KNOWN" -v canon="$CANON8" -v file="$f" '
                  /^[[:space:]]*```/ { infence = !infence; next }
                  infence {
@@ -203,17 +214,37 @@ while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     f=${hit%%:*}; rest=${hit#*:}; ln=${rest%%:*}; tok=${rest##*:}
     bad "$f:$ln calls superseded id '$tok' current/canonical in prose — it is history, say so"
-done < <(git ls-files '*.md' 2>/dev/null | while read -r f; do
+done < <(git ls-files '*.md' 2>/dev/null | grep -Ev "$HISTORY_RE" | while read -r f; do
              awk -v known="$KNOWN" -v canon="$CANON8" -v file="$f" '
-                 /^[[:space:]]*```/ { infence = !infence; next }
-                 # A line that says "superseded" is self-labelling as history — "as of canonical id
-                 # X (now superseded by Y)" is exactly the phrasing this repo should keep using, and
-                 # flagging it would train people to delete the supersession chain to appease a gate.
-                 !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ {
-                     line = $0
-                     while (match(line, /[0-9a-f]{8}/)) {
-                         tok = substr(line, RSTART, 8); line = substr(line, RSTART + 8)
-                         if (tok != canon && index(known, tok) > 0) print file ":" NR ":" tok
+                 function scan(s, n,   tok, hit) {
+                     hit = 0
+                     while (match(s, /[0-9a-f]{8}/)) {
+                         tok = substr(s, RSTART, 8); s = substr(s, RSTART + 8); hit = 1
+                         if (tok != canon && index(known, tok) > 0) print file ":" n ":" tok
+                     }
+                     return hit
+                 }
+                 /^[[:space:]]*```/ { infence = !infence; carry = 0; next }
+                 infence { carry = 0; next }
+                 {
+                     was = carry; carry = 0
+                     # A line that says "superseded" is self-labelling as history — "as of canonical id
+                     # X (now superseded by Y)" is exactly the phrasing this repo should keep using, and
+                     # flagging it would train people to delete the supersession chain to appease a gate.
+                     if (/[Ss]upersed/) next
+                     if (/[Cc]urrent|[Cc]anonical|[Ll]atest/) {
+                         # THE CLAIM CAN WRAP. docs/ROADMAP.md said "The current canonical id is" at the
+                         # end of one line and `4722cec8…` at the start of the next, four re-baselines
+                         # after that id was retired, and a per-line rule never saw the two together. So a
+                         # claim line naming no id, whose open sentence ENDS by introducing one ("... id
+                         # is", "METHOD_ID:"), carries to the next line — up to that line'"'"'s first sentence
+                         # break, no further. Any looser rule flags history on the line after an unrelated
+                         # "currently" (docs/PROOF_DURABILITY.md did exactly that when this was added).
+                         if (!scan($0, NR) && /([Cc]urrent|[Cc]anonical|[Ll]atest)[^.;!?]*([Ii][Dd]|METHOD_ID|is|was|:)[`*]*[[:space:]]*$/) carry = 1
+                     } else if (was) {
+                         head = $0
+                         if (match(head, /[.;!?]( |$)/)) head = substr(head, 1, RSTART)
+                         scan(head, NR)
                      }
                  }' "$f"
          done)
