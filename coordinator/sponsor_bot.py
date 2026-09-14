@@ -6,8 +6,12 @@ It runs on the coordinator box, next to the coordinator's database, and:
     `proving`), oldest payment first, and moves each from `paid` to `proving` when it starts on it;
   * rents one-GPU pods the way the board fleet does (hazync-board-fleet/fleet.sh), boots each against the
     signed release, and has it prove its assigned heights with the released worker's explicit mode,
-    `hazync-worker run <n>`, under the bot's own key. It never uses /api/claim: claims are unsigned, so a
-    privilege keyed on the bot's public key could be spoofed by anyone;
+    `hazync-worker run <n>`. It never uses /api/claim: claims are unsigned;
+  * submits each sponsorship's blocks under its OWN key, with the handle "SPONSOR: <sponsor name>" (one
+    more key, "SPONSOR: Hazync trial", for every trial). One key per sponsorship because the board adds
+    up work by key and shows the handle a key last submitted with. Keys are registered in the
+    coordinator's `sponsor_keys` table before a pod uses them; the coordinator refuses a handle starting
+    "SPONSOR" from any other key;
   * marks a sponsorship `proven` once every block of its span is covered by verified proofs from anyone
     (the coordinator does the same at submit; this catches blocks that arrived another way);
   * logs every assigned block in `sponsor_work` and every pod in `sponsor_pods`, so `report` gives a
@@ -52,6 +56,12 @@ IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 # 4090 community hosts often never expose public SSH; A40s always did (board fleet, 2026-09-11).
 GPU_TYPES = ("NVIDIA GeForce RTX 4090", "NVIDIA A40")
 TRIAL_MAX = 1000
+# The board handle for a sponsorship's key. The coordinator cleans handles with server.clean_handle and lets
+# a registered sponsor key's handle run to len(prefix) + SPONSOR_NAME_MAX, so a 40-character name is kept.
+HANDLE_PREFIX = "SPONSOR: "
+NAME_MAX = 40
+HANDLE_CAP = len(HANDLE_PREFIX) + NAME_MAX
+TRIAL_NAME = "Hazync trial"
 # `report` bands: the sponsorship price ladder's height ranges, and everything above it.
 BANDS = ((1, 100000), (100001, 150000), (150001, 180000), (180001, 200000), (200001, 230000), (230001, 10 ** 9))
 
@@ -76,12 +86,68 @@ def ensure_tables(c):
         sponsorship_id INTEGER,                 -- NULL for a trial block
         height INTEGER NOT NULL, pod_id TEXT, gpu_type TEXT, cost_per_hr REAL,
         assigned_at REAL, proven_at REAL, seconds REAL, usd_estimate REAL,
-        outcome TEXT);                          -- NULL while in flight; proven | stalled | failed | cancelled
+        outcome TEXT,                           -- NULL while in flight; proven | stalled | failed | cancelled
+        pubkey TEXT);                           -- the identity the block was proved under
       CREATE INDEX IF NOT EXISTS sponsor_work_height ON sponsor_work(height);
       CREATE TABLE IF NOT EXISTS sponsor_pods(
         pod_id TEXT PRIMARY KEY, name TEXT, gpu_type TEXT, cost_per_hr REAL,
         created_at REAL, terminated_at REAL, usd_estimate REAL, note TEXT);
     """)
+    if "pubkey" not in {r[1] for r in c.execute("PRAGMA table_info(sponsor_work)")}:
+        c.execute("ALTER TABLE sponsor_work ADD COLUMN pubkey TEXT")
+    c.commit()
+
+
+def has_sponsor_keys(c):
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sponsor_keys'").fetchone() is not None
+
+
+# ---------- identities ----------
+
+def board_handle(name):
+    """"SPONSOR: <name>" exactly as the board will show it: server.clean_handle's rule (printable only,
+    no < > & " ', trimmed), capped at HANDLE_CAP."""
+    h = "".join(ch for ch in HANDLE_PREFIX + str(name or "") if ch.isprintable() and ch not in "<>&\"'").strip()
+    return h[:HANDLE_CAP]
+
+
+def _write_private(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o600)
+
+
+def identity(home, sponsorship_id, name):
+    """The key a sponsorship's blocks are proved under, in $home/identities/<id | trial>/ as the worker
+    expects (key.hex, the raw ed25519 seed in hex, and handle). Created once and reused."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization as ser
+    tag = "trial" if sponsorship_id is None else str(int(sponsorship_id))
+    d = os.path.join(home, "identities", tag)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    kp = os.path.join(d, "key.hex")
+    if not os.path.isfile(kp):
+        sk = Ed25519PrivateKey.generate()
+        _write_private(kp, sk.private_bytes(ser.Encoding.Raw, ser.PrivateFormat.Raw, ser.NoEncryption()).hex())
+    with open(kp) as f:
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(f.read().strip()))
+    pub = sk.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw).hex()
+    hp = os.path.join(d, "handle")
+    if sponsorship_id is not None and name is None and os.path.isfile(hp):
+        with open(hp) as f:                      # a lookup: keep the handle the key was made with
+            handle = f.read().strip()
+    else:
+        handle = board_handle(TRIAL_NAME if sponsorship_id is None else name)
+        if not os.path.isfile(hp) or open(hp).read().strip() != handle:
+            _write_private(hp, handle + "\n")
+    return {"tag": tag, "home": d, "pubkey": pub, "handle": handle}
+
+
+def register_key(c, ident, sponsorship_id, now=None):
+    """Put a key in the coordinator's sponsor_keys, so it may use a "SPONSOR" handle. Idempotent."""
+    c.execute("INSERT OR IGNORE INTO sponsor_keys(pubkey, sponsorship_id, handle, created_at) VALUES(?,?,?,?)",
+              (ident["pubkey"], sponsorship_id, ident["handle"], time.time() if now is None else now))
     c.commit()
 
 
@@ -224,9 +290,20 @@ class RunPod:
     def __init__(self, key, url=GRAPHQL_URL, timeout=60):
         self.key, self.url, self.timeout = key, url, timeout
 
+    @staticmethod
+    def key_path():
+        """RUNPOD_API_KEY_FILE, else runpod.key in SPONSOR_BOT_HOME. Never the home directory: on the
+        coordinator box the bot runs as `hazync`, which has none."""
+        path = os.environ.get("RUNPOD_API_KEY_FILE")
+        if not path and os.environ.get("SPONSOR_BOT_HOME"):
+            path = os.path.join(os.environ["SPONSOR_BOT_HOME"], "runpod.key")
+        if not path:
+            raise SystemExit("sponsor_bot: set RUNPOD_API_KEY_FILE, or SPONSOR_BOT_HOME with runpod.key in it")
+        return path
+
     @classmethod
     def from_env(cls):
-        path = os.path.expanduser(os.environ.get("RUNPOD_API_KEY_FILE", "~/.runpod.key"))
+        path = cls.key_path()
         if not os.path.isfile(path):
             raise SystemExit(f"sponsor_bot: no RunPod API key file at {path} (set RUNPOD_API_KEY_FILE)")
         with open(path) as f:
@@ -328,31 +405,40 @@ echo "MID=$(./hazync-host-cuda method-id 2>&1 | grep -oE '[0-9a-f]{64}' | head -
 
 
 class SshRunner:
-    """Boots a pod against the signed release and runs assigned heights on it with `hazync-worker run <n>`."""
+    """Boots a pod against the signed release and runs assigned heights on it with `hazync-worker run <n>`,
+    each under its sponsorship's identity."""
 
     FILES = ("hazync-worker", "hazync-run-workers.sh", "hazync-host-x86_64-linux-gnu-cuda")
 
-    def __init__(self, ssh_key, bot_home, meta_url, release=None, workdir=None):
+    # Nothing here reads $HOME or ~/.ssh: on the coordinator box the bot runs as `hazync`, which has no home
+    # directory. Keys, known_hosts, the gpg keyring and scratch files all live under SPONSOR_BOT_HOME, and
+    # every ssh and scp call names its key, its known_hosts file and no config file.
+
+    def __init__(self, ssh_key, bot_home, meta_url, release=None, workdir=None, gnupghome=None):
         self.key, self.home, self.meta_url, self.release = ssh_key, bot_home, meta_url, release
-        self.dir = workdir or tempfile.mkdtemp(prefix="sponsor_bot_")
+        self.known_hosts = os.path.join(bot_home, "known_hosts")
+        self.gnupghome = gnupghome or os.path.join(bot_home, "gnupg")
+        if workdir is None:
+            os.makedirs(os.path.join(bot_home, "work"), mode=0o700, exist_ok=True)
+            workdir = tempfile.mkdtemp(prefix="run-", dir=os.path.join(bot_home, "work"))
+        self.dir = workdir
         self.method_id = None
         self.ssh_pubkey = None
 
     @classmethod
     def from_env(cls):
-        key, home = os.environ.get("SPONSOR_BOT_SSH_KEY"), os.environ.get("SPONSOR_BOT_HOME")
-        if not key or not home:
-            raise SystemExit("sponsor_bot: set SPONSOR_BOT_SSH_KEY (private key path) and SPONSOR_BOT_HOME "
-                             "(the bot's key.hex and handle)")
-        return cls(os.path.expanduser(key), os.path.expanduser(home),
-                   os.environ.get("SPONSOR_BOT_META_URL", "http://127.0.0.1:8899/api/meta"),
-                   os.environ.get("SPONSOR_BOT_RELEASE") or None)
+        home = os.environ.get("SPONSOR_BOT_HOME")
+        if not home or not os.path.isabs(home):
+            raise SystemExit("sponsor_bot: set SPONSOR_BOT_HOME to an absolute path (identities, the SSH key, "
+                             "known_hosts and the gpg keyring live there)")
+        key = os.environ.get("SPONSOR_BOT_SSH_KEY") or os.path.join(home, "ssh", "id_ed25519")
+        return cls(key, home, os.environ.get("SPONSOR_BOT_META_URL", "http://127.0.0.1:8899/api/meta"),
+                   os.environ.get("SPONSOR_BOT_RELEASE") or None,
+                   gnupghome=os.environ.get("SPONSOR_BOT_GNUPGHOME") or None)
 
     def prepare(self):
         """Everything checked locally before a cent is spent: identity, SSH key, program ID, signed manifest."""
-        for f in ("key.hex", "handle"):
-            if not os.path.isfile(os.path.join(self.home, f)):
-                raise SystemExit(f"sponsor_bot: no {f} in {self.home} (the bot's identity)")
+        os.makedirs(os.path.join(self.home, "identities"), mode=0o700, exist_ok=True)
         if not os.path.isfile(self.key) or not os.path.isfile(self.key + ".pub"):
             raise SystemExit(f"sponsor_bot: the SSH key {self.key} or its .pub is missing")
         with open(self.key + ".pub") as f:
@@ -374,9 +460,7 @@ class SshRunner:
         base = f"https://github.com/bitcoin-ghost/hazync/releases/download/{tag}/"
         for f in ("SHA256SUMS.txt", "SHA256SUMS.txt.asc"):
             urllib.request.urlretrieve(base + f, os.path.join(self.dir, f))
-        v = subprocess.run(["gpg", "--verify", "SHA256SUMS.txt.asc", "SHA256SUMS.txt"], cwd=self.dir,
-                           capture_output=True, text=True)
-        if "Good signature" not in (v.stdout + v.stderr):
+        if not self.verify_manifest():
             raise SystemExit("sponsor_bot: the release manifest's signature is not good; nothing was started")
         with open(os.path.join(self.dir, "SHA256SUMS.txt")) as f:
             want = [line for line in f if line.split() and line.split()[-1] in self.FILES]
@@ -388,8 +472,19 @@ class SshRunner:
             f.write(BOOT_SH.replace("@REL@", tag))
         return self
 
+    def verify_manifest(self):
+        """gpg --verify with the keyring in SPONSOR_BOT_HOME (GNUPGHOME), not the user's."""
+        env = dict(os.environ, GNUPGHOME=self.gnupghome)
+        v = subprocess.run(["gpg", "--batch", "--verify", "SHA256SUMS.txt.asc", "SHA256SUMS.txt"], cwd=self.dir,
+                           capture_output=True, text=True, env=env)
+        return "Good signature" in (v.stdout + v.stderr)
+
     def _opts(self):
-        return ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes", "-i", self.key]
+        # Fresh pods reuse IPs and ports with new host keys, so host keys are not checked; they are still
+        # recorded in SPONSOR_BOT_HOME rather than a home directory that does not exist.
+        return ["-F", "/dev/null", "-i", self.key, "-o", "IdentitiesOnly=yes",
+                "-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes"]
 
     def _ssh(self, pod, cmd, timeout=60):
         ip, port = pod.ssh
@@ -405,15 +500,13 @@ class SshRunner:
         detail = "not attempted"
         for _ in range(3):
             try:
-                ok = (self._ssh(pod, "mkdir -p /workspace /root/.hazync && chmod 700 /root/.hazync").returncode == 0
+                ok = (self._ssh(pod, "mkdir -p /workspace /root/.hazync-ids && chmod 700 /root/.hazync-ids").returncode == 0
                       and self._scp(pod, [os.path.join(self.dir, "boot.sh"), os.path.join(self.dir, "want.txt")],
-                                    "/workspace/").returncode == 0
-                      and self._scp(pod, [os.path.join(self.home, "key.hex"), os.path.join(self.home, "handle")],
-                                    "/root/.hazync/").returncode == 0)
+                                    "/workspace/").returncode == 0)
                 if not ok:
                     detail = "ssh or scp failed"
                 else:
-                    out = self._ssh(pod, "chmod 600 /root/.hazync/key.hex; bash /workspace/boot.sh", 900).stdout
+                    out = self._ssh(pod, "bash /workspace/boot.sh", 900).stdout
                     if "SHA_OK" in out and "GPU_OK" in out and f"MID={self.method_id}" in out:
                         return True, "SHA_OK GPU_OK MID ok"
                     detail = " ".join(out.split())[-200:] or "boot printed nothing"
@@ -422,12 +515,36 @@ class SshRunner:
             time.sleep(10)
         return False, detail
 
-    def start(self, pod, heights):
-        hs = " ".join(str(int(h)) for h in heights)
-        cmd = ("cd /workspace && : > sponsor-run.log && setsid nohup bash -c 'for n in " + hs + "; do "
-               "HAZYNC_HOST=/workspace/hazync-host-cuda ./hazync-worker run $n; echo \"DONE $n rc=$?\"; done; "
-               "echo ALLDONE' >> /workspace/sponsor-run.log 2>&1 < /dev/null & disown; exit 0")
-        r = self._ssh(pod, cmd)
+    def start(self, pod, work):
+        """work: [{"height", "home", "pubkey", "handle", "tag"}]. Every identity the blocks need is copied to
+        /root/.hazync-ids/<tag>/ and each block runs with HAZYNC_HOME pointing at its own. Bundles and
+        witnesses are shared, not kept per identity."""
+        copied = getattr(pod, "identities", None)
+        if copied is None:
+            copied = pod.identities = set()
+        for w in {w["tag"]: w for w in work}.values():
+            if w["tag"] in copied:
+                continue
+            dest = f"/root/.hazync-ids/{w['tag']}"
+            if (self._ssh(pod, f"mkdir -p {dest} && chmod 700 {dest}").returncode != 0
+                    or self._scp(pod, [os.path.join(w["home"], "key.hex"), os.path.join(w["home"], "handle")],
+                                 dest + "/").returncode != 0
+                    or self._ssh(pod, f"chmod 600 {dest}/key.hex").returncode != 0):
+                raise RuntimeError(f"could not copy identity {w['tag']} to {pod.name}")
+            copied.add(w["tag"])
+        lines = ["#!/bin/bash", "cd /workspace"]
+        for w in work:
+            lines.append(f"HAZYNC_HOME=/root/.hazync-ids/{w['tag']} BUNDLE_DIR=/workspace/bundles "
+                         f"WITNESS_DIR=/workspace/witnesses HAZYNC_HOST=/workspace/hazync-host-cuda "
+                         f"./hazync-worker run {int(w['height'])}; echo \"DONE {int(w['height'])} rc=$?\"")
+        lines.append("echo ALLDONE")
+        script = os.path.join(self.dir, f"run-{pod.id}.sh")
+        with open(script, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        if self._scp(pod, [script], "/workspace/sponsor-run.sh").returncode != 0:
+            raise RuntimeError(f"could not copy the work list to {pod.name}")
+        r = self._ssh(pod, "cd /workspace && : > sponsor-run.log && setsid nohup bash /workspace/sponsor-run.sh"
+                           " >> /workspace/sponsor-run.log 2>&1 < /dev/null & disown; exit 0")
         if r.returncode != 0:
             raise RuntimeError(f"could not start work on {pod.name}: {r.stderr.strip()[:200]}")
 
@@ -475,7 +592,7 @@ class Bot:
     def __init__(self, db_path, api, runner, *, max_pods, max_usd, max_usd_per_hour, pod_price_ceiling=1.0,
                  stall_s=45 * 60, ssh_timeout_s=15 * 60, boot_timeout_s=30 * 60, fail_grace_s=300,
                  blocks_per_pod=25, sleep_s=30, budget_lead_s=180, capacity_backoff_s=300, confirm_wait_s=5.0,
-                 trial=None, clock=time.time, sleep=time.sleep, log=None):
+                 trial=None, identity_home=None, clock=time.time, sleep=time.sleep, log=None):
         for flag, v in (("--max-pods", max_pods), ("--max-usd", max_usd), ("--max-usd-per-hour", max_usd_per_hour)):
             if v is None or v <= 0:
                 raise BotRefused(f"live mode needs a positive {flag}")
@@ -488,6 +605,8 @@ class Bot:
         self.fail_grace_s, self.blocks_per_pod, self.sleep_s = fail_grace_s, max(1, int(blocks_per_pod)), sleep_s
         self.budget_lead_s, self.capacity_backoff_s, self.confirm_wait_s = budget_lead_s, capacity_backoff_s, confirm_wait_s
         self.trial = list(trial) if trial is not None else None
+        self.identity_home = identity_home
+        self._identities = {}
         self.clock, self.sleep = clock, sleep
         self.log = log or (lambda m: print(f"[{time.strftime('%H:%M:%S', time.gmtime())}Z] {m}", flush=True))
         self.pods = []
@@ -513,7 +632,13 @@ class Bot:
 
     # --- the loop ---
     def run(self):
+        if not self.identity_home:
+            raise BotRefused("no identity home (SPONSOR_BOT_HOME): the bot keeps one key per sponsorship there")
         c = connect(self.db_path)
+        if not has_sponsor_keys(c):
+            c.close()
+            raise BotRefused("the coordinator's database has no sponsor_keys table: deploy the coordinator with "
+                             "the sponsor handle rule first, or its submits would be refused or unguarded")
         ensure_tables(c)
         if self.trial is not None:
             bad = trial_refusals(c, self.trial, self.clock())
@@ -619,6 +744,18 @@ class Bot:
         else:
             p.finished_since = None
 
+    def _identity(self, c, sid):
+        """The sponsorship's key, created on first use and registered before any pod gets it."""
+        if sid not in self._identities:
+            name = None
+            if sid is not None:
+                row = c.execute("SELECT name FROM sponsorships WHERE id=?", (sid,)).fetchone()
+                name = row["name"] if row else f"#{sid}"
+            ident = identity(self.identity_home, sid, name)
+            register_key(c, ident, sid)
+            self._identities[sid] = ident
+        return self._identities[sid]
+
     def _busy(self):
         return {a["height"] for p in self._live() for a in p.assigned}
 
@@ -629,18 +766,21 @@ class Bot:
                 self._terminate(c, p, "nothing left to prove")
                 continue
             chunk = todo[:self.blocks_per_pod]
-            items = []
+            items, work = [], []
             for sid, h in chunk:
-                cur = c.execute("INSERT INTO sponsor_work(sponsorship_id, height, pod_id, gpu_type, cost_per_hr, assigned_at)"
-                                " VALUES(?,?,?,?,?,?)", (sid, h, p.id, p.gpu_type, p.rate(self.ceiling), now))
+                ident = self._identity(c, sid)
+                cur = c.execute("INSERT INTO sponsor_work(sponsorship_id, height, pod_id, gpu_type, cost_per_hr,"
+                                " assigned_at, pubkey) VALUES(?,?,?,?,?,?,?)",
+                                (sid, h, p.id, p.gpu_type, p.rate(self.ceiling), now, ident["pubkey"]))
                 items.append({"sid": sid, "height": h, "row": cur.lastrowid})
+                work.append({"height": h, **ident})
             for sid in sorted({sid for sid, _ in chunk if sid is not None}):
                 c.execute("UPDATE sponsorships SET status='proving' WHERE id=? AND status='paid'", (sid,))
             c.commit()
             p.assigned, p.state = items, "working"
             p.segment_start = p.last_progress = now
             p.finished_since = None
-            self.runner.start(p, [h for _, h in chunk])
+            self.runner.start(p, work)
             self.log(f"{p.name}: proving {len(chunk)} block(s) from {chunk[0][1]}")
 
     def _launch(self, c, now):
@@ -876,8 +1016,9 @@ def main(argv=None):
                   sleep_s=a.tick, trial=trial)
     except BotRefused as e:
         raise SystemExit(f"sponsor_bot: {e}")
-    bot.api = RunPod.from_env()
     bot.runner = SshRunner.from_env().prepare()
+    bot.api = RunPod.from_env()
+    bot.identity_home = bot.runner.home
     install_signal_handlers()
     try:
         reason = bot.run()

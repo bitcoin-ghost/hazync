@@ -131,6 +131,12 @@ check(_sp.run([sys.executable, _sb]).returncode == 0,
       "the sponsor bot keeps to its caps, terminates its pods and works only held blocks (test_sponsor_bot.py)")
 check(_sp.run([sys.executable, _sb, "--control"]).returncode == 0,
       "the sponsor bot's control fails when pods are left running (test_sponsor_bot.py --control)")
+# Its handle, "SPONSOR: <name>", is only accepted from the keys it registers.
+_si = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_identity.py")
+check(_sp.run([sys.executable, _si]).returncode == 0,
+      "a SPONSOR handle is refused from any key the bot has not registered (test_sponsor_identity.py)")
+check(_sp.run([sys.executable, _si, "--control"]).returncode == 0,
+      "that test's control fails under the old handle rules (test_sponsor_identity.py --control)")
 
 if fails:
     print(f"{len(fails)} failure(s).")

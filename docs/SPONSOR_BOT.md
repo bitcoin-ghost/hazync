@@ -30,6 +30,39 @@ The bot:
   spoofed. The bot picks blocks from the database and each pod proves them with the released worker's
   explicit mode, `hazync-worker run <n>`, which submits without claiming.
 
+## Identities: one key per sponsorship
+
+The bot submits a sponsorship's blocks as **`SPONSOR: <sponsor name>`**, under a key of its own for that
+sponsorship. One key per sponsorship, not one for the bot, because the board adds up work by key and shows
+the handle a key last submitted with: a single bot key would show every sponsor's blocks under whichever
+sponsor was proven last.
+
+- **Where:** `<SPONSOR_BOT_HOME>/identities/<sponsorship id>/`, with `key.hex` (the raw ed25519 seed in
+  hex, the worker's format) and `handle`, mode 600 in a 700 directory. Created the first time a
+  sponsorship is worked, and reused after that.
+- **Trials:** every trial shares one key, `identities/trial/`, with the handle `SPONSOR: Hazync trial`.
+- **The handle** is cleaned exactly as the coordinator's `clean_handle` cleans it (printable characters
+  only, no `< > & " '`, trimmed), so `O'Brien` is `SPONSOR: OBrien` in the file and on the board. A
+  sponsor name is 1 to 40 characters, and a registered sponsor key's handle may be 49, so no name is cut.
+- **On a pod:** every identity its blocks need is copied to `/root/.hazync-ids/<id>/`, and each
+  `hazync-worker run <n>` runs with `HAZYNC_HOME` pointing at that block's identity. Bundles and witnesses
+  are shared (`BUNDLE_DIR`, `WITNESS_DIR` under `/workspace`), not kept per identity.
+- **`sponsor_work.pubkey`** records the key each block was proved under.
+
+### Registration, and the reserved prefix
+
+- **`sponsor_keys`** (in the coordinator's schema: `pubkey`, `sponsorship_id`, NULL for the trial key,
+  `handle`, `created_at`) lists the bot's keys. The bot inserts a key before any pod is given it, and
+  refuses to run on a database without the table: that coordinator would not enforce the rule below.
+- **The coordinator refuses any handle whose folded form starts with `sponsor` from a key that is not in
+  `sponsor_keys`**, with the same message as a reserved handle, in `submit`, spine submit, `rotate` (for
+  the new key) and `claim`. Folded means NFKC, lowercase, letters and digits only, with `0` read as `o` and
+  `5` as `s`, so `SPONSOR :`, `s.p.o.n.s.o.r` and `Sp0nsor` are all caught.
+- **Not caught:** look-alike letters from other scripts, such as a Cyrillic `о`.
+- **Also refused:** an ordinary handle that happens to start that way, such as `Sponsorship fan`. The
+  2026-09-13 production copy had no such handle.
+- **Handle length:** ordinary handles keep the 48-character cap; a registered sponsor key may use 49.
+
 ## Money safety
 
 - **Caps.** Live mode refuses to start without `--max-pods`, `--max-usd` (total for the run) and
@@ -58,7 +91,6 @@ The same recipe as the board fleet (`hazync-board-fleet/fleet.sh`):
   hosts often never expose public SSH), image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`,
   port 22, 40 GB disk, named `hz-sponsor-<run>-<n>`.
 - **Boot over SSH:**
-  - copy the bot's identity
   - download the Latest release's worker, run script and CUDA host
   - check them against the PGP-verified `SHA256SUMS.txt`
   - run a GPU smoke prove (`prove-block`, because a card can pass boot with no usable CUDA device, #261)
@@ -78,18 +110,37 @@ The same recipe as the board fleet (`hazync-board-fleet/fleet.sh`):
 
 ## Setup on the coordinator box
 
-- **Identity:** a directory for the bot, with `key.hex` (mode 600) and `handle`. Make it with
-  `HAZYNC_HOME=<dir> hazync-worker id "hazync sponsor"`. The handle must not normalise to a reserved word
-  (`hazync` alone is refused). Set `SPONSOR_BOT_HOME` to the directory.
-- **SSH:** a key pair for the pods. Set `SPONSOR_BOT_SSH_KEY` to the private key; the `.pub` next to it is
-  given to RunPod.
-- **RunPod:** the API key in a file, mode 600. Set `RUNPOD_API_KEY_FILE` (default `~/.runpod.key`). The key
-  is never printed.
-- **gpg** with the maintainer's release key imported (`777F E81F 8CC0 77FD 3D08 055E 852C 2B31 90F5 B928`).
-  A manifest without a good signature stops the bot before anything is rented.
+The bot runs as the coordinator's user, `hazync`, which has **no home directory**. Nothing the bot does
+reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under `SPONSOR_BOT_HOME`, set to
+`/var/lib/hazync/sponsor-bot` (owned by `hazync`, mode 700).
+
+```
+/var/lib/hazync/sponsor-bot/
+  identities/<sponsorship id>/key.hex, handle   one per sponsorship, created by the bot
+  identities/trial/key.hex, handle              the one trial key
+  ssh/id_ed25519, id_ed25519.pub                the pods' SSH key (SPONSOR_BOT_SSH_KEY defaults here)
+  known_hosts                                   written by ssh; pods' host keys are not checked
+  gnupg/                                        keyring holding the maintainer's release key
+  runpod.key                                    the RunPod API key, mode 600 (RUNPOD_API_KEY_FILE defaults here)
+  work/run-*/                                   the release manifest, boot script and work lists per run
+```
+
+- **SSH:** every `ssh` and `scp` call passes `-F /dev/null -i <key> -o IdentitiesOnly=yes
+  -o UserKnownHostsFile=<SPONSOR_BOT_HOME>/known_hosts -o GlobalKnownHostsFile=/dev/null
+  -o StrictHostKeyChecking=no`. Host keys are not checked because fresh pods reuse IPs and ports with new
+  host keys.
+- **gpg:** `gpg --verify` runs with `GNUPGHOME=<SPONSOR_BOT_HOME>/gnupg` (or `SPONSOR_BOT_GNUPGHOME`).
+  Import the maintainer's release key there once:
+  `GNUPGHOME=/var/lib/hazync/sponsor-bot/gnupg gpg --import <key>`, fingerprint
+  `777F E81F 8CC0 77FD 3D08 055E 852C 2B31 90F5 B928`. A manifest without a good signature stops the bot
+  before anything is rented.
+- **RunPod:** the API key file is `RUNPOD_API_KEY_FILE`, or `runpod.key` in `SPONSOR_BOT_HOME`. There is no
+  fallback to a home directory, and the key is never printed.
 - **Optional:** `SPONSOR_BOT_RELEASE` to pin a release tag (default: GitHub Latest), and
   `SPONSOR_BOT_META_URL` (default `http://127.0.0.1:8899/api/meta`).
 - **`COORD_DB`:** the coordinator's database, as for the coordinator.
+- **Measured on the box, 2026-09-14:** outbound HTTPS to RunPod and GitHub and outbound SSH work, and
+  `cryptography` 41.0.7, `ssh`, `ssh-keygen` and `gpg` are installed.
 
 ## Commands
 
