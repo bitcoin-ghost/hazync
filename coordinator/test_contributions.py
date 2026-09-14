@@ -123,6 +123,21 @@ _fc = _sp.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__fi
 if not CONTROL:
     check(_fc.returncode == 0, "the chain-wide folded count agrees (test_folded_count.py)")
 
+# The sponsor proving bot reads the same verified proofs to decide what it has proven, and it spends money.
+# It runs from here, and its control with it, so the CI steps already on this file cover it (the coordinator
+# token has no `workflow` scope). A control that exits 0 has failed as it must.
+_sb = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_bot.py")
+check(_sp.run([sys.executable, _sb]).returncode == 0,
+      "the sponsor bot keeps to its caps, terminates its pods and works only held blocks (test_sponsor_bot.py)")
+check(_sp.run([sys.executable, _sb, "--control"]).returncode == 0,
+      "the sponsor bot's control fails when pods are left running (test_sponsor_bot.py --control)")
+# Its handle, "SPONSOR: <name>", is only accepted from the keys it registers.
+_si = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_identity.py")
+check(_sp.run([sys.executable, _si]).returncode == 0,
+      "a SPONSOR handle is refused from any key the bot has not registered (test_sponsor_identity.py)")
+check(_sp.run([sys.executable, _si, "--control"]).returncode == 0,
+      "that test's control fails under the old handle rules (test_sponsor_identity.py --control)")
+
 if fails:
     print(f"{len(fails)} failure(s).")
     sys.exit(1)
