@@ -97,8 +97,13 @@ A sponsorship **holds** its blocks from the moment it is paid at least its minim
 - **The bot does not claim.** Claims are unsigned, so a "the bot's key may claim held blocks" rule could be
   spoofed by anyone who copies the key. The bot picks held blocks itself and proves them with
   `hazync-worker run <n>`, which needs no claim (see `docs/SPONSOR_BOT.md`).
-- **A proof from anyone is still accepted**, as every proof is: submit never looks at claims or holds. A
-  held block proven by someone else simply counts towards the sponsorship.
+- **Only the sponsorship's own key can prove a held block.** `submit()` refuses (`403`) a proof that would
+  newly cover a held block unless its key is registered for THAT sponsorship in `sponsor_keys` (the bot
+  registers one key per sponsorship). The sponsor paid for those blocks, so another prover cannot take
+  them, or their credit, by submitting them directly; claims already never offer them. A fold that only
+  re-expresses held blocks already proven takes nothing and is accepted. Tested adversarially over HTTP on
+  a copy of the live database (2026-09-14): before this rule, another key's direct submit of a held block
+  was accepted and credited to it.
 - **The hold ends when the whole span is covered.** `submit()` moves the sponsorship to `proven` (with
   `proven_at`) as soon as every block of the span is covered by verified ranges. Cancelling or refunding
   a sponsorship also ends its hold.
