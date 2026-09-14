@@ -23,6 +23,9 @@
 #   HAZYNC_ALERT_DRYRUN=1       print what would be sent, send nothing (tests)
 #   ALERT_STATE_DIR             crash de-duplication stamps (default /var/lib/hazync-alert)
 #   ALERT_REPEAT_SECS           at most one crash alert per unit per this many seconds (default 900)
+#   ALERT_PRIORITY              ntfy priority: min|low|default|high|urgent (default high). The daily backup
+#                               summary sends low, so a routine "all good" does not ring like a failure.
+#   ALERT_TAGS                  ntfy tags, comma-separated emoji short codes (default rotating_light)
 set -uo pipefail
 
 ENV_FILE="${HAZYNC_ALERT_ENV:-/etc/hazync/alert.env}"
@@ -73,8 +76,16 @@ case "${1:-}" in
         ;;
 esac
 
+# Only values ntfy understands reach the headers; anything else falls back to the alarm defaults.
+case "${ALERT_PRIORITY:-high}" in
+    min|low|default|high|urgent|[1-5]) PRIO="${ALERT_PRIORITY:-high}" ;;
+    *) PRIO=high ;;
+esac
+TAGS="$(printf '%s' "${ALERT_TAGS:-rotating_light}" | tr -cd 'a-z0-9_,-')"
+[ -n "$TAGS" ] || TAGS=rotating_light
+
 if [ "${HAZYNC_ALERT_DRYRUN:-0}" = "1" ]; then
-    printf 'DRYRUN url=%s\nTitle: %s\n\n%s\n' "${NTFY_URL:-<unset>}" "$title" "$body"
+    printf 'DRYRUN url=%s\nTitle: %s\nPriority: %s\nTags: %s\n\n%s\n' "${NTFY_URL:-<unset>}" "$title" "$PRIO" "$TAGS" "$body"
     [ -n "${NTFY_URL:-}" ] || { echo "[hazync-alert] FATAL: NTFY_URL is not set" >&2; exit 3; }
     exit 0
 fi
@@ -86,7 +97,7 @@ if [ -z "${NTFY_URL:-}" ]; then
 fi
 
 if printf '%s' "$body" | curl -fsS -m 20 --retry 3 --retry-delay 5 \
-        -H "Title: $title" -H "Priority: high" -H "Tags: rotating_light" \
+        -H "Title: $title" -H "Priority: $PRIO" -H "Tags: $TAGS" \
         --data-binary @- "$NTFY_URL" >/dev/null; then
     echo "[hazync-alert] sent: $title"
 else

@@ -61,29 +61,44 @@ if printf '%s' "$out" | grep -q "^Title: Hazync: hazync-bridge.service CRASHED";
 else bad "one unit's crash suppressed another's"; echo "$out"; fi
 unset HAZYNC_ALERT_DRYRUN NTFY_URL
 
-echo "== 4. a real POST reaches the server with the title header =="
+echo "== 4. a real POST reaches the server with the title, priority and tags headers =="
 python3 - "$TMP" <<'PY' &
 import http.server, socketserver, sys, os
 d = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
-        with open(os.path.join(d, "posted"), "w") as f:
-            f.write("TITLE=" + self.headers.get("Title", "") + "\n" + self.rfile.read(n).decode())
+        k = len([f for f in os.listdir(d) if f.startswith("posted")]) + 1
+        with open(os.path.join(d, f"posted{k}"), "w") as f:
+            f.write("TITLE=" + self.headers.get("Title", "") + "\nPRIORITY=" + self.headers.get("Priority", "")
+                    + "\nTAGS=" + self.headers.get("Tags", "") + "\n" + self.rfile.read(n).decode())
         self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
     def log_message(self, *a): pass
 with socketserver.TCPServer(("127.0.0.1", 0), H) as s:
     open(os.path.join(d, "port"), "w").write(str(s.server_address[1]))
-    s.handle_request()
+    for _ in range(3):
+        s.handle_request()
 PY
 SRV_PID=$!
 for _ in $(seq 1 50); do [ -s "$TMP/port" ] && break; sleep 0.1; done
-if NTFY_URL="http://127.0.0.1:$(cat "$TMP/port")/topic" "$ALERT" "Hazync: test" "hello from the test" >"$TMP/o" 2>&1 \
-   && grep -q "^TITLE=Hazync: test" "$TMP/posted" 2>/dev/null && grep -q "hello from the test" "$TMP/posted"; then
+URL="http://127.0.0.1:$(cat "$TMP/port")/topic"
+if NTFY_URL="$URL" "$ALERT" "Hazync: test" "hello from the test" >"$TMP/o" 2>&1 \
+   && grep -q "^TITLE=Hazync: test" "$TMP/posted1" 2>/dev/null && grep -q "hello from the test" "$TMP/posted1"; then
     note "ok   POSTed body + Title header to the ntfy URL"
 else
-    bad "the alert did not arrive at the server"; cat "$TMP/o" "$TMP/posted" 2>/dev/null
+    bad "the alert did not arrive at the server"; cat "$TMP/o" "$TMP/posted1" 2>/dev/null
 fi
+grep -q "^PRIORITY=high$" "$TMP/posted1" 2>/dev/null && grep -q "^TAGS=rotating_light$" "$TMP/posted1" \
+    && note "ok   by default an alert rings as high priority (unchanged for every existing caller)" \
+    || { bad "default priority/tags changed"; cat "$TMP/posted1"; }
+NTFY_URL="$URL" ALERT_PRIORITY=low ALERT_TAGS=white_check_mark,floppy_disk "$ALERT" "Hazync backups: all good" "summary" >"$TMP/o" 2>&1
+grep -q "^PRIORITY=low$" "$TMP/posted2" 2>/dev/null && grep -q "^TAGS=white_check_mark,floppy_disk$" "$TMP/posted2" \
+    && note "ok   ALERT_PRIORITY / ALERT_TAGS reach ntfy (a daily summary does not ring like a failure)" \
+    || { bad "ALERT_PRIORITY/ALERT_TAGS were not sent"; cat "$TMP/o" "$TMP/posted2" 2>/dev/null; }
+NTFY_URL="$URL" ALERT_PRIORITY=$'high\r\nX-Evil: 1' ALERT_TAGS='a b;c' "$ALERT" "Hazync: odd" "odd" >"$TMP/o" 2>&1
+grep -q "^PRIORITY=high$" "$TMP/posted3" 2>/dev/null && grep -q "^TAGS=abc$" "$TMP/posted3" \
+    && note "ok   an unknown priority falls back to high and tags are reduced to safe characters" \
+    || { bad "unsanitised priority/tags reached the headers"; cat "$TMP/o" "$TMP/posted3" 2>/dev/null; }
 wait "$SRV_PID" 2>/dev/null; SRV_PID=""
 
 echo "== 5. watchdog: a dead coordinator alerts once, then recovers once =="
@@ -121,7 +136,7 @@ for f in dropins/*-alert.conf; do
 done
 [ -f hazync-alert@.service ] && grep -q "hazync-alert.sh --unit %i" hazync-alert@.service \
     && note "ok   drop-ins -> hazync-alert@.service -> hazync-alert.sh --unit" || bad "hazync-alert@.service missing or wrong"
-for u in hazync-coordinator hazync-bridge; do
+for u in hazync-coordinator hazync-bridge litestream; do
     grep -q "ExecStopPost=+/usr/local/bin/hazync-alert.sh --crash %n" "dropins/$u-alert.conf" \
         || bad "$u (Restart=always) has no --crash hook — a crash loop would be silent"
 done

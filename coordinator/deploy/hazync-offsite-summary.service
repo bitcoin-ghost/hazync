@@ -1,0 +1,20 @@
+[Unit]
+Description=Hazync: daily backup summary to the phone, including a restore drill of the ledger from R2
+After=network-online.target litestream.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hazync-offsite-watch summary
+StateDirectory=hazync-offsite
+Environment=HOME=/var/lib/hazync-offsite
+# The drill restores ~110 MB into /var/lib/hazync/restore-drill as the hazync user, then deletes it.
+ReadWritePaths=/var/lib/hazync
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

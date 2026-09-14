@@ -1,0 +1,19 @@
+[Unit]
+Description=Hazync: push to the phone when the offsite ledger copy stops, goes stale, or Litestream warns
+After=network-online.target litestream.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hazync-offsite-watch watch
+# Root reads the root-only Litestream config and the journal. State (last alert times, journal cursor)
+# lives in /var/lib/hazync-offsite.
+StateDirectory=hazync-offsite
+Environment=HOME=/var/lib/hazync-offsite
+TimeoutStartSec=5min
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

@@ -367,6 +367,20 @@ sqlite3 /var/lib/hazync/restore-test/coordinator.db 'PRAGMA integrity_check'
 
 Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contributor counts were identical to live, 5 s behind.
 
+**Phone notifications** (ntfy, same topic as every other alert):
+
+| When | Priority | From |
+|---|---|---|
+| The hourly mirror fails, or its check finds a receipt older than 30 min missing from R2 | high | `hazync-offsite-proofs.service` `OnFailure=` |
+| Litestream crashes | high | `dropins/litestream-alert.conf` |
+| Litestream is not running; the newest ledger change in R2 is over 15 min old; R2 cannot be listed | high, re-sent every 6 h, one low RECOVERED | `hazync-offsite-watch.timer` (every 10 min) |
+| Litestream logs WARN/ERROR lines | default, at most one push an hour | `hazync-offsite-watch.timer` |
+| Daily at 08:00 UK time: receipts in R2 vs disk, the mirror's 24 h, ledger lag, and a **restore drill** | low if all good, high if not | `hazync-offsite-summary.timer` |
+
+The restore drill restores the ledger from R2 into `/var/lib/hazync/restore-drill`, checks integrity,
+compares it with the live ledger, and deletes it. Priorities come from `ALERT_PRIORITY` / `ALERT_TAGS`
+in `hazync-alert.sh`; without them every caller still rings at high.
+
 **Check the receipt mirror by hand:** `/usr/local/sbin/hazync-offsite-proofs check --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs`
 
 > ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of

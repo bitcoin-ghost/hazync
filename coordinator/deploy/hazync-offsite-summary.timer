@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily Hazync backup summary
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Europe/London
+Persistent=true
+
+[Install]
+WantedBy=timers.target
