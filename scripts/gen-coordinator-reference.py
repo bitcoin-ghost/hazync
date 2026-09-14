@@ -159,6 +159,8 @@ ENV = {
     "server:CLAIM_GRACE": "Seconds before a claim that has never beaten is released (#296).",
     "server:CLAIM_OPEN_MAX": "Live claims one key may hold at once; a further claim is refused with 429 until one is "
                              "proven or lapses. `0` means no limit.",
+    "server:CLAIM_RETAKE_WAIT": "Seconds before a key may re-take a block its own claim let lapse without a heartbeat; "
+                                "other keys are offered it at once. `0` means straight away.",
     "server:BEAT_SKEW": "Allowed distance in seconds between a beat's signed `ts` and server time.",
     "server:MAX_ATTEMPTS": "Failure count at which `/api/state` flags the frontier blocker as needing "
                            "attention.",

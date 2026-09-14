@@ -451,6 +451,13 @@ contributor then proved. A fleet running more than 4 GPUs under ONE key needs it
 Public requests reach the coordinator through the web box, which is in `RATE_EXEMPT`, so the per-IP rate
 limit does not stop a single client there; the per-key cap does.
 
+**A key does not take back a block it let lapse.** When a claim that never beat is released by the grace,
+every other key is offered the block at once, but the key that let it lapse waits `CLAIM_RETAKE_WAIT` (default
+3600 s) before it may claim that block again. Added 2026-09-14: the cap alone left `ghost:dda215` re-claiming
+frontier block 67,532 every time its claim lapsed, and nobody else was offered it. If the frontier is stuck
+behind a claimed block anyway, prove that block directly: `hazync run <n>` needs no claim and is accepted
+whoever holds one.
+
 ### Notes
 - **Served window** = the claimable set = the blocks the archive bridge has emitted bundles for (up to
   `tip - HAZYNC_BRIDGE_FINALITY`, default 100). Blocks outside it 404 and the CLI says so; the window grows

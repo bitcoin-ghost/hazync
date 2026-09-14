@@ -201,6 +201,11 @@ CLAIM_GRACE = int(os.environ.get("CLAIM_GRACE", "600"))  # never-beaten claims: 
 # blocks it never proved, re-claiming in bursts as CLAIM_GRACE released them: another contributor's worker on
 # the same IP proved 9,116 of its 9,133 claimed blocks, and the frontier waited over an hour behind one.
 CLAIM_OPEN_MAX = int(os.environ.get("CLAIM_OPEN_MAX", "4"))
+# Seconds before a key may re-take a block its OWN claim let lapse without a single beat (0: straight away). The
+# grace (#296) frees such a block early so OTHER workers can take it; the same key must not simply take it back,
+# or one unworked block consumes that key and nobody else is offered it (the 39,318 rule). Measured 2026-09-14:
+# `ghost:dda215` re-claimed frontier block 67,532 every time it lapsed, for over three hours.
+CLAIM_RETAKE_WAIT = int(os.environ.get("CLAIM_RETAKE_WAIT", "3600"))
 # A claim is LIVE (it holds its block) while it beats within CLAIM_TTL, or has never beaten and is inside
 # CLAIM_GRACE, and is younger than CLAIM_MAX. One definition, for the blocks that are held and for the cap.
 LIVE_CLAIM_SQL = ("status='claimed' AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
@@ -2573,6 +2578,12 @@ def claim(body):
                                       f"another",
                              "open_claims": open_n, "max": CLAIM_OPEN_MAX}
         proven, held = coverage_and_held(c, now)
+        # CLAIM_RETAKE_WAIT: the blocks this key's own never-beaten claims let lapse are held FOR THIS KEY, in both
+        # the frontier re-offer and the scan below. Every other key is offered them as soon as the grace ends.
+        if pk and CLAIM_RETAKE_WAIT > 0:
+            held = held | {r["lo"] for r in c.execute(
+                "SELECT lo FROM ranges WHERE assignee=? AND status='claimed' AND last_beat IS NULL AND claimed_at > ?",
+                (pk, now - CLAIM_RETAKE_WAIT))}
         # A claim blocks EVERY worker for CLAIM_TTL, including the one that made it. That looks like a
         # bug — a worker locked out of retrying its own failed block — and on 2026-08-01 it was
         # "fixed" so a worker could re-pick its own claim. That was wrong, and reverted the same day.
