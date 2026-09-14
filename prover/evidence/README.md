@@ -12,7 +12,7 @@ To add evidence, put in the file itself: the date, the producing commit or branc
 Columns: **Produced under** is taken from the file where it says; otherwise "not stated" plus the
 commit that added it (`git log --follow --diff-filter=A`). **Reproduce** is the command or script the
 file names, with whether it still exists on `main`. **Cited by** is a `git grep` for the file name
-outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/AUDIT_2026-07.md`,
+outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/history/AUDIT_2026-07.md`,
 `prover/README.md`) are not listed per file.
 
 ## Genesis-era proving and hardening (added in `e6496d8`, 2026-07-16)
@@ -20,7 +20,7 @@ outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/AUDIT_2
 | File | Records | Produced under | Reproduce | Cited by |
 |---|---|---|---|---|
 | `block_741000_proof.log` | Block 741,000: 16 chunks on 2 GPUs, aggregated, verified | Not stated; added in `e6496d8` 2026-07-16 | Not stated (the `CLUSTER:` output format is `prover/cluster.sh`, which exists) | none (`.gitignore` names it) |
-| `bridge_ibd.log` | Archive-node bridge emitting witnesses to height 199 | 2026-07-15 (log timestamps); guest not applicable | Not stated; the `-hazyncwitness` hook is described in `docs/HAZYNC_ARCHITECTURE.md` | none |
+| `bridge_ibd.log` | Archive-node bridge emitting witnesses to height 199 | 2026-07-15 (log timestamps); guest not applicable | Not stated; the `-hazyncwitness` hook is described in `docs/history/HAZYNC_ARCHITECTURE.md` | none |
 | `hardening_validation.txt` | H1/H2/H3 hardening results: regressions, in-block spend, BIP30 | 2026-07-15, 2x L40S; guest not stated | Not stated | none |
 | `hardening_rangefold_1_550.log` | Range-fold `[1..550]` verified genesis-anchored, 1077 s | Not stated in file (`hardening_validation.txt` dates the run 2026-07-15) | Not stated (`LEVEL 0: prove blocks` format is `prover/rangecluster.sh`, exists) | none |
 | `rangefold_1_176.log` | Range-fold `[1..176]` verified genesis-anchored, 320 s | Not stated; added in `e6496d8` 2026-07-16 | Not stated (`prover/rangecluster.sh` format, exists) | none |
@@ -32,7 +32,7 @@ outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/AUDIT_2
 |---|---|---|---|---|
 | `bip68_locks.txt` | BIP68 time/height locks on real MTP, blocks 700000-700100 | Guest not stated; added in `0d78e17` 2026-07-16 | `prover/test_bip68_locks.sh` (exists) | none |
 | `bip68_real_mainnet.txt` | 90-day CSV lock on real tx, plus counterfactual reject | Guest not stated; added in `d8387f8` 2026-07-16 | Not stated (current harness `prover/test_bip68_real.sh`; see known issues) | `SECURITY.md` |
-| `cov_negatives.txt` | COV-2 merkle mutation and COV-1 time-too-old rejected | Guest not stated; added in `c50b184` 2026-07-16 | `prover/test_cov_negatives.sh` (**deleted**, see known issues) | `SECURITY.md` |
+| `cov_negatives.txt` | COV-2 merkle mutation and COV-1 time-too-old rejected | Guest not stated; added in `c50b184` 2026-07-16 | `prover/test_cov_negatives.sh` (**deleted**, see known issues) | `docs/history/SECURITY_AUDIT_LOG.md` |
 | `cshims_shim_audit.txt` | `cshims.c` call sites, negative `_sbrk`, glibc differential | 2026-08-01, guest `be5e0528` (pre-fix) | Not stated (section 3 output matches `prover/methods/guest/test-cshims.sh`, exists) | none |
 | `coinbase_smt_witness_size.txt` | Coinbase-SMT proof size versus tree size (#54 gate) | Measured 2026-08-02; guest not applicable | Not stated; no producing harness found in the tree | none |
 
@@ -40,13 +40,13 @@ outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/AUDIT_2
 
 | File | Records | Produced under | Reproduce | Cited by |
 |---|---|---|---|---|
-| `extend_spine_1_3.txt` | `extend-spine` negative, two absorptions, genesis-anchored verify | Local non-canonical guest `72fb6608` (not in `reproduce/LINEAGE.tsv`); board was `be5e0528`; added in `93b9bff` 2026-07-31 | `host extend-spine`, `host verify-range` (exist) | `coordinator/test_spine_fold.py` (glob `extend_spine_*.txt`) |
+| `extend_spine_1_3.txt` | `extend-spine` negative, two absorptions, genesis-anchored verify | Local non-canonical guest `72fb6608` (not in `reproduce/LINEAGE.tsv`); board was on `be5e0528`, since superseded; added in `93b9bff` 2026-07-31 | `host extend-spine`, `host verify-range` (exist) | `coordinator/test_spine_fold.py` (glob `extend_spine_*.txt`) |
 | `extend_spine_seam_normalization.txt` | Seam pre-check false rejection; normalised fix; fold cost n=3 | Failure under `be5e0528`; re-run on "local guest" (id not stated); added in `f74206c` 2026-08-01 | `host extend-spine`, `host verify-range` (exist) | `coordinator/test_spine_fold.py` (glob) |
-| `fold_and_snark_wrap_1_1000.txt` | Fold `[1..1000]` to one receipt, Groth16 wrap, genesis-pin negative | 2026-07-28, guest `3f52baff` (v0.10.0) | `host fold-range`, `host snark-wrap`, `host verify-snark` (exist) | `docs/PROVING.md`, `docs/HAZYNC_ARCHITECTURE.md` |
-| `fold_concurrency_2xL40S.txt` | Fold throughput and VRAM at K=1..4, both cards | 2026-07-28, guest `3f52baff` (v0.10.0) | `prover/bench-fold-concurrency.sh` (exists) | none |
-| `groth16_snark_wrap.txt` | First Groth16 wrap, block 170, CPU path; CUDA path broken | 2026-07-28, guest `3f52baff` (v0.10.0) | `host prove-snark` (exists) | `docs/PROVING.md`, `docs/HAZYNC_ARCHITECTURE.md` |
-| `groth16_cuda_crash_sm89.txt` | Groth16 CUDA `sppark` illegal-memory-access, environment capture (#20) | 2026-07-28T15:51:27Z, guest `3f52baff`, risc0 3.0.5 | `host snark-wrap` (exists) | none |
-| `verifier_aarch64.txt` | `hazync-verify` on aarch64 under qemu; later WASM memory | 2026-07-28 `3f52baff`; appended 2026-07-30 `85dc0b56` and 2026-07-31 (WASM) | `cargo build --target aarch64-unknown-linux-gnu`, `qemu-aarch64-static` (commands, stated) | `verifier/README.md`, `verifier/dist/README.md` |
+| `fold_and_snark_wrap_1_1000.txt` | Fold `[1..1000]` to one receipt, Groth16 wrap, genesis-pin negative | 2026-07-28, guest `3f52baff` (v0.10.0) | `host fold-range`, `host snark-wrap`, `host verify-snark` (exist) | `docs/PROVING.md`, `docs/SPEC.md`, `docs/TOPOLOGY_AND_SETTINGS.md`, `docs/history/HAZYNC_ARCHITECTURE.md` |
+| `fold_concurrency_2xL40S.txt` | Fold throughput and VRAM at K=1..4, both cards | 2026-07-28, guest `3f52baff` (v0.10.0) | `prover/bench-fold-concurrency.sh` (exists) | `docs/TOPOLOGY_AND_SETTINGS.md` |
+| `groth16_snark_wrap.txt` | First Groth16 wrap, block 170, CPU path; CUDA path broken | 2026-07-28, guest `3f52baff` (v0.10.0) | `host prove-snark` (exists) | `docs/GLOSSARY.md`, `docs/PROVING.md`, `docs/SPEC.md`, `docs/history/HAZYNC_ARCHITECTURE.md` |
+| `groth16_cuda_crash_sm89.txt` | Groth16 CUDA `sppark` illegal-memory-access, environment capture (#20) | 2026-07-28T15:51:27Z, guest `3f52baff`, risc0 3.0.5 | `host snark-wrap` (exists) | `prover/testdata/snark/README.md` |
+| `verifier_aarch64.txt` | `hazync-verify` on aarch64 under qemu; later WASM memory | 2026-07-28 `3f52baff`; appended 2026-07-30 `85dc0b56` and 2026-07-31 (WASM) | `cargo build --target aarch64-unknown-linux-gnu`, `qemu-aarch64-static` (commands, stated) | `verifier/README.md` |
 | `wasm_verifier_live.txt` | Deployed WASM module equals release; live verdicts correct | 2026-08-01; page reports guest `be5e0528`; module equals v0.13.1 asset | Not stated as a script (node driving deployed `hazync-verify.js`) | `docs/GOALS.md` |
 | `node_sync_demo.txt` | Adoptable state from a proof matches a live node | 2026-07-28, guest `3f52baff` (v0.10.0), proof `fold_1000.snark` | Not stated (output matches `prover/node-sync-demo.sh`, exists) | none |
 | `hazed_chain_binding.txt` | Identity (merkle + headers) plus validity proof, RPC txids | 2026-07-28, guest `3f52baff` | Not stated (`prover/hazed-chain-verify.py --txid-source rpc`, exists) | none |
@@ -65,7 +65,7 @@ outside this directory; directory-level mentions (`docs/GOALS.md`, `docs/AUDIT_2
 
 Manifest: `h100_962000_2026-08-21.txt`. Its header: H100 80GB HBM3 (sm_90), UpCloud FI-HEL2, driver
 595.58.03, CUDA 12.6, 12 cores; branch `bench/135-on-main` at `c6e95ff` (main + #136 + #137); guest
-`b62d2a60` (canonical from 2026-08-21 per `reproduce/LINEAGE.tsv`); block 962,000, `HAZYNC_CHUNKS=16`,
+`b62d2a60` (canonical from 2026-08-21 per `reproduce/LINEAGE.tsv`, since superseded); block 962,000, `HAZYNC_CHUNKS=16`,
 cost-packed, chunk 9 (451 inputs). All files below share that provenance unless noted. No file here is
 cited by name from any doc; the write-up is in `docs/history/ACCELERATION.md` (H100 sections), which
 points to an off-repo copy of the full logs (`~/hazync-h100-evidence/`).

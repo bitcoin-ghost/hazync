@@ -8,12 +8,12 @@ and settings), [`THREAT_MODEL.md`](THREAT_MODEL.md) (who is trusted for what).
 
 **Index:** [aggregate](#aggregate-join-tree-lift-resolve) ·
 [anchor / absorb](#anchor-genesis-anchored-absorb) · [audit / round](#audit-vs-round) ·
-[beat](#beat-heartbeat) · [bigint2](#bigint2-field-backend-lift_x-hint) · [block proof](#block-proof-range-leaf) ·
+[beat](#beat-heartbeat) · [bigint2](#bigint2) · [block proof](#block-proof-range-leaf) ·
 [board](#proof-party-board-contributor-handle-sponsor) · [bridge / bundle](#witness-bundle-bridge) ·
-[channels](#channels-core-ghost-stock) · [chunk](#chunk) · [claim](#claim-claim_ttl-claim_grace-claim_max) ·
+[channels](#channels-core-ghost-stock) · [chunk](#chunk) · [claim](#claim) ·
 [coinbase SMT](#coinbase-smt-bip30) · [fold](#fold) · [frontier](#frontier) · [Groth16](#stark-receipt-succinct-groth16-snark-wrap) ·
-[journal](#rangestate-journal) · [lineage](#method_id-guest-id-re-baseline-lineage) · [maximal-Core](#maximal-core) ·
-[METHOD_ID](#method_id-guest-id-re-baseline-lineage) · [po2](#segment-po2-seg_po2) · [segment](#segment-po2-seg_po2) ·
+[journal](#rangestate-journal) · [lineage](#method-id) · [maximal-Core](#maximal-core) ·
+[METHOD_ID](#method-id) · [po2](#segment) · [segment](#segment) ·
 [seg-serve / seg-connect](#seg-serve-seg-connect) · [spine](#spine) · [straggler](#straggler) ·
 [Tier 0](#tier-0) · [vrange](#vrange)
 
@@ -29,9 +29,10 @@ and settings), [`THREAT_MODEL.md`](THREAT_MODEL.md) (who is trusted for what).
   (`server.lift(..)` in `prover/host/src/main.rs`).
 - **join** / **join tree** — risc0's recursion step that merges two adjacent succinct receipts. The
   vendored risc0 (`vendor/risc0-zkvm`) replaces the linear chain of joins with a balanced tree of depth
-  `log2(N)` whose levels are published as work (`docs/HAZYNC_ARCHITECTURE.md`, "balanced join tree").
+  `log2(N)` whose levels are published as work (`docs/history/HAZYNC_ARCHITECTURE.md`, "balanced join tree").
 - **resolve** — discharging an assumption (e.g. a chunk receipt the aggregate `env::verify`s) against a
-  conditional receipt; `seg-serve` sends resolves out as a third job tag (`docs/SEGMENT_DISTRIBUTION.md`).
+  conditional receipt; `seg-serve` sends resolves to workers one at a time under `RESOLVE_TAG`, or runs
+  them itself with `HAZYNC_RESOLVE_LOCAL=1` (`docs/FLEET_OPERATIONS.md`).
   ⚠ The same word also names risc0's `SegmentRef::resolve()`, which merely loads a segment
   (`session.segments[..].resolve()` in `prover/host/src/main.rs`).
 
@@ -51,9 +52,10 @@ and settings), [`THREAT_MODEL.md`](THREAT_MODEL.md) (who is trusted for what).
 
 ### audit vs round
 
-`SECURITY.md` records review **rounds** (1–9 internal, 10–11 external AI-assisted). "**audit #N**"
+Review **rounds** (1–9 internal, 10–11 external AI-assisted) are recorded in
+`docs/history/SECURITY_AUDIT_LOG.md`, indexed from `SECURITY.md`. "**audit #N**"
 (#1–#5, counted in `docs/EXTERNAL_REVIEW.md`) is a separate series: audit #3 is the 2026-08-03 BIP30 F-1
-pass, audit #5 the 2026-08-04 pass. `docs/AUDIT_2026-07.md` is round 8. `SECURITY.md` states that the two
+pass, audit #5 the 2026-08-04 pass. `docs/history/AUDIT_2026-07.md` is round 8. `SECURITY.md` states that the two
 numberings do not line up. `reproduce/METHOD_ID` and `prover/methods/guest/build.rs` also use "an audit
 round" loosely, meaning any review pass. No commissioned professional audit has happened (`SECURITY.md`).
 
@@ -64,8 +66,9 @@ holds. Signed ed25519 over `"<range>:<ts>"` with integer `ts`; a `ts` more than 
 `120` s) from server time is refused, which bounds replay. The worker beats only when a segment has
 finished since the last beat (`_tick` in `coordinator/hazync`), so a hung prover's claim lapses.
 ⚠ Stale text says there are no heartbeats: the comment above `CLAIM_TTL` in `coordinator/server.py`, the
-`do_POST` comment ("no claim, no heartbeat"), `cmd_run` in `coordinator/hazync`, and
-`coordinator/README.md`.
+`do_POST` comment ("no claim, no heartbeat"), and `cmd_run` in `coordinator/hazync`.
+
+<a id="bigint2"></a>
 
 ### bigint2, field backend, lift_x hint
 
@@ -75,8 +78,7 @@ finished since the last beat (`_tick` in `coordinator/hazync`), so a hung prover
   (`field_5x52`, `field_10x26`); wNAF, GLV and the ECDSA logic are unchanged. `docs/FIELD_BIGINT2_BACKEND.md`.
 - **lift_x hint** — `patches/0013-lift-x-via-witness-hint.patch`: the host supplies the pubkey Y
   coordinate (`liftx_hints`, `prover/host/src/main.rs`) and the guest checks `y² = x³ + 7` with libsecp's
-  own arithmetic instead of computing a square root. `docs/LIFTX_HINT.md` (⚠ its banner still reads "complete but never
-  compiled, and not measured").
+  own arithmetic instead of computing a square root. `docs/LIFTX_HINT.md`.
 - Both are applied unconditionally by `provision-vps.sh` since `METHOD_ID 37987b85` (`docs/PROVING.md`,
   "Releases"). The broader bigint2 substitutions (`0005` ECDSA, `0006` Schnorr, `0007` lift_x,
   `0008` scalar inverse, `0014` wholesale ECDSA) are not in the canonical build: `provision-vps.sh`
@@ -102,8 +104,8 @@ Three guest builds, one canonical id (`docs/BUILDS.md`):
   `0001`/`0002` plus libsecp patches `0012`/`0013` (`provision-vps.sh`).
 - **GHOST** — experimental; different `METHOD_ID`, so its proofs are rejected by the board.
 
-⚠ Naming varies: `docs/BUILDS.md` says CORE/GHOST channels, `docs/CORE_VS_GHOST.md` says Core mode/Ghost
-mode, `docs/history/MODELS.md` says models. `docs/CORE_VS_GHOST.md` §2 (dated 2026-08-30) also lists
+⚠ Naming varies: `docs/BUILDS.md` says CORE/GHOST channels, `docs/history/CORE_VS_GHOST.md` says Core mode/Ghost
+mode, `docs/history/MODELS.md` says models. `docs/history/CORE_VS_GHOST.md` §2 (dated 2026-08-30) also lists
 patches `0009`/`0010` under CORE; `provision-vps.sh` does not apply them.
 
 ### chunk
@@ -112,6 +114,8 @@ A contiguous slice of one block's inputs, proved separately (guest mode 4, `chun
 by the aggregate. `HAZYNC_CHUNKS` requests the count (default `2`, `nchunks_env()`); the packer balances
 predicted cost rather than input count (`prover/host/src/main.rs`, "Chunk packing"; `docs/PROVING.md`).
 ⚠ `docs/SPEC.md` §10.1 and `hazync spine` also call the range being absorbed into the spine a "chunk".
+
+<a id="claim"></a>
 
 ### claim, CLAIM_TTL, CLAIM_GRACE, CLAIM_MAX
 
@@ -126,7 +130,6 @@ predicted cost rather than input count (`prover/host/src/main.rs`, "Chunk packin
 - **`CLAIM_GRACE`** — default `600` s: a claim that has never beaten is released after this (#296).
 - **`CLAIM_MAX`** — default `86400` s: hard cap regardless of beats.
 - Releasing a claim cancels nothing; a late submission still lands.
-- ⚠ `coordinator/README.md`'s settings table gives `CLAIM_TTL` a default of `1800`; the code says `3600`.
 
 ### coinbase SMT, BIP30
 
@@ -156,8 +159,10 @@ which needs absorptions.
 
 As much of the result decided by Bitcoin Core's own code as possible, while allowing narrow
 substitutions at interfaces Core or libsecp already parameterise. `patches/0002` (SHA-256 through the
-risc0 accelerator) is the precedent (`docs/CORE_VS_GHOST.md` §1). Earlier use in `reproduce/METHOD_ID`
+risc0 accelerator) is the precedent (`docs/history/CORE_VS_GHOST.md` §1). Earlier use in `reproduce/METHOD_ID`
 (2026-07-26) means sourcing all consensus constants from Core's `chainparams.cpp`.
+
+<a id="method-id"></a>
 
 ### METHOD_ID, guest id, re-baseline, lineage
 
@@ -203,7 +208,9 @@ Distributed proving of one block across machines. `host seg-serve` (`seg_serve_c
 **segment coordinator**: it executes the guest, publishes segments, joins and resolves as work, and
 assembles the receipt. `host seg-connect <host:port>` (`seg_connect_cmd`) is a worker that proves what
 it is sent and holds no state. `HAZYNC_AGG=1` makes `seg-serve` build the aggregate (mode 5)
-environment. ⚠ This is not the board coordinator (`CONTRIBUTING.md`; `docs/SEGMENT_DISTRIBUTION.md`).
+environment. ⚠ This is not the board coordinator (`CONTRIBUTING.md`; `docs/FLEET_OPERATIONS.md`).
+
+<a id="segment"></a>
 
 ### segment, po2, seg_po2
 
@@ -238,14 +245,14 @@ The single genesis-anchored head `[1..N]` with the largest `N`, advanced only by
 A block proves in the time of its slowest chunk, so the straggler ratio is max chunk cost ÷ mean chunk
 cost across a block's chunks. The packer prints it as `straggler (...): max ... vs mean ... = ...x`
 (`prover/host/src/main.rs`, chunk packing report). It caps how much adding cards helps
-(`docs/BUILDS.md`, `docs/GHOST_NEXT_BUILD.md`).
+(`docs/BUILDS.md` §1 and §3.1).
 
 ### Tier 0
 
 The guest-codegen speed axis that costs no fidelity: C `-O3` for libsecp, Rust `lto = "fat"` +
 `codegen-units = 1`, and `ECMULT_WINDOW_SIZE` tuning (`docs/history/TIER0_RESULTS_2026-08-26.md`). The
 settings are in `prover/methods/guest/build.rs` ("TIER 0") and `prover/methods/guest/Cargo.toml`
-`[profile.release]`. ⚠ `docs/GPU_EXPERIMENT_RUNBOOK.md` §9 still says Tier 0 is waiting on a re-baseline.
+`[profile.release]`.
 
 ### vrange
 
@@ -260,7 +267,7 @@ A verified range: a row in the coordinator's `vranges` table written when a subm
   of reading it.
 - **bridge** — an archive node that replays the chain through the accumulator and emits a bundle per
   block. Host `bridge` (`cmd_bridge`) writes to `HAZYNC_BRIDGE_OUT` (default `/root/bridge_bundles`) up
-  to tip minus `HAZYNC_BRIDGE_FINALITY` (default `100`) (`docs/HAZYNC_ARCHITECTURE.md`, "Archive-node
+  to tip minus `HAZYNC_BRIDGE_FINALITY` (default `100`) (`docs/history/HAZYNC_ARCHITECTURE.md`, "Archive-node
   bridge").
 - **bundle** — `bundle_<n>.json`: a block's in-boundary (`in_roots`, …) plus its `witness`. That is
   enough to prove the block with no replay (`prove-range-bridge`). Served by `GET /api/witness/<n>` (in
