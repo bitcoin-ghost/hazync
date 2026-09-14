@@ -134,6 +134,14 @@ if not CONTROL:
 elif _cap.returncode != 0:
     print("CONTROL FAILED — test_claim_cap.py --control passed with the cap off.")
     sys.exit(1)
+# So does the re-take wait: a key does not get back a block its own never-beaten claim let lapse.
+_retake = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_claim_retake.py")]
+                         + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_retake.returncode == 0, "a key does not re-take a block it let lapse unworked (test_claim_retake.py)")
+elif _retake.returncode != 0:
+    print("CONTROL FAILED — test_claim_retake.py --control passed with the wait off.")
+    sys.exit(1)
 
 if CONTROL:
     if fails:
