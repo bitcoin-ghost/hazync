@@ -1,5 +1,13 @@
 # GPU experiment runbook
 
+> **Historical record, moved here on 2026-09-14.** Every experiment below was run, closed or overtaken:
+> E5 measured coordinator egress (~18 Mbps) and E6/E9 closed at a ≤1.09x ceiling
+> ([`TEN_MINUTE_BLOCK.md`](TEN_MINUTE_BLOCK.md) §3); E11 found chunk count worth +0.2%
+> ([`BENCH_8xL40S_2026-09-08.md`](BENCH_8xL40S_2026-09-08.md)); E7's premise was wrong — po2 23's invalid proofs
+> came from risc0's baked `ALLOWED_CONTROL_ROOT` ([`ACCELERATION.md`](ACCELERATION.md), update 2026-08-28) —
+> and #182 was closed unmerged. No E8 result is recorded. What is current: [`../BUILDS.md`](../BUILDS.md),
+> [`../FLEET_OPERATIONS.md`](../FLEET_OPERATIONS.md).
+
 Everything from `PERF_INVESTIGATION_2026-08-26.md` that could not be settled without a card, in an
 order that respects what produces what. Written to be executed top to bottom on a rented box.
 

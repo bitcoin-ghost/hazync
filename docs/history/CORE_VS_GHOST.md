@@ -1,5 +1,10 @@
 # Core mode vs Ghost mode — makeup, cost, and the trade
 
+> **Historical record, moved here on 2026-09-14.** A decision memo of 2026-08-30; the decision has been
+> taken — CORE ships, as the canonical guest since v0.21.0 (2026-09-07). Superseded by
+> [`../BUILDS.md`](../BUILDS.md) — what is current: its §1 card counts MEASURED on two L40S on 2026-09-02
+> (CORE 10, GHOST 5, block 962,000), not the DERIVED Core figures below.
+
 **2026-08-30.** One block (962,000), one L40S, po2 22, 16 chunks. Every Ghost figure is MEASURED on
 hardware. **Every Core figure is DERIVED from measured components — arm K has never been run.** §6
 says exactly what one run would settle.

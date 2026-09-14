@@ -1,5 +1,10 @@
 # Overnight run — 2026-08-03
 
+> **Historical record, moved here from `tasks/overnight_2026-08-03.md` on 2026-09-14.** An overnight task log
+> (audit #3, #54, #83). Ids and commits are as they were that night: the container id recorded below was the
+> canonical `dfc9eeda…` (`reproduce/LINEAGE.tsv`), superseded on 2026-08-04; branch commit `29a4a46` was
+> squashed into `70a0fa5`. What is current: `reproduce/METHOD_ID`, [`../../CHANGELOG.md`](../../CHANGELOG.md).
+
 Ship hazync: finish audit #3, hunt the F-1 class, merge, release, deploy, stranger run.
 
 ## State at start
@@ -23,7 +28,7 @@ doc comment pointing the wrong way is not cosmetic here.
 Method: for every height-gated branch and every exception, ask *does a test drive it from the REAL
 precondition, or a convenient one?*
 
-**FIXED — `BIP34Height` was the one buried height still hand-typed** (`29a4a46`). BIP66/BIP65/CSV/
+**FIXED — `BIP34Height` was the one buried height still hand-typed** (`70a0fa5`, squashed from `29a4a46`). BIP66/BIP65/CSV/
 Segwit are all read from Core's compiled `Consensus::Params` and asserted by `assert_core_constants`.
 BIP34's 227931 was a literal in two places with nothing checking it, while `reproduce/METHOD_ID`
 claimed "nothing consensus-relevant is a hand-typed magic number now". Not a live bug — the value is
@@ -35,7 +40,7 @@ The guest image id moved, as any guest edit does. It is deliberately NOT written
 scans docs for tokens claimed as a guest id and fails anything that is not canonical or a documented
 predecessor — and it caught this file doing exactly that. The gate is right. A pre-release local build
 id in a doc is the stale-id trap the gate exists for, so the measured value lives in the commit message
-(`29a4a46`) and the authoritative one comes from the release container.
+(`70a0fa5`) and the authoritative one comes from the release container.
 
 **FILED #83 — no fixture drives any activation boundary.** Fixtures are at 130000/140000 (before
 everything) and 741000 (after everything), so every gate in `validate_block` has one side exercised
@@ -206,7 +211,7 @@ consensus failures.
 
 ## STOPPED at phase 4 — container METHOD_ID, and why I did not proceed
 
-Canonical at the time, since superseded (container, fixed paths):  b161735a13d120a29aaf1e3c910bc6cbb486467bef40c04fe839aa4044170b3d
+Canonical at the time, since superseded (container, fixed paths):  dfc9eeda7a5cc19f5091a642c1d88cde6fb153259d94be7e317ee20efb41206f
 Local build (this box):              1bed31ef0cb83c0dcabe0baaed1a4eff676c838569ffa07e8b96056ec9f32507
 reproduce/METHOD_ID still pins:      71790584… (pre-#54, as expected mid-flight)
 
