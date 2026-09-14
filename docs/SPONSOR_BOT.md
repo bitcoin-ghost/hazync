@@ -93,6 +93,9 @@ sponsor was proven last.
   ssh channel open until the proving run ended; the call timed out and the uncaught timeout stopped the bot
   (its cleanup still terminated the pod). A timed-out ssh or scp is now a failed step: the pod is terminated
   with its blocks logged `failed`, and those blocks go to the next pod.
+- **Blocks with no bundle wait.** The bot works only blocks the coordinator can serve a bundle or witness for,
+  checked the same way as `server.bundle_path`. A held block without one is not queued and no pod is rented for
+  it; `plan` and the run's log say how many wait. A trial refuses such a block.
 - **`stop-all`** terminates every pod whose name starts with `hz-sponsor-`.
 
 ## Pods
@@ -157,6 +160,9 @@ reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under `SPONSOR_BOT_HOME`
 - **Optional:** `SPONSOR_BOT_RELEASE` to pin a release tag (default: GitHub Latest), and
   `SPONSOR_BOT_META_URL` (default `http://127.0.0.1:8899/api/meta`).
 - **`COORD_DB`:** the coordinator's database, as for the coordinator.
+- **`HAZYNC_BRIDGE_OUT`** (and `WITNESS_DIR`, if the coordinator sets it): the same values as the
+  coordinator's unit, `/var/lib/hazync/bridge_bundles` on the box. Without `HAZYNC_BRIDGE_OUT` the bot sees only
+  the legacy witnesses, so it rents nothing for any block above them.
 - **Measured on the box, 2026-09-14:** outbound HTTPS to RunPod and GitHub and outbound SSH work, and
   `cryptography` 41.0.7, `ssh`, `ssh-keygen` and `gpg` are installed.
 
@@ -174,8 +180,8 @@ python3 sponsor_bot.py stop-all
   (seconds between looks, default 30).
 - **Without `--live`:** `run` and `trial` print the plan and exit with code 2.
 - **`trial`:** proves chosen blocks without a sponsorship, to measure cost before the price ladder is
-  trusted. It refuses any block already proven, claimed by a prover within the last hour, or held for a
-  sponsorship, and at most 1,000 blocks.
+  trusted. It refuses any block already proven, without a bundle, claimed by a prover within the last hour,
+  or held for a sponsorship, and at most 1,000 blocks.
 
 ## What is tested, and what is not
 
@@ -186,8 +192,11 @@ time running 3,600 times faster. It checks:
 - the caps, the GPU fallback and the price ceiling
 - every termination path: stall, failed boot, exception, SIGTERM, `stop-all`
 - the queue order, `proving` and `proven`, trial refusals, and the cost log and report
+- blocks with no bundle: never given to a pod, and a queue of only such blocks rents nothing
+- a block that lands before its pod is stopped, and the correction of older rows
 
-`--control` skips pod cleanup on an error, and must fail.
+`--control` skips pod cleanup on an error, ignores proofs that land before a pod is stopped, and counts every
+block as having a bundle. It must fail.
 
 **Not tested:**
 

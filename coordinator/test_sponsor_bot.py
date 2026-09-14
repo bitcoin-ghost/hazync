@@ -34,6 +34,10 @@ os.environ["VERIFY_MODE"] = "mock"
 os.environ["COORD_ALLOW_MOCK"] = "1"
 os.environ["TIP_CACHE_TTL"] = "0"
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
+# Bundles for blocks 1 to 10,000, the heights these tests use; block 400,000 has none.
+os.environ["HAZYNC_BRIDGE_OUT"] = tempfile.mkdtemp(prefix="bundles_")
+for _h in range(1, 10001):
+    open(os.path.join(os.environ["HAZYNC_BRIDGE_OUT"], f"bundle_{_h}.json"), "w").close()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
@@ -44,8 +48,9 @@ DB = os.environ["COORD_DB"]
 if CONTROL:
     sponsor_bot._CONTROL_SKIP_CLEANUP_ON_ERROR = True
     sponsor_bot._CONTROL_IGNORE_LANDED = True
-    print("CONTROL: pods are not terminated when the bot errors, and proofs that land before a pod is stopped"
-          " are ignored -- the checks below MUST fail")
+    sponsor_bot._CONTROL_IGNORE_BUNDLES = True
+    print("CONTROL: pods are not terminated when the bot errors, proofs that land before a pod is stopped are"
+          " ignored, and every block counts as having a bundle -- the checks below MUST fail")
 
 fails = []
 
@@ -396,6 +401,31 @@ check(tbot.run() == "done", "a trial proves its blocks")
 rows = q("SELECT sponsorship_id, height, outcome FROM sponsor_work ORDER BY height")
 check([(r["sponsorship_id"], r["height"], r["outcome"]) for r in rows] == [(None, 505, "proven"), (None, 506, "proven")],
       "trial blocks are logged with no sponsorship")
+
+# ---------- blocks with no bundle ----------
+print("== blocks with no bundle wait ==")
+reset()
+c = sponsor_bot.connect(DB)
+bad = sponsor_bot.trial_refusals(c, [505, 400000])
+c.close()
+check(len(bad) == 1 and "400000" in bad[0] and "no bundle" in bad[0], f"a trial refuses a block with no bundle ({bad})")
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01)
+s_wait = sponsor(400000, 400001, paid_at=100)
+s_now = sponsor(9500, 9501, paid_at=200)
+logs = []
+reason = make_bot(api, runner, max_pods=2, blocks_per_pod=5, log=logs.append).run()
+check(reason == "done" and status_of(s_now) == "proven" and [hs for _, hs in runner.started] == [[9500, 9501]],
+      f"a run proves the blocks it can and never gives a pod a block with no bundle ({runner.started})")
+check(len(api.deploys) == 1 and not api.live() and status_of(s_wait) == "paid",
+      f"it rents nothing for the earlier sponsorship with no bundles, which stays held ({len(api.deploys)} deploys, {status_of(s_wait)})")
+check(any("2 held block(s) have no bundle yet" in m for m in logs), "and the log says how many held blocks wait")
+plan_lines = sponsor_bot.plan_text(DB)
+check(any("2 more block(s) wait for bundles" in line for line in plan_lines), f"so does the plan ({plan_lines[-2:]})")
+reset()
+api = FakeRunPod()
+sponsor(400000, 400001)
+check(make_bot(api, FakeRunner()).run() == "done" and not api.deploys, "a queue of only waiting blocks rents no pod at all")
 
 # ---------- a run: max pods, proving on start, the cost log, every pod terminated ----------
 print("== a run ==")
@@ -775,7 +805,7 @@ reset()
 c = sponsor_bot.connect(DB)
 sponsor_bot.ensure_tables(c)
 for h, secs, usd, outcome in ((1000, 10, 0.001, "proven"), (2000, 30, 0.003, "proven"), (3000, 20, 0.002, "proven"),
-                              (120000, 100, 0.02, "proven"), (4000, None, None, "stalled")):
+                              (250000, 100, 0.02, "proven"), (4000, None, None, "stalled")):
     c.execute("INSERT INTO sponsor_work(height, seconds, usd_estimate, outcome) VALUES(?,?,?,?)", (h, secs, usd, outcome))
 c.execute("INSERT INTO sponsor_pods(pod_id, terminated_at, usd_estimate) VALUES('a', 1, 0.5)")
 c.execute("INSERT INTO sponsor_pods(pod_id, terminated_at, usd_estimate) VALUES('b', 1, 0.25)")
@@ -784,8 +814,8 @@ rep = sponsor_bot.report(c)
 c.close()
 b1, b2 = rep["bands"][0], rep["bands"][1]
 check((b1["lo"], b1["blocks"], b1["median_seconds"], b1["max_seconds"], b1["median_usd"], b1["max_usd"])
-      == (1, 3, 20, 30, 0.002, 0.003), f"band 1 to 100,000: 3 blocks, median 20 s, max 30 s ({b1})")
-check((b2["lo"], b2["blocks"], b2["median_seconds"]) == (100001, 1, 100), f"band 100,001 to 150,000 ({b2})")
+      == (1, 3, 20, 30, 0.002, 0.003), f"band 1 to 200,000: 3 blocks, median 20 s, max 30 s ({b1})")
+check((b2["lo"], b2["blocks"], b2["median_seconds"]) == (200001, 1, 100), f"band 200,001 to 400,000 ({b2})")
 check(rep["blocks_proven"] == 4 and abs(rep["pod_usd"] - 0.75) < 1e-9 and abs(rep["all_in_usd_per_block"] - 0.1875) < 1e-9,
       "all in: $0.75 of pods over 4 proven blocks is $0.1875 a block")
 check(rep["outcomes"] == {"proven": 4, "stalled": 1}, f"outcomes are counted ({rep['outcomes']})")

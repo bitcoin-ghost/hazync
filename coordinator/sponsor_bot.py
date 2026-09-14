@@ -71,11 +71,17 @@ NAME_MAX = 40
 HANDLE_CAP = len(HANDLE_PREFIX) + NAME_MAX
 TRIAL_NAME = "Hazync trial"
 # `report` bands: the sponsorship price ladder's height ranges, and everything above it.
-BANDS = ((1, 100000), (100001, 150000), (150001, 180000), (180001, 200000), (200001, 230000), (230001, 10 ** 9))
+BANDS = ((1, 200000), (200001, 400000), (400001, 600000), (600001, 800000), (800001, 1000000), (1000001, 10 ** 9))
+# Where the coordinator serves a block from, in its order (server.bundle_path): the bridge's bundle, then the
+# legacy witness, with the same variables and default as the coordinator. Set HAZYNC_BRIDGE_OUT for the bot as
+# for the coordinator: without it only the legacy witnesses count, and no pod is rented for anything above them.
+BRIDGE_DIR = os.environ.get("HAZYNC_BRIDGE_OUT", "")
+WITNESS = os.environ.get("WITNESS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "witnesses"))
 
 # test_sponsor_bot.py --control sets these to show its cleanup and landed-proof tests can fail. Never set them otherwise.
 _CONTROL_SKIP_CLEANUP_ON_ERROR = False
 _CONTROL_IGNORE_LANDED = False
+_CONTROL_IGNORE_BUNDLES = False
 
 
 # ---------- the database ----------
@@ -178,6 +184,15 @@ def plan(rows):
             f"({r['hi'] - r['lo'] + 1} blocks) for {r['name']}" for r in rows]
 
 
+def has_bundle(h):
+    """True when the coordinator can serve block h to a worker, so a pod can prove it."""
+    if _CONTROL_IGNORE_BUNDLES:
+        return True
+    files = ([os.path.join(BRIDGE_DIR, f"bundle_{int(h)}.json")] if BRIDGE_DIR else []) \
+        + [os.path.join(WITNESS, f"block_{int(h)}.json")]
+    return any(os.path.exists(f) for f in files)
+
+
 def is_covered(c, h):
     return c.execute("SELECT 1 FROM vranges WHERE lo<=? AND hi>=? LIMIT 1", (h, h)).fetchone() is not None
 
@@ -257,17 +272,19 @@ def reconcile_work(c):
     return fixed
 
 
-def pending_work(c, busy=(), trial=None):
+def pending_work(c, busy=(), trial=None, need_bundle=True):
     """[(sponsorship id, or None for a trial, height)] still to prove, in the order to prove them:
-    held sponsorships oldest payment first, heights in order, skipping covered and busy heights."""
+    held sponsorships oldest payment first, heights in order, skipping covered and busy heights, and heights
+    with no bundle yet (unless need_bundle is False): no pod can prove those, so renting one would only spend."""
     busy = set(busy)
+    ok = has_bundle if need_bundle else (lambda h: True)
     if trial is not None:
-        return [(None, h) for h in trial if h not in busy and not is_covered(c, h)]
+        return [(None, h) for h in trial if h not in busy and not is_covered(c, h) and ok(h)]
     out, seen = [], set()
     for r in held_rows(c):
         cov = covered_heights(c, r["lo"], r["hi"])
         for h in range(r["lo"], r["hi"] + 1):
-            if h not in cov and h not in busy and h not in seen:
+            if h not in cov and h not in busy and h not in seen and ok(h):
                 seen.add(h)
                 out.append((r["id"], h))
     return out
@@ -299,12 +316,15 @@ def parse_blocks(spec):
 
 
 def trial_refusals(c, heights, now=None):
-    """Why each trial block may not be proven by the bot: already proven, claimed right now, or held."""
+    """Why each trial block may not be proven by the bot: already proven, no bundle yet, claimed right now, or held."""
     now = time.time() if now is None else now
     out = []
     for h in heights:
         if is_covered(c, h):
             out.append(f"block {h} is already proven")
+            continue
+        if not has_bundle(h):
+            out.append(f"block {h} has no bundle yet, so no pod can prove it")
             continue
         try:
             claimed = c.execute("SELECT 1 FROM ranges WHERE status='claimed' AND lo<=? AND hi>=?"
@@ -727,6 +747,10 @@ class Bot:
         fixed = reconcile_work(c)
         if fixed:
             self.log(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
+        if self.trial is None:
+            waiting = len(pending_work(c, need_bundle=False)) - len(pending_work(c))
+            if waiting:
+                self.log(f"{waiting} held block(s) have no bundle yet and wait for the bridge: no pod is rented for them")
         if self.trial is not None:
             bad = trial_refusals(c, self.trial, self.clock())
             if bad:
@@ -1052,6 +1076,9 @@ def plan_text(db_path=DB, trial=None):
         elif not rows:
             lines.append("no held sponsorships in the queue")
         lines.append(f"{len(todo)} block(s) still to prove")
+        waiting = len(pending_work(c, (), trial, need_bundle=False)) - len(todo)
+        if waiting:
+            lines.append(f"{waiting} more block(s) wait for bundles: no pod can prove them until the bridge builds them")
         bands = report(c)["bands"]
         if todo and bands:
             est = 0.0
