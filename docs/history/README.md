@@ -46,14 +46,16 @@ For what is true now, see [`../README.md`](../README.md); for releases, [`../../
 | `PERF_INVESTIGATION_2026-08-26.md` | the perf investigation | Tier 0 shipped; worker-process ceiling ≤1.09x |
 | `RELEASE_PLAN.md` | the early-August finishing plan — not a release procedure | obsolete; the v0.21.0 cutover happened 2026-09-07 |
 | `ROADMAP.md` | the task inventory and completed-work log | superseded; `../../CHANGELOG.md` and the issue tracker |
+| `SECURITY_AUDIT_LOG.md` | every security review round, 1–9 self and 10–11 external, plus the 2026-07 self- and coverage audits (moved out of `SECURITY.md`) | dated record; `../../SECURITY.md` keeps status, open items and the finding index |
 | `SEGDIST_TASKS.md` | segment-distribution tasks, with step 2 (formerly `SEGDIST_STEP2.md`) | complete; the last segment moved to workers in #158 |
 | `SEGMENT_DISTRIBUTION.md` | segment-distribution design and its two- and three-card measurements | superseded by `../FLEET_OPERATIONS.md` |
 | `STACK_INTEGRATION_PLAN.md` | the four-lever stack plan | three levers shipped via #208; the #139 middle path is Ghost-only |
 | `TEN_MINUTE_BLOCK.md` | the ten-minute target and fleet arithmetic | target met; `../TOPOLOGY_AND_SETTINGS.md`, `../BUILDS.md` |
+| `TOPOLOGY_AND_SETTINGS_2026-09-05.md` | the topology page before its CORE rewrite: stock guest, #139 scenarios, the 2-card aggregate measurement | superseded by `../TOPOLOGY_AND_SETTINGS.md` (#308) |
 | `TIER0_RESULTS_2026-08-26.md` | Tier 0 codegen results | shipped; ecmult window 21 is the default |
 | `TIP_BLOCK_BIGINT2_2026-08-28.md` | bigint2 on the tip block | **contains its own retraction** (7.53x → 4.48x) |
 | `WITNESS_WIRE_PROFILE_2026-08-28.md` | witness deserialisation profile and the `PackedHash` encoder | encoder shipped (#208) |
-| [`releases/`](releases/) | release bodies of v0.20.0 (pre-publish draft) and v0.21.1–v0.21.4 | the GitHub releases are canonical; `../../CHANGELOG.md` |
+| [`releases/`](releases/) | release bodies of v0.20.0 (pre-publish draft) and v0.21.0–v0.21.4 | the GitHub releases are canonical; `../../CHANGELOG.md` |
 
 ## Where the experiment branches went
 

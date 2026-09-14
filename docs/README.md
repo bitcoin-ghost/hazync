@@ -25,7 +25,6 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 | [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md) | one block across many GPUs: `seg-serve` / `seg-connect`, knobs, failure handling |
 | [`BUILDS.md`](BUILDS.md) | the CORE (shipped) and GHOST channels: patches, flags, measured card counts |
 | [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | fleet shape, card and per-box settings |
-| [`GHOST_NEXT_BUILD.md`](GHOST_NEXT_BUILD.md) | the Ghost channel's next build |
 | [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a board coordinator |
 | [`SPONSOR_BOT.md`](SPONSOR_BOT.md) | the sponsor proving bot |
 
@@ -48,8 +47,9 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 | | |
 |---|---|
 | [`history/README.md`](history/README.md) | the development record, with its known-stale figures |
-| [`history/releases/`](history/releases/) | copies of release bodies (v0.20.0 draft, v0.21.1–v0.21.4) |
-| [`RELEASE_NOTES_v0.21.0.md`](RELEASE_NOTES_v0.21.0.md) | the v0.21.0 release body, kept at this path while external links still point here |
+| [`history/releases/`](history/releases/) | copies of release bodies (v0.20.0 draft, v0.21.0–v0.21.4) |
+| [`history/SECURITY_AUDIT_LOG.md`](history/SECURITY_AUDIT_LOG.md) | the round-by-round security review record, indexed from `SECURITY.md` |
+| [`history/TOPOLOGY_AND_SETTINGS_2026-09-05.md`](history/TOPOLOGY_AND_SETTINGS_2026-09-05.md) | the pre-CORE topology page, as it stood before its rewrite |
 
 ## ⛔ How to read a number in this repository
 
