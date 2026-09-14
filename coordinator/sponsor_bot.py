@@ -508,15 +508,22 @@ class SshRunner:
                 "-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "GlobalKnownHostsFile=/dev/null",
                 "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes"]
 
+    # A timed-out ssh or scp is a FAILED STEP for that pod, never an exception: on the first trial an uncaught
+    # TimeoutExpired from starting work stopped the whole bot.
+    @staticmethod
+    def _run(argv, timeout):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout}s")
+
     def _ssh(self, pod, cmd, timeout=60):
         ip, port = pod.ssh
-        return subprocess.run(["ssh", "-n", *self._opts(), "-p", str(port), f"root@{ip}", cmd],
-                              capture_output=True, text=True, timeout=timeout)
+        return self._run(["ssh", "-n", *self._opts(), "-p", str(port), f"root@{ip}", cmd], timeout)
 
     def _scp(self, pod, paths, dest):
         ip, port = pod.ssh
-        return subprocess.run(["scp", "-q", *self._opts(), "-P", str(port), *paths, f"root@{ip}:{dest}"],
-                              capture_output=True, text=True, timeout=120)
+        return self._run(["scp", "-q", *self._opts(), "-P", str(port), *paths, f"root@{ip}:{dest}"], 120)
 
     def boot(self, pod):
         detail = "not attempted"
@@ -552,7 +559,7 @@ class SshRunner:
                     or self._scp(pod, [os.path.join(w["home"], "key.hex"), os.path.join(w["home"], "handle")],
                                  dest + "/").returncode != 0
                     or self._ssh(pod, f"chmod 600 {dest}/key.hex").returncode != 0):
-                raise RuntimeError(f"could not copy identity {w['tag']} to {pod.name}")
+                raise StartFailed(f"could not copy identity {w['tag']} to {pod.name}")
             copied.add(w["tag"])
         lines = ["#!/bin/bash", "cd /workspace"]
         for w in work:
@@ -564,11 +571,10 @@ class SshRunner:
         with open(script, "w") as f:
             f.write("\n".join(lines) + "\n")
         if self._scp(pod, [script], "/workspace/sponsor-run.sh").returncode != 0:
-            raise RuntimeError(f"could not copy the work list to {pod.name}")
-        r = self._ssh(pod, "cd /workspace && : > sponsor-run.log && setsid nohup bash /workspace/sponsor-run.sh"
-                           " >> /workspace/sponsor-run.log 2>&1 < /dev/null & disown; exit 0")
+            raise StartFailed(f"could not copy the work list to {pod.name}")
+        r = self._ssh(pod, launch_command())
         if r.returncode != 0:
-            raise RuntimeError(f"could not start work on {pod.name}: {r.stderr.strip()[:200]}")
+            raise StartFailed(f"could not start work on {pod.name}: {r.stderr.strip()[:200]}")
 
     def status(self, pod):
         try:
@@ -580,10 +586,26 @@ class SshRunner:
         return "finished" if r.stdout.strip() == "ALLDONE" else "running"
 
 
+def launch_command(workdir="/workspace"):
+    """Start the work list detached, so the ssh that starts it returns at once.
+
+    Only `setsid -f` goes to the background, with stdin, stdout and stderr all redirected. The first trial used
+    `cd ... && : > log && setsid nohup bash run.sh >> log 2>&1 < /dev/null & disown`: `&` backgrounds the whole
+    `&&` list in a subshell whose own stdout and stderr are still the ssh channel, so ssh waited for the proving
+    run to end and the call timed out (reproduced with pipes: the old command held them open, this returns)."""
+    return (f"cd {workdir} && : > sponsor-run.log && setsid -f bash {workdir}/sponsor-run.sh"
+            f" >> {workdir}/sponsor-run.log 2>&1 < /dev/null; exit 0")
+
+
 # ---------- the bot ----------
 
 class BotRefused(RuntimeError):
     pass
+
+
+class StartFailed(RuntimeError):
+    """Work could not be started on ONE pod (an ssh or scp step failed or timed out). The bot terminates that
+    pod and puts its blocks back in the queue; it is not a reason to stop the run."""
 
 
 class Pod:
@@ -805,7 +827,13 @@ class Bot:
             p.assigned, p.state = items, "working"
             p.segment_start = p.last_progress = now
             p.finished_since = None
-            self.runner.start(p, work)
+            try:
+                self.runner.start(p, work)
+            except StartFailed as e:
+                # This pod could not start its work: terminate it and let the blocks go back to the queue for
+                # another pod. Anything else still stops the run, with every pod terminated.
+                self._terminate(c, p, f"could not start work: {e}", outcome="failed")
+                continue
             self.log(f"{p.name}: proving {len(chunk)} block(s) from {chunk[0][1]}")
 
     def _launch(self, c, now):

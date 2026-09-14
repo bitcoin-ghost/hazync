@@ -139,9 +139,10 @@ class FakeRunner:
     """A pod that proves its assigned blocks by writing verified proofs into the coordinator database."""
     ssh_pubkey = "ssh-ed25519 AAAAFAKE sponsor-bot@test"
 
-    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False):
+    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=()):
         self.per_block, self.boot_fail, self.stall = per_block, set(boot_fail), set(stall)
         self.raise_on_start = raise_on_start
+        self.start_fail = set(start_fail)       # pods (1st, 2nd, ...) whose work cannot be started
         self.booted, self.started, self.threads, self.status_at_start = [], [], {}, {}
         self.work, self.unregistered_at_start = [], []
         self.lock = threading.Lock()
@@ -158,6 +159,8 @@ class FakeRunner:
     def start(self, pod, work):
         if self.raise_on_start:
             raise RuntimeError("simulated failure while starting work")
+        if self.nth(pod) in self.start_fail:
+            raise sponsor_bot.StartFailed(f"simulated: could not start work on {pod.name}")
         heights = [w["height"] for w in work]
         self.started.append((pod.id, heights))
         self.work.extend((pod.id, dict(w)) for w in work)
@@ -468,6 +471,60 @@ note = q("SELECT note FROM sponsor_pods WHERE pod_id=?", (first,))[0]["note"] or
 check(first in api.terminations and first not in [p for p, _ in runner.started] and note.startswith("boot failed"),
       f"a pod whose boot fails is terminated before it is given work ({note})")
 check(status_of(s) == "proven", "a second pod proves the blocks")
+
+# ---------- a pod whose work cannot be started ----------
+print("== a pod whose work cannot be started ==")
+reset()
+s1 = sponsor(9800, 9803)
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01, start_fail={1})
+logs = []
+reason = make_bot(api, runner, max_pods=1, blocks_per_pod=5, log=logs.append).run()
+check(reason == "done" and status_of(s1) == "proven",
+      f"the run carries on and the sponsorship is proven by another pod (reason {reason}, {status_of(s1)})")
+check(len(api.deploys) >= 2 and not api.live(), f"the pod that could not start was terminated and replaced ({len(api.deploys)} deploys, live {api.live()})")
+check(q("SELECT COUNT(*) n FROM sponsor_work WHERE outcome='failed'")[0]["n"] == 4,
+      "its four blocks are logged as failed on that pod, then proven on the next")
+check(q("SELECT note FROM sponsor_pods WHERE note LIKE 'could not start work%'"), "and the pod's note says why")
+
+print("== starting work returns at once, and a timeout is a failed step ==")
+wd = tempfile.mkdtemp(prefix="launch_")
+with open(os.path.join(wd, "sponsor-run.sh"), "w") as f:
+    f.write("#!/bin/bash\nsleep 30\necho ALLDONE\n")
+t0 = time.time()
+try:
+    r = sponsor_bot.subprocess.run(["bash", "-c", sponsor_bot.launch_command(wd)], capture_output=True, text=True, timeout=5)
+    took, timed_out = time.time() - t0, False
+except sponsor_bot.subprocess.TimeoutExpired:
+    took, timed_out = time.time() - t0, True
+sponsor_bot.subprocess.run(["pkill", "-f", os.path.join(wd, "sponsor-run.sh")], capture_output=True)
+check(not timed_out and took < 2, f"the launch command returns with its output pipes free while the work runs on ({took:.2f}s)")
+real_run = sponsor_bot.subprocess.run
+
+
+def hang(argv, **kw):
+    raise sponsor_bot.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+
+class _Pod:
+    id, name, ssh = "podT", "hz-sponsor-t", ("127.0.0.1", 22)
+
+
+sponsor_bot.subprocess.run = hang
+try:
+    sr = sponsor_bot.SshRunner.__new__(sponsor_bot.SshRunner)
+    sr.key, sr.known_hosts, sr.dir = "/nonexistent/key", "/dev/null", wd
+    res = sr._ssh(_Pod(), "true")
+    try:
+        _Pod.identities = {"trial"}
+        sr.start(_Pod(), [{"height": 1, "tag": "trial", "home": wd, "pubkey": "p", "handle": "h"}])
+        raised = None
+    except Exception as e:
+        raised = e
+finally:
+    sponsor_bot.subprocess.run = real_run
+check(res.returncode == 124, f"a timed-out ssh comes back as a failed result, not an exception (rc {res.returncode})")
+check(isinstance(raised, sponsor_bot.StartFailed), f"so starting work on an unreachable pod raises StartFailed ({type(raised).__name__})")
 
 # ---------- an exception mid-run ----------
 print("== an exception mid-run ==")
