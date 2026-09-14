@@ -126,6 +126,14 @@ _holds = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.ab
                         + (["--control"] if CONTROL else []))
 if not CONTROL:
     check(_holds.returncode == 0, "sponsor holds keep blocks from normal workers (test_sponsor_holds.py)")
+# The per-key claim cap uses the same liveness as the grace, so it runs from here too (and its control).
+_cap = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_claim_cap.py")]
+                      + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_cap.returncode == 0, "one key holds at most CLAIM_OPEN_MAX live claims (test_claim_cap.py)")
+elif _cap.returncode != 0:
+    print("CONTROL FAILED — test_claim_cap.py --control passed with the cap off.")
+    sys.exit(1)
 
 if CONTROL:
     if fails:

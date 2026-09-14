@@ -196,6 +196,19 @@ CLAIM_MAX  = int(os.environ.get("CLAIM_MAX", "86400"))   # hard cap: release a c
 # claim lapsed still submits successfully; the cost of being wrong here is duplicate work, not lost
 # work. That is what makes a short grace safe.
 CLAIM_GRACE = int(os.environ.get("CLAIM_GRACE", "600"))  # never-beaten claims: released after this
+# Live claims one key may hold at once (0: no limit). A worker proves one block at a time, so an honest key
+# holds about one per GPU; measured 2026-09-14, no proving key held more than 1. `ghost:dda215` held 26 to 61
+# blocks it never proved, re-claiming in bursts as CLAIM_GRACE released them: another contributor's worker on
+# the same IP proved 9,116 of its 9,133 claimed blocks, and the frontier waited over an hour behind one.
+CLAIM_OPEN_MAX = int(os.environ.get("CLAIM_OPEN_MAX", "4"))
+# A claim is LIVE (it holds its block) while it beats within CLAIM_TTL, or has never beaten and is inside
+# CLAIM_GRACE, and is younger than CLAIM_MAX. One definition, for the blocks that are held and for the cap.
+LIVE_CLAIM_SQL = ("status='claimed' AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
+                  " AND (last_beat IS NOT NULL OR claimed_at > ?)")
+
+
+def _live_claim_args(now):
+    return (now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE)
 # How far a signed beat's timestamp may sit from ours. It bounds REPLAY of a captured beat, so it
 # wants to be small; it also has to absorb ordinary clock drift on a contributor's box plus request
 # latency, so it cannot be tiny. Two minutes is comfortably above NTP-corrected drift and well under
@@ -506,6 +519,8 @@ def init_db():
         if col not in have:
             c.execute(f"ALTER TABLE sponsorships ADD COLUMN {col} {decl}")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_token ON sponsorships(token_hash)")
+    # claim() counts one key's live claims under the global lock (CLAIM_OPEN_MAX): an index, not a table scan.
+    c.execute("CREATE INDEX IF NOT EXISTS ranges_assignee_status ON ranges(assignee, status)")
     c.commit(); c.close()
 
 def parse_any_range(rid):
@@ -865,11 +880,7 @@ def coverage_and_held(c, now):
         proven.update(range(row["lo"], row["hi"] + 1))
     # #296: a claim that has never beaten is held only for CLAIM_GRACE. One that HAS beaten keeps the
     # full CLAIM_TTL, however slow it is — the test is progress, not speed.
-    held = {r["lo"] for r in c.execute(
-        "SELECT lo FROM ranges WHERE status='claimed'"
-        " AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
-        " AND (last_beat IS NOT NULL OR claimed_at > ?)",
-        (now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE))}
+    held = {r["lo"] for r in c.execute("SELECT lo FROM ranges WHERE " + LIVE_CLAIM_SQL, _live_claim_args(now))}
     # Sponsor holds (SPONSOR_HOLD_SQL) are held whoever asks. Adding them HERE is what keeps them out of every
     # path that hands out blocks: claim()'s scan, its frontier-blocker re-offer (#284), and pick(). The
     # sponsor bot does not claim; it proves its blocks with `hazync-worker run <n>`.
@@ -2548,6 +2559,19 @@ def claim(body):
             return 200, {"ok": True, "range": again, "ttl": CLAIM_TTL,
                          "note": "claimed for %d minutes; submissions are accepted for any height regardless"
                                  % int(CLAIM_TTL / 60)}
+        # CLAIM_OPEN_MAX: a key already holding that many live claims gets no more until one is proven or
+        # lapses. Counted with the liveness `held` uses, so a finished or released claim frees its slot and a
+        # slow prover that beats keeps its blocks. A retry of a claim this key already made was answered
+        # above, so a lost response is never refused.
+        if CLAIM_OPEN_MAX > 0 and pk:
+            open_n = c.execute("SELECT COUNT(*) FROM ranges WHERE assignee=? AND " + LIVE_CLAIM_SQL,
+                               (pk,) + _live_claim_args(now)).fetchone()[0]
+            if open_n >= CLAIM_OPEN_MAX:
+                c.close()
+                return 429, {"error": f"this key already holds {open_n} claimed blocks that are not finished "
+                                      f"(at most {CLAIM_OPEN_MAX}): prove one, or let one lapse, before claiming "
+                                      f"another",
+                             "open_claims": open_n, "max": CLAIM_OPEN_MAX}
         proven, held = coverage_and_held(c, now)
         # A claim blocks EVERY worker for CLAIM_TTL, including the one that made it. That looks like a
         # bug — a worker locked out of retrying its own failed block — and on 2026-08-01 it was
