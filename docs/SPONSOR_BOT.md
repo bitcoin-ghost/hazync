@@ -16,7 +16,7 @@ minimum:
 status IN ('paid','proving') AND paid_sats IS NOT NULL AND min_sats IS NOT NULL AND paid_sats >= min_sats
 ```
 
-Normal workers are never offered held blocks. Proofs from anyone are still accepted. The coordinator marks
+Normal workers are never offered held blocks. A proof of a held block is accepted only from a key the bot registered for that sponsorship (`403` for anyone else). The coordinator marks
 a sponsorship `proven` at submit when its whole span is covered.
 
 The bot:

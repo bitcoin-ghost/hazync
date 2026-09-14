@@ -1852,7 +1852,7 @@ SPONSOR_PUBLIC_SQL = ("status IN ('paid','proving','proven') AND paid_sats IS NO
 
 # A HOLD (docs/SPONSORSHIP.md, "Holds"): a sponsorship paid at least its minimum and not yet proven keeps
 # its blocks for the sponsor proving bot. No claim or pick ever offers a held block to anyone, and a proof of
-# a held block is still accepted from anyone, as every proof is. The hold ends when the whole span is covered
+# a held block is accepted only from a key registered for that sponsorship (_hold_refusal). The hold ends when the whole span is covered
 # (submit() moves the sponsorship to `proven`) or it is cancelled or refunded. It has no expiry, so /api/state
 # reports a hold on the frontier's next block once it is older than SPONSOR_HOLD_ALERT.
 SPONSOR_HOLD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL"
@@ -1887,6 +1887,33 @@ def _sponsor_mark_proven(c, lo, hi, now=None):
                       (now or time.time(), sp["id"]))
             done.append(sp["id"])
     return done
+
+def _hold_refusal(c, lo, hi, pubkey):
+    """(sponsorship id, first block) if [lo..hi] would newly prove a block held for a sponsorship and `pubkey`
+    is not a key registered for THAT sponsorship in sponsor_keys; else None.
+
+    The sponsor paid for those blocks, so another prover must not take them, and their credit, by submitting
+    them directly: claims never offer them (coverage_and_held), and this closes the other door. Only blocks
+    not yet covered by verified ranges count, so a fold that re-expresses blocks already proven takes nothing."""
+    for sp in _sponsor_holds(c, lo, hi):
+        a, b = max(lo, sp["lo"]), min(hi, sp["hi"])
+        covered = set()
+        for r in c.execute("SELECT lo, hi FROM vranges WHERE lo<=? AND hi>=?", (b, a)):
+            covered.update(range(max(a, r["lo"]), min(b, r["hi"]) + 1))
+        first = next((h for h in range(a, b + 1) if h not in covered), None)
+        if first is None:
+            continue
+        try:
+            mine = c.execute("SELECT 1 FROM sponsor_keys WHERE pubkey=? AND sponsorship_id=?",
+                             (str(pubkey).lower(), sp["id"])).fetchone() is not None
+        except sqlite3.OperationalError:          # a database from before the table
+            mine = False
+        if not mine:
+            return sp["id"], first
+    return None
+
+def _hold_message(held):
+    return {"error": f"block {held[1]:,} is held for sponsorship #{held[0]}: only the sponsor's prover can prove it"}
 
 def _is_public_sponsorship(r):
     return (r["status"] in SPONSOR_PUBLIC and r["paid_sats"] is not None and r["min_sats"] is not None
@@ -2823,6 +2850,14 @@ def submit(body):
             r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
             c.close()
     if r["status"] == "verified": return 409, {"error": "already proven"}
+    # A held block is proven only by its sponsorship's registered key (_hold_refusal). Checked here, before
+    # the expensive verification, and again when committing, in case a hold started in between.
+    with _lock:
+        c = db()
+        _held = _hold_refusal(c, int(r["lo"]), int(r["hi"]), pk)
+        c.close()
+    if _held:
+        return 403, _hold_message(_held)
     # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges run in parallel),
     #    but bounded by _verify_sem so a burst can't spawn unlimited STARK verifications and OOM the box.
     with _verify_sem:
@@ -2836,6 +2871,10 @@ def submit(body):
         if r2 and r2["status"] == "verified":
             c.close()
             return 409, {"error": "already proven"}   # another submit won the race while we were verifying
+        _held = _hold_refusal(c, int(r["lo"]), int(r["hi"]), pk)
+        if _held:
+            c.close()
+            return 403, _hold_message(_held)
         c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
                   " VALUES(?,?,?,?,?,?,?,?)", (rid, pk, handle, sha, sig, int(ok), note, time.time()))
         if ok:
