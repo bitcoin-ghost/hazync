@@ -9,11 +9,11 @@ writing closes it, and issues that engineering can never close rot in the tracke
 
 ## What we already have, stated precisely
 
-**Five internal audits** and **two external reviews** (SECURITY.md, rounds 10 & 11). Both external
+**Five internal audits** and **two external reviews** (`docs/history/SECURITY_AUDIT_LOG.md`, rounds 10 & 11). Both external
 passes were **AI-assisted full-source reviews, not a commissioned professional audit** — a distinction
 SECURITY.md keeps deliberately, and this page keeps too. Only one audit has a standalone write-up,
-`docs/AUDIT_2026-07.md` (SECURITY.md round 8); the others are recorded only where their findings were
-fixed — `SECURITY.md`, `reproduce/METHOD_ID` and code comments.
+`docs/history/AUDIT_2026-07.md` (round 8 in the audit log); the others are recorded only where their findings
+were fixed — the audit log (indexed by finding in `SECURITY.md`), `reproduce/METHOD_ID` and code comments.
 
 They were not cheap talk. They found real defects, including one canonical-chain break (audit #3, F-1)
 that had survived internal review because a comment, a test name and a fixture all agreed with each
@@ -197,9 +197,10 @@ substantive bug found in this work came from running those, not from reading the
   `utreexo.rs` is what is proven, and it carries hardening the host oracle does not.
 - **`reproduce/METHOD_ID` is the source of truth for the id**, and the container is the only place it is
   canonically derived. A local build legitimately differs (it embeds `CARGO_HOME`).
-- **`SECURITY.md` is a real changelog of findings**, including our own mistakes and retractions. Reading
+- **`docs/history/SECURITY_AUDIT_LOG.md` is a real changelog of findings** (indexed from `SECURITY.md`), including our own mistakes and retractions. Reading
   it is faster than rediscovering them.
-- **Past audit findings are in `SECURITY.md`, `docs/AUDIT_2026-07.md` and `reproduce/METHOD_ID`.**
+- **Past audit findings are in `SECURITY.md` (status and index), `docs/history/SECURITY_AUDIT_LOG.md`,
+  `docs/history/AUDIT_2026-07.md` and `reproduce/METHOD_ID`.**
   Re-treading them is allowed but is not where the value is.
 
 ## Not on this list, deliberately

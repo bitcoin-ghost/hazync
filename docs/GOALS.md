@@ -1,6 +1,6 @@
 # Hazync — goals
 
-Six technical goals. Everything in `ROADMAP.md` is in service of one of these; if a task cannot be
+Six technical goals. Every task (once inventoried in `history/ROADMAP.md`) is in service of one of these; if a task cannot be
 traced to a goal here, it is not on the critical path.
 
 Each goal states what it means, where it actually stands (**measured, not asserted**), and what would
@@ -102,12 +102,12 @@ that has not been re-derived for CORE.
 **Keeping up with the tip** at a bounded lag needs about **11 L40S** on that block, and a sub-10-minute
 block about **13** (`TOPOLOGY_AND_SETTINGS.md` §1) — both INFERRED from an 8-card fleet that measured
 15m13s. On rented RTX 4090s, block 966,256 has been proved end to end in **8.09 minutes on 26 cards**
-and **9.07 minutes on 27** (`docs/history/MILESTONE_966256_2026-09-10.md`,
+and **9.07 minutes on 27** (runs 1 and 4,
 `docs/history/MILESTONE_966256_RUN4_2026-09-10.md`).
 
 ⚠ **Name the framing, the card and the po2 with any fleet size.** Throughput (consecutive blocks
 overlap, so a bounded lag) and latency (one block inside 600 s) are different questions; the stock
-guest's ~29 here and `FLEET_SIZING.md`'s ~32 answered them for a guest that no longer ships. 24 GB cards
+guest's ~29 here and `history/FLEET_SIZING.md`'s ~32 answered them for a guest that no longer ships. 24 GB cards
 run the CUDA default po2 21 (peak 22,478 MiB on a 4090); only po2 22, which peaked at 40.6 GB on the
 stock guest, is out of their reach.
 

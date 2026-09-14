@@ -4,7 +4,7 @@
 > **board coordinator** — the long-lived service that hands out ranges, verifies submissions and runs
 > the scoreboard. It never proves and needs no GPU.
 >
-> The **segment coordinator** ([`SEGMENT_DISTRIBUTION.md`](SEGMENT_DISTRIBUTION.md)) is a different
+> The **segment coordinator** ([`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md)) is a different
 > thing entirely: an ephemeral `seg-serve` process that splits ONE block's proof across machines. It
 > lives for one prove and does need a GPU. The two share no code.
 
@@ -134,7 +134,7 @@ compares its host's `METHOD_ID` with your `/api/meta`, `run-workers.sh` refuses 
 mismatch, and your coordinator rejects a receipt made by any other guest. Beyond that it needs only
 what you serve: a witness bundle per block, with no node and no chain data of its own.
 
-A *segment* worker (`seg-connect`, [`SEGMENT_DISTRIBUTION.md`](SEGMENT_DISTRIBUTION.md)) needs less
+A *segment* worker (`seg-connect`, [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md)) needs less
 still — no session and no block, only the segment in front of it — but that belongs to a segment
 coordinator, not to you.
 
@@ -143,5 +143,5 @@ coordinator on a different guest is a different board.
 
 ## Related
 
-- `docs/HAZYNC_ARCHITECTURE.md` for how the pieces fit together
+- `docs/SPEC.md` for how the pieces fit together (design history: `docs/history/HAZYNC_ARCHITECTURE.md`)
 - hazync#69 for the design reasoning behind federation

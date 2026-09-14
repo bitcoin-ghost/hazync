@@ -1,10 +1,16 @@
 # Hazync engine — architecture & integration plan
 
+> **Historical record, moved here on 2026-09-14.** Superseded by [`../SPEC.md`](../SPEC.md),
+> [`../SOUNDNESS.md`](../SOUNDNESS.md) and [`../PROVING.md`](../PROVING.md) — what is current: those three for
+> the design, the trust model and proving. The bigint2 field backend discussed below shipped as `patches/0012`
+> in the canonical CORE guest from v0.21.0 ([`../BUILDS.md`](../BUILDS.md)). `ACCELERATION.md` below is
+> [`ACCELERATION.md`](ACCELERATION.md) in this directory.
+
 > **Historical working notes.** This is the original design/integration plan and reads as a changelog.
 > Some of it has been overtaken: recursion (listed here as a future item) is fully implemented,
 > hardened, and demonstrated; and the k256/`patches/0003` accelerator (described here as "done & the
 > lever we needed") has been **removed from the guest** (2026-07-19) to keep it pure-Core. For the current truth see
-> `SOUNDNESS.md`, `SECURITY.md`, `PROVING.md`, and `ACCELERATION.md`.
+> `../SOUNDNESS.md`, `../../SECURITY.md`, `../PROVING.md`, and `ACCELERATION.md`.
 
 *How the "real Core VerifyScript in a zkVM" result becomes the Hazync validity-proof engine: block
 proving, the UTXO accumulator, recursion, tip validation, node verification, IBD, and serving-layer

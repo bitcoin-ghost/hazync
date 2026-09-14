@@ -1,3 +1,8 @@
+> **Historical record.** Superseded by `docs/BUILDS.md` and `docs/TOPOLOGY_AND_SETTINGS.md` — what is current:
+> Tier 0 shipped in v0.21.0 (`-O3`, fat LTO, `codegen-units=1`, `ECMULT_WINDOW_SIZE=21`); the bigint2 field
+> backend shipped as `patches/0012`; the scheduling ceiling is ≤1.09x (card measured 91.5% busy,
+> `TEN_MINUTE_BLOCK.md` §3).
+
 # Performance investigation — 2026-08-26
 
 A pass over the whole tree for speed, memory and cost, and a plan of experiments to settle each idea.
@@ -235,7 +240,7 @@ The control and the window-20 arm reproduce TIER0's figures **exactly**, and the
 identical across all three, so this extends the original sweep rather than competing with it.
 **Window 21 is the optimum and is worth ~6x what window 20 was going to buy.**
 
-⇒ Full verdict, consequences and caveats: **`TOPOLOGY_AND_SETTINGS.md` §4.1**. Do not re-derive it
+⇒ Full verdict, consequences and caveats: **`../TOPOLOGY_AND_SETTINGS.md` §4.1**. Do not re-derive it
 from this section.
 
 ---

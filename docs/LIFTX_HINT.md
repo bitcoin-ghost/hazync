@@ -3,7 +3,7 @@
 **Status: SHIPPED.** Merged in `42417d2` (#208); `patches/0013` is part of the canonical CORE guest
 since v0.21.0 (`c12ad67`), applied by `provision-vps.sh` phase 5a with `HAZYNC_LIFTX_HINT=1` exported
 beside it. **MEASURED: +6.31%** in execute mode, 6,897 hits / 134 misses (98.1%), journal digest gate
-PASS (`docs/RELEASE_NOTES_v0.20.0.md`); a live `seg-serve` run logs `liftx: hits=430` (`9d860d7`).
+PASS (`docs/history/releases/RELEASE_NOTES_v0.20.0.md`); a live `seg-serve` run logs `liftx: hits=430` (`9d860d7`).
 
 ⛔ **It must be set at RUN time as well as build time**, or chunked proving dies — §6.
 

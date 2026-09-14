@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Classify every input of a block JSON by script type and count ECDSA vs Schnorr
-# verifications. Sources the input-mix table in docs/ACCELERATION.md 'The board'.
+# verifications. Sources the input-mix table in docs/history/ACCELERATION.md 'The board'.
 # Usage: python3 prover/tools/classify_inputs.py [prover/block_962000.json]
 import json, collections
 import sys

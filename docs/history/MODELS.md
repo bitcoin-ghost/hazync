@@ -1,5 +1,9 @@
 # Two models: Core and Ghost
 
+> **Historical record, 2026-08-29.** Superseded by `../BUILDS.md` (the three channels; CORE ships since
+> v0.21.0 with **10** cards measured, Ghost 5). Shipped CORE also carries `patches/0012`, a narrow
+> field-backend substitution, so the §2 "identical + advice-and-verify" boundary did not hold as drawn.
+
 **Proposed 2026-08-29.** Build two provers, push each to its own limit, benchmark them head to head,
 and take the fidelity decision *once*, against numbers, at the end.
 
@@ -83,7 +87,10 @@ Model: `N = (chunk_card_seconds x straggler / R + aggregate) / 600`, scenario (a
 proving cost — the running A/B settles this); the liftx saving (unbuilt); and above all **whether the
 aggregate distributes at all.** If it does not, the aggregate alone is 1,575 s = 26 min and
 **no model reaches 600 s at ANY card count.** That has never been exercised.
-→ `feedback_only_measured_numbers`
+
+*(2026-09-14: wrong when written — the aggregate had already been distributed and measured at **2.78x on
+three L40S** on 2026-08-24, `2facde4`; see `SEGDIST_TASKS.md`. The "Ghost, wholesale" rows were never
+run either: `hazync_ecdsa_verify_full` had no call site until `patches/0014`, `9b767b5`.)*
 
 ⚠ **liftx's headline is conditional on #139.** It removes 1.42 G: ~45% of the 3.14 G that remains
 *after* bigint2, but only ~10% of the 14.04 G before it. In the Core model it is worth **~1.11x, not
@@ -101,6 +108,7 @@ do not expect them to move the fleet.
 ⏰ **The highest-value Ghost-only lever is the AGGREGATE, not more chunk substitution.** It never
 received #136's `read_slice` fix, 78% of its guest run is deserialisation at 347 cyc/byte, and whether
 it distributes is unexercised. That is where Ghost's freedom is actually worth something.
+*(2026-09-14: it had been exercised — 2.78x on three cards, `2facde4`, 2026-08-24.)*
 
 ## 6. Running the benchmark
 

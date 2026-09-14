@@ -1,10 +1,21 @@
 # Segment distribution — design and build plan
 
+> **Historical record, moved here on 2026-09-14.** The segment-distribution design and measurement log of
+> 2026-08-23/24. Superseded by [`../FLEET_OPERATIONS.md`](../FLEET_OPERATIONS.md) — what is current:
+> - "Nothing here is deployed" is stale: `seg-serve`/`seg-connect` ship in the release binary and ran the
+>   544.0 s block ([`MILESTONE_966256_RUN4_2026-09-10.md`](MILESTONE_966256_RUN4_2026-09-10.md)).
+> - The ~18-minute floor below was refuted by this document's own later sections: the aggregate distributes
+>   (2.78x on three L40S, #153).
+> - "The segment coordinator proves the last segment itself" is stale: since #158 (closing #157) a worker
+>   proves it (`NOLIFT_TAG`), the coordinator merges the session into its claim, and a worker lifts it.
+> - The P1 commands `seg-export`, `seg-prove`, `seg-lift` and `seg-assemble` never existed in `main.rs`; the
+>   built ones are `seg-prove-one`, `seg-join`, `seg-work`, `seg-coordinate` and `seg-distribute`.
+
 > **Two different things are called "coordinator" in this project.** This document is about the
 > **segment coordinator** — the ephemeral `seg-serve` process that executes one guest run, pushes its
 > segments to workers and drives assembly. It lives for the duration of one prove and needs a GPU.
 >
-> The **board coordinator** (`coordinator/server.py`, [`docs/RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md))
+> The **board coordinator** (`coordinator/server.py`, [`docs/RUN_YOUR_OWN_COORDINATOR.md`](../RUN_YOUR_OWN_COORDINATOR.md))
 > is the long-lived public service that hands out block ranges, verifies submitted proofs and runs
 > the scoreboard. It never proves anything and needs no GPU. The two share no code.
 

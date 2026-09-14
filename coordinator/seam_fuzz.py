@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Adversarial fuzz harness for the Hazync coordinator's range-chaining seam logic
-(`server._frontier_chain`) — the S1/F1/H9 trust boundary in SECURITY.md, where ranges were once
+(`server._frontier_chain`) — the S1/F1/H9 trust boundary indexed in SECURITY.md (detail: docs/history/SECURITY_AUDIT_LOG.md), where ranges were once
 chained on a weaker seam than the guest fold (a false-low-height / weak-flags splice risk).
 
 Threat model: a submitter must have a REAL proof per range, so the boundary metadata

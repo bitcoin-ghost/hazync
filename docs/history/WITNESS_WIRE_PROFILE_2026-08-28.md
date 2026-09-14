@@ -1,5 +1,8 @@
 # The witness, measured on the wire
 
+> **Historical record, 2026-08-28.** The `PackedHash`/`PackedHashes` encoder measured below shipped in
+> the witness format; its cycle effect was still unmeasured as a separate figure when this was written.
+
 Block 962,000, 8,006 inputs, 6,303 de-duplicated txs. Every figure produced by running the same
 `risc0_zkvm::serde::to_vec` the executor uses, per sub-structure, so all of them share one unit.
 Reproduce with `HAZYNC_WITNESS_SIZES=1 HAZYNC_BLOCK=block_962000.json host check-full`.
@@ -51,14 +54,8 @@ It is the same defect as the proofs: a `[u8; 32]` goes through risc0 serde's def
 | proofs only | 4,071,296 | **1.78x** |
 | **proofs + `txids`** | **3,466,108** | **2.09x** |
 
-⛔ **Bytes are measured; the cycle consequence is NOT MEASURED and no figure is given for it.**
-An earlier draft carried validation figures derived by putting these byte ratios through the
-"78% of block validation is deserialisation" number. That is a forecast, not a result, and it is
-removed. → [[feedback_only_measured_numbers]]
-
-**The run that would measure it:** an execute-mode aggregate (mode 5) before and after, comparing
-cycles. It needs chunk receipts from the CURRENT guest and the encoder moves `METHOD_ID`, so every
-stored receipt is void — new ones require a GPU.
+⛔ **Bytes are measured; the cycle consequence is NOT MEASURED** — see "What is NOT measured" at the
+end.
 
 ## Before writing the encoder
 
@@ -132,7 +129,7 @@ prefix overhead, not amplification.
 ⛔ **The cycle consequence of this is NOT MEASURED, and no figure is given for it here.** Earlier
 drafts of this document carried one, derived by carrying the byte ratio through the
 "78% of block validation is deserialisation" figure. That is a forecast, not a result, and it is
-removed. → [[feedback_only_measured_numbers]]
+removed.
 
 **What would measure it:** an execute-mode run of the aggregate path (mode 5) before and after,
 comparing cycles. That needs chunk receipts from the CURRENT guest, and the encoder moves

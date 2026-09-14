@@ -115,7 +115,7 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-
 
 `verify-range` pins the full genesis in-boundary; `verify-any` (used by the coordinator on each
 submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
-invariant the guest fold enforces. See [`HAZYNC_ARCHITECTURE.md`](HAZYNC_ARCHITECTURE.md).
+invariant the guest fold enforces. See [`SPEC.md`](SPEC.md) §10.
 
 ## Prover reliability: the risc0 segment-boundary retry
 
@@ -305,7 +305,7 @@ the k256 substitution was **removed from the guest** (2026-07-19; it reintroduce
 question), and an early bigint2 field-mul intercept was measured ~10% slower; the shipped backend differs
 by keeping the coprocessor's representation throughout, so no conversion is paid per call
 (`FIELD_BIGINT2_BACKEND.md` §2–3). The faster Ghost build goes further and does not ship. Analysis in
-[`CORE_VS_GHOST.md`](CORE_VS_GHOST.md) and [`BUILDS.md`](BUILDS.md); the long historic record is
+[`BUILDS.md`](BUILDS.md) (the decision memo is [`history/CORE_VS_GHOST.md`](history/CORE_VS_GHOST.md)); the long historic record is
 [`history/ACCELERATION.md`](history/ACCELERATION.md).
 
 ## Building the release binaries (maintainer notes)

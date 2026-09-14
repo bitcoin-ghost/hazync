@@ -200,7 +200,7 @@ four C helpers together at **428 M (6.8%)**.
 2,191 M cycles — 38% of the block.** A first measurement of 2.381x was entirely this. Per-call cost
 fell 296→138 cy (mul) and 208→123 (sqr) against an 83 cy operation. ⚠ The flat profile attributed only
 663 M to `memcpy` and under-reported the true cost 3.3x, because the rest was inlined into the
-wrappers. → `CORE_VS_GHOST.md` §8
+wrappers. → `history/CORE_VS_GHOST.md` §8
 
 ✅ **The earlier block number was a projection, and the condition it set is met.** It had no guest
 build, no `METHOD_ID` and no digest — the host reference stood in for the coprocessor, so it proved the

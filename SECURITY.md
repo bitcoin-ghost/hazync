@@ -12,7 +12,7 @@ most.
 > ⚠️ **Two numbering schemes run through this repo, and they do not line up.** The **rounds**
 > (1–9 self, 10–11 external) are the review passes recorded in the audit log. The **internal audits**
 > (#1–#5, counted in [`docs/EXTERNAL_REVIEW.md`](docs/EXTERNAL_REVIEW.md)) are a separate series, and
-> they are what `reproduce/METHOD_ID`, `docs/ROADMAP.md` and `docs/PROVING.md` mean by "audit #3" and
+> they are what `reproduce/METHOD_ID`, `docs/history/ROADMAP.md` and `docs/PROVING.md` mean by "audit #3" and
 > "audit #5". Audit #3 is *not* round 3: it is the 2026-08-03 pass that found the BIP30 F-1
 > canonical-chain break, and audit #5 is the 2026-08-04 pass whose guest guards were pinned as
 > `4722cec8` (superseded since; the guest that ships now is `37987b85`, pinned 2026-09-06).
@@ -20,7 +20,7 @@ most.
 The property that makes this worth reviewing: the prover runs **real Bitcoin Core v28 consensus code**
 (`interpreter.cpp`, `SignatureHash`, `libsecp256k1`, with Core's consensus logic unmodified) inside a
 RISC0 zkVM, plus a Utreexo accumulator. There is no consensus reimplementation to diverge from Core.
-It is *maximal-Core*, not pure Core ([`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md) §1): the
+It is *maximal-Core*, not pure Core ([`docs/SPEC.md`](docs/SPEC.md) §12): the
 canonical guest applies `patches/0001` (an ILP32 `Serialize` overload) and `patches/0002` (SHA-256 via
 the zkVM accelerator) to Core and, since v0.21.0, `patches/0012` (a coprocessor field backend) and
 `patches/0013` (a `lift_x` witness hint that libsecp's own arithmetic checks) to libsecp256k1. Those
@@ -151,7 +151,7 @@ its sections:
 | the bench-backdoor and `MiniReader` hardening | Round 4 |
 | F1–F3 (round 5's, distinct from round 3's) | Round 5 |
 | H9 | Round 6 |
-| A1, G1–G5, N1–N3 | Round 8 (full write-up in `docs/AUDIT_2026-07.md`) |
+| A1, G1–G5, N1–N3 | Round 8 (full write-up in `docs/history/AUDIT_2026-07.md`) |
 | #4, #6, #8 | Round 9 |
 | `cshims.c` (round 10); H-1, M-1, L-1–L-3 (round 11) | Rounds 10 & 11 |
 | S1–S4, C1–C3, and housekeeping H1–H3 (distinct from the guest H1–H4) | Earlier findings (2026-07-15) |
