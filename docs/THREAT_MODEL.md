@@ -189,19 +189,24 @@ the board; retaining receipts; serving witness bundles.
 
 **An outside attacker** (no access to the box):
 
-- **Can claim blocks under any pubkey** ([#310](https://github.com/bitcoin-ghost/hazync/issues/310)).
-  `claim()` takes `pubkey` and `handle` from the body and checks no signature; `beat()`, `submit()` and
-  `rotate()` are all signed. The bounds that apply:
+- **Can claim blocks under any pubkey, unsigned** ([#310](https://github.com/bitcoin-ghost/hazync/issues/310)).
+  `claim()` accepts a claim signed by its key over `claim:<nonce>:<ts>` (within `BEAT_SKEW`), refuses one whose
+  signature does not verify, and still accepts an unsigned one unless `CLAIM_REQUIRE_SIG=1`, because workers up
+  to v0.21.4 sign nothing. `beat()`, `submit()` and `rotate()` are all signed. The bounds that apply:
+  - one key holds at most `CLAIM_OPEN_MAX` live claims (4 by default, #319), and a key does not get back a block
+    its own never-beaten claim let lapse for `CLAIM_RETAKE_WAIT` (#321). Both count **signed and unsigned claims
+    apart**, so unsigned claims sent under a key cannot fill that key's signed slots or keep blocks from its
+    signed claims; they can still crowd out that key's own unsigned claims, i.e. a worker older than the
+    signing release;
   - a claim that is never beaten is released after `CLAIM_GRACE` (600 s by default, #296), and beats must be
     signed, so without the key a claim cannot be held longer;
-  - `RATE_MAX` / `RATE_WINDOW` per client address (120 POSTs per 60 s by default), with nginx's `10r/s` in
-    front;
   - `claim()` re-offers the frontier's own blocker at most once per `CLAIM_TTL` (`held`).
 
-  There is no per-key or per-address cap on concurrent claims. At the defaults, one address could hold on
-  the order of 1,200 blocks at a time (120 a minute for 600 s). That figure is derived from the defaults,
-  not measured, and neither is the effect on the board. Claims are advisory: `submit` accepts any height,
-  and `hazync run <n>` never claims.
+  The per-key cap does not stop an attacker using many fresh keys, and there is no per-address cap: public
+  requests reach the coordinator from the web box, which is in `RATE_EXEMPT` (measured 2026-09-14), so the
+  per-address `RATE_MAX` does not apply to them either; nginx's `10r/s` in front does. The effect on the board
+  of many keys is not measured. Claims are advisory: `submit` accepts any height, and `hazync run <n>` never
+  claims.
 - Can submit a valid proof against the wrong predecessor (§3); can take any unreserved handle first; can
   read every pubkey, which is why beats are signed (audit #5, L-2).
 - **Cannot** add an unverified range, advance the frontier with a range that does not seam, replace the
@@ -372,9 +377,10 @@ Each verified against the tree or GitHub on 2026-09-14.
 5. **The worker reads coordinator responses without a bound** (`get()` in `coordinator/hazync`; §6).
 6. **No commissioned external audit** (`SECURITY.md`). The accumulator, the recursion binding and ghostd
    adoption are the named priorities.
-7. **Unsigned claims** — [#310](https://github.com/bitcoin-ghost/hazync/issues/310). Anyone can hold blocks
-   under any key, for `CLAIM_GRACE` each, within the rate limit, with no per-key or per-address cap (§5). The
-   effect on the board is not measured.
+7. **Unsigned claims** — [#310](https://github.com/bitcoin-ghost/hazync/issues/310). Signed claims are verified
+   and counted apart, so unsigned claims under a key cannot use up its signed cap or re-take wait; unsigned claims
+   stay accepted until `CLAIM_REQUIRE_SIG=1`, which needs a worker release that signs. Many fresh keys are not
+   limited, and there is no per-address cap behind the web box (§5). The effect on the board is not measured.
 8. **Key rotation cannot be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311). One
    rotation per old key, a second is `409`, and nothing removes one, so a stolen `key.hex` moves attribution
    permanently (§4).

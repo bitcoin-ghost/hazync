@@ -106,8 +106,11 @@ ROUTES = {
         "signature or proof is `422`, not `403`. No prior claim is required.",
     "POST /api/claim":
         "Take the earliest block that is not proven or held, width 1; frontier+1 is re-offered first when "
-        "a cover of it cannot seam (#281). `pubkey` is asserted, not proven: there is no signature. A "
-        "`nonce` makes a retried claim return the same block (#268). Advisory: `submit` never requires it.",
+        "a cover of it cannot seam (#281). A claim signed by its key over `claim:<nonce>:<ts>` (within "
+        "`BEAT_SKEW`) speaks for that key: the per-key cap and the re-take wait count signed and unsigned claims "
+        "apart, and a signature that does not verify is refused, not treated as unsigned (#310). Unsigned claims "
+        "are accepted unless `CLAIM_REQUIRE_SIG=1`. A `nonce` makes a retried claim return the same block (#268). "
+        "Advisory: `submit` never requires it.",
     "POST /api/spine":
         "Submit a new spine head, signed over the receipt. `host verify-range` must pass (full genesis "
         "pin), then `verify-any` supplies `lo`/`hi`; `lo` must be 1 and `hi` must exceed the current head "
@@ -159,6 +162,8 @@ ENV = {
     "server:CLAIM_GRACE": "Seconds before a claim that has never beaten is released (#296).",
     "server:CLAIM_OPEN_MAX": "Live claims one key may hold at once; a further claim is refused with 429 until one is "
                              "proven or lapses. `0` means no limit.",
+    "server:CLAIM_REQUIRE_SIG": "`1` refuses claims that are not signed by their key (#310). Off by default: workers "
+                                "up to v0.21.4 do not sign claims.",
     "server:CLAIM_RETAKE_WAIT": "Seconds before a key may re-take a block its own claim let lapse without a heartbeat; "
                                 "other keys are offered it at once. `0` means straight away.",
     "server:BEAT_SKEW": "Allowed distance in seconds between a beat's signed `ts` and server time.",

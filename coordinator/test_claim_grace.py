@@ -142,6 +142,14 @@ if not CONTROL:
 elif _retake.returncode != 0:
     print("CONTROL FAILED — test_claim_retake.py --control passed with the wait off.")
     sys.exit(1)
+# And signed claims (#310): unsigned claims under a key cannot use up its cap or its re-take wait.
+_signed = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_claim_signed.py")]
+                         + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_signed.returncode == 0, "only a signed claim speaks for its key (test_claim_signed.py)")
+elif _signed.returncode != 0:
+    print("CONTROL FAILED — test_claim_signed.py --control passed with every claim unsigned.")
+    sys.exit(1)
 
 if CONTROL:
     if fails:
