@@ -1,9 +1,18 @@
 # A coprocessor field backend for libsecp — design
 
-**Goal:** get Core mode from ~24 cards to ~9, **without conceding a single algorithm.** libsecp keeps
-its wNAF, its GLV, its ECDSA logic and every check; only the field *backend* changes — which libsecp
-already parameterises (`field_5x52`, `field_10x26`, asm variants). Adding `field_bigint2` uses its own
-extension point.
+**Status: SHIPPED.** `patches/0012` is part of the canonical CORE guest since v0.21.0 (`c12ad67`):
+`provision-vps.sh` phase 5a applies it to every build and exports `HAZYNC_FIELD_BIGINT2=1`. What follows
+is the design record and the validation it passed.
+
+⛔ **Open soundness item for shipped code: gate 4, the corrupt-signature negative control, has never
+run on a CORE build** (§5b). Every gate that did run shows that valid blocks still validate; none shows
+this backend rejecting a bad signature inside the guest.
+
+**Goal, as set:** get Core mode from ~24 cards to ~9, **without conceding a single algorithm.**
+**Measured:** 10 cards on two L40S, straggler 1.295 (`BUILDS.md` §1, `42417d2`). libsecp keeps its
+wNAF, its GLV, its ECDSA logic and every check; only the field *backend* changes — which libsecp already
+parameterises (`field_5x52`, `field_10x26`, asm variants). Adding `field_bigint2` uses its own extension
+point.
 
 ⚠ **This is the same fidelity posture as `patches/0002`** (SHA-256 → risc0 accelerator), already
 shipped in **both** models at 3.4% of guest compute. It is arguably a *smaller* concession than #139,
@@ -97,7 +106,7 @@ canonical and magnitude is always 1, a good many collapse to almost nothing:
 
 | group | functions | notes |
 |---|---|---|
-| **no-ops** | `normalize`, `normalize_weak`, `normalize_var`, `get_bounds` | already canonical |
+| **normalisers** | `normalize`, `normalize_weak`, `normalize_var`, `get_bounds` | no-ops in this canonical plan. ⏰ Under the lazy design §3b adopted they are real work (`normalize` is 21 instructions); `get_bounds` is called only from libsecp's tests |
 | **trivial C** | `set_int`, `clear`, `is_zero`, `is_odd`, `cmp_var`, `cmov`, `to_storage`, `from_storage`, `normalizes_to_zero{,_var}` | limb-wise |
 | **software mod-p** | `add`, `add_int`, `negate_unchecked`, `mul_int_unchecked`, `half` | add-with-carry + conditional subtract |
 | **byte I/O** | `set_b32_mod`, `set_b32_limit`, `get_b32` | endianness only; the representation is already canonical |
@@ -139,7 +148,7 @@ Gates 0 and 1 both run on a workstation with no GPU and no guest build: `scripts
 | **1. libsecp256k1's own suite, `-DVERIFY`, counts 2 / 8 / 32** | ✅ **`no problems found`**, with a stock `field_10x26` control passing on the same command line |
 | **2. mutation controls** | ✅ every mutant caught by at least one gate |
 | **3. journal digest on block 962,000** | ✅ **PASS** — `4fb3e3c5…4656d`, byte-identical to control AND to the recorded value, `all_valid=1`, `binds=8006` |
-| 4. corrupt-signature negative control | ⛔ **NOT RUN** |
+| 4. corrupt-signature negative control | ⛔ **NOT RUN — an open soundness item for shipped code.** No run on a CORE build rejects a corrupted signature inside the guest: the #223 negative corpus (`fuzz-native/negative-corpus.sh`) has no signature case, and the byte-flip control in `fuzz-native/realvector.cpp` runs natively on libsecp's stock field backend. Gate 1 runs libsecp's invalid-signature tests against this backend with the host reference standing in for the coprocessor, which is not the same thing |
 
 ⏰ **Gate 3 needed no GPU.** `RISC0_PPROF_ENABLE_INLINE_FUNCTIONS=1 HAZYNC_CHUNKS=1
 HAZYNC_PROFILE_EXEC=1 host chunk-profile` executes the block on CPU in ~4 min (backend) / ~9 min
@@ -171,16 +180,17 @@ produces one. Any future lazy backend inherits this gap. Keep both gates.
 Three "controls" passed and I nearly recorded that as coverage. The quoted `#include` in
 `field_impl.h` resolves relative to the **including file's** directory first, so it read the good copy
 already sitting in `secp/src/` and no mutant ever reached the compiler. Each mutant now gets its own
-tree and is `cmp`-checked against the source before its result counts. → `gotcha_checks_that_cannot_fail`
+tree and is `cmp`-checked against the source before its result counts.
 
 ## 6. Status
 
-⏰ **WRITTEN, and validated as far as a workstation can take it.** `patches/0012` plus
-`field_bigint2{,_impl}.h`, `field_bigint2.rs`, and `testsupport/`. Gates 0-2 pass.
+✅ **SHIPPED in the canonical CORE guest since v0.21.0** (`c12ad67`): `patches/0012` plus
+`field_bigint2{,_impl}.h`, `field_bigint2.rs`, and `testsupport/`. Gates 0–3 pass; gate 4 has not run
+(§5b).
 
-⏰ **2026-08-31 — MEASURED: 3.836x** (13,748,003,793 → 3,583,757,161 cycles), past the 3.67x
-projected. Cards land at **~8-10** depending on the straggler, which is unmeasured for this arm and is
-now the only figure here that needs a GPU.
+✅ **2026-08-31 — MEASURED in execute mode: 3.836x** (13,748,003,793 → 3,583,757,161 cycles), past the
+3.67x projected. ✅ **2026-09-02 — MEASURED on two L40S with real proving: straggler 1.295, 10 cards**
+(`BUILDS.md` §1), where the derived figure had been 9.
 
 ✅ **§3's central worry did not materialise.** Canonical adds were projected to cost ~750 M and to be
 the reason for 9 cards rather than 7. The lazy + branching rewrite put `hz_add` at **197 M**, and all
@@ -192,10 +202,11 @@ fell 296→138 cy (mul) and 208→123 (sqr) against an 83 cy operation. ⚠ The 
 663 M to `memcpy` and under-reported the true cost 3.3x, because the rest was inlined into the
 wrappers. → `CORE_VS_GHOST.md` §8
 
-⛔ **The earlier block number was a projection.** No guest build, no `METHOD_ID`, no digest. The host
-reference stands in for the coprocessor, so what is proven is the *glue* — representation, lazy
-invariant, libsecp's contracts — not the coprocessor and not the block. **~9 cards holds only if arm
-C2 reproduces the control's journal digest byte for byte on block 962,000.**
+✅ **The earlier block number was a projection, and the condition it set is met.** It had no guest
+build, no `METHOD_ID` and no digest — the host reference stood in for the coprocessor, so it proved the
+*glue* (representation, lazy invariant, libsecp's contracts), not the coprocessor or the block. It
+required arm C2 to reproduce the control's journal digest byte for byte on block 962,000; gate 3 did
+(§5b), and the card count measured 10, not 9.
 
 ⚠ **Arm C2 would have measured nothing until today.** `patches/0012` was applied inside the
 `want_bigint2 = 1` branch of `scripts/gpu-stack-ab.sh`, and arm C2 passes `0` — Core mode has no #139.

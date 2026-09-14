@@ -11,7 +11,9 @@ writing closes it, and issues that engineering can never close rot in the tracke
 
 **Five internal audits** and **two external reviews** (SECURITY.md, rounds 10 & 11). Both external
 passes were **AI-assisted full-source reviews, not a commissioned professional audit** — a distinction
-SECURITY.md keeps deliberately, and this page keeps too.
+SECURITY.md keeps deliberately, and this page keeps too. Only one audit has a standalone write-up,
+`docs/AUDIT_2026-07.md` (SECURITY.md round 8); the others are recorded only where their findings were
+fixed — `SECURITY.md`, `reproduce/METHOD_ID` and code comments.
 
 They were not cheap talk. They found real defects, including one canonical-chain break (audit #3, F-1)
 that had survived internal review because a comment, a test name and a fixture all agreed with each
@@ -43,8 +45,11 @@ are what make it a claim about **Bitcoin** rather than a claim about itself:
 - **Check the guest image id against `/api/meta` and `reproduce/METHOD_ID`.** All three must agree. A
   proof that verifies against the *wrong* guest is a proof of the wrong program.
 
-`epoch_start_time` should be `1231006505` — Bitcoin's genesis timestamp — for any spine, since a spine
-is anchored at genesis by construction.
+`epoch_start_time` is **not** the genesis timestamp. It is the timestamp of the first block of the
+retarget period containing the tip — block `⌊height / 2016⌋ × 2016` — because the verifier reports the
+proof's *out*-boundary (`rs.out_epoch_start`, `verifier/src/lib.rs`). It equals `1231006505` only while
+the tip is below height 2016. The genesis pin applies to the *in*-boundary (`docs/SPEC.md` §9), which
+`--json` does not print; a spine that verifies has already passed it.
 
 Note what this deliberately does not show: the spine is short, and it is not the `frontier` the board
 reports. Those are different claims and the panel keeps them separate on purpose — the frontier is the
@@ -90,7 +95,29 @@ Internally covered, and worth being accurate about what that means:
 All of it self-audit, all of it small-`n`. The board is heading for ~200M leaves. It is also **new
 code** — unlike the Core consensus path, nobody else has been running it for a decade.
 
-### 3. The C++ bridge inside the guest
+### 3. The non-Core cryptographic code in the shipped guest
+
+Since v0.21.0 the canonical guest is maximal-Core, not pure Core: two patches beneath libsecp256k1 sit on
+the signature-verification path of every block, and neither is Core's code.
+
+- **`patches/0012` — the `field_bigint2` field backend.** `prover/methods/guest/field_bigint2.h`,
+  `prover/methods/guest/field_bigint2_impl.h` and `prover/methods/guest/src/field_bigint2.rs`. A lazy
+  8×32-bit-limb representation, with add/sub/negate/half in C and multiply/square/inversion routed to the
+  RISC0 bigint2 coprocessor. libsecp's algorithms above the field are untouched; the representation is
+  not, and it admits states (elements ≥ p) that libsecp's own test suite never generates — two
+  deliberately broken backends passed that suite and were caught only by the project's mod-p harness
+  (`docs/FIELD_BIGINT2_BACKEND.md` §5b). **No corrupt-signature negative control has run on a CORE
+  build.**
+- **`patches/0013` — the `lift_x` witness hint.** `prover/methods/guest/src/liftx_hint.rs`. Replaces the
+  square root in `secp256k1_ge_set_xo_var` with a host-supplied Y, checked as `y² == x³ + 7`. The argument
+  that this accepts exactly what the square root would have produced is short (`docs/LIFTX_HINT.md` §3)
+  and worth checking independently — including that a hostile or truncated table can only cost the
+  fallback.
+
+This is the newest consensus-relevant code in the repo, and no outside review has seen it: rounds 10 and
+11 predate it by about a month.
+
+### 4. The C++ bridge inside the guest
 
 `prover/methods/guest/verify_input.cpp` — the glue between Core's real consensus code and the zkVM.
 
@@ -102,18 +129,20 @@ rather than a crash.
 Audit #5 read it in full and found one unguarded index (L-1, since fixed, no exposure). That is a good
 sign, not a conclusion.
 
-### 4. The coordinator under a HOSTILE-coordinator model
+### 5. The coordinator under a HOSTILE-coordinator model
 
 Currently reviewed under the stated model: `COORD_URL` is operator-chosen and trusted. That model is
 honest today.
 
-If untrusted coordinators ever become supported — which is what hazync#69 contemplates — the worker's
-handling of coordinator responses needs a second pass: unbounded `get().read()` sizes, claim-response
-handling, and anything else that treats the coordinator's answer as well-formed.
+hazync#69 has landed (closed 2026-08-24): anyone can run a coordinator
+(`docs/RUN_YOUR_OWN_COORDINATOR.md`), seed witnesses from a peer, and set `PEER_COORDINATORS` so
+coordinators stop handing out each other's work. A worker still trusts the coordinator it is pointed at,
+but there are now more of them to point at, so the worker's handling of coordinator responses is due
+its second pass: `get()` in `coordinator/hazync` reads a response body with an unbounded `.read()`, and
+claim-response handling, and anything else that treats the coordinator's answer as well-formed, needs
+the same look.
 
-**Do not commission this until #69 has a design**, or the review will be of a model we are not building.
-
-### 5. ghostd integration — landed, and the highest-value consensus surface here
+### 6. ghostd integration — landed, and the highest-value consensus surface here
 
 hazync#31, #42 and #46 are all met and closed — the work landed, which is exactly why it needs outside
 eyes rather than less. This is the consumer side of the trust boundary: the code that decides a proof
@@ -170,11 +199,12 @@ substantive bug found in this work came from running those, not from reading the
   canonically derived. A local build legitimately differs (it embeds `CARGO_HOME`).
 - **`SECURITY.md` is a real changelog of findings**, including our own mistakes and retractions. Reading
   it is faster than rediscovering them.
-- **Five internal audits are in `docs/AUDIT_*.md` and SECURITY.md.** Re-treading them is allowed but is
-  not where the value is.
+- **Past audit findings are in `SECURITY.md`, `docs/AUDIT_2026-07.md` and `reproduce/METHOD_ID`.**
+  Re-treading them is allowed but is not where the value is.
 
 ## Not on this list, deliberately
 
-**Core's consensus code itself.** It is compiled verbatim from a pinned tag and has had far more review
-than we could commission. Auditing it here would be auditing Bitcoin Core, and the pinning is what needs
-checking (item 1), not the code.
+**Core's consensus code itself.** It is compiled from a pinned tag with only the portability patches
+`0001` and `0002` applied, and has had far more review than we could commission. Auditing it here would
+be auditing Bitcoin Core, and the pinning is what needs checking (item 1), not the code. The two
+libsecp256k1 patches beneath it are not Core's, which is why they are item 3.

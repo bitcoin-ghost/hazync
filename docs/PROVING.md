@@ -3,12 +3,12 @@
 This is the operator's guide to the real proving commands. Everything below is implemented,
 hardened, and demonstrated on real mainnet data — single blocks, recursive chains, the parallel
 range-fold, and tip operation. (For *joining the live party* rather than driving the prover
-directly, see [`CONTRIBUTING.md`](../CONTRIBUTING.md). For the soundness posture and the nine rounds of
-adversarial hardening, see [`SECURITY.md`](../SECURITY.md).)
+directly, see [`CONTRIBUTING.md`](../CONTRIBUTING.md). For the soundness posture — nine rounds of
+self-audit and two AI-assisted external reviews — see [`SECURITY.md`](../SECURITY.md).)
 
 Proving is RAM- and GPU-heavy. Build on a provisioned box (`provision-vps.sh`); a small WSL2 machine
-can run *execute-mode* validation but not proving. GPU proving needs CUDA **12.6** (the script
-installs it) and the `cuda` feature.
+can run *execute-mode* validation but not proving. GPU proving needs CUDA **12.8** (the script
+installs it; RISC0 3.0.5's kernels do not build against 13.x) and the `cuda` feature.
 
 ```
 GPU=1 REPO_DIR=$PWD ./provision-vps.sh
@@ -42,8 +42,13 @@ HAZYNC_BLOCK=block_741000.json HAZYNC_CHUNKS=16 ./target/release/host prove-seg 
 
 Chunks are packed to equal predicted **cost**, not equal input counts (#132). A block's chunks prove in
 parallel, so its wall-clock is its slowest chunk, and equal input counts leave that straggler fat — on
-block 741000, 1.22x the mean, i.e. fifteen provers waiting on one. Cost is predicted as
-`1_950_000 * ec_verifies + 182 * bytes`, coefficients fitted against a measured execute-mode run.
+block 741000, 1.22x the mean, i.e. fifteen provers waiting on one. Cost is predicted per input from its
+ECDSA and Schnorr verifies, its bytes and a per-input base, with a discount for a key already seen
+(`COST_PER_EC_OP_REPEAT`). The constants are globals in `prover/host/src/main.rs`, each overridable by an
+environment variable: `COST_PER_EC_OP` 417,798 (`HAZYNC_COST_EC_OP`), `COST_PER_SCHNORR_OP` 462,435
+(`HAZYNC_COST_SCHNORR_OP`), `COST_INPUT_BASE` 41,387 (`HAZYNC_COST_INPUT_BASE`) and
+`COST_PER_INPUT_BYTE` 2 (`HAZYNC_COST_INPUT_BYTE`) — Core's per-curve fit to measured execute-mode
+cycles (`docs/BUILDS.md` §2). Ghost carries its own fit (`docs/BUILDS.md` §3).
 
 `chunk-profile` reports how the work actually falls out, under both the old and new packing:
 
@@ -137,60 +142,36 @@ at a hardcoded rung (which on CPU would waste a duplicate attempt at the size th
 Normal workloads prove at the default; only the affected ~10% fall back, and the receipt is identical
 either way.
 
-**Releases.** The current release ships `METHOD_ID 37987b85`, pinned on 2026-09-06 by the
-**Core-becomes-canonical** re-baseline: patches `0012` (the `field_bigint2` coprocessor backend) and
-`0013` (`lift_x` via a verified witness hint) are now applied unconditionally by `provision-vps.sh`,
-so the guest that ships is the one the README calls CORE. Until this id they were benchmark-only
-levers that no canonical build turned on. Block 962,000 commits the same journal as the superseded
-guest — byte-identical, `all_valid=1`, `binds=8006` — at 3,357,576,338 cycles against its
-13,748,003,793. Core's consensus code is unchanged; what moved is how libsecp does 256-bit modular
-arithmetic.
+**The ladder is for failures, not stalls** (#256). A prove that stops making progress, or hits the outer
+timeout, is retried **once at the same segment size** and then abandoned with a message naming how far
+it got — smaller segments mean more of them, so walking the ladder only makes a slow prove slower
+(`_run_with_seg_retry` in `coordinator/hazync`).
 
-`b62d2a60` (2026-08-04, the **audit #5** re-baseline: guest index guards on `coin_leaf`, a
-32-bit-safe overflow check in `coinbase_value`, and a missing `return true` whose absence was
-undefined behaviour on a leaf-commitment path) is **superseded**. A verifier pinned to it will
-reject proofs from this release, and vice versa — the id is what makes a proof checkable, so a
-re-baseline is a hard cut rather than an upgrade. Only a proof
-made against `37987b85` verifies today.
+**#119 — a prover fault, fixed in a vendored crate.** `prover/Cargo.toml` patches
+`risc0-circuit-rv32im-sys` to a vendored 4.0.3 (`vendor/risc0-circuit-rv32im-sys`) carrying one fix in
+`kernels/cxx/ffi.cpp` and `kernels/cuda/ffi.cu` (search `HAZYNC_119_ACCUM_FIX`): phase 3 of the accum
+pass added a value to LogUp cells the instruction arm never wrote, which could yield a non-canonical
+field element and a receipt that fails `verify()`. It is prover-only — `METHOD_ID`, the circuit and the
+verifier are unchanged — shipped in v0.21.1 (#245), and is to be dropped once upstream ships the fix.
 
-It is worth being precise about the chain of guests behind it, because each one reset the board and it
-is easy to attribute the current id to the wrong change:
+**Releases.** The current release is **v0.21.4**. It ships `METHOD_ID 37987b85`, which became
+canonical on 2026-09-07 (`c12ad67`) with the **Core-becomes-canonical** re-baseline: patches `0012` (the
+`field_bigint2` coprocessor backend) and `0013` (`lift_x` via a verified witness hint) are applied
+unconditionally by `provision-vps.sh`, so the guest that ships is the one `docs/BUILDS.md` calls CORE.
+Block 962,000 commits the same journal as the stock guest — byte-identical, `all_valid=1`,
+`binds=8006` — at 3,357,576,338 cycles against its 13,748,003,793. Core's consensus logic is unchanged;
+what moved is how libsecp does 256-bit modular arithmetic and square roots, which puts those two
+patches in the trust base (`docs/SOUNDNESS.md` §2).
 
-| id | date | why |
-|---|---|---|
-| `be5e0528` | | the `ruint` RUSTSEC bump |
-| `71790584` | 2026-08-02 | `cshims.c` `_sbrk` bounds + `strtoul` base handling (#55), `multi_check` docs (#59) |
-| `dfc9eeda` | 2026-08-03 | BIP30 closed by a coinbase-only SMT (#54), audit #3's 91842/91880 grandfather |
-| `b161735a` | 2026-08-04 | the id stopped depending on where the repo is checked out (#88) |
-| `b62d2a60` | 2026-08-04 | audit #5 |
-| `1d6c3792` | 2026-08-23 | parallel block validation |
-| `3867611d` | 2026-09-04 | the coprocessor field backend (benchmark-only; the shipped guest was still stock) |
-| **`37987b85`** | **2026-09-06** | **Core becomes the guest that ships — current** |
+Proofs are not interchangeable across ids: a verifier pinned to an earlier guest rejects proofs from
+this release, and vice versa, so a re-baseline is a hard cut rather than an upgrade. Only a proof made
+against `37987b85` verifies today. Every id that has ever been canonical is in
+[`reproduce/LINEAGE.tsv`](../reproduce/LINEAGE.tsv) — one row per id, oldest first, with the date it
+became canonical, the commit that pinned it and its risc0 toolchain — and `reproduce/METHOD_ID` records
+why each was superseded. How a release is cut is `scripts/release.sh`.
 
-`reproduce/METHOD_ID` carries the full reasoning for each. v0.13.0 added the two things that let volunteered
-compute accumulate rather than pile up: an **incremental genesis-anchored spine**
-(`host extend-spine`, coordinator `/api/spine`, `hazync spine`) that advances by absorbing adjacent
-chunks instead of being re-folded from scratch, and **folding as a task in its own right**
-(`/api/foldable`, `hazync fold`) so it no longer depends on claim width — at width-1 claims nothing
-was being folded at all. The previous release, v0.12.2, fixed a CPU prover that could not prove: it
-was built without risc0's `prove` feature and shelled out to `r0vm`, which the release does not ship.
-
-> **v0.12.0 re-baselines the guest twice over, and the board restarted from genesis.** The
-> accumulator's leaf and interior hashes are now domain-separated (which changes every leaf hash), and
-> `ruint` moved 1.19.0 → 1.20.0 for RUSTSEC-2026-0220 — a dependency bump with no Hazync source
-> change, but ruint is compiled into the circuit so the id moves anyway. `reproduce/METHOD_ID` records
-> both, with reasons. Proofs are **not** interchangeable across ids: a `3f52baff` proof from v0.11.0
-> stays valid *under `3f52baff`* and is correctly rejected by a `be5e0528` verifier. That is the guest
-> pin working, not a bug.
-
-The id was previously re-baselined in v0.10.0 (libsecp's ecmult
-window raised to its measured optimum — see `reproduce/METHOD_ID`), on top of the real-Core `pow.cpp`
-difficulty retarget carved into the guest, every consensus constant sourced from Core's own
-`chainparams.cpp`, and the v0.9.0 witness wire format. Both the
-**`hazync-host-x86_64-linux-gnu`** CPU binary and the multi-arch **CUDA** binary embed this guest and
-carry the segment-retry across all prove paths plus the earlier fixes (P2SH sigop count, BIP30 bridge
-handling, in-block-spend leaf fix, and the round-9 R-1 coinbase-vin hardening). A deeper fix (patching
-risc0's segment reservation so no retry is needed) is future work.
+A deeper fix for the segment-boundary panic above (patching risc0's segment reservation so no retry is
+needed) is future work.
 
 ## The guest image id (METHOD_ID) & reproducibility
 
@@ -302,10 +283,11 @@ fixed), a full-chain genesis-anchored wrap projects to roughly **3.4 KB best / ~
 ~7.6 KB worst**. Two data points are a fit, not a law — treat as inferred until instrumented, and do
 not quote 3,441 B as "the" size. **A few KB** is the honest characterisation; no fixed-size claim is safe.
 
-⚠️ **Groth16 currently fails on CUDA builds** (issue #20) — `sppark` illegal memory access, reproduced on
-the released binary with the GPU idle. The CPU path works, and since the wrap is flat in chain length and
-runs once, CPU-only is not a throughput problem. Verification is gated in CI (issue #23); a minimal
-phone-runnable verifier is still outstanding (issues #19, #24).
+⚠️ **Groth16 fails on CUDA builds** (issue #20, closed won't-fix as an upstream defect) — `sppark`
+illegal memory access, reproduced on the released binary with the GPU idle. The CPU path works, and since
+the wrap runs once per artifact, CPU-only is not a throughput problem. Verification is gated in CI (issue
+#23). A phone-class verifier exists: the WASM build runs in a browser with no host imports and a 1.9 MiB
+memory peak, which is how `GOALS.md` G3 was met; #19 and #24 are closed.
 
 ```
 ./target/release/host prove-snark
@@ -313,12 +295,18 @@ phone-runnable verifier is still outstanding (issues #19, #24).
 
 ## Acceleration note
 
-In the sound build only SHA-256 is routed to the RISC0 accelerator (patch 0002); ECDSA and Schnorr
-run through the compiled, unmodified `libsecp256k1`, unaccelerated. Speeding up the EC verify is open
-work — the k256 substitution was **removed from the guest** (2026-07-19; it reintroduced the
-reimplementation question), and the bigint2 field-mul intercept was prototyped and disproven (~10%
-slower). The guest is pure Core; acceleration analysis in [`CORE_VS_GHOST.md`](CORE_VS_GHOST.md); the long historic
-record is [`history/ACCELERATION.md`](history/ACCELERATION.md).
+The shipped guest is **maximal-Core, not pure Core**. SHA-256 goes through the RISC0 accelerator (patch
+`0002`), and since v0.21.0 libsecp256k1 carries two patches beneath its own checks: `0012`, a
+`field_bigint2` backend that routes 256-bit modular multiply, square and inversion to the bigint2
+coprocessor, and `0013`, a pubkey-Y witness hint verified with libsecp's own field arithmetic. The ECDSA
+and Schnorr logic — wNAF, GLV, every check — stays libsecp's. Block 962,000 went from 13,748,003,793
+cycles on the stock guest to 3,357,576,338 with a byte-identical journal. What was ruled out on the way:
+the k256 substitution was **removed from the guest** (2026-07-19; it reintroduced the reimplementation
+question), and an early bigint2 field-mul intercept was measured ~10% slower; the shipped backend differs
+by keeping the coprocessor's representation throughout, so no conversion is paid per call
+(`FIELD_BIGINT2_BACKEND.md` §2–3). The faster Ghost build goes further and does not ship. Analysis in
+[`CORE_VS_GHOST.md`](CORE_VS_GHOST.md) and [`BUILDS.md`](BUILDS.md); the long historic record is
+[`history/ACCELERATION.md`](history/ACCELERATION.md).
 
 ## Building the release binaries (maintainer notes)
 
@@ -348,8 +336,9 @@ the host bytes need not be. Build both in a container so the binary links agains
   `provision-vps.sh` installs CUDA **12.8** over the stock image's 13.2. Use
   the **CUDA 12** toolchain inside the `ubuntu:22.04` container, and pass multi-arch flags so the binary
   isn't pinned to one GPU:
-  `NVCC_APPEND_FLAGS="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90"`.
-  Confirm coverage with `cuobjdump --list-elf <host>` (expect `sm_80 sm_86 sm_89 sm_90`).
+  `NVCC_APPEND_FLAGS="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_100,code=compute_100"`
+  (`prover/build-release.sh`; `sm_100` needs CUDA 12.8+, #181).
+  Confirm coverage with `cuobjdump --list-elf <host>` (expect `sm_80 sm_86 sm_89 sm_90 sm_100`).
 
 Before publishing, smoke-test each binary: `host method-id` (== `reproduce/METHOD_ID`), `host
 bundle-roundtrip-test`, `host verify-any` on a served proof, and — for CUDA binaries — **`host
