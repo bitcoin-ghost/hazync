@@ -116,6 +116,12 @@ The same recipe as the board fleet (`hazync-board-fleet/fleet.sh`):
   type, price, assigned and proven times, seconds, estimated dollars and outcome (`proven`, `stalled`,
   `failed`, `cancelled`). A block's seconds are the pod time between the previous block landing and this
   one. When several land between two looks, that time is split evenly between them.
+- **A block that lands before its pod is stopped is logged `proven`.** Stopping a pod first checks its
+  assigned blocks against the proofs. Trial 2's pod proved blocks 90000 and 90001 in the minute before the
+  bot stopped on an error, and both were logged `cancelled`. `run`, `trial` and `report` also correct older
+  rows. A `cancelled`, `failed` or `stalled` row becomes `proven` when its block was proven under the row's own
+  key between its assignment and its pod's termination. Its seconds run from that pod's previous proof to this
+  one. A proof that lands after the pod was stopped is left alone.
 - **`sponsor_pods`:** one row per pod, with its price, lifetime, estimated spend and why it was terminated.
   `report` divides all pod spend by the blocks proven, so boot and idle time are counted in the all-in
   figure.

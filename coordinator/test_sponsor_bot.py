@@ -43,7 +43,9 @@ server.init_db()
 DB = os.environ["COORD_DB"]
 if CONTROL:
     sponsor_bot._CONTROL_SKIP_CLEANUP_ON_ERROR = True
-    print("CONTROL: pods are not terminated when the bot errors -- the checks below MUST fail")
+    sponsor_bot._CONTROL_IGNORE_LANDED = True
+    print("CONTROL: pods are not terminated when the bot errors, and proofs that land before a pod is stopped"
+          " are ignored -- the checks below MUST fail")
 
 fails = []
 
@@ -139,10 +141,11 @@ class FakeRunner:
     """A pod that proves its assigned blocks by writing verified proofs into the coordinator database."""
     ssh_pubkey = "ssh-ed25519 AAAAFAKE sponsor-bot@test"
 
-    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=()):
+    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=(), prove_then_fail=()):
         self.per_block, self.boot_fail, self.stall = per_block, set(boot_fail), set(stall)
         self.raise_on_start = raise_on_start
         self.start_fail = set(start_fail)       # pods (1st, 2nd, ...) whose work cannot be started
+        self.prove_then_fail = set(prove_then_fail)     # pods whose blocks land, then starting reports a failure
         self.booted, self.started, self.threads, self.status_at_start = [], [], {}, {}
         self.work, self.unregistered_at_start = [], []
         self.lock = threading.Lock()
@@ -161,6 +164,15 @@ class FakeRunner:
             raise RuntimeError("simulated failure while starting work")
         if self.nth(pod) in self.start_fail:
             raise sponsor_bot.StartFailed(f"simulated: could not start work on {pod.name}")
+        if self.nth(pod) in self.prove_then_fail:
+            # Trial 2: the work ran and its blocks landed, but the command that started it timed out.
+            c = sqlite3.connect(DB, timeout=30)
+            for w in work:
+                c.execute("INSERT OR IGNORE INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES(?,?,?,?,?,?)",
+                          (f"bot-{w['height']}", w["height"], w["height"], w["pubkey"], "SPONSOR: test", time.time()))
+            c.commit()
+            c.close()
+            raise sponsor_bot.StartFailed(f"simulated: {pod.name} proved its blocks, then its launch timed out")
         heights = [w["height"] for w in work]
         self.started.append((pod.id, heights))
         self.work.extend((pod.id, dict(w)) for w in work)
@@ -525,6 +537,56 @@ finally:
     sponsor_bot.subprocess.run = real_run
 check(res.returncode == 124, f"a timed-out ssh comes back as a failed result, not an exception (rc {res.returncode})")
 check(isinstance(raised, sponsor_bot.StartFailed), f"so starting work on an unreachable pod raises StartFailed ({type(raised).__name__})")
+
+# ---------- proofs that land before a pod is stopped ----------
+print("== a block proven just before its pod is stopped is logged proven ==")
+reset()
+s1 = sponsor(9900, 9901)
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01, prove_then_fail={1})
+reason = make_bot(api, runner, max_pods=1, blocks_per_pod=5).run()
+first = runner.booted[0]
+rows = q("SELECT height, outcome, seconds FROM sponsor_work WHERE pod_id=? ORDER BY height", (first,))
+check([(r["height"], r["outcome"]) for r in rows] == [(9900, "proven"), (9901, "proven")]
+      and all(r["seconds"] is not None for r in rows),
+      f"blocks that landed before the pod was stopped are logged proven, not failed ({[(r['height'], r['outcome']) for r in rows]})")
+check(reason == "done" and status_of(s1) == "proven" and len(api.deploys) == 1 and not api.live(),
+      f"no second pod is rented for them and the sponsorship is proven ({len(api.deploys)} deploys, {status_of(s1)})")
+
+print("== work rows logged as stopped whose block was proven are corrected ==")
+import contextlib  # noqa: E402
+import io  # noqa: E402
+reset()
+c = sponsor_bot.connect(DB)
+sponsor_bot.ensure_tables(c)
+K, OTHER = "k" * 64, "o" * 64
+c.execute("INSERT INTO sponsor_pods(pod_id, name, cost_per_hr, created_at, terminated_at, usd_estimate)"
+          " VALUES('old', 'hz-sponsor-x-2', 0.74, 1000, 1100, 0.02)")
+for h, outcome in ((90000, "cancelled"), (90001, "failed"), (90002, "cancelled"), (90003, "stalled"),
+                   (90004, "cancelled"), (90005, "proven")):
+    c.execute("INSERT INTO sponsor_work(height, pod_id, cost_per_hr, assigned_at, outcome, pubkey, seconds)"
+              " VALUES(?,?,?,?,?,?,?)", (h, "old", 0.74, 1010, outcome, K, 10 if outcome == "proven" else None))
+for vid, h, key, ts in (("e", 90005, K, 1020), ("a", 90000, K, 1040), ("b", 90001, K, 1058),
+                        ("c", 90003, OTHER, 1050), ("d", 90004, K, 1200)):
+    c.execute("INSERT INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES(?,?,?,?,?,?)", (vid, h, h, key, "h", ts))
+c.commit()
+c.close()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    code = sponsor_bot.main(["report"])
+out = buf.getvalue()
+got = {r["height"]: r for r in q("SELECT * FROM sponsor_work")}
+check(code == 0 and "corrected 2 work row(s)" in out, f"report corrects the log before counting ({out.splitlines()[:1]})")
+check(got[90000]["outcome"] == got[90001]["outcome"] == "proven"
+      and abs((got[90000]["seconds"] or 0) - 20) < 1e-9 and abs((got[90001]["seconds"] or 0) - 18) < 1e-9
+      and got[90001]["proven_at"] == 1058 and abs((got[90001]["usd_estimate"] or 0) - 18 * 0.74 / 3600) < 1e-12,
+      "blocks proven under the row's key while its pod was alive become proven, timed from that pod's previous proof")
+check((got[90002]["outcome"], got[90003]["outcome"], got[90004]["outcome"]) == ("cancelled", "stalled", "cancelled"),
+      "a block never proven, one proven by another key and one proven after the pod was stopped are left as they were")
+check("outcomes: cancelled 2, proven 3, stalled 1" in out, f"so the report counts them ({out.splitlines()[-1:]})")
+c = sponsor_bot.connect(DB)
+check(sponsor_bot.reconcile_work(c) == 0, "a second pass changes nothing")
+c.close()
 
 # ---------- an exception mid-run ----------
 print("== an exception mid-run ==")

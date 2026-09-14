@@ -73,8 +73,9 @@ TRIAL_NAME = "Hazync trial"
 # `report` bands: the sponsorship price ladder's height ranges, and everything above it.
 BANDS = ((1, 100000), (100001, 150000), (150001, 180000), (180001, 200000), (200001, 230000), (230001, 10 ** 9))
 
-# test_sponsor_bot.py --control sets this to show its cleanup test can fail. Never set it otherwise.
+# test_sponsor_bot.py --control sets these to show its cleanup and landed-proof tests can fail. Never set them otherwise.
 _CONTROL_SKIP_CLEANUP_ON_ERROR = False
+_CONTROL_IGNORE_LANDED = False
 
 
 # ---------- the database ----------
@@ -216,6 +217,44 @@ def reconcile(c, now=None):
                 done.append(r["id"])
     c.commit()
     return done
+
+
+def reconcile_work(c):
+    """Correct work rows logged `cancelled`, `failed` or `stalled` whose block was in fact proven under the row's
+    own key while its pod was still alive. A proof can land after the bot's last look and before it stops the
+    pod: trial 2's pod proved blocks 90000 and 90001 in the minute before the bot stopped on an error, and both
+    were logged `cancelled`. A proof that lands after the pod was stopped is left alone, since it cannot be told
+    apart from another pod's work. Seconds run from that pod's previous proof, or from the assignment, to this
+    proof's own timestamp. Returns the number of rows corrected."""
+    if _CONTROL_IGNORE_LANDED:
+        return 0
+    try:
+        rows = c.execute(
+            "SELECT w.id, w.height, w.pod_id, w.cost_per_hr, w.assigned_at, w.outcome, v.ts"
+            " FROM sponsor_work w JOIN sponsor_pods p ON p.pod_id = w.pod_id"
+            " JOIN vranges v ON v.lo <= w.height AND v.hi >= w.height AND v.pubkey = w.pubkey"
+            " WHERE p.terminated_at IS NOT NULL AND v.ts >= w.assigned_at AND v.ts <= p.terminated_at"
+            " ORDER BY w.pod_id, v.ts").fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    fixed, last, seen = 0, {}, set()
+    for r in rows:
+        if r["id"] in seen:
+            continue
+        seen.add(r["id"])
+        start = max(r["assigned_at"], last.get(r["pod_id"], r["assigned_at"]))
+        last[r["pod_id"]] = r["ts"]
+        if r["outcome"] not in ("cancelled", "failed", "stalled"):
+            continue
+        if c.execute("SELECT 1 FROM sponsor_work WHERE height=? AND outcome='proven' LIMIT 1", (r["height"],)).fetchone():
+            continue
+        secs = max(0.0, r["ts"] - start)
+        cur = c.execute("UPDATE sponsor_work SET outcome='proven', proven_at=?, seconds=?, usd_estimate=?"
+                        " WHERE id=? AND outcome=?",
+                        (r["ts"], secs, secs * (r["cost_per_hr"] or 0.0) / 3600.0, r["id"], r["outcome"]))
+        fixed += cur.rowcount
+    c.commit()
+    return fixed
 
 
 def pending_work(c, busy=(), trial=None):
@@ -685,6 +724,9 @@ class Bot:
             raise BotRefused("the coordinator's database has no sponsor_keys table: deploy the coordinator with "
                              "the sponsor handle rule first, or its submits would be refused or unguarded")
         ensure_tables(c)
+        fixed = reconcile_work(c)
+        if fixed:
+            self.log(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
         if self.trial is not None:
             bad = trial_refusals(c, self.trial, self.clock())
             if bad:
@@ -708,6 +750,10 @@ class Bot:
                 if self.stop_reason == "runpod":
                     break
                 if not self._live() and not pending_work(c, (), self.trial):
+                    # The last blocks can land after this pass's reconcile, just before their pod is stopped.
+                    if self.trial is None:
+                        for sid in reconcile(c, self.clock()):
+                            self.log(f"sponsorship #{sid} is proven")
                     self.stop_reason = self.stop_reason or "done"
                     break
                 self.sleep(self.sleep_s)
@@ -761,15 +807,7 @@ class Bot:
     def _progress(self, c, p, now):
         done = [a for a in p.assigned if is_covered(c, a["height"])]
         if done:
-            # Blocks run one after another on a pod, and several can land between two looks: the time
-            # since the last one landed is split evenly between them.
-            each = max(0.0, now - p.segment_start) / len(done)
-            for a in done:
-                c.execute("UPDATE sponsor_work SET proven_at=?, seconds=?, usd_estimate=?, outcome='proven'"
-                          " WHERE id=? AND outcome IS NULL", (now, each, each * p.rate(self.ceiling) / 3600.0, a["row"]))
-            c.commit()
-            p.assigned = [a for a in p.assigned if a not in done]
-            p.segment_start = p.last_progress = now
+            self._record_proven(c, p, done, now)
         if any(a["sid"] is not None and not is_held(c, a["sid"]) for a in p.assigned):
             self._terminate(c, p, "a sponsorship it was proving is no longer held")
             return
@@ -790,6 +828,17 @@ class Bot:
                 self._terminate(c, p, "its worker finished without proving every assigned block", outcome="failed")
         else:
             p.finished_since = None
+
+    def _record_proven(self, c, p, done, now):
+        # Blocks run one after another on a pod, and several can land between two looks: the time
+        # since the last one landed is split evenly between them.
+        each = max(0.0, now - p.segment_start) / len(done)
+        for a in done:
+            c.execute("UPDATE sponsor_work SET proven_at=?, seconds=?, usd_estimate=?, outcome='proven'"
+                      " WHERE id=? AND outcome IS NULL", (now, each, each * p.rate(self.ceiling) / 3600.0, a["row"]))
+        c.commit()
+        p.assigned = [a for a in p.assigned if a not in done]
+        p.segment_start = p.last_progress = now
 
     def _identity(self, c, sid):
         """The sponsorship's key, created on first use and registered before any pod gets it."""
@@ -880,6 +929,10 @@ class Bot:
     def _terminate(self, c, p, note, outcome="cancelled"):
         if not p.live:
             return
+        # A block can land after the last look: count it as proven, not as `outcome`.
+        landed = [] if _CONTROL_IGNORE_LANDED else [a for a in p.assigned if is_covered(c, a["height"])]
+        if landed:
+            self._record_proven(c, p, landed, self.clock())
         if p.assigned:
             for a in p.assigned:
                 c.execute("UPDATE sponsor_work SET outcome=? WHERE id=? AND outcome IS NULL", (outcome, a["row"]))
@@ -1047,8 +1100,11 @@ def main(argv=None):
         print("\n".join(plan_text()))
         return 0
     if cmd == "report":
-        c = connect(DB, readonly=True)
+        c = connect(DB, readonly=not os.path.exists(DB))
         try:
+            fixed = reconcile_work(c)
+            if fixed:
+                print(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
             print(format_report(report(c)))
         finally:
             c.close()
