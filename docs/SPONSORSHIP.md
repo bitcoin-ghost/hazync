@@ -26,7 +26,7 @@ requested -> invoiced -> paid -> proving -> proven
 | `paid` | payment integration, on settlement of **at least** `min_sats` | no |
 | `underpaid` | payment integration, on settlement **below** `min_sats`; the payment is kept as a donation | status only |
 | `proving` | sponsor bot, when it starts pods | no |
-| `proven` | sponsor bot, when every block in the span is verified | no |
+| `proven` | `submit()`, when every block of the span is covered by verified ranges | yes |
 | `expired` | payment integration, invoice not paid in time | no |
 | `cancelled`, `refunded` | operator | no |
 
@@ -86,6 +86,32 @@ withhold the sponsor's name. Paying at least the minimum is what earns the name;
   move the minimum a sponsor was quoted, and the public rule compares what settled against `min_sats`.
 - A preview with sponsorship open: `SPONSOR_OPEN=1 SPONSOR_BTC_USD=77400` (the bands default).
 
+## Holds
+
+A sponsorship **holds** its blocks from the moment it is paid at least its minimum until they are proven:
+`status IN ('paid','proving') AND paid_sats >= min_sats` (`SPONSOR_HOLD_SQL` in `server.py`).
+
+- **Normal workers are never offered a held block.** Holds are added to `coverage_and_held()`, the one set
+  `claim()` and `pick()` both read, so they cover `claim()`'s scan, its frontier-blocker re-offer (#284) and
+  `/api/pick`. An unpaid `requested` row, an `underpaid` one and a `paid` row below its minimum hold nothing.
+- **The bot does not claim.** Claims are unsigned, so a "the bot's key may claim held blocks" rule could be
+  spoofed by anyone who copies the key. The bot picks held blocks itself and proves them with
+  `hazync-worker run <n>`, which needs no claim (see `docs/SPONSOR_BOT.md`).
+- **A proof from anyone is still accepted**, as every proof is: submit never looks at claims or holds. A
+  held block proven by someone else simply counts towards the sponsorship.
+- **The hold ends when the whole span is covered.** `submit()` moves the sponsorship to `proven` (with
+  `proven_at`) as soon as every block of the span is covered by verified ranges. Cancelling or refunding
+  a sponsorship also ends its hold.
+- **Only open blocks can be sponsored.** A quote or request is refused (`409`) if any block of the span is
+  already proven, is being proven by a live claim, or is held by another sponsorship.
+- **Holds never expire**, so they are watched. `/api/state`'s `blocked` names the sponsorship
+  (`"sponsorship": id`) when the frontier's next block is held, and is calm about it until the hold is older
+  than `SPONSOR_HOLD_ALERT` (default 6 hours), when it sets `needs_attention`. `/api/block/<n>` carries
+  `"held": {"sponsorship": id, "since": seconds}`.
+- ⚠ **Open with payments (step 3):** a hold should start when the invoice is created, for the invoice's
+  payment window, so nobody proves or sponsors the blocks while the sponsor is paying. Until payments
+  exist only a paid status holds.
+
 ## The private link and the public list
 
 - **The link.** A successful request returns a `token` once (`secrets.token_urlsafe(24)`). Only its sha256
@@ -132,5 +158,5 @@ as `/api/blockstatus`.
    expiry, and refunds.
 3. **The bot** (`coordinator/sponsor_bot.py` is a dry-run skeleton): RunPod pods, a spending limit, the
    normal worker under the bot's key, `proving` and `proven` updates.
-4. **Priority.** Paid spans claimed ahead of open work. The claim path is not touched until then.
+4. ~~**Priority.**~~ Built as **holds** (above): paid spans are kept for the bot, and nobody else is offered them.
 5. **Moderation.** Sponsor names need the takedown handling contributor names already have.
