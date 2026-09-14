@@ -3,10 +3,12 @@
 > ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `archive/hazync_helix_experiment`, 2026-08-28.**
 > Kept because the reasoning is worth having; **read the corrections below before quoting any number.**
 >
-> - **9.10x wholesale was never measured** — see `9b767b5`; nothing called the wholesale entry point.
+> - **9.10x wholesale was never measured** (and 446 / 48.33 s is 9.23x, not 9.10x) — see `9b767b5`; nothing called the wholesale entry point.
 > - **the aggregate is not 1,575 s.** Measured 2026-09-02: **405.6 s** on two workers, 473.1 s with
 >   the coordinator also working (1.63x, free). Any "impossible at any N" conclusion built on 1,575 s
 >   does not survive it.
+> - **"Resolution (196 s) … becomes the floor"** is superseded: resolution measured 0.28 s per resolve, ~4.5 s
+>   at 16 chunks (`TEN_MINUTE_BLOCK.md` §8.15(b)).
 > - **"7 cards"** measured **10** (Core) and **5** (Ghost) — `BUILDS.md` §1.
 > - Its own verdict — Helix is *probably not needed* — still stands; the operator chose the middle
 >   path everywhere.
@@ -21,7 +23,7 @@
 > | arm | proving wall | vs stock |
 > |---|---|---|
 > | middle path (one line swapped) | 55.75 s | **8.00x** |
-> | wholesale (whole predicate) | 48.33 s | **9.10x** |
+> | wholesale (whole predicate) | 48.33 s | **9.23x** |
 >
 > ⇒ **The 15% premium buys at most ONE card** (6 vs 5), and only in the pessimistic aggregate case.
 > One card is a cheap price for keeping Core's DER parsing, low-S handling, r/s checks, inversion and
@@ -33,7 +35,7 @@
 >
 > **Kept, not deleted**, because the reasoning is still the right reasoning if a future backend is
 > fast enough to reopen the trade — and because the S1 analysis (why two guests cannot work) is
-> load-bearing for any such proposal. → `TOPOLOGY_AND_SETTINGS.md`
+> load-bearing for any such proposal. → `../TOPOLOGY_AND_SETTINGS.md`
 
 **Status: DESIGN SKETCH, 2026-08-28.** Written down so the idea is not lost; it is not a
 recommendation.
@@ -174,7 +176,7 @@ The measurement this design was conditional on has been taken. On an L40S, block
 |---|---|---|
 | stock libsecp | 446, 446, 446 s | — |
 | **middle path** (one line swapped) | 55, 56, 56, 56 s | **8.00x** |
-| **wholesale** (whole predicate) | 48, 49, 48 s | **9.10x** |
+| **wholesale** (whole predicate) | 48, 49, 48 s | **9.23x** |
 
 ⇒ **And the 15% gap between the two arms is precisely what the height gate is for.** Had wholesale
 been indistinguishable from the middle path, Helix would have been pointless — you would simply keep

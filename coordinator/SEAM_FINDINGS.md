@@ -1,7 +1,7 @@
 # Hazync coordinator — range-seam fuzz report
 
 **Target:** `server._frontier_chain()` — the coordinator's range-chaining seam logic, the S1/F1/H9
-trust boundary in `SECURITY.md`. This is where independently-verified ranges are stitched into the
+trust boundary indexed in `SECURITY.md` (detail: `docs/history/SECURITY_AUDIT_LOG.md`). This is where independently-verified ranges are stitched into the
 genesis-anchored frontier, and where earlier reviews found the coordinator chaining on a *weaker*
 seam than the guest fold (a false-low-height / weak-flags splice, H9; a UTXO/difficulty/MTP
 discontinuity, S1/F1).

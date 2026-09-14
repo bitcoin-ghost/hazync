@@ -5,7 +5,7 @@ verification procedure. It is the document to hand a reviewer who asks "what exa
 and how would I check it myself".
 
 It deliberately does not argue. The soundness argument is [`SOUNDNESS.md`](SOUNDNESS.md); the design
-rationale and history are [`HAZYNC_ARCHITECTURE.md`](HAZYNC_ARCHITECTURE.md); what is measured and what
+rationale and history are [`history/HAZYNC_ARCHITECTURE.md`](history/HAZYNC_ARCHITECTURE.md); what is measured and what
 is still open is [`GOALS.md`](GOALS.md). Where this document and those disagree about a *format*, this
 one is wrong and should be fixed — the code is the authority, and `reproduce/METHOD_ID` is the
 authority on which code.
@@ -375,8 +375,8 @@ the consensus regression, which is what detects that.
 
 - **Mainnet only.** The guest compiles `CChainParams::Main()`. A testnet or regtest proof requires a
   different guest and therefore a different image id.
-- **No commissioned audit.** `SECURITY.md` records nine rounds of self-audit and two AI-assisted
-  external reviews (rounds 10 and 11); neither is a professional audit, and both predate the libsecp
+- **No commissioned audit.** `docs/history/SECURITY_AUDIT_LOG.md` (indexed from `SECURITY.md`) records nine
+  rounds of self-audit and two AI-assisted external reviews (rounds 10 and 11); neither is a professional audit, and both predate the libsecp
   patches in §12.
 - **A wrapped proof is a few KB, not the ~200–300 B quoted in some older docs.** The whole serialised
   Groth16 receipt measured 2,033 B for block 170 (`prover/evidence/groth16_snark_wrap.txt`) and 3,441 B

@@ -1,5 +1,12 @@
 # Hazync — release plan
 
+> **Historical record, moved here on 2026-09-14.** Obsolete. Its premise — that Core's and RISC0's cost is
+> "not ours to optimise" — was overturned by the CORE guest shipped in v0.21.0 (field backend `patches/0012`,
+> lift_x hint `0013`, Tier 0 codegen; [`../BUILDS.md`](../BUILDS.md)). The v0.21.0 cutover it calls pending
+> happened on 2026-09-07, and the startup-only id check it warns about (hazync#99) was fixed in `8c8839c`: a
+> worker now exits 78 on a genuine id mismatch and `run-workers.sh` stops. What is current:
+> [`../PROVING.md`](../PROVING.md), [`../../CHANGELOG.md`](../../CHANGELOG.md).
+
 **Objective: ship a product that lets strangers push compute at the board, so the proof generation
 completes by brute force.**
 

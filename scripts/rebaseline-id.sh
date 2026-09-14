@@ -41,28 +41,33 @@ echo
 #   prover/evidence/**  are RECORDS OF PAST RUNS. Those runs really did happen under the old guest;
 #                       rewriting the id in them does not update a reference, it falsifies the
 #                       measurement. The first version of this script rewrote five evidence files.
-#   tasks/**            same category, and it was missed here for exactly one re-baseline. The
-#                       SHORT-form pass below already excludes tasks/, but this full-hex pass did not,
-#                       so the 4722cec8 re-baseline rewrote a dated line in
-#                       tasks/overnight_2026-08-03.md that recorded what the container id WAS that
-#                       night — turning a measurement into a false one. A dated log is history by
-#                       construction; the two passes now agree about that instead of disagreeing.
+#   docs/history/**,    same category: dated records (the development record, release bodies, the
+#   docs/RELEASE_NOTES_*, changelog). A dated log is history by construction. The overnight log, then at
+#   CHANGELOG.md        tasks/overnight_2026-08-03.md, was missed here: the full-hex pass did not
+#                       exclude tasks/, so the b161735a re-baseline (a4b8918) rewrote the line recording
+#                       what the container id WAS that night, dfc9eeda, into b161735a — turning a
+#                       measurement into a false one — and the 4722cec8 re-baseline only relabelled it
+#                       "at the time". The list is HISTORY_RE below; check-versions.sh exempts the
+#                       dated-record part of it from its currency checks, so the gate never demands a
+#                       rewrite there that this script refuses to make.
 #   prover/testdata/**  describes which guest PRODUCED the committed fixtures, and a proof carries its
 #                       guest id inside it. Re-pointing the prose does not re-point the .snark files —
 #                       it just makes the README claim they were made by a guest that never touched
 #                       them, hiding the very fact that they now need regenerating. Same re-baseline,
 #                       same falsification, undone by hand alongside tasks/.
-#   short forms         `3f52baff…` appears in the supersession CHAIN in ROADMAP.md and in past-tense
+#   short forms         `3f52baff…` appears in supersession CHAINS (reproduce/METHOD_ID,
+#                       docs/history/ROADMAP.md) and in past-tense
 #                       statements ("v0.10.0's 3f52baff changes the guest ELF again"). Those are
 #                       history and must survive. Only full 64-hex occurrences are rewritten; the
 #                       short-form sites need judgement per site, and check-versions.sh is what
 #                       catches the ones that genuinely needed updating.
 #   binaries            embed the id in compiled code. The substitution is length-preserving so it
 #                       does not visibly corrupt the file — it produces a binary that CLAIMS the new
-#                       id while containing the old build, which is worse than a corrupt one. The
-#                       aarch64 verifier in verifier/dist/ has to be REBUILT, not edited.
-mapfile -t FILES < <(git ls-files | grep -v '^prover/evidence/' | grep -v '^tasks/' \
-                                  | grep -v '^prover/testdata/' | while read -r f; do
+#                       id while containing the old build, which is worse than a corrupt one. No
+#                       guest-dependent binary is committed any more (hazync#85): release-sign.yml builds
+#                       hazync-verify-aarch64 from the tag and asserts its embedded id.
+HISTORY_RE='^(prover/evidence/|prover/testdata/|docs/history/|docs/RELEASE_NOTES_|CHANGELOG\.md$)'
+mapfile -t FILES < <(git ls-files | grep -Ev "$HISTORY_RE" | while read -r f; do
     grep -Iq . "$f" 2>/dev/null || continue          # -I: skip binary files
     grep -lq "$OLD" "$f" 2>/dev/null && echo "$f"
 done)
@@ -79,7 +84,8 @@ done
 # short form ("the current canonical id is `3f52baff…`"), and check-versions REQUIRES the canonical
 # short id to appear in them. So the script and the gate disagreed, and every re-baseline became a
 # round of hand-editing driven by gate failures. The #54 re-baseline took five rounds across eleven
-# sites, and docs/ROADMAP.md still named a retired id as canonical through TWO of them.
+# sites, and docs/ROADMAP.md (now docs/history/ROADMAP.md) still named a retired id as canonical through TWO
+# of them.
 #
 # The fix is not to replace short ids blindly — that would corrupt the supersession chains, which is
 # what the old reasoning was protecting. It is to replace them on exactly the lines the GATE would
@@ -90,25 +96,40 @@ OLD8=${OLD:0:8}; NEW8=${NEW:0:8}
 # SCANNED SEPARATELY FROM $FILES, and that is the whole point. $FILES is discovered by grepping for the
 # FULL 64-hex id — so a doc that only ever writes the SHORT form is not in it, and iterating $FILES
 # here reaches nothing. That is exactly how docs/PROVING.md, SECURITY.md and docs/ROADMAP.md were
-# missed: check-versions requires the canonical SHORT id in each of them, and none of the three
+# missed (ROADMAP.md has since moved to docs/history/): check-versions required the canonical SHORT id in
+# each of them, and none of the three
 # contains the long form at all.
 echo
 echo "short-form ids on lines that CLAIM currency (same rule check-versions applies):"
 while read -r f; do
     [ -f "$f" ] || continue
-    n=$(awk -v old="$OLD8" '
-            /^[[:space:]]*```/ { infence = !infence; next }
-            !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ && index($0, old) { c++ }
-            END { print c + 0 }' "$f")
-    [ "$n" = "0" ] && continue
     tmp=$(mktemp)
+    # Same claim rule as check-versions.sh check 8, including a claim that WRAPS: a claim line naming no id,
+    # whose open sentence ends by introducing one ("... id is", "METHOD_ID:"), carries to the next line up
+    # to its first sentence break.
     awk -v old="$OLD8" -v new="$NEW8" '
-        /^[[:space:]]*```/ { infence = !infence; print; next }
-        !infence && /[Cc]urrent|[Cc]anonical|[Ll]atest/ && !/[Ss]upersed/ { gsub(old, new) }
-        { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+        /^[[:space:]]*```/ { infence = !infence; carry = 0; print; next }
+        infence { carry = 0; print; next }
+        {
+            was = carry; carry = 0
+            if (!/[Ss]upersed/) {
+                if (/[Cc]urrent|[Cc]anonical|[Ll]atest/) {
+                    if ($0 !~ /[0-9a-f]{8}/ && /([Cc]urrent|[Cc]anonical|[Ll]atest)[^.;!?]*([Ii][Dd]|METHOD_ID|is|was|:)[`*]*[[:space:]]*$/) carry = 1
+                    gsub(old, new)
+                } else if (was) {
+                    head = $0; tail = ""
+                    if (match($0, /[.;!?]( |$)/)) { head = substr($0, 1, RSTART); tail = substr($0, RSTART + 1) }
+                    gsub(old, new, head); $0 = head tail
+                }
+            }
+            print
+        }' "$f" > "$tmp"
+    if cmp -s "$tmp" "$f"; then rm -f "$tmp"; continue; fi
+    n=$(diff "$f" "$tmp" | grep -c '^<')
+    mv "$tmp" "$f"
     printf '  %-44s %d claim line(s)\n' "$f" "$n"
-done < <(git ls-files '*.md' | grep -v '^prover/evidence/' | grep -v '^tasks/')
-echo "  (history, fenced evidence and tasks/ left alone — those legitimately name retired ids)"
+done < <(git ls-files '*.md' | grep -Ev "$HISTORY_RE")
+echo "  (HISTORY_RE records and fenced evidence left alone — those legitimately name retired ids)"
 echo
 
 # reproduce/METHOD_ID is the source of truth and its trailing line must be the bare id.
@@ -117,14 +138,16 @@ tail -1 reproduce/METHOD_ID | grep -qE "^$NEW$" \
 
 echo
 echo "NOT touched, deliberately:"
-echo "  prover/evidence/**                  records of runs made under the OLD guest — history, not references"
-echo "  verifier/dist/hazync-verify-aarch64 a binary; it must be REBUILT, not edited"
+echo "  prover/evidence/**, docs/history/**  records made under the OLD guest — history, not references"
+echo "  (and the rest of HISTORY_RE)"
+echo "  verifier binaries                   none committed; release-sign.yml builds them from the tag (#85)"
 echo "  the DEPLOYED site                   a live host; step 5 below, and nothing here can do it for you"
 echo
 echo "Now, and in this order:"
 echo "  1. write WHY into reproduce/METHOD_ID (the supersession note) — it is the audit trail"
 echo "  2. regenerate prover/testdata/snark/*.snark with the NEW guest (they are old proofs)"
-echo "  3. rebuild verifier/dist/hazync-verify-aarch64 and refresh its .sha256"
+echo "  3. nothing to rebuild under verifier/dist/ — the release workflow builds and id-checks the aarch64"
+echo "     verifier; check-versions.sh confirms verifier/ and verifier-ffi/ embed the new id"
 echo "  4. ./scripts/check-versions.sh && ./scripts/check-utreexo.sh && ./scripts/check-spec.sh"
 echo "  5. cut the release, then DEPLOY the new hazync-verify.wasm to the web box — the browser"
 echo "     verifier is pinned to the guest and a re-baseline silently invalidates the deployed copy."

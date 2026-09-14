@@ -1,5 +1,7 @@
 # Hazync v0.21.2 — workers that fail loudly, a spine that keeps up, an aggregate you can time
 
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.2>
+
 A reliability release. Every change comes from something that went wrong on the live board or a
 rented fleet on 2026-09-11. Each section below names the incident behind it.
 

@@ -3835,7 +3835,7 @@ fn main() {
     // CUDA 13 driver the default po2 21 fails on an OTHERWISE IDLE L40S with 45 GB free (#97), so this
     // is the first thing a contributor on UpCloud's current GPU image meets. `coordinator/hazync` walks
     // a retry ladder and absorbs it; a direct `host prove-block` gets the bare panic, which is what
-    // RELEASE_PLAN.md §1.4 says must not happen — an OOM has to name HAZYNC_SEG_PO2 and a value to try.
+    // docs/history/RELEASE_PLAN.md §1.4 says must not happen — an OOM has to name HAZYNC_SEG_PO2 and a value to try.
     //
     // The hook ADDS the remedy and leaves the original panic intact. The underlying message is still
     // the most accurate description of what happened, and replacing it would trade one unhelpful

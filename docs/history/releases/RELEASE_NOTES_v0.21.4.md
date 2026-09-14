@@ -1,5 +1,7 @@
 # Hazync v0.21.4 — a board that explains itself
 
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.4>
+
 Everything here comes from one night's incident. Block 39,413 pinned the frontier for five hours, and
 the coordinator's entire account of it was *"a live worker is proving it"*. Each change below is a
 thing that could not be seen at the time.
@@ -103,3 +105,5 @@ which, across rented boxes in several countries, they do not. #252 says its geog
 
 - `/api/spine/segments` — who absorbed each block into the spine, and how much of the chain is folded
   (#292), so the two steps after proving stop being anonymous.
+  *Correction, 2026-09-14: the endpoint itself shipped in v0.21.3 (#288, `e8de809`); new in v0.21.4 is
+  the folded-share report (#292, `df6ca32`).*

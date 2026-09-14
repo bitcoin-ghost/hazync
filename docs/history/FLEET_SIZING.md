@@ -1,5 +1,12 @@
 # Fleet sizing: how many cards does a tip block need?
 
+> **Historical record, moved here on 2026-09-14.** Superseded by
+> [`BENCH_8xL40S_2026-09-08.md`](BENCH_8xL40S_2026-09-08.md) (a measured 8×L40S CORE fleet: ~13 L40S for a
+> sub-ten-minute block) and [`MILESTONE_966256_RUN4_2026-09-10.md`](MILESTONE_966256_RUN4_2026-09-10.md)
+> (544.0 s on 27 RTX 4090s). The aggregate does distribute — 2.78x on three L40S (#153,
+> [`SEGMENT_DISTRIBUTION.md`](SEGMENT_DISTRIBUTION.md)) — so the "never measured" caveat below is closed. How to
+> run a fleet now: [`../FLEET_OPERATIONS.md`](../FLEET_OPERATIONS.md).
+
 Scope: how many GPUs it takes to prove one tip block inside Bitcoin's ~10-minute interval, which is the
 threshold for tracking the chain rather than falling behind it.
 
@@ -11,14 +18,14 @@ sections below say which parts are which. Read §4 before spending money on it.
 >
 > The documentation now has one reference sheet and one evidence trail, and this file is neither:
 >
-> - **What to run** — fleet, card, po2, build flags: **`TOPOLOGY_AND_SETTINGS.md`**.
+> - **What to run** — fleet, card, po2, build flags: **`../TOPOLOGY_AND_SETTINGS.md`**.
 > - **How the fleet question was answered, and what was got wrong** — **`TEN_MINUTE_BLOCK.md`**.
 >
 > **What is still live here is §6**, the coordinator-egress measurement, which exists nowhere else.
 >
 > ⛔ **§3's `wall(N)` model is SUPERSEDED.** It divides the entire one-card total — aggregate included —
 > by `N`, leaving only 83 s undivided, which assumes the aggregate distributes across cards. See §4's
-> caveat 5. The live scenarios are in `TEN_MINUTE_BLOCK.md` §8.13 and `TOPOLOGY_AND_SETTINGS.md` §1.
+> caveat 5. The live scenarios are in `TEN_MINUTE_BLOCK.md` §8.13 and `../TOPOLOGY_AND_SETTINGS.md` §1.
 >
 > ⚠ **This page is still cited by `TEN_MINUTE_BLOCK.md` as an independent source** — its 1,565.9 s
 > aggregate corroborates a later direct measurement of 1,574.9 s, 0.6% apart. That is why the file is

@@ -123,7 +123,7 @@ mkdir -p "$OUT"
 # net win is entirely the JIT. One run each, so treat 4% as within variance.
 #
 # ⚠ AND IT DOES NOT MAKE THE B200 WORTH BUYING. At 1,702.3 s it still loses to an L40S's 1,565.9 s by
-# 8.7%, with native code and no JIT. See docs/ACCELERATION.md, "The three-card run (2026-08-25)".
+# 8.7%, with native code and no JIT. See docs/history/ACCELERATION.md, "The three-card run (2026-08-25)".
 #
 # COST: ptxas assembles each architecture SEQUENTIALLY at ~6-7 min per kernel file, so this fifth
 # target adds roughly that to every cuda release. It needs CUDA 12.8+ (see provision-vps.sh phase 7).

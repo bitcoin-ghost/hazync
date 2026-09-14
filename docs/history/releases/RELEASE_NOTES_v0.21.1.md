@@ -1,5 +1,7 @@
 # Hazync v0.21.1 — #119 is fixed
 
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.1>
+
 **The prover no longer emits receipts that fail their own `verify()`.** hazync#119 has cost
 proving time since 2026-08-16. Across three weeks it was read as flaky silicon, then as
 card-specific, then as a degree overflow. It was none of those. It's a witness-generation bug in

@@ -1,15 +1,21 @@
 # Hazync roadmap
 
+> **Historical record, moved here on 2026-09-14.** A task inventory and completed-work log, maintained in
+> earnest to early August 2026 and afterwards touched only by re-baselines. Superseded by
+> [`../BUILDS.md`](../BUILDS.md), [`../PROVING.md`](../PROVING.md) and the issue tracker — what is current:
+> the canonical id is `reproduce/METHOD_ID`; the Proof Party (§4, still `[ ]` below) has been live since
+> v0.2.0; ghost#543 merged 2026-08-05; the coprocessor field backend shipped (`patches/0012`, armed in v0.21.0).
+
 The state, the open work, and the order to do it in. Hazync proves Bitcoin Core's real consensus code
 in a zkVM; the method is built and demonstrated on real mainnet data, and what remains is (1) closing
 self-found soundness gaps, (2) presenting it credibly, (3) external review, and (4) actually producing
 the full-chain proof. Status markers: `[ ]` open, `[~]` in progress, `[x]` done.
 
-> **Goals live in [`GOALS.md`](GOALS.md).** That document states the six technical goals, where each
+> **Goals live in [`GOALS.md`](../GOALS.md).** That document states the six technical goals, where each
 > actually stands (measured), and what would count as done. This file is the task inventory and the
 > record of what has been completed — it answers "what has been done", not "what are we for".
 >
-> **Work distribution is specified in [`SPEC.md`](SPEC.md) §10.1**
+> **Work distribution is specified in [`SPEC.md`](../SPEC.md) §10.1**
 > (#37 + #30): free-running provers, opportunistic tree folding, an incrementally-extended genesis
 > spine, and the storage answer — retain every per-block receipt, discard bundles behind the frontier.
 >
@@ -76,7 +82,7 @@ The repo went public fast and reads like working notes. Make it a curated artifa
   container (`reproduce/Dockerfile`) that builds the guest at FIXED paths (stock `RISC0_USE_DOCKER` was
   insufficient — the guest embeds external Core C++ + a custom cross-toolchain). **Verified reproducible
   bit-for-bit across machines** (local WSL2 == GitHub CI == GPU box): the canonical id checked in at
-  `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The current canonical id is
+  `reproduce/METHOD_ID` is asserted by the `reproducible-image-id` CI job. The canonical id at the time was
   `4722cec8…` (audit #5: `coin_leaf` bounds guards, a 32-bit-safe overflow check in `coinbase_value`
   — `__int128` does not exist on `rv32im` — and a `bool` whose success path had no `return true`, which
   `-w` had hidden from the container, CI and an audit round alike. See `reproduce/METHOD_ID`,
@@ -134,7 +140,7 @@ The repo went public fast and reads like working notes. Make it a curated artifa
 
     The leaf counts are one lower than previously recorded on 130000/140000/741000 because the old
     fixtures predated `coin_height` and so could not express an in-block spend; each of those blocks has
-    exactly one. Tip hashes and `cum_work` are unchanged — see the leaf-count note in `../SECURITY.md`.
+    exactly one. Tip hashes and `cum_work` are unchanged — see the leaf-count note in `SECURITY_AUDIT_LOG.md`.
 
 ## 3. External review + writeup
 
