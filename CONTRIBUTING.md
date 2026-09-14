@@ -158,6 +158,10 @@ That pre-flight matters: a worker on the wrong guest id proves happily and has *
 rejected, burning GPU hours for nothing. That is exactly what happens if you keep an old binary after a
 re-baseline, so the script blocks it rather than letting it run.
 
+**Running workers for days?** [`docs/PROVER_OPERATIONS.md`](docs/PROVER_OPERATIONS.md) is the operator's
+manual: which modes to run, how claims work, stopping without stranding a block, a systemd unit, upgrading,
+watching the board, disk use, and a table of what goes wrong.
+
 Prove as many blocks as you like — just run it again.
 
 **Any height the bridge has reached is provable, not only ones near the frontier.** The coordinator
