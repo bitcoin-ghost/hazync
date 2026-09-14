@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 DB = os.environ.get("COORD_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "coordinator.db"))
@@ -52,6 +53,13 @@ HELD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL AND min_sats
 CLAIM_TTL = int(os.environ.get("CLAIM_TTL", "3600"))   # a claim taken or beaten this recently is live
 POD_PREFIX = "hz-sponsor-"
 GRAPHQL_URL = "https://api.runpod.io/graphql"
+# RunPod's API sits behind Cloudflare, which refuses Python's default "Python-urllib/3.x" User-Agent with
+# HTTP 403 "error code: 1010" (measured 2026-09-14). Without this header the bot could not deploy, list or
+# terminate a pod, and every refusal was logged as "no GPU capacity".
+USER_AGENT = "hazync-sponsor-bot/1 (+https://github.com/bitcoin-ghost/hazync)"
+# After this many refused deploy requests in a row the bot stops: an API it cannot talk to will not start
+# answering by itself, and it could not terminate a pod either.
+RUNPOD_REFUSALS_MAX = 3
 IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 # 4090 community hosts often never expose public SSH; A40s always did (board fleet, 2026-09-11).
 GPU_TYPES = ("NVIDIA GeForce RTX 4090", "NVIDIA A40")
@@ -317,12 +325,19 @@ class RunPod:
         return json.dumps(str(v))            # a JSON string literal is a valid GraphQL string literal
 
     def _gql(self, query):
-        req = urllib.request.Request(self.url, data=json.dumps({"query": query}).encode(),
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": f"Bearer {self.key}"})
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.key}"}
+        if USER_AGENT:
+            headers["User-Agent"] = USER_AGENT
+        req = urllib.request.Request(self.url, data=json.dumps({"query": query}).encode(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 d = json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read()[:200].decode(errors="replace").strip()
+            except Exception:
+                body = ""
+            raise RunPodError(f"HTTP {e.code} {e.reason}: {body}") from e
         except Exception as e:
             raise RunPodError(f"{type(e).__name__}: {e}") from e
         if d.get("errors") and not d.get("data"):
@@ -330,7 +345,11 @@ class RunPod:
         return d.get("data") or {}
 
     def deploy(self, name, ssh_pubkey, gpu_types=GPU_TYPES):
-        """One on-demand 1-GPU pod, trying each GPU type in turn. None when none has capacity."""
+        """One on-demand 1-GPU pod, trying each GPU type in turn. None when RunPod answered and no type had
+        capacity. RunPodError when RunPod refused the request for every type: that is not a capacity miss,
+        and treating it as one hid a Cloudflare 403 behind "no GPU capacity" on the first trial."""
+        refused = None
+        answered = False
         for gt in gpu_types:
             q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: ALL, gpuCount: 1, volumeInGb: 0, "
                  f"containerDiskInGb: 40, gpuTypeId: {self._s(gt)}, name: {self._s(name)}, "
@@ -338,10 +357,13 @@ class RunPod:
                  f"env: [{{key: \"PUBLIC_KEY\", value: {self._s(ssh_pubkey)}}}] }}) {{ id costPerHr }} }}")
             try:
                 p = self._gql(q).get("podFindAndDeployOnDemand")
-            except RunPodError:
-                p = None
+                answered = True
+            except RunPodError as e:
+                refused, p = e, None
             if p and p.get("id"):
                 return {"id": p["id"], "name": name, "gpu_type": gt, "cost_per_hr": float(p.get("costPerHr") or 0)}
+        if refused is not None and not answered:
+            raise refused
         return None
 
     def pods(self):
@@ -615,6 +637,7 @@ class Bot:
         self.prefix = f"{POD_PREFIX}{int(time.time())}-"   # wall time, not self.clock: unique per run
         self._n = 0
         self._capacity_at = 0.0
+        self._refusals = 0
 
     # --- money ---
     def _live(self):
@@ -660,6 +683,8 @@ class Bot:
                     break
                 self._assign(c, now)
                 self._launch(c, now)
+                if self.stop_reason == "runpod":
+                    break
                 if not self._live() and not pending_work(c, (), self.trial):
                     self.stop_reason = self.stop_reason or "done"
                     break
@@ -795,7 +820,18 @@ class Bot:
             if self.spend(now) + (self.hourly() + self.ceiling) * self.budget_lead_s / 3600.0 >= self.max_usd:
                 break
             self._n += 1
-            info = self.api.deploy(f"{self.prefix}{self._n}", self.runner.ssh_pubkey)
+            try:
+                info = self.api.deploy(f"{self.prefix}{self._n}", self.runner.ssh_pubkey)
+            except RunPodError as e:
+                self._refusals += 1
+                self._capacity_at = now + self.capacity_backoff_s
+                if self._refusals >= RUNPOD_REFUSALS_MAX:
+                    self.stop_reason = "runpod"
+                    self.log(f"RunPod refused the deploy request {self._refusals} times in a row ({e}): stopping")
+                else:
+                    self.log(f"RunPod refused the deploy request ({e}); trying again later")
+                break
+            self._refusals = 0
             if not info:
                 self._capacity_at = now + self.capacity_backoff_s
                 self.log("no GPU capacity on RunPod; trying again later")
@@ -1005,7 +1041,9 @@ def main(argv=None):
             raise SystemExit(f"sponsor_bot: {e}")
     if not a.live:
         print("\n".join(plan_text(DB, trial)))
-        raise SystemExit("sponsor_bot: dry run; add --live with --max-pods, --max-usd and --max-usd-per-hour to rent GPUs")
+        print("sponsor_bot: dry run; add --live with --max-pods, --max-usd and --max-usd-per-hour to rent GPUs",
+              file=sys.stderr)
+        return 2
     missing = [f for f, v in (("--max-pods", a.max_pods), ("--max-usd", a.max_usd),
                               ("--max-usd-per-hour", a.max_usd_per_hour)) if v is None]
     if missing:
@@ -1031,6 +1069,8 @@ def main(argv=None):
         c.close()
     if bot.unconfirmed:
         return 4
+    if reason == "runpod":
+        return 5
     return 3 if reason == "budget" else 0
 
 
