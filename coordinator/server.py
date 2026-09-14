@@ -158,6 +158,23 @@ def is_genesis_anchored(in_tip, lo):
         return in_tip == GENESIS_TIP and int(lo) == 1
     except (TypeError, ValueError):
         return False
+
+# Block 0 is the most famous block in Bitcoin, so people WILL try to prove it, submit it and sponsor it.
+# It cannot be proved: it is the in-boundary every range proof is pinned to (`is_genesis_anchored`), in
+# the same way Bitcoin Core writes it into chainparams rather than validating it. Every entry point says
+# so in the same words, and refuses BEFORE doing any work -- no DB row, no signature check, no STARK
+# verification -- so the curious cost the board nothing.
+GENESIS_MESSAGE = ("Block 0 is the genesis block. It is the fixed starting point every Hazync proof is anchored "
+                   "to -- Bitcoin itself never validates it, it is written into the software -- so there is "
+                   "nothing to prove and no proof of it can exist. Proving starts at block 1.")
+
+def genesis_refusal(lo, hi, what="Submit"):
+    """(400, body) for any range that includes block 0, else None. `what` names the retry."""
+    if lo != 0:
+        return None
+    msg = GENESIS_MESSAGE + (f" {what} blocks 1 to {hi} instead." if hi >= 1 else "")
+    return 400, {"error": msg, "genesis": True}
+
 # A claim expires this long after it is TAKEN — not after a heartbeat stops, because there are no
 # heartbeats. A worker that dies mid-block leaves nothing to reap; the block simply reopens on its own.
 CLAIM_TTL  = int(os.environ.get("CLAIM_TTL", "3600"))    # 1 hour, then anyone may take it
@@ -2005,7 +2022,8 @@ def block_detail(n):
                  "sponsor": sponsor,
                  # A paid sponsorship keeps this block for the sponsor bot: normal workers are never offered it.
                  "held": ({"sponsorship": hold[0]["id"], "since": int(now - (hold[0]["paid_at"] or now))}
-                          if hold else None)}
+                          if hold else None),
+                 **({"note": GENESIS_MESSAGE} if n == 0 else {})}
 
 # Control, formatting, surrogate and private-use characters: where a right-to-left override, a zero-width
 # joiner that makes "Jo<ZWJ>hn" look like "John", or an invisible letter would hide. NOT unassigned (Cn):
@@ -2038,6 +2056,9 @@ def _sponsor_span(lo, hi):
     except (TypeError, ValueError):
         return 400, {"error": "lo and hi must be block heights"}
     tip = chain_tip()
+    _genesis = genesis_refusal(lo, hi, what="Sponsor")
+    if _genesis:
+        return _genesis
     if lo < 1 or hi < lo or hi > tip:
         return 400, {"error": f"blocks must run from 1 to {tip}, lowest first"}
     if hi - lo + 1 > SPONSOR_MAX_BLOCKS:
@@ -2783,6 +2804,8 @@ def submit(body):
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
     if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
     if not parse_any_range(rid): return 400, {"error": "invalid range id"}
+    _genesis = genesis_refusal(*parse_any_range(rid))    # before any row, signature or verification
+    if _genesis: return _genesis
     # #281: refuse a wide range that starts INSIDE existing coverage without being backed by it.
     #
     # `_frontier_chain` needs `prev.hi + 1 == lo` EXACTLY (H9), so such a range can never join the
@@ -2809,29 +2832,24 @@ def submit(body):
     # break, taken deliberately and with a message that says exactly what to do, rather than leaving a
     # shape whose only legitimate use is one the current client no longer needs.
     #
-    # THE GENESIS SEED IS NOT AN EXEMPTION. Block 0 is the genesis anchor and cannot be proved, so a
-    # `[0..hi]` submission is really a receipt for `[1..hi]` (see verify_receipt). It used to skip this
-    # rule outright (`_lo > 0`), which let `[0..hi]` introduce `hi` blocks of coverage with no per-block
-    # receipt beneath it — the one shape that could still put a G1 hole on the board after #281. Judge
-    # it by the blocks it actually proves: `[0..1]` is one block, anything wider must be a fold.
+    # No genesis-seed exemption: `[0..hi]` used to skip this rule outright (`_lo > 0`), which let it add
+    # `hi` blocks of coverage with no per-block receipt beneath it -- the one G1 hole #281 left. Block 0
+    # is now refused above (genesis_refusal), before this rule is ever reached.
     _lo, _hi = parse_any_range(rid)
-    _plo = max(_lo, 1)                 # the first block this range really proves
-    if _hi > _plo:                     # width 1 introduces coverage; wider must be a fold
+    if _hi > _lo:                      # width 1 introduces coverage; wider must be a fold
         with _lock:
             c = db()
-            _backed = _tiled_by_verified(c, _plo, _hi)
-            _clash = None if _backed else _overlapping_vrange(c, _plo, _hi)
+            _backed = _tiled_by_verified(c, _lo, _hi)
+            _clash = None if _backed else _overlapping_vrange(c, _lo, _hi)
             c.close()
         if not _backed:
-            _msg = (f"range [{_plo}..{_hi}] is {_hi - _plo + 1} blocks wide but the board does not hold "
+            _msg = (f"range [{_lo}..{_hi}] is {_hi - _lo + 1} blocks wide but the board does not hold "
                     f"proofs for all of them, so this is not a fold. Submit each block on its own "
-                    f"first, then the range that folds them -- `hazync run {_plo}-{_hi}` does that for "
+                    f"first, then the range that folds them -- `hazync run {_lo}-{_hi}` does that for "
                     f"you from v0.21.4. Only a single block may cover ground nothing has covered yet.")
-            if _lo == 0:
-                _msg += " (Block 0 is the genesis anchor and is never proved, so this range starts at 1.)"
-            if _clash and _clash["lo"] <= _plo <= _clash["hi"]:
+            if _clash and _clash["lo"] <= _lo <= _clash["hi"]:
                 _msg += (f" Note [{_clash['lo']}..{_clash['hi']}] is already verified: start at "
-                         f"{_clash['hi'] + 1}, not {_plo} — range bounds are INCLUSIVE.")
+                         f"{_clash['hi'] + 1}, not {_lo} — range bounds are INCLUSIVE.")
             return 409, {"error": _msg}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
@@ -3044,6 +3062,8 @@ class H(BaseHTTPRequestHandler):
                     name = f"hazync-{lo}.hzk" if lo == hi else f"hazync-{lo}-{hi}.hzk"
                     return self._send(200, raw=open(f, "rb").read(), ctype="application/octet-stream",
                                       headers={"Content-Disposition": f'attachment; filename="{name}"'})
+            if rng == (0, 0):
+                return self._send(404, {"error": GENESIS_MESSAGE, "genesis": True})
             return self._send(404, {"error": "proof not available"})
         if p == "/api/witnesses":
             # Bulk bundle sync (#69). Seeding a new coordinator from a peer is ~220,000 bundles; with

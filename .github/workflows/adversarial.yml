@@ -239,6 +239,14 @@ jobs:
         run: |
           cd coordinator
           python3 test_overlap_guard.py --control
+      - name: Block 0 (genesis) is refused at every entry point, with the reason, before any work
+        # Genesis is the most famous block in Bitcoin, so people will try to prove, submit and sponsor it.
+        # It is the anchor every proof is pinned to and cannot be proved.
+        run: cd coordinator && python3 test_genesis.py
+      - name: Genesis refusal POSITIVE CONTROL (refusals removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_genesis.py --control
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls

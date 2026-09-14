@@ -281,16 +281,29 @@ def fetch_bundles(lo, hi):
             fh.write(data)
     return True
 
+# Block 0 is the most famous block in Bitcoin, so people will try `hazync run 0`. Say why it cannot be
+# proved, and what to run instead, before a single GPU-second is spent. The coordinator refuses it too.
+GENESIS_NOTE = ("block 0 is the genesis block: the fixed starting point every Hazync proof is anchored to. "
+                "Bitcoin itself never validates it (it is written into the software), so there is nothing to "
+                "prove and no proof of it can exist.")
+
+def _refuse_genesis(lo, hi):
+    """(lo, hi) unchanged, or exit explaining that block 0 cannot be proved and what to run instead."""
+    if lo != 0:
+        return lo, hi
+    alt = "hazync run 1" if hi <= 1 else f"hazync run 1-{hi}"
+    sys.exit(f"{GENESIS_NOTE} Proving starts at block 1 -- try `{alt}`.")
+
 def parse_range(rng):
-    # "N" -> (N, N); "lo-hi" -> (lo, hi). Exits with a clear message on anything else.
+    # "N" -> (N, N); "lo-hi" -> (lo, hi). Exits with a clear message on anything else, and on block 0.
     try:
         p = [int(x) for x in rng.split("-")]
     except ValueError:
         p = []
     if len(p) == 1:
-        return p[0], p[0]
+        return _refuse_genesis(p[0], p[0])
     if len(p) == 2 and p[1] >= p[0]:
-        return p[0], p[1]
+        return _refuse_genesis(p[0], p[1])
     sys.exit(f"invalid range '{rng}' — use 'N' (one block) or 'lo-hi' (e.g. 1000-1999)")
 
 def cmd_id(args):
@@ -660,11 +673,8 @@ def cmd_prove(args, claimed=False, submit_leaves=False):
     # os.replace stays on one filesystem (no EXDEV).
     work = RCPTDIR / f".work-{rng}"
     shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True, exist_ok=True)
-    # Block 0 is the genesis anchor and is unprovable, so we start at max(lo, 1). The genesis-seed slot
-    # 0-999 is thus proved as blocks 1..999; the coordinator (which pins the genesis in-boundary) accepts
-    # a [1..hi] receipt for a [0..hi] claim. Starting at 1 also means a bad manual `run 0-...` no longer
-    # crashes on `prove-range 0`.
-    start = max(lo, 1)
+    # parse_range refuses block 0 (genesis, unprovable), so every range starts at a provable block.
+    start = lo
     # Prefer the archive-node bridge: if the coordinator serves a ready-made bundle for every block in the
     # range, prove each with NO replay (O(1)/block). Otherwise fall back to the replay path, which rebuilds
     # the accumulator from genesis and so needs every witness up to hi.
@@ -1054,7 +1064,7 @@ def cmd_run(args):
               + ("" if n == 1 else f" — the next range starts at {hi + 1}"))
         # Still worth checking up front: proving a block whose witness cannot be fetched wastes the
         # whole prove, and the coordinator serves witnesses by direct file lookup so this is cheap.
-        for probe in sorted({max(lo, 1), hi}):
+        for probe in sorted({lo, hi}):
             if not witness_in_window(probe):
                 sys.exit(f"block {probe} has no witness on the coordinator yet — nothing was started.")
     else:
