@@ -1171,7 +1171,7 @@ constrain a curve.
 | scales past 2 cards | ⛔ **UNMEASURED** — needs a THIRD box |
 | is `seg-serve` a bottleneck? | ⛔ **UNKNOWN** — nothing here tested it |
 
-⇒ **The fleet arithmetic in `TOPOLOGY_AND_SETTINGS.md` §0.5 stands on the 2-card measurement**, which
+⇒ **The fleet arithmetic in `TOPOLOGY_AND_SETTINGS_2026-09-05.md` §0.5 (the archived pre-CORE revision; current CORE sizing is `../TOPOLOGY_AND_SETTINGS.md` §1.1) stands on the 2-card measurement**, which
 supports scenario (a) as far as it goes. The 7-9 card figure is intact; what is not established is
 whether it holds at the fleet sizes that matter.
 
