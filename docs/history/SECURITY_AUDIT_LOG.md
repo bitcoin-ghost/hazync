@@ -1,0 +1,528 @@
+# Hazync — security audit log
+
+> **Moved out of [`SECURITY.md`](../../SECURITY.md) on 2026-09-14, verbatim.** This is the dated,
+> round-by-round record of the review passes (rounds 1–9 self, 10–11 external), the 2026-07-15
+> self-audit and the 2026-07-16 coverage audit. `SECURITY.md` keeps release verification, the status
+> table and the open items, and indexes every finding ID to its section here. Each section is as it
+> was written on its date, so guest ids, sizes and the word "current" refer to that date;
+> `reproduce/LINEAGE.tsv` says which guest is canonical now. Four corrections were added inline on
+> 2026-09-14, each marked with that date. Where a section says "the status table above", the table
+> is in `SECURITY.md`.
+
+## Fixed 2026-07-16 — adversarial pass over the guest (SEC-1/2/3)
+
+All three were validated by rebuilding the guest and re-running the full regression (block 170, block
+741000, `check-ibd` genesis→550) to **byte-identical** tip hashes — i.e. the fixes change nothing on
+valid data, they only reject the malicious cases they close.
+
+### SEC-1 (med-high) — `has_witness` was host-controlled ⇒ BIP141 witness-commitment bypass
+The guest derived `has_witness` (and the wtxids) from host-supplied input. A malicious prover could
+claim "no witness" for a segwit block with a missing or invalid witness commitment and have it prove
+valid, even though Core rejects it — and it opened a witness-malleability divergence.
+**Fix:** recompute `has_witness` *and* every wtxid in-guest from the raw transaction bytes, using
+Core's own `HasWitness()` / `GetWitnessHash()`. The host can no longer influence the witness-commitment
+decision. Block 741000 (segwit+taproot) still proves valid with an identical tip hash and 394 UTXO
+leaves.
+
+> **Leaf-count note (2026-07-27).** The `394` recorded here and below was measured against the
+> then-current `block_741000.json`, which predated the `coin_mtp` / `coin_height` fields. Without
+> `coin_height` a fixture cannot express an **in-block spend** (a coin created *and* spent inside the
+> same block), so that coin never netted out and left one stray leaf. Regenerating the fixtures from an
+> archive node (`prover/fetch_block_rpc.py`) makes it **393**, and the same −1 appears on 130000
+> (127→126) and 140000 (330→329) — each of those blocks contains exactly one in-block spend. Tip hashes
+> and `cum_work` are unchanged throughout, so this corrects the fixtures, not consensus. The historical
+> figures are left as recorded.
+
+### SEC-2 (high-criticality location) — accumulator `delete` trusted an unverified position
+`delete(i, proof_i, proof_last)` verified *membership* of the proven leaves but never checked that the
+global index `i` actually matched them, nor that `proof_last` was the current rightmost coin. Fed
+inconsistent values, a prover could corrupt the accumulator — the worst case being a spent coin
+surviving (a double-spend). No working exploit was built, but the assumption was untested.
+**Fix:** pin `i` to the proven leaf — its tree height must equal the proof's, and its local offset
+(`i − tree_offset`) must equal `proof_i.position` (the *local* in-tree index) — and likewise pin
+`proof_last` to `last`. (Subtlety: `Proof.position` is the local index, not the global one; a first
+attempt that compared against the global `i` broke honest deletes at block 170 and was corrected.)
+
+### SEC-3 (low, robustness) — prevouts vector length unchecked
+`verify_input` / `check_tx` / `tx_full_sigops` indexed `spent[...]` without asserting
+`spent.size() == tx.vin.size()`; a short blob is an out-of-bounds read (the zkVM has no memory
+protection). Failed closed in practice.
+**Fix:** explicit length asserts on the prevouts vector in all three entry points.
+
+## Fixed 2026-07-17 — deeper adversarial pass (H1–H4: binding the proof to the block)
+
+A second adversarial review looked specifically for ways a mining-capable prover could make an invalid
+block prove valid, and found four under-constraints between the (real, correct) Core code and the block
+being proven. All four are fixed; each has a negative test that must reject, alongside an honest
+baseline that must still be accepted. The execute-mode cases run self-contained via `host adversarial`
+(and in CI); the segmented one runs on a GPU box.
+
+### H1 (critical) — block height was host-controlled
+`chain_step`/`aggregate` committed `height = prev.height + 1` but validated the block using the
+host-supplied `w.height` with no equality check. Height selects the script flags and the coinbase
+subsidy, so `w.height = 1` turned every soft-fork flag off (segwit/taproot outputs become
+anyone-can-spend) and set the subsidy to 50 BTC, while the journal still committed the true height.
+**Fix:** assert `w.height == prev.height + 1`. **Test:** `host adversarial` (#1). The range-fold path
+was already bound by its genesis pin + adjacency check.
+
+### H2 (critical) — segmented chunks bound neither flags nor the spending witness
+A chunk proof committed only the coin leaf, so the aggregation could accept a *different* valid spend of
+the same coin, or the spend validated under attacker-chosen weaker flags. **Fix:** each chunk commits a
+binding digest over `(raw_tx, input_idx, prevouts, coin metadata, flags)`; the aggregation recomputes it
+under the block's real flags and requires equality. **Test:** `HAZYNC_H2_BADHEIGHT=1 host prove-seg`
+(aggregate rejects).
+
+### H3 (high, inflation) — in-block coins had no double-spend / ordering guard
+A coin created earlier in the same block bypasses the accumulator; the set that tracked it did not count
+multiplicity or check ordering, so it could be spent twice (minting its value) or before it was created.
+**Fix:** enforce creation by a strictly earlier tx and spend-at-most-once. **Tests:** `host adversarial`
+(#3 double-spend, #3 spend-before-create).
+
+### H4 (medium) — the coinbase never ran through CheckTransaction
+The coinbase reached only the subsidy/BIP34/witness-commitment checks, never `CheckTransaction`, so a
+malformed coinbase (bad-cb-length, out-of-range or overflowing output sum) could pass. **Fix:** run the
+coinbase through real Core `CheckTransaction` plus an `IsCoinBase` assertion. **Test:** `host
+adversarial` (#4).
+
+## Fixed 2026-07-17 (round 2) — re-audit of the patched code (H5–H8)
+
+A second adversarial pass (three reviewers) attacked the H1–H4 fixes and swept the rest. H2/H3/H4 held
+up; H1 held on the folded path. It found one more critical and a cluster of range/coordinator anchoring
+gaps.
+
+### H5 (critical) — multi-input fee-prevouts were not bound to the accumulator
+Each `BlockInput` carries its own `prevouts` blob, but only the entry at its `input_idx` is authenticated
+(folded into the leaf + `stump.delete`). `check_tx` runs once per tx on the first input's blob and sums
+**every** entry into the fee. So for a ≥2-input tx a prover puts a phantom high-value coin at another
+index of the first input's blob — never authenticated — inflating the fee to ~21M BTC and minting it via
+the coinbase (a sibling variant omits a `BlockInput` to skip a script check + a deletion → theft /
+double-spend). **Fix:** a pre-pass ties the flat input list to each tx's real `vin` — exactly
+`tx_vin_count` consecutive `BlockInput`s, sequential `input_idx`, one shared `raw_tx` + `prevouts` blob —
+so every entry `check_tx`/sigops read is an authenticated coin. **Test:** `host adversarial` (#5), with an
+honest 2-input baseline that must still pass.
+
+### H6 (high) — range verifier under-pinned the genesis in-boundary
+`verify-range` pinned `in_tip`/`in_leaves`/`in_nbits` but not `in_epoch_start` (feeds the block-2016
+retarget, propagates across fold seams → forgeable difficulty), `in_roots` (`in_leaves==0` alone permits
+phantom roots), or `in_recent`/`in_time`. **Fix:** `assert_genesis_in_boundary` pins the full genesis
+boundary; `verify-any` applies it whenever a range claims to connect to genesis.
+
+### H7 (medium) — coordinator cross-range continuity — FIXED
+`server.py` chained verified ranges by tip-hash only, so `in_nbits`/`in_epoch_start` of range k+1 weren't
+checked against range k's `out_*` (a range could claim an easier `in_nbits` and be mined cheaper).
+**Fix:** `verify-any` pins the genesis in-boundary and now prints `in_nbits/out_nbits/in_epoch/out_epoch`;
+the coordinator's `_frontier_chain` walks ranges from genesis requiring `out_nbits/out_epoch(k) ==
+in_nbits/in_epoch(k+1)` across every seam (deploy: `vranges` gains those columns + a redeploy).
+
+### H8 (speculative) — cross-mode journal laundering — FIXED
+`block_proof` (mode 1) commits a self_id-free `BlockOutput` and never aborts; in principle a mode-1
+receipt could be laundered as a fake `prev` if its bytes decoded as a `ChainState` with trailing
+`self_id == METHOD_ID`. No exploit was constructed (the type-mismatched decode makes it very hard).
+**Fix:** every recursion-consumed journal (`ChainState`, `RangeState`, `ChunkOut`) now commits a distinct
+domain tag (`KIND_CHAIN`/`KIND_RANGE`/`KIND_CHUNK`) as its first field, and every consumer asserts it —
+so a journal of the wrong type can never be laundered across modes.
+
+## Fixed 2026-07-17 (round 3) — re-audit of the H1–H8 code
+
+A third pass (three reviewers: bypass H5–H8, consensus-flag surface, trust boundary). H5/H6/H8 and the
+genesis-catch were attacked and held. New findings, all fixed:
+
+### Script-flag / activation layer (guest — these were mostly *reject-valid*, i.e. the from-genesis prover would STALL on canonical blocks)
+- **H-S1 (high):** `block_script_flags` ignored Core's `script_flag_exceptions`. Core forces P2SH|WITNESS|TAPROOT
+  on for all blocks *except* two historical violating blocks (BIP16 → no flags; Taproot ~709632 → no TAPROOT).
+  The guest enforced TAPROOT everywhere and would permanently stall on the Taproot-exception block. **Fix:**
+  rewrote `block_script_flags` to match Core's `GetBlockScriptFlags` exactly — always-on base + a block-hash
+  exception table (hash passed to `chunk_prove` too, bound via the H2 digest) + buried deployments.
+- **H-S2 (high):** BIP34 enforced from 227836; Core's `BIP34Height` is 227931 → guest rejected valid blocks
+  in that 95-block window. **Fix:** 227931.
+- **H-S3 (medium):** BIP68 relative-locktime enforced with no CSV gate; Core only enforces it from 419328.
+  **Fix:** gate the relative-lock branch on `spend_height >= 419328`.
+- **H-S4 (low, accept-invalid):** the old height-gated P2SH/WITNESS/TAPROOT were *more lenient* than Core below
+  the gates (a proof there didn't imply Core-validity). Closed by the same always-on rewrite (H-S1).
+
+### Coordinator trust boundary (host + Python — no guest change)
+- **S1 / F1 (high):** the coordinator chained ranges on a WEAKER seam check than the guest fold — it matched
+  tip-hash (and, after H7, nbits/epoch) but **not the UTXO accumulator roots, `in_time`, or the MTP window**.
+  A mid-chain range could fabricate its in-boundary UTXO set (spend non-existent coins / double-spend) or its
+  `in_time` (forge a 4× easier retarget) with a valid STARK, and be spliced into the frontier. **Fix:**
+  `verify-any` computes a **full boundary digest** (`boundary_digest`: tip + normalized UTXO roots + leaves +
+  nBits + time + epoch + MTP window) — exactly what `fold_range` binds — and the coordinator's `_frontier_chain`
+  requires `out_bhash(k) == in_bhash(k+1)` across every seam. Not live-exploitable before (frontier below the
+  first retarget, single prover), now closed.
+- **F2 (low):** `_frontier_chain` used an unordered SELECT with first-wins; added `ORDER BY lo, ts` and the
+  full-boundary digest makes a preempting range have to match the real boundary anyway.
+- **F3 (low):** rows with no boundary digest (pre-migration NULL) are no longer chainable.
+- **S2 (medium foot-gun):** `VERIFY_MODE` defaulted to `mock` (accept-everything) when `HAZYNC_HOST` was unset.
+  **Fix:** mock now fails closed unless `COORD_ALLOW_MOCK=1`.
+- **S3 (low):** `verify-any` output was scraped from stdout+stderr; now only the single `RANGE-OK` stdout line.
+- **Signature fail-closed:** `verify_sig` accepted everything when the ed25519 lib was missing; now fails closed
+  unless `COORD_ALLOW_UNSIGNED=1`.
+
+Verified sound (attacked, no action): genesis constants (`GENESIS_WORK` etc. checked against real block 0),
+retarget/MTP/PoW math, weight/sigop formulas, taproot/annex path, test-only env hooks (guest reads no env),
+`METHOD_ID` handling. `regress` + full `adversarial` suite + honest segmented composition pass on the round-3 guest.
+
+## Round 4 (2026-07-17) — no soundness break found; hardening only
+
+A fourth pass (three reviewers: C++/Core integration + patches, Utreexo accumulator + primitive math,
+whole-chain no-inflation + UTXO carry) found **no new soundness hole**. Confirmed sound: the `VerifyScript`
+invocation (correct precomputed data / amount / sigversion for legacy/segwit/taproot), ECDSA is real
+libsecp256k1 (the k256 acceleration experiment has since been removed — the guest is pure Core *[2026-09-14: no longer true since v0.21.0, which applies libsecp patches `0012` and `0013`; see `SECURITY.md`]*), the SHA-256 accelerator is byte-identical, the
+serialize shim is consensus-neutral, static-ctor tagged-hash init covers all paths, the accumulator
+delete/proof handling and `num_leaves`/root recomputation, all primitive math (`check_pow`/`SetCompact`,
+`add_work`, `calc_next_bits` clamping, subsidy halving, merkle root), global no-inflation, and UTXO carry
+(no resurrection; `w.new_outputs`/`w.wtxids`/`inp.flags` confirmed dead/unused). Hardening applied:
+
+- **Bench backdoor fenced.** `verify_input` short-circuited to a fixed test-vector ECDSA result for two
+  magic flag values (`0xB0`/`0xB1`) — a "return valid" path, unreachable in consensus (`block_script_flags`
+  never yields those) but now compiled out unless `HAZYNC_ECDSA_BENCH` is defined. *[2026-09-14: since
+  deleted outright with the rest of the k256 experiment, in `3e32706` on 2026-07-19; nothing named
+  `HAZYNC_ECDSA_BENCH` remains in the guest.]*
+- **`MiniReader` fails closed.** `read`/`ignore` now trap on any read past the buffer end (was an unchecked
+  `memcpy` — OOB-read only, never accept-invalid, but now a clean rejection).
+- **Reference-spec doc corrected.** `accumulator/src/lib.rs` now states the guest `utreexo.rs` adds the
+  SEC-2 pinning the reference oracle lacks (the proven guest is the authority).
+
+**Update 2026-07-30 — the domain-tag item below is now FIXED, and "non-exploitable" was wrong.** Leaf
+and interior hashes are domain-separated as of canonical id `85dc0b56…` (since superseded by
+`be5e0528…` for RUSTSEC-2026-0220, by `71790584…` in v0.14.0, by `dfc9eeda…` for the #54 BIP30
+SMT plus audit #3, by `b161735a…` in v0.16.0 when #88 removed the repo checkout path from the id, and
+by `4722cec8…` for audit #5's guest guards, by `b62d2a60…` for the #135 chunk-payload
+re-baseline (#136 read_slice + #137 per-transaction grouping), and by `1d6c3792…` for parallel block
+validation — see `reproduce/METHOD_ID` for the full chain). A leaf preimage is
+`57 + |scriptPubKey|` bytes, so a 7-byte scriptPubKey gives a 64-byte preimage — the width an interior
+node hashes — and the stated barrier (leaf preimages open with an uncontrollable txid) is a grinding
+cost rather than a separation, since a txid is the hash of a transaction an attacker composes. See
+`docs/SPEC.md` §3. The other two items here remain deferred.
+
+Documented, not changed (non-exploitable, deliberately deferred to avoid churn/re-prove): a trailing-byte
+`r.p==r.e` parity assert (trailing bytes are inert — txid is PoW-bound); explicit leaf/internal-node hash
+domain tags (implicit separation already holds because every leaf preimage begins with an uncontrollable
+txid); and removing the dead `new_outputs`/`wtxids`/`inp.flags` witness fields.
+
+## Round 5 (2026-07-17) — no new hole; one trivial fix + one documented gap
+
+Fifth pass (three reviewers: a regression-hunt inside the fixes, a fresh full-surface sweep, and a
+docs/web-page currency check). The regression hunt traced every H1–H8 + flag/coordinator fix against
+Core v28 and found **no regression** — the fixes are correct as written. Net: one trivial fix, one
+documented gap, one false alarm, plus a large docs-currency pass.
+
+- **F2 (low, accept-invalid) — FIXED.** Block weight omitted Core's `4*(80 + CompactSize(ntx))`
+  header + tx-count term, so a block could sit up to ~324 WU over `MAX_BLOCK_WEIGHT`. No inflation;
+  now matches Core's `GetBlockWeight`.
+- **F1 (flag always-on "diverges from Core") — NOT A BUG.** Two independent reviewers and Core's own
+  `GetBlockScriptFlags` (read on the box) confirm the base P2SH|WITNESS|TAPROOT is always-on with exactly
+  the two exception blocks — the exact code a from-genesis IBD runs (Core itself would stall otherwise).
+  Height-gating would be the accept-invalid behaviour already flagged as H-S4. No change.
+- **F3 (low, pre-BIP34 BIP30 duplicate-coinbase overwrite) — FIXED + tested.** The two historical
+  duplicate-coinbase blocks (91842 / 91880, below the BIP34 height) have *distinct* accumulator leaves
+  (the leaf commits height, so no collision and the "collision-free" claim holds), but pre-enforcement Core
+  **overwrites** the old outpoint whereas the guest kept both, leaving one extra leaf Core discards — which
+  a from-genesis prove crossing height ~91842 could later spend. **Fix:** at exactly those two block hashes
+  the guest now deletes the superseded coinbase leaf, recomputed from *this* block's coinbase at the
+  host-supplied old height/mtp (the duplicate coinbase is byte-identical), so the delete can only remove a
+  genuine earlier duplicate of this coinbase's outpoint, and it is *mandatory* at those hashes (a prover
+  cannot skip it). BIP34 (enforced from 227931) makes coinbases unique thereafter, so no later duplicate can
+  occur. **Test:** `host check-bip30` on real block 91842 — honest overwrite accepted with a matching root,
+  skipping it rejected, wrong old-height rejected. In CI.
+- **Docs currency:** rewrote the stale `PROVING.md` (it described recursion as unimplemented and handed
+  out a pre-hardening `chain_step`), corrected the README `ACCELERATION` repo-map line + status/audit
+  language, `HAZYNC_ARCHITECTURE.md`'s BIP34 height (227836→227931), annotated the stale 741000 evidence log
+  (402→394), added a working-notes banner to `HAZYNC_ARCHITECTURE.md`, and updated the live page's
+  self-audit copy to the four-round history.
+
+## Round 6 (2026-07-18) — one MAJOR soundness finding (H9) + web/liveness + completeness
+
+Sixth pass (three reviewers: guest consensus, host witness-binding, coordinator seam). The soundness
+core held (H1–H8 / SEC / F1–F3 all survived concrete attack), but the host reviewer found one genuine
+MAJOR hole in the coordinator seam.
+
+- **H9 (MAJOR, over-issuance / weak-flags splice) — FIXED.** The coordinator chains independently-verified
+  ranges on tip-hash + full `boundary_digest` continuity, but the digest bound the UTXO set / difficulty /
+  MTP window and **not the block height**, and `prove_range` never tied `w.height` to the in-boundary's
+  chain position. So a block mined onto the *real* tip (real prev-hash, real UTXO root, real current
+  difficulty ⇒ real PoW) but **labelled a false low height** would have `block_subsidy(low)` = up to 50 BTC
+  (over-issuance) and `block_script_flags(low)` omitting DERSIG/CLTV/CSV/NULLDUMMY (a script invalid at the
+  true height validates) — a self-inconsistent `(height, boundary)` pair the guest never rejects standalone.
+  The guest `fold_range` rejects it (`hi+1==lo` adjacency); the coordinator's non-folding chain did not, so
+  it could splice into the genesis-anchored frontier composite. **Fix (defence-in-depth, two independent
+  layers):** (1) coordinator `_frontier_chain` enforces `lo==1` at genesis and `lo==prev_hi+1` at every seam;
+  (2) the host `boundary_digest` now binds height (out-boundary = `hi`, in-boundary = `lo-1`) from the
+  in-circuit-committed `RangeState.lo/hi`, so `out_bhash(k)==in_bhash(k+1)` chaining *structurally* requires
+  adjacency. Either layer alone closes it. Verified: a mislabeled-height range no longer advances the
+  frontier while honest contiguous + out-of-order gap-fill still do.
+- **Coordinator hardening (web/liveness).** Stored XSS via the contributor `handle` rendered into the public
+  dashboard through `innerHTML` — fixed at both layers (`clean_handle` strips `< > & " '`; the dashboard
+  escapes every render sink). Liveness DoS — the up-to-120 s `verify-any` ran inside the global write lock,
+  stalling every claim/heartbeat/submit — moved out of the lock (re-check status on commit; unique temp
+  paths). Stat double-count — `proven` summed overlapping ranges — replaced with an interval-merge.
+- **Completeness / robustness (guest + host).** Added the **nVersion soft-fork rejection** (Core
+  `ContextualCheckBlockHeader`: reject `v<2 @227931`, `v<3 @363725`, `v<4 @388381`) closing an accept-invalid
+  gap; asserted `header.len()==80`; bounds-guarded `check_input_locks`' `input_idx` (fail-closed `-43`).
+
+Validated in execute mode with **no regression**: `regress` (block 170 byte-exact), `adversarial` (all
+holes reject), `check-full` 741000 (byte-exact tip, UTXO 394 — 393 with the regenerated fixtures, see the leaf-count note above), `check-bip30`, and an nVersion negative that
+rejects. `METHOD_ID` changed (guest changed) ⇒ prior proofs invalid, re-proven from genesis.
+
+## Round 7 (2026-07-18) — re-audit of the round-6 fixes; no new soundness hole
+
+Seventh pass (three reviewers over commit `a094ae5`: coordinator changes, guest/host changes, holistic
+H9-closure sweep). All three **clean on soundness**. The sweep confirmed H9 is closed on all five proof
+paths (`chain_step`, `aggregate`, `chunk_prove`, `prove_range`, `fold_range`) with the two fix layers each
+independently sufficient. One genuine new-in-round-6 **minor** was fixed: the lock-free `submit()` had no cap
+on concurrent `verify-any` subprocesses (fan-out DoS on the small box) — bounded with a `Semaphore(cpu_count)`.
+Two other observations (the `0-999` seed range is unprovable by design so blocks 1–999 are proven as
+single-block ranges; `by_in` first-wins can understate the frontier) are pre-existing and non-soundness.
+
+## Round 8 (2026-07-22) — completeness + verifier audit; full write-up in `docs/AUDIT_2026-07.md`
+
+Eighth pass (five reviewers, one dimension each, each told to break it: consensus completeness,
+enforcement gating, accumulator soundness, the FFI/VerifyScript boundary, and the end-to-end trust
+scope). Four dimensions came back **sound** — the accumulator (no inclusion-forgery / skipped-delete /
+double-spend), the FFI boundary (script runs against exactly the leaf-committed coin with the full
+prevout set force-computed, `MissingDataBehavior::FAIL`), enforcement gating (every proving-mode check on
+an asserted panic path; mode 1 confirmed debug-only + tag-un-launderable), and consensus completeness (all
+Core block-connection rules bar the deviations below, comments verified against the code). One
+verifier-hole and five completeness deviations were found; none allowed minting, theft, or double-spend on
+the real chain today. All fixed except G4 (unprovable — left documented). See the status table above and
+the finding-by-finding detail + verification in **`docs/AUDIT_2026-07.md`**.
+
+- **A1 (verifier-hole) — FIXED.** A bare `ChainState` receipt (mode 2 `chain_step` / mode 5 `aggregate`)
+  committed no record of the anchor it bottomed out at, so an `is_base=1` receipt built on a *fabricated*
+  anchor (arbitrary height/UTXO/work/easy nBits) was journal-indistinguishable from a genesis-anchored
+  one. Not reachable through any shipped verifier — `verify-range`/`verify-any` decode only `RangeState`
+  and pin the full genesis in-boundary — but a standing foot-gun for anyone handed a raw chain receipt.
+  **Fix (S5):** the guest commits `anchor_id = dsha256(base-anchor journal)` in the base step and carries
+  it forward unchanged; new host command **`verify-chain`** verifies the STARK, asserts
+  `self_id==METHOD_ID` + the `KIND_CHAIN` tag, and pins `anchor_id == dsha256(genesis_anchor)` — the
+  chain-track analogue of `verify-range`'s genesis pin. A checkpoint-anchored proof correctly fails it.
+- **G3 (medium, reject-valid/liveness) — FIXED.** The BIP141 witness-commitment check ran unconditionally;
+  Core enforces it only from segwit activation (481824). A canonical pre-activation block carrying an
+  early commitment output but a witness-free coinbase would be wrongly rejected — a from-genesis stall in
+  433k–481823. **Fix:** gate the commitment at 481824; below activation `witness_ok = !has_witness`
+  (Core's `unexpected-witness`, which now also covers the coinbase — **G2**).
+- **G5 (low) — FIXED.** Added the explicit block-level `MoneyRange(total_fee)` + an i128-safe
+  `subsidy + fees ≤ MAX_MONEY` bound (Core's `bad-txns-accumulated-fee-outofrange`), folded into the
+  already-gated `subsidy_ok`, rather than relying on anchor-integrity induction.
+- **G1 (low, bounded) — CLOSED (#54), was a gated invariant.** A utreexo `Stump` cannot prove
+  non-membership, so Core's general BIP30 `HaveCoin` lookup used to be replaced by a structural
+  argument: BIP34 (asserted, ≥227931) forces coinbase-txid uniqueness, the two pre-BIP34 duplicates are
+  handled by F3, and a non-coinbase duplicate is a double-spend the accumulator rejects. Sound, and it
+  EXPIRED — at ~1,983,702 (≈2046) a BIP34 height-push can reproduce a pre-BIP34 coinbase scriptSig and
+  the reasoning stops holding.
+  A **second accumulator** now proves the property instead: a coinbase-only sparse Merkle tree (txid ->
+  unspent output count) whose root is journalled beside the utreexo roots and enforced at the fold seam.
+  Absence and a zero count are the same state, so "prove it is absent" is exactly "prove BIP30 is
+  satisfied" — and a fully-spent duplicate stays legal, which it must. The ceiling is gone because the
+  check no longer depends on any property of scriptSig encoding. The guest DERIVES the coinbase txid,
+  its spendable-output count and the spent-coinbase list itself and takes only the proofs from the
+  witness; `is_genesis_anchored` pins the tree to empty at the anchor.
+- **N1/N2/N3 (hardening).** Removed the dead `BlockInput.flags` (guest+host; flags are guest-derived — a
+  refactor trap); length-prefixed `scriptPubKey` in all three byte-identical UTXO-leaf sites (future-proofs
+  the preimage — **changes every leaf hash/root**); and `tx_full_sigops` now fails closed on a short
+  prevouts blob instead of under-counting.
+
+Validated in execute mode with **no regression** (real Core code in the zkVM): `regress` (block 170
+byte-exact tip), `check-full` 130000 (pre-segwit G3 branch, VALID) and 741000 (active G3 branch + taproot +
+~670 inputs, VALID, tip byte-exact to the pre-change value — proving N2 is consensus-neutral),
+741000_badwit correctly REJECTED (`witness_ok=false` only), and `check-bip30` PASS. `METHOD_ID` changed
+(guest + leaf format changed) ⇒ all prior proofs invalid, re-proven from genesis. `cargo fmt` clean; the
+prove-based `adversarial` suite + `clippy` are re-run on the GPU box as part of the re-prove.
+
+## Round 9 (2026-07-24/25) — post-audit fixes + empirical era validation
+
+Three fixes after round 8, then an empirical pass over the chain's era transitions on a real archive node.
+
+### Guest — P2SH sigop over-count (reject-valid)
+`tx_full_sigops` counted redeemScript sigops for *every* input, not just P2SH ones — over-counting legacy
+inputs versus Core's `GetP2SHSigOpCount`, so a from-genesis prover could reject a Core-valid block near
+the sigop limit. **Fix:** guard the redeemScript count with `IsPayToScriptHash()`. Guest change →
+`METHOD_ID` re-baselined `601d7ca2…` → `36a0415d…`. (#4)
+
+### Guest/bridge — BIP30 grandfathered duplicate coinbases (91842 / 91880)
+The two pre-BIP30 blocks whose coinbase duplicates an earlier still-unspent coinbase require Core's
+overwrite. The guest now *mandates* the overwrite witness at exactly those two block hashes and the bridge
+emits it; validated end-to-end (91842 proved, `RANGE-OK`). (#6)
+
+### Host — in-block spend detection keyed on txid, not the coin leaf (liveness)
+Both host witness builders (`build_full` for `check-full`, and `build_block_carried`, the production
+bridge) cancelled in-block-created coins (H1) by **txid** membership. The guest cancels by **leaf**
+membership — and the leaf carries the coin's creation *height*. They diverge on a **pre-BIP34 coinbase-txid
+collision**: a block spending an older coin whose funding tx shares a txid with a tx in the spending block.
+The guest keeps that coin external (its leaf has the older height); the txid heuristic falsely cancelled
+it. Effect: `check-full` false-failed on busy blocks with in-block spends, and — the real bug — the bridge
+would emit a witness the guest rejects, **stalling a genesis→tip proof at the first colliding-txid block**.
+**Fix:** both builders now detect in-block spends by `created.contains(&coin_leaf)` — the guest's exact
+rule. Host-only; guest unchanged → `METHOD_ID` still `36a0415d`. Note this is a case where the *guest was
+already correct* and the host builder was wrong: it is a liveness bug (a valid block made unprovable), not
+a soundness one (no invalid block could be accepted). (#8, v0.7.2)
+
+### Empirical era validation
+On a real archive node, every representative era block validates at `36a0415d` with all consensus flags
+true: **segwit** (500000), **taproot** (750000), **big-block** (741000, ~6.4k inputs *[2026-09-14: wrong — block 741000 has 146 transactions and 670
+inputs, as round 8 says; `prover/block_741000.json`, whose merkle root commits to every transaction]*), and the **pre-BIP34
+collision** case (130000), plus the COV/SEC reject-path suite. The in-block-leaf bug above is the only
+defect the pass surfaced.
+
+## Rounds 10 & 11 (2026-08-01/02) — the first EXTERNAL reviews
+
+> **Outcome: re-baselined to `71790584…` (v0.14.0).** The two guest-side findings below — `cshims.c`
+> and `multi_check` — could not ship without a new `METHOD_ID`, so they were batched into one
+> deliberate re-baseline rather than triggering two. It discarded **46,177 proven blocks**: the
+> attribution ledger was archived (`coordinator.db.be5e0528`, 52 MB — who proved what is worth keeping),
+> but the 12 GB of receipts were **deleted**, since nothing can verify them under the new id and
+> re-proving is required regardless. Taken at 4.8% of the chain precisely because that cost only grows —
+> the previous re-baseline was taken when the board held zero blocks, so this is the first with real work
+> on it. Everything else from both reviews shipped earlier in v0.13.5 under `be5e0528…`.
+
+
+The first reviews by people outside the project. Two independent passes, both AI-assisted full-source
+reviews rather than a commissioned professional audit — that distinction matters and is kept
+throughout. **Neither found a soundness break in the guest, the verifier or the coordinator frontier.**
+
+Both landed on the same two places as the highest residual risk: the C++ bridge compiled into the
+guest, and the accumulator. That agreement is itself a finding — it is where outside eyes go first.
+
+### Round 10 — review #1 (Kimi)
+
+No defect found in the Rust. Its largest stated unknown was the two files it could not read,
+`verify_input.cpp` and `cshims.c`, observing that a missing domain tag in the C++ leaf builder *"would
+undermine the entire security claim"*. Both were then read directly.
+
+**`verify_input.cpp` — not a defect.** The C++ leaf builders do apply `TAG_LEAF`, and
+`scripts/check-utreexo.sh` has been asserting agreement across host Rust, guest Rust and guest C++ in
+CI since the domain-separation re-baseline. The stronger argument is structural: the host builds
+witnesses with Rust leaves and commits `root_next`, the guest rebuilds them in C++ and asserts
+`root_matches` — so a tag mismatch would change every leaf hash and no proof would verify at all.
+Every proof on the board is an execution of that check.
+
+**`cshims.c` — two real defects, both latent.** `_sbrk` checked only its upper bound while
+`_malloc_trim_r` calls it with negative increments (confirmed in the linked guest ELF), and `strtoul`
+ignored its `base` argument entirely. Neither can produce a false proof: all four `strtoul` call sites
+are libstdc++/newlib scaffolding with none on the consensus path, and heap exhaustion is fail-closed
+(1 MiB heap, `-fexceptions`, no `catch` anywhere in the guest validator, so `bad_alloc` reaches
+`std::terminate`). **FIXED here (#56)**, as part of the re-baseline this change forced. `cshims.c` compiles into the
+guest, so the fix could not land without invalidating every proof on the board; it waited until a
+re-baseline was being done deliberately rather than triggering one on its own.
+
+Also filed from this round: the BIP30 structural argument's hard ceiling at height ~1,983,702 (#54),
+and `std::random_device` being linked into the guest though never called (#55).
+
+### Round 11 — review #2 (opencode)
+
+Verdict: consensus-critical core sound. One High, one Medium, three Low.
+
+| ID | Finding | Status |
+|----|---------|--------|
+| **H-1** | Script injection in `release-sign.yml` — the release tag was interpolated into three `run:` blocks in the job holding `GPG_PRIVATE_KEY` and `contents: write` | **FIXED** (#57) |
+| **M-1** | `hazync-bridge.service` ran as root with no hardening | **FIXED, stage 1** (#61); path migration → #58 |
+| **L-1** | API did not distinguish genesis-anchored from mid-chain | **FIXED** (#62) |
+| **L-2** | Accumulator panic paths reachable from untrusted proof data | **FIXED** (#63) |
+| **L-3** | `multi_check` hardcodes coin metadata | **FIXED** (#56) — held back until a re-baseline was happening anyway, because a guest comment moves the id; landed, and in `main` |
+
+**H-1 was the serious one and is worth stating plainly.** GitHub substitutes a `${{ }}` expression
+into the script text *before* bash parses it, so a tag containing shell metacharacters executed as
+code — and `workflow_dispatch` made that input directly supplyable by any account with write access.
+The payoff was the release-signing private key and, with it, forged `SHA256SUMS.txt.asc` for every
+published binary: the artefacts this document tells people to verify. The tag now arrives through
+`env:` and is shape-checked, and `scripts/check-workflow-injection.sh` bans `${{ }}` in any `run:`
+block repo-wide, with a positive control.
+
+Note the limit of reproducibility as a defence here: it protects anyone who rebuilds the guest and
+checks `METHOD_ID`, and does nothing for someone who does exactly what this document says and verifies
+the signature.
+
+**L-2 was larger than reported.** Beyond the three panic paths, `delete` could *mutate before
+rejecting* — the disjoint-tree branch set a root and only then discovered a malformed rightmost proof,
+leaving a corrupted Stump behind a `false` return. Worse than the panic, because the caller believes
+nothing happened. Every rejection path now returns before touching state.
+
+The report also asked to "confirm the fork `hazync-utreexo` stays in sync". **There is no fork** —
+`hazync-utreexo` is `accumulator/`, consumed by path from `prover/host` and `audit-fuzz`. The guest
+does not use it at all; it has its own `prover/methods/guest/src/utreexo.rs`.
+
+### Found by us while fixing the above, not by either reviewer
+
+- **`hazync-coordinator.service` sets `ProtectHome=true` while reading `/root/bridge_bundles`** —
+  which `ProtectHome` makes inaccessible. `can_serve_witness` probes with `os.path.exists`, so it
+  fails silently to the legacy witness window: no exception, no log (#60). *[2026-09-14: resolved. The
+  bundles moved to `/var/lib/hazync/bridge_bundles` (#58); the base unit in this repo no longer sets
+  `ProtectHome`, and the live coordinator runs with `ProtectHome=true` from
+  `coordinator/deploy/dropins/hazync-coordinator-paths-and-user.conf`.]*
+- **`verify-any` had no CI coverage at all** — the command the coordinator runs on *every* submission
+  (#65). The standalone verifier was well covered, but it is a different path with a different genesis
+  condition.
+- **A test that passed its own positive control.** The first draft of the L-2 tests passed against the
+  unfixed code, because fully random proofs never get past `verify()` and so never reached the paths.
+  They now build genuine proofs and perturb one field.
+- **`build-release.sh` bind-mounts the live working tree**, so switching branches mid-build silently
+  produces a binary that is a mixture of them, with `METHOD_ID` and the smoke tests all reporting fine.
+- **Any guest-source edit that moves line numbers changes `METHOD_ID` — including comments.** Adding
+  fifteen lines of pure comment to `prover/methods/guest/src/main.rs` moved the id from `be5e0528…` to
+  `2a334ebe…`; the mechanism is Rust embedding file/line into panic metadata. This was measured only
+  because the opposite was assumed and CI was asked to prove it. The consequence is easy to get wrong:
+  a "harmless" comment in the guest is a re-baseline that invalidates every proof on the board, so
+  guest documentation must be batched into a change that is already re-baselining. Recorded in
+  `reproduce/METHOD_ID`. It is also why L-3 above waited for a re-baseline instead of landing on its
+  own — it has since landed, and this line said "fixed but unmerged" for long after that was true.
+  Verified 2026-08-11: the doc comment is in `main`'s guest. A status line that goes stale in the
+  *pessimistic* direction is the cheaper failure, but it still cost a branch audit to disprove.
+
+## Earlier findings (2026-07-15 self-audit) — status
+
+- **S1 — recursion `self_id` is host-supplied.** The chain/aggregation guests call
+  `env::verify(self_id, prev_journal)` with a host-controlled `self_id`; the concern is the IVC
+  self-reference trap (a nested `self_id ≠ METHOD_ID` smuggling a malicious guest's receipt). **Fixed:**
+  `self_id` is committed and the verifier asserts `== METHOD_ID` at every level; the positive chain
+  verifies and an adversarial wrong-id chain is rejected. Argument written up in `SOUNDNESS.md §3`.
+  Single-block proofs were always unconditional here; this hardened the recursive case.
+- **S2 — maturity / BIP68-height fed placeholder metadata.** The harness set every spent coin's
+  `coin_height`/`coin_is_coinbase`/`coin_mtp` benign, so maturity + BIP68 never fired on real blocks.
+  **Fixed:** the fetcher/bridge sources each spent coin's real height + coinbase flag and threads them
+  into the witness; both checks fire on real blocks (validated on 741000). While closing this we also
+  found and fixed a latent header bug — the header builder hardcoded version 1 (masked by the
+  version-1-era test vectors), so PoW was wrong on modern blocks; it now uses the real versionbits.
+- **S3 — standalone block proofs don't bind to the real UTXO set.** `prove_full` fabricates `root_prev`
+  from the block's own prevouts + filler, so a standalone proof attests *internal validity +
+  accumulator consistency*, not "these coins were in mainnet's UTXO set at height N". **Not a bug —
+  inherent to standalone testing.** Real-UTXO binding comes from the chain recursion carrying
+  `root_next(N−1) == root_prev(N)` from a trusted anchor; operationally the archive-node bridge drives
+  the accumulator from the real coin set. Stated plainly so results aren't over-read.
+- **S4 — BIP34 / BIP30.** Both **added and validated on 741000** (`bip34_ok` / `bip30_ok`). BIP68-time
+  is **fixed** too: the block-proving path commits the coin's real creation median-time-past (`coin_mtp`,
+  leaf-committed and unforgeable) and the relative-lock branch is gated on `spend_height >= 419328` +
+  `version >= 2` with the disable bit clear — matching Core's CSV activation (`check_input_locks` in
+  `verify_input.cpp`). The earlier `coin_mtp = 0` placeholder only ever existed in the standalone
+  `build_full` diagnostic harness (fabricated anchor), never the real IBD/chain proving path that
+  produces published proofs. Consistent with the S2/BIP68 rows in the table above.
+- **C1 — regression harness.** **Added:** `check-full` / `regress` run known blocks + the adversarial
+  inflation case in execute mode (seconds, no proving) and assert the flags; standard pre-flight before
+  any GPU prove.
+- **C2 — duplication** between `build_block`/`build_full` and `chain_step`/`aggregate` (the witness_ok
+  conjunction drifted once). Low priority; a shared helper would prevent re-drift. **Open, cosmetic.**
+- **C3 — fabricated anchor timestamps/nbits** in standalone runs — resolved by real recursion (tied to
+  S2/S3). **Open only for near-retarget standalone runs.**
+- **H1** — a committed `.pyc`; **H2 — resolved:** all three `Cargo.lock` files (`accumulator/`,
+  `prover/`, `prover/methods/guest/`) are now committed for reproducible builds; **H3** — README
+  refresh. Housekeeping.
+
+## Coverage audit (2026-07-16)
+
+A pass over Bitcoin Core's block-validation surface for rules we might not enforce found two — both
+real consensus rules Core checks, both now fixed (see the COV rows above):
+- **COV-1 `time-too-old`:** a block whose timestamp is ≤ the median-time-past of the previous 11 blocks
+  is invalid; `chain_step`/`aggregate`/`prove_range` now assert `block_time > prev_mtp`.
+- **COV-2 merkle mutation (CVE-2012-2459):** the `ComputeMerkleRoot` call discarded Core's `mutated`
+  flag (duplicate-txid tree malleability); it is now captured and rejected.
+
+Deliberately **not** enforced (documented trust boundaries, not gaps): the 2-hour future-time limit
+(node-local wall-clock, unprovable); standardness/policy (not consensus). "Only the coinbase is a
+coinbase" is covered by Core's `CheckTransaction` (null-prevout rejection for non-coinbase inputs).
+The COV fixes were validated for no-regression (check-ibd 550 + 741000 + demo all still VALID) **and by
+adversarial negative tests** (`prover/ci_negative_tests.sh`, evidence `prover/evidence/cov_negatives.txt`):
+- COV-2: an honest `[A,B,C]` tx list and a malleated `[A,B,C,C]` (last tx duplicated) produce the
+  *identical* merkle root — the CVE-2012-2459 collision — but the malleated one is flagged `mutated=1`
+  and rejected on `merkle_ok`.
+- COV-1: with the previous-11 median-time-past forced to equal the block's own timestamp, `check-full`
+  rejects with `time_ok=false` and every other flag true (isolated to the timestamp check); the same
+  block without the knob is VALID.
