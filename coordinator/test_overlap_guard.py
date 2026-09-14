@@ -153,6 +153,23 @@ reset()
 submit(100, 103)
 check(submit(101, 101)[0] == 200, "a single block inside an existing wide range is still accepted")
 
+# ── the genesis seed is not an exemption ──────────────────────────────────────────────────────────
+# Block 0 is unprovable, so `[0..hi]` is a receipt for `[1..hi]`. The guard used to skip `lo == 0`
+# outright, so an unbacked `[0..hi]` could add `hi` blocks of coverage with no per-block receipt: the
+# one way left to put a G1 hole on the board after #281.
+print("== the genesis seed [0..hi] is held to the same rule ==")
+reset()
+code, obj = submit(0, 3)
+check(code == 409, "an unbacked [0..3] is REFUSED — starting at block 0 is not a free pass")
+check("3 blocks wide" in str(obj.get("error", "")) and "genesis anchor" in str(obj.get("error", "")),
+      "  ...and the error counts the 3 blocks it really proves, and says why block 0 is not one")
+check(not (covered() & {1, 2, 3}), "  ...so blocks 1..3 stay uncovered and claim() still hands them out")
+for h in (1, 2, 3):
+    submit(h, h)
+check(submit(0, 3)[0] == 200, "with blocks 1..3 on the board, [0..3] IS a fold and is accepted")
+reset()
+check(submit(0, 1)[0] == 200, "[0..1] proves exactly one block, so it may cover fresh ground like any single block")
+
 # ── a board that ALREADY holds a bad range must still be repairable ───────────────────────────────
 # Not hypothetical, and worth being blunt about: the guard refuses the wide REPAIR range too, because
 # it overlaps the bad one. Replayed against the live board on 2026-09-12, it refuses 5 of 4,783 wide

@@ -230,6 +230,20 @@ jobs:
         # production retention: that needs the coordinator's real DB and proof store, which CI has
         # not got and should not have. Its job is to prove the gate can still fail.
         run: ./coordinator/test-check-retention.sh
+      - name: A wide range must be a fold, the genesis seed included (#281)
+        # Was not in CI, so nothing would have noticed it breaking. The [0..hi] genesis seed used to be
+        # exempt from the fold rule, the one way left to put coverage on the board with no per-block
+        # receipt beneath it -- the G1 hole the step above exists to catch.
+        run: cd coordinator && python3 test_overlap_guard.py
+      - name: Overlap guard POSITIVE CONTROL (guard removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_overlap_guard.py --control
+      - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
+        # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
+        # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
+        # for the path that is supposed to tell someone.
+        run: ./coordinator/deploy/test-alerting.sh
       - name: Coordinator worker parses (nothing else imports it, so nothing else would notice)
         # coordinator/server.py IS compiled on every push, because seam_fuzz.py and parse_fuzz.py both
         # `import server`. coordinator/hazync is not: it has no .py extension, so it is not importable

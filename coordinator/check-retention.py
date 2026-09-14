@@ -71,9 +71,12 @@ def main():
 
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     rows = con.execute("SELECT lo, hi FROM ranges WHERE status = 'verified'").fetchall()
+    # Block 0 is the genesis anchor, not a proof: it is unprovable, and a verified `[0..hi]` row (the
+    # genesis seed) is a receipt for `[1..hi]`. Counting height 0 as "proven" reported a G1 violation
+    # that no amount of proving could ever clear — and an alarm that cannot be cleared gets muted.
     proven = set()
     for lo, hi in rows:
-        proven.update(range(lo, hi + 1))
+        proven.update(range(max(lo, 1), hi + 1))
 
     # An empty ledger has two very different causes and they must not be conflated.
     #

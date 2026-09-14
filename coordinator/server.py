@@ -2808,21 +2808,30 @@ def submit(body):
     # ⚠ A worker OLDER than this sends the wide range alone and will be refused. That is a protocol
     # break, taken deliberately and with a message that says exactly what to do, rather than leaving a
     # shape whose only legitimate use is one the current client no longer needs.
+    #
+    # THE GENESIS SEED IS NOT AN EXEMPTION. Block 0 is the genesis anchor and cannot be proved, so a
+    # `[0..hi]` submission is really a receipt for `[1..hi]` (see verify_receipt). It used to skip this
+    # rule outright (`_lo > 0`), which let `[0..hi]` introduce `hi` blocks of coverage with no per-block
+    # receipt beneath it — the one shape that could still put a G1 hole on the board after #281. Judge
+    # it by the blocks it actually proves: `[0..1]` is one block, anything wider must be a fold.
     _lo, _hi = parse_any_range(rid)
-    if _hi > _lo and _lo > 0:          # width 1 introduces coverage; lo==0 is the genesis seed
+    _plo = max(_lo, 1)                 # the first block this range really proves
+    if _hi > _plo:                     # width 1 introduces coverage; wider must be a fold
         with _lock:
             c = db()
-            _backed = _tiled_by_verified(c, _lo, _hi)
-            _clash = None if _backed else _overlapping_vrange(c, _lo, _hi)
+            _backed = _tiled_by_verified(c, _plo, _hi)
+            _clash = None if _backed else _overlapping_vrange(c, _plo, _hi)
             c.close()
         if not _backed:
-            _msg = (f"range [{_lo}..{_hi}] is {_hi - _lo + 1} blocks wide but the board does not hold "
+            _msg = (f"range [{_plo}..{_hi}] is {_hi - _plo + 1} blocks wide but the board does not hold "
                     f"proofs for all of them, so this is not a fold. Submit each block on its own "
-                    f"first, then the range that folds them -- `hazync run {_lo}-{_hi}` does that for "
+                    f"first, then the range that folds them -- `hazync run {_plo}-{_hi}` does that for "
                     f"you from v0.21.4. Only a single block may cover ground nothing has covered yet.")
-            if _clash and _clash["lo"] <= _lo <= _clash["hi"]:
+            if _lo == 0:
+                _msg += " (Block 0 is the genesis anchor and is never proved, so this range starts at 1.)"
+            if _clash and _clash["lo"] <= _plo <= _clash["hi"]:
                 _msg += (f" Note [{_clash['lo']}..{_clash['hi']}] is already verified: start at "
-                         f"{_clash['hi'] + 1}, not {_lo} — range bounds are INCLUSIVE.")
+                         f"{_clash['hi'] + 1}, not {_plo} — range bounds are INCLUSIVE.")
             return 409, {"error": _msg}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}

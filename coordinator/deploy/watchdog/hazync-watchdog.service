@@ -1,0 +1,15 @@
+[Unit]
+Description=Hazync off-box watchdog — probes the coordinator from the web box
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+StateDirectory=hazync-watchdog
+Environment=WATCHDOG_STATE_DIR=/var/lib/hazync-watchdog
+Environment=ALERT_STATE_DIR=/var/lib/hazync-watchdog
+ExecStart=/usr/local/bin/hazync-watchdog.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
