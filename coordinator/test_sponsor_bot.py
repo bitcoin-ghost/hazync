@@ -64,6 +64,8 @@ class FakeRunPod:
         self.prices = {"NVIDIA GeForce RTX 4090": 0.34, "NVIDIA A40": 0.49}
         self.capacity = {"NVIDIA GeForce RTX 4090": True, "NVIDIA A40": True}
         self.deploys, self.terminations = [], []
+        self.agents = []                    # the User-Agent of every request
+        self.refuse_deploy = False          # answer deploys with an API error instead of a pod
         self.max_live, self.n = 0, 0
         self.lock = threading.Lock()
         fake = self
@@ -73,6 +75,17 @@ class FakeRunPod:
                 pass
 
             def do_POST(self):
+                agent = self.headers.get("User-Agent") or ""
+                fake.agents.append(agent)
+                if not agent or agent.startswith("Python-urllib"):
+                    # What api.runpod.io's Cloudflare does to Python's default User-Agent (measured 2026-09-14).
+                    out = b"error code: 1010\n"
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(out)))
+                    self.end_headers()
+                    self.wfile.write(out)
+                    return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 out = json.dumps(fake.handle(body["query"], self.headers.get("Authorization"))).encode()
                 self.send_response(200)
@@ -95,6 +108,8 @@ class FakeRunPod:
         with self.lock:
             if auth != "Bearer test-key":
                 return {"errors": [{"message": "unauthorized"}], "data": None}
+            if "podFindAndDeployOnDemand" in q and self.refuse_deploy:
+                return {"errors": [{"message": "simulated refusal"}], "data": None}
             if "podFindAndDeployOnDemand" in q:
                 gt = re.search(r'gpuTypeId: "([^"]+)"', q).group(1)
                 name = re.search(r'name: "([^"]+)"', q).group(1)
@@ -261,6 +276,35 @@ for kw, why in ((dict(max_pods=0), "zero pods"), (dict(max_usd=0), "a zero total
     except sponsor_bot.BotRefused:
         refused = True
     check(refused, f"the bot refuses {why}")
+
+# ---------- RunPod: the User-Agent, and a refusal is not a capacity miss ----------
+print("== RunPod: User-Agent and refusals ==")
+reset()
+api = FakeRunPod()
+make_bot(api, FakeRunner(), trial=[9700]).run()
+check(api.agents and all(a == sponsor_bot.USER_AGENT and a for a in api.agents),
+      f"every RunPod call carries the bot's own User-Agent, not Python's default ({sorted(set(api.agents))[:2]})")
+check(len(api.deploys) == 1, f"so a pod is deployed through the Cloudflare-like guard ({len(api.deploys)} deploys)")
+saved_agent, sponsor_bot.USER_AGENT = sponsor_bot.USER_AGENT, ""
+try:
+    sponsor_bot.RunPod("test-key", url=FakeRunPod().url, timeout=10).deploy("hz-sponsor-x", FakeRunner.ssh_pubkey)
+    raised = ""
+except sponsor_bot.RunPodError as e:
+    raised = str(e)
+sponsor_bot.USER_AGENT = saved_agent
+check("403" in raised and "1010" in raised,
+      f"without it RunPod refuses (403, 1010) and the client says so instead of returning 'no capacity' ({raised!r})")
+reset()
+api = FakeRunPod()
+api.refuse_deploy = True
+logs = []
+reason = make_bot(api, FakeRunner(), trial=[9701], capacity_backoff_s=0, log=logs.append).run()
+refusals = [m for m in logs if "RunPod refused the deploy request" in m]
+check(reason == "runpod" and len(refusals) == sponsor_bot.RUNPOD_REFUSALS_MAX,
+      f"{sponsor_bot.RUNPOD_REFUSALS_MAX} refused deploys in a row stop the run as 'runpod' (reason {reason}, {len(refusals)} refusals)")
+check(not any("no GPU capacity" in m for m in logs), "a refusal is never logged as a capacity miss")
+check(not api.live(), "and nothing is left running")
+check(sponsor_bot.main(["trial", "--blocks", "9702"]) == 2, "a dry run exits with code 2, as the docs say")
 
 # ---------- the queue: only holds, oldest payment first ----------
 print("== the queue ==")
