@@ -11,6 +11,7 @@ hazync — Proof Party contributor CLI.
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
   hazync fold [n]           # fold n adjacent proven ranges into wider ones (default 1) — helps everyone
   hazync spine [n]          # advance the genesis-anchored spine n steps, each absorbing the widest chunk available (default: all)
+  hazync notify new         # push to your phone (ntfy) when this worker stops or cannot work; also: test | off | <topic or URL>
 
 The party proves the chain forward from genesis, so you take a range near the current
 frontier. The coordinator serves a ready-made witness bundle for each block in its window,
@@ -27,9 +28,12 @@ Config (env):
   HAZYNC_HOME identity + receipts (default ~/.hazync). Point it elsewhere and you are a DIFFERENT
               contributor — a separate key and handle, credited separately on the board. Use it to
               hold more than one identity on a box, or to try the party without touching your real key.
+  HAZYNC_NTFY an ntfy topic or URL for alerts; overrides what `hazync notify` saved (`off` disables)
+  HAZYNC_NTFY_REPEAT seconds before the same problem is pushed again (default 3600)
 Identity + receipts live under $HAZYNC_HOME (default ~/.hazync/).
 """
 import os, sys, json, base64, subprocess, urllib.request, urllib.error, pathlib, threading, time, shutil, random, re
+import secrets, socket
 import signal
 import concurrent.futures
 
@@ -50,6 +54,8 @@ HOME    = pathlib.Path(os.environ.get("HAZYNC_HOME") or os.path.expanduser("~/.h
 KEY     = HOME / "key.hex"
 HANDLE  = HOME / "handle"
 RCPTDIR = HOME / "receipts"
+NTFY_FILE  = HOME / "ntfy"              # `hazync notify`: the ntfy URL alerts go to. The topic is a secret.
+NTFY_STATE = HOME / "ntfy-sent.json"    # when each kind of alert was last pushed, so one problem is one push an hour
 
 # Default to the PUBLIC party, not localhost. Almost nobody running this has a coordinator of their
 # own — they downloaded a release and want to contribute — and localhost sends them to a connection
@@ -237,6 +243,142 @@ def post(path, body):
 
 def get(path):
     return _open(urllib.request.Request(COORD + path, headers={"User-Agent": UA}), timeout=60).read()
+
+
+# ---------- alerts to the prover (ntfy) ----------
+#
+# A worker that stops, or fails on every block, used to say so only in a log file nobody reads while it runs
+# unattended: a box with no usable GPU, a prover binary left behind by a re-baseline and a clock the
+# coordinator refuses all look, from outside, like an idle machine. `hazync notify` sends those to the
+# prover's phone through ntfy (https://ntfy.sh, or a server of their own). Off until it is set up, and a push
+# that cannot be sent never stops or slows the work.
+NTFY_SERVER = "https://ntfy.sh"
+
+
+def _ntfy_url():
+    """The ntfy URL alerts go to: HAZYNC_NTFY, else what `hazync notify` saved, else None (off)."""
+    v = os.environ.get("HAZYNC_NTFY", "").strip()
+    if not v:
+        try:
+            v = NTFY_FILE.read_text().strip()
+        except OSError:
+            v = ""
+    if not v or v.lower() == "off":
+        return None
+    return v if v.startswith(("https://", "http://")) else f"{NTFY_SERVER}/{v.lstrip('/')}"
+
+
+def notify(title, body, key=None, priority="high", tags="warning"):
+    """Push one alert to the prover through ntfy. True if it was sent.
+
+    Never raises, and gives up after 10 s: an alert is about the work and must never get in its way. `key` names
+    the problem; one key is pushed at most once per HAZYNC_NTFY_REPEAT seconds (default one hour), remembered in
+    $HAZYNC_HOME, because every `hazync run` is a new process and a failing loop would otherwise push every few
+    seconds."""
+    url = _ntfy_url()
+    if not url:
+        return False
+    now = time.time()
+    try:
+        repeat = float(os.environ.get("HAZYNC_NTFY_REPEAT", "3600"))
+    except ValueError:
+        repeat = 3600.0
+    try:
+        sent = json.loads(NTFY_STATE.read_text())
+        sent = sent if isinstance(sent, dict) else {}
+    except (OSError, ValueError):
+        sent = {}
+    if key and now - float(sent.get(key) or 0) < repeat:
+        print(f"  (alert '{key}' not pushed again: sent {int(now - float(sent[key]))} s ago)", flush=True)
+        return False
+    try:
+        handle = HANDLE.read_text().strip()
+    except OSError:
+        handle = ""
+    where = f"{handle or 'hazync'} on {socket.gethostname()}"
+    head = f"Hazync ({where}): {title}".encode("ascii", "replace").decode()[:250]    # HTTP headers are not UTF-8
+    req = urllib.request.Request(url, data=str(body)[-3500:].encode(), method="POST",
+                                 headers={"Title": head, "Priority": priority, "Tags": tags, "User-Agent": UA})
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception as e:
+        print(f"  ! could not push the alert '{title}': {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return False
+    if key:
+        sent[key] = now
+        try:
+            tmp = NTFY_STATE.with_name(NTFY_STATE.name + ".tmp")
+            tmp.write_text(json.dumps(sent))
+            os.replace(tmp, NTFY_STATE)
+        except OSError:
+            pass
+    print(f"  alert pushed: {title}", flush=True)
+    return True
+
+
+def _ntfy_save(value):
+    HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(NTFY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value + "\n")
+    os.chmod(NTFY_FILE, 0o600)
+
+
+def cmd_notify(args):
+    """hazync notify [new | test | off | <topic or URL> | send <title> [body] [--key K] [--priority P] [--tags T]]"""
+    sub = args[0] if args else ""
+    if sub == "send":
+        # For run-workers.sh. Exits 0 even when alerts are off or the push failed: a launcher never stops over one.
+        opts, pos, rest, i = {"--key": None, "--priority": "high", "--tags": "warning"}, [], args[1:], 0
+        while i < len(rest):
+            if rest[i] in opts and i + 1 < len(rest):
+                opts[rest[i]] = rest[i + 1]
+                i += 2
+            else:
+                pos.append(rest[i])
+                i += 1
+        if not pos:
+            sys.exit("usage: hazync notify send <title> [body] [--key K] [--priority P] [--tags T]")
+        notify(pos[0], pos[1] if len(pos) > 1 else pos[0], key=opts["--key"], priority=opts["--priority"],
+               tags=opts["--tags"])
+        return
+    if sub == "off":
+        try:
+            NTFY_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        print("alerts off." + ("  (HAZYNC_NTFY is still set in this environment, and wins.)" if os.environ.get("HAZYNC_NTFY") else ""))
+        return
+    if sub == "":
+        url = _ntfy_url()
+        if not url:
+            print("alerts are off. Turn them on with:\n"
+                  "  hazync notify new                  # a private topic on ntfy.sh, and a test push\n"
+                  "  hazync notify <topic or URL>       # a topic or ntfy server of your own")
+        else:
+            base, _, topic = url.rpartition("/")
+            print(f"alerts go to {base}/{topic[:6]}…  (test with: hazync notify test; stop with: hazync notify off)")
+        return
+    if sub == "test":
+        if not _ntfy_url():
+            sys.exit("alerts are off: run `hazync notify new` first.")
+        ok = notify("test alert", "If you can read this on your phone, alerts from this worker will reach you.",
+                    priority="default", tags="white_check_mark")
+        sys.exit(0 if ok else 1)
+    if sub == "new":
+        value = "hazync-" + secrets.token_urlsafe(18)
+    elif sub.startswith(("https://", "http://")) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sub):
+        value = sub
+    else:
+        sys.exit(f"not an ntfy topic or URL: {sub!r} (a topic is letters, digits, - and _; or give https://server/topic)")
+    _ntfy_save(value)
+    url = _ntfy_url()
+    print(f"alerts will go to {url}\n"
+          f"  Subscribe to that topic in the ntfy app (or open the URL). Anyone who knows the topic can read your\n"
+          f"  alerts and send you fake ones, so keep it private.")
+    if not notify("alerts are on", "This worker will push here when it stops or cannot work.",
+                  priority="default", tags="white_check_mark"):
+        sys.exit("saved, but the test push did not arrive; check the address, then run `hazync notify test`.")
 
 def witness_in_window(blk):
     # True if the coordinator currently serves the witness for `blk` (i.e. the block is inside the rolling
@@ -649,6 +791,10 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
                   f"  Every prove here fails, and each retry would claim (and abandon) another block.\n"
                   f"  Stopping this worker. Fix the GPU/driver, or run a CPU build of the host.",
                   file=sys.stderr, flush=True)
+            notify("worker stopped: no usable GPU",
+                   f"{label}: {_err_tail(last)}\nEvery prove on this box fails, so the worker stopped rather than "
+                   f"claim block after block. Fix the GPU or its driver, then start the workers again.",
+                   key="stopped-no-gpu", priority="urgent", tags="rotating_light")
             sys.exit(EX_CONFIG)
         if any(h in last for h in _HARD_ERR):           # smaller segments won't help — fail fast, loudly
             tail = _err_tail(last)
@@ -880,12 +1026,17 @@ def cmd_submit(args):
     # benign and genuinely worth retrying.
     if "METHOD_ID" in err or "guest image id" in err:
         sys.exit(_guest_mismatch_exit(err))
+    notify(f"proof for {rng} rejected", f"The coordinator rejected the proof for {rng}:\n{err[:1500]}",
+           key="submit-rejected")
     sys.exit(1)
 
 
 # Exit status for "this worker is misconfigured and retrying cannot help" (EX_CONFIG). Distinct from 1
 # so a supervising loop can stop instead of spinning; run-workers.sh breaks on it.
 EX_CONFIG = 78
+# Exit status for "nothing to claim right now" (EX_TEMPFAIL): a busy board, not a fault. run-workers.sh waits
+# longer and does not count it towards NOTIFY_FAIL_STREAK.
+EX_TEMPFAIL = 75
 
 
 def _guest_mismatch_exit(err):
@@ -922,6 +1073,10 @@ def _guest_mismatch_exit(err):
           f"  coordinator    : {theirs}\n"
           f"  Rebuild the guest, or point HAZYNC_HOST at a binary built from the coordinator's guest.\n"
           f"  Nothing this worker proves can land until those two ids are equal.", file=sys.stderr)
+    notify("worker stopped: guest id mismatch",
+           f"This worker's guest id {mine} is not the coordinator's {theirs}, so every proof it made would be "
+           f"rejected. Update the prover binary to the current release, then start the workers again.",
+           key="stopped-guest-id", priority="urgent", tags="rotating_light")
     return EX_CONFIG
 
 def cmd_selftest(args):
@@ -1118,7 +1273,15 @@ def cmd_run(args):
                     raise
                 time.sleep(5 * (k + 1))
         if not res.get("ok"):
-            sys.exit(f"nothing to claim: {res.get('error') or res}")
+            err = str(res.get("error") or res)
+            # Nothing free, this key's claim cap (#319) or the rate limit: normal on a busy board, and the loop just
+            # waits (EX_TEMPFAIL). Anything else is this box -- a clock the coordinator refuses, a signature it
+            # cannot verify (#310), a reserved handle -- and retrying cannot fix it, so the prover is told.
+            if any(s in err for s in ("nothing available", "already holds", "rate limit")):
+                print(f"nothing to claim right now: {err}")
+                sys.exit(EX_TEMPFAIL)
+            notify("claim refused", f"The coordinator refused this worker's claim:\n{err[:1500]}", key="claim-refused")
+            sys.exit(f"nothing to claim: {err}")
         rng = res["range"]
         print(f"claimed block {rng} (yours for {int(res.get('ttl', 3600) / 60)} min; "
               f"if you stop, it reopens by itself)")
@@ -1430,7 +1593,7 @@ def main():
     c, a = argv[0], argv[1:]
     fn = {"id": cmd_id, "pick": cmd_pick, "prove": cmd_prove, "selftest": cmd_selftest,
           "submit": cmd_submit, "run": cmd_run, "spine": cmd_spine, "fold": cmd_fold,
-          "rotate": cmd_rotate}.get(c)
+          "rotate": cmd_rotate, "notify": cmd_notify}.get(c)
     if not fn:
         print(f"unknown command '{c}'\n"); print(__doc__); sys.exit(1)
     if c in ("claim", "prove", "submit") and not a:  # these require a range; don't traceback on a bare call

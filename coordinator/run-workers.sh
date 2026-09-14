@@ -21,6 +21,7 @@
 #   HAZYNC_BASE   Core/secp source root                (default $HOME/hazync-build)
 #   LOG_DIR       per-worker logs                      (default $HOME/hazync-workers)
 #   MODE          prove | fold | mixed                  (default prove)
+#   NOTIFY_FAIL_STREAK  failures in a row before a worker pushes an alert (default 5; alerts need `hazync notify`)
 #
 # WHY FOLDING GETS A MODE. Proving is the expensive job; folding is what turns a heap of per-block
 # receipts into something a stranger can check in ONE download. It costs seconds where a prove costs
@@ -65,6 +66,13 @@ for _n in hazync-worker hazync; do
     [ -f "$_here/$_n" ] && [ -x "$_here/$_n" ] && { CLI="$_here/$_n"; break; }
 done
 [ -n "$CLI" ] || CLI="$_here/hazync"      # keep the old path for the error message below
+
+# Push an alert to the prover's phone through the CLI's `notify send` (ntfy; off until `hazync notify` sets it
+# up). Never fails this script, and the CLI pushes one problem at most once an hour.
+alert() {
+    [ -f "$CLI" ] && [ -x "$CLI" ] && "$CLI" notify send "$1" "$2" --key "$3" --priority "${4:-high}" >/dev/null 2>&1
+    return 0
+}
 
 if [ "$STOP" = "--stop" ]; then
     # Match the loop names this script sets, AND the worker's own command line. The old patterns
@@ -113,13 +121,16 @@ echo "coordinator     : ${want:-<unreachable>}  ($COORD_URL)"
 echo "seg-po2         : $("$HAZYNC_HOST" seg-po2 2>/dev/null | tail -1)"
 
 if [ -z "$mine" ]; then
-    echo "FATAL: could not read a guest id from $HAZYNC_HOST" >&2; exit 1
+    echo "FATAL: could not read a guest id from $HAZYNC_HOST" >&2
+    alert "workers not started: no guest id" "Could not read a guest id from $HAZYNC_HOST on $(hostname), so no worker was started." start-no-id urgent
+    exit 1
 fi
 if [ -n "$want" ] && [ "$mine" != "$want" ]; then
     echo >&2
     echo "FATAL: guest id mismatch — every proof this worker makes would be REJECTED." >&2
     echo "Rebuild against the canonical guest (prover/build-release.sh) or download the current" >&2
     echo "release binary; see reproduce/METHOD_ID." >&2
+    alert "workers not started: guest id mismatch" "This box's prover ($mine) does not match the coordinator ($want), so every proof would be rejected. Nothing was started. Update the prover binary." start-guest-id urgent
     exit 1
 fi
 [ -z "$want" ] && echo "WARNING: coordinator unreachable — starting anyway, id NOT confirmed" >&2
@@ -137,6 +148,7 @@ if [ -z "${SKIP_GPU_SMOKE:-}" ] && command -v nvidia-smi >/dev/null && nvidia-sm
         echo "FATAL: this box has a GPU but cannot prove on it -- nothing was claimed." >&2
         echo "  $(grep -vE '^\s*$' "$smoke_dir/smoke.log" | tail -1 | cut -c1-200)" >&2
         echo "  Fix the GPU/driver (or SKIP_GPU_SMOKE=1 to run anyway). Full log: $smoke_dir/smoke.log" >&2
+        alert "workers not started: this GPU cannot prove" "$(grep -vE '^\s*$' "$smoke_dir/smoke.log" | tail -n 5)" start-gpu urgent
         exit 1
     fi
     rm -rf "$smoke_dir"
@@ -189,14 +201,32 @@ for i in $(seq 1 "$N"); do
             # that does not match the coordinator (#99). Retrying that is the failure mode this loop
             # once had: three GPUs proving for a day into guaranteed rejection, looking busy the whole
             # time. Every other status is a transient worth retrying.
+            # Exit 75 (EX_TEMPFAIL) is "nothing to claim right now", a busy board and not a fault, so it waits
+            # longer and is not counted. NOTIFY_FAIL_STREAK failures in a row push one alert (ntfy, set up with
+            # `hazync notify`), the first success after that pushes another, and a stopped loop pushes too.
+            log="'"$LOG_DIR"'/worker_'"$i"'.log"; fails=0; alerted=0
             while true; do
-                "./$CLI_NAME" '"$job"' >> "'"$LOG_DIR"'/worker_'"$i"'.log" 2>&1
+                "./$CLI_NAME" '"$job"' >> "$log" 2>&1
                 rc=$?
                 if [ "$rc" -eq 78 ]; then
-                    echo "worker '"$i"' stopped: unrecoverable (guest id mismatch, or no usable GPU), see '"$LOG_DIR"'/worker_'"$i"'.log" >&2
+                    echo "worker '"$i"' stopped: unrecoverable (guest id mismatch, or no usable GPU), see $log" >&2
+                    "./$CLI_NAME" notify send "worker '"$i"' ('"$job"') stopped" "$(tail -n 15 "$log")" --key worker-stopped --priority urgent >/dev/null 2>&1
                     break
                 fi
-                [ "$rc" -ne 0 ] && sleep 3
+                if [ "$rc" -eq 75 ]; then sleep 30; continue; fi
+                if [ "$rc" -ne 0 ]; then
+                    fails=$((fails + 1))
+                    if [ "$fails" -eq '"${NOTIFY_FAIL_STREAK:-5}"' ]; then
+                        "./$CLI_NAME" notify send "worker '"$i"' ('"$job"') failed $fails times in a row" "$(tail -n 20 "$log")" --key worker-failing >/dev/null 2>&1
+                        alerted=1
+                    fi
+                    sleep 3
+                else
+                    if [ "$alerted" = 1 ]; then
+                        "./$CLI_NAME" notify send "worker '"$i"' ('"$job"') is working again" "It succeeded after $fails failures in a row." --key worker-recovered --priority default >/dev/null 2>&1
+                    fi
+                    fails=0; alerted=0
+                fi
                 sleep 2
             done
         '

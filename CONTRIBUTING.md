@@ -158,6 +158,24 @@ That pre-flight matters: a worker on the wrong guest id proves happily and has *
 rejected, burning GPU hours for nothing. That is exactly what happens if you keep an old binary after a
 re-baseline, so the script blocks it rather than letting it run.
 
+**Get a push when a worker needs you.** A worker that stops (no usable GPU, a prover binary left behind by
+a re-baseline), keeps failing, or has its claims refused (a clock that is wrong, for example) says so in
+its log, which nobody reads while it runs unattended. Point it at [ntfy](https://ntfy.sh) and it pushes to
+your phone instead:
+
+```
+./hazync notify new          # makes a private topic, saves it, sends a test push, prints the topic
+./hazync notify test         # send another test
+./hazync notify off          # stop
+./hazync notify <topic or https://your-ntfy-server/topic>    # a topic or server of your own
+```
+
+Install the ntfy app and subscribe to the topic it prints. **The topic is the only secret:** anyone who knows
+it can read your alerts and send you fake ones, so keep the generated one rather than choosing a guessable
+name. Each problem is pushed at most once an hour (`HAZYNC_NTFY_REPEAT`). `run-workers.sh` also pushes after
+5 failures in a row (`NOTIFY_FAIL_STREAK`), again when the worker recovers, and when it refuses to start; a
+board with nothing free to claim is not a failure. A push that cannot be sent never stops the work.
+
 Prove as many blocks as you like — just run it again.
 
 **Any height the bridge has reached is provable, not only ones near the frontier.** The coordinator

@@ -229,6 +229,9 @@ ENV = {
                        "since the last one.",
     "cli:HAZYNC_FOLD_CONCURRENCY": "Folds run concurrently within one tree level.",
     "cli:HAZYNC_SPINE_VRANGES_TTL": "Seconds `hazync spine` reuses its copy of `/api/vranges`.",
+    "cli:HAZYNC_NTFY": "An ntfy topic or URL for alerts when this worker stops or cannot work; overrides what "
+                       "`hazync notify` saved. `off` disables.",
+    "cli:HAZYNC_NTFY_REPEAT": "Seconds before the same problem is pushed again.",
     # coordinator/run-workers.sh
     "launcher:COORD_URL": "Coordinator base URL, used for the `/api/meta` guest-id pre-flight.",
     "launcher:LOG_DIR": "Per-worker logs `worker_<i>.log` and bundle directories `bundles_<i>`.",
@@ -237,6 +240,8 @@ ENV = {
     "launcher:HAZYNC_BASE": "Core/secp source root, exported to the workers.",
     "launcher:SKIP_GPU_SMOKE": "Non-empty skips the pre-flight `prove-block` on a box with a GPU (#261).",
     "launcher:HAZYNC_HOME": "Where the handle check looks for `handle`.",
+    "launcher:NOTIFY_FAIL_STREAK": "Failures in a row before a worker loop pushes an alert (`hazync notify`); exit 75, "
+                                  "nothing to claim right now, does not count.",
 }
 
 # Variables the CLI or launcher sets for the processes it starts. Keyed "<source key>:<NAME>".
@@ -763,7 +768,9 @@ def build(root):
     w("")
     w(f"`run-workers.sh [N] [--stop]`: N defaults to `{n_default}`. It checks the host's guest id against "
       "`/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command "
-      "until it exits `78` (`EX_CONFIG`).")
+      "until it exits `78` (`EX_CONFIG`). Exit `75` (`EX_TEMPFAIL`, nothing to claim right now) waits 30 s and is not "
+      "a failure. With alerts set up (`hazync notify`), a loop pushes after `NOTIFY_FAIL_STREAK` failures in a row, on "
+      "recovery and when it stops, and the launcher pushes when it refuses to start.")
     w("")
     w("### Environment")
     w("")

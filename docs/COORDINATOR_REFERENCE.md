@@ -151,6 +151,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 | `spine` | `cmd_spine()` | `hazync spine [n]` | advance the genesis-anchored spine n steps, each absorbing the widest chunk available (default: all) |
 | `fold` | `cmd_fold()` | `hazync fold [n]` | fold n adjacent proven ranges into wider ones (default 1) — helps everyone |
 | `rotate` | `cmd_rotate()` | `hazync rotate <key.hex>` | move an older key's blocks onto this box's identity (both keys sign) |
+| `notify` | `cmd_notify()` | `hazync notify new` | push to your phone (ntfy) when this worker stops or cannot work; also: test \| off \| <topic or URL> |
 
 ### Environment
 
@@ -162,6 +163,8 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 | `WITNESS_DIR` | `str(HOME / 'witnesses')` | constant `WITNESS` | Legacy per-block witnesses for the replay path. |
 | `BUNDLE_DIR` | `str(HOME / 'bundles')` | constant `BUNDLES` | Bundles fetched from the coordinator for the bridge path. |
 | `HAZYNC_ALLOW_DEV_WRITES` | — | `_guard_dev_writes()` | `1`, `true` or `yes` lets a source checkout (`VERSION = "dev"`) POST to the default public coordinator. |
+| `HAZYNC_NTFY` | `''` / — | `_ntfy_url()`, `cmd_notify()` | An ntfy topic or URL for alerts when this worker stops or cannot work; overrides what `hazync notify` saved. `off` disables. |
+| `HAZYNC_NTFY_REPEAT` | `'3600'` | `notify()` | Seconds before the same problem is pushed again. |
 | `HAZYNC_GPU_LOCK` | `'/tmp/hazync-gpu.lock'` | `gpu_lock()` | Lock file serialising GPU jobs on one box; `none` disables it. |
 | `HAZYNC_STALL_MIN` | `'600'` | `_prove_watched()` | Minimum seconds without segment progress before a prove is killed. |
 | `HAZYNC_FIRST_PROGRESS` | `'1800'` | `_prove_watched()` | Seconds allowed before the first segment completes. |
@@ -182,7 +185,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 
 ## Launcher (`coordinator/run-workers.sh`, shipped as `hazync-run-workers.sh`)
 
-`run-workers.sh [N] [--stop]`: N defaults to `4`. It checks the host's guest id against `/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command until it exits `78` (`EX_CONFIG`).
+`run-workers.sh [N] [--stop]`: N defaults to `4`. It checks the host's guest id against `/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command until it exits `78` (`EX_CONFIG`). Exit `75` (`EX_TEMPFAIL`, nothing to claim right now) waits 30 s and is not a failure. With alerts set up (`hazync notify`), a loop pushes after `NOTIFY_FAIL_STREAK` failures in a row, on recovery and when it stops, and the launcher pushes when it refuses to start.
 
 ### Environment
 
@@ -195,6 +198,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 | `HAZYNC_BASE` | `$HOME/hazync-build` | Core/secp source root, exported to the workers. |
 | `SKIP_GPU_SMOKE` | `(empty)` | Non-empty skips the pre-flight `prove-block` on a box with a GPU (#261). |
 | `HAZYNC_HOME` | `$HOME/.hazync` | Where the handle check looks for `handle`. |
+| `NOTIFY_FAIL_STREAK` | `5` | Failures in a row before a worker loop pushes an alert (`hazync notify`); exit 75, nothing to claim right now, does not count. |
 
 ### Set for the workers
 

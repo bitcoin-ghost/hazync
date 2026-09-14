@@ -175,6 +175,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_progress.py --control
+      - name: A worker that stops or keeps failing tells its prover through ntfy (hazync notify)
+        run: cd coordinator && python3 test_worker_notify.py
+      - name: Worker alerts POSITIVE CONTROL (alerts never sent — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_worker_notify.py --control
       - name: release.sh attests the CUDA host it cannot run (#275)
         # The fallback that lets a GPU-less release box publish the CUDA host sat under a STALENESS
         # check, which is true for exactly the fresh artifact that needs it — so it never ran, and
