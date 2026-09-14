@@ -93,7 +93,7 @@ curl -fLOJ https://bitcoinghost.org/hazync/api/spine/proof  # -J: lands as hazyn
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules, checked in **milliseconds** on a laptop, with no node, no peers, no chain data and
 nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
-verifier is a WebAssembly module served in **~295 KB** gzipped (1,065,304 bytes raw) that peaks at
+verifier is a WebAssembly module served in **~295 KB** gzipped (1,064,517 bytes raw) that peaks at
 **1.9 MiB of memory**, small enough for a phone.
 
 N is however far the anchored proof currently reaches, and it grows as the board does. Swap the URL
