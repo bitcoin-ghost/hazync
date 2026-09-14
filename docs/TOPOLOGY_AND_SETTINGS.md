@@ -1,275 +1,113 @@
 # Recommended topology and settings
 
-**As of 2026-08-28.** One page for "what should we actually run, and why" — fleet shape, card, per-box
-settings, guest build flags, provisioning. Everything else in `docs/` is an investigation; this is the
-conclusion those investigations currently support.
+**As of v0.21.4 (2026-09-14), for the canonical CORE guest `37987b85`.** One page for "what should we
+actually run, and why" — fleet shape, card, per-box settings, guest build, provisioning. It states
+conclusions. The CORE measurements behind them are `docs/history/BENCH_8xL40S_2026-09-08.md`,
+`docs/history/MILESTONE_966256_2026-09-10.md` and `docs/history/MILESTONE_966256_RUN4_2026-09-10.md`;
+the stock-guest investigations that preceded them are `docs/history/TEN_MINUTE_BLOCK.md`,
+`docs/history/ACCELERATION.md` and `docs/history/TIER0_RESULTS_2026-08-26.md`. Earlier revisions of this
+page priced the stock guest; their headline numbers are in §7 so they are not quoted again.
 
-⇒ **For the evidence behind these numbers — how the fleet question was answered, and what was got
-wrong on the way — read `TEN_MINUTE_BLOCK.md`.** This page is deliberately short and states
-conclusions; that one carries the measurements, the cross-checks and the post-mortems. If a number
-here ever looks surprising, its working is there.
-
-**Every row is labelled.** MEASURED means it exists in this repo's evidence. INFERRED means arithmetic
-over measured inputs. UNKNOWN means nobody has measured it and the row says so. **A setting with no
-label is a bug in this page.**
+**Every row is labelled.** MEASURED means it exists in this repo's evidence — on the CORE guest unless it
+says *stock*. INFERRED means arithmetic over measured inputs. UNKNOWN means nobody has measured it.
 
 ⚠ **Two rules this project keeps re-learning:**
 
-1. **Never quote a fleet size without saying which framing and which po2 it assumes.** Latency and
-   throughput differ by ~10% of the fleet; po2 22 and po2 20 differ by 1.42x.
-2. **Measure before quoting.** Every superseded number in §8 was, at the time, someone's confident
-   summary of a real measurement.
+1. **Never quote a fleet size without its framing, its card and its po2.**
+2. **Measure before quoting.** Every number in §7 was, at the time, someone's confident summary of a
+   real measurement.
 
 ---
 
-## 0. Two modes — decide which one you are sizing for
+## 0. Two workloads — decide which one you are sizing for
 
-The project has **one goal and two workloads**, and almost every fleet argument this board has had
-came from pricing them as if they were the same thing. `GOALS.md` G2 is one; G6 is the other.
+`GOALS.md` G2 and G6 are one goal and two workloads, and pricing them as the same thing is where most
+fleet arguments on this board came from.
 
 | | **Backfill** (G2) | **Tip-following** (G6) |
 |---|---|---|
-| the work | **138-229 card-years** (1.8-3.0bn inputs @ 2.41 card-s/input) | **~29 L40S continuously** |
 | sized by | budget and calendar | the block interval |
-| per-block latency | **irrelevant** — 880,000 blocks are queued | matters, but only after catch-up |
-| fidelity posture | inputs are a **closed set** — exhaustively testable | inputs do not exist yet |
+| per-block latency | **irrelevant** — the whole chain is queued | matters, once caught up |
+| fidelity posture | inputs are a **closed set**, exhaustively testable | inputs do not exist yet |
 
-⛔ **~29 cards is BREAK-EVEN, not the answer.** It matches the chain's growth and burns down **none**
-of the backlog. Backfill is a separate purchase on top: **+100 cards ≈ 1.4-2.3 years**, **+500 ≈
-0.3-0.5 years**.
-
-⇒ **Practical consequence: §1's latency-vs-lag question is not live yet.** While backfilling you are
-nowhere near the tip, so tip latency cannot be answered until catch-up is in sight — years out at any
-plausible fleet. **Size for throughput; a bounded lag costs nothing that matters.** Revisit §1 when
-catch-up is actually close.
-
-⚖ **The fidelity asymmetry is worth more than it looks.** Backfill's signature set is closed and
-enumerable, so an acceleration can be differential-tested against libsecp on **every input it will
-ever see**. Tip proving cannot be. Since backfill holds 138-229 card-years and tip-following ~29
-cards, a trade that is unacceptable at the tip may be entirely defensible for history —
-hazync#139 is exactly that decision. See `TEN_MINUTE_BLOCK.md` and hazync#139.
+⇒ **While backfilling, size for throughput (§1.2).** Tip latency (§1.1) is not a live question until
+catch-up is in sight.
 
 ---
 
-## 0.5 ✅ MEASURED 2026-08-28 — #139 proves out, and the aggregate distributes
+## 1. Fleet size
 
-Two GPU results move every number below.
+### 1.1 Latency — one block, tip to receipt, inside 600 s
 
-| | result |
-|---|---|
-| **#139 bigint2, GPU proving wall** | **8.00x** (middle path) / **9.10x** (wholesale) — the coprocessor takes ~13%, not the win |
-| **distributed aggregate, 2 workers** | **1.81x** — scenario (c), where 10 min is unreachable at any N, is **dead** |
+**MEASURED — 8 × L40S, 8 chunks (one per card), po2 21, aggregate over 8 `seg-connect` workers**
+(`BENCH_8xL40S_2026-09-08.md`):
 
-Per-verify ECDSA drops **1,723,407 → 140,044 cycles (12.31x)**, and block 962,000 is only **1.8%
-taproot by input**, so #139 accelerates essentially the whole block.
+| block | prevouts | chunk phase (slowest card) | straggler | aggregate | compute total |
+|---|---|---|---|---|---|
+| 966,108 | 8,562 | 709 s | 1.118 | 203.8 s | **912.8 s** |
+| 966,107 | 7,961 | 602 s | 1.048 | 205.8 s | **807.8 s** |
+| 966,106 | 6,644 | 522 s | 1.059 | 189.8 s | **711.8 s** |
 
-⇒ **With #139, a near-tip block needs ~7-9 cards rather than 32.**
-
-⚠ **The aggregate distributes — 1.81x on TWO CARDS (88-91% efficiency). Beyond two cards is
-UNMEASURED.**
-
-⛔ **A "seg-serve is the ceiling" claim was published here and is RETRACTED.** The N=4 arm that
-appeared to show saturation ran **2 worker processes per card on the same two boxes** — no extra
-compute, and GPU concurrency is measured at 0.95-1.03x (rejected three times). It tested nothing.
-→ `TEN_MINUTE_BLOCK.md` §8.14
-
-| | status |
-|---|---|
-| does the aggregate distribute at all? | ✅ yes — scenario (c) is dead |
-| does it scale past 2 cards? | ⛔ **UNMEASURED — needs a THIRD box** |
-| is `seg_serve_cmd` a bottleneck? | ⛔ **UNKNOWN** |
-
-⇒ **The 7-9 card figure stands on the 2-card evidence**, which supports scenario (a) as far as it
-goes. What is not established is whether it holds at fleet scale.
-
-⇒ **The aggregate's witness read is unaffected and remains the largest identified lever** — §7.5
-measured **78.2% of block-validation cycles** as deserialising the witness, and #136's `read_slice`
-fix went to **chunks only**. Worth ~3x on the aggregate, it rides the #139 re-baseline, and it
-shrinks the aggregate rather than needing it to distribute:
-
-| aggregate | cards (a) | if it does NOT distribute |
-|---|---|---|
-| 1,575 s (when this was written) | 7 | impossible at any N |
-| 767 s | **6** | impossible |
-| 497 s | **5** | **24 — viable** |
-| ✅ **405.6 s — MEASURED 2026-09-02** | | **better than this table's best row** |
-
-⇒ **The measurement overtook the projection.** Two workers give 405.6 s; one remote worker with an
-idle coordinator gives 772.4 s, and simply letting the coordinator work too gives **473.1 s — 1.63x
-for no extra hardware and no code change**. The row this table called "viable" has been passed, so
-the "if it does NOT distribute" column no longer describes a hazard: it distributes, and it is not
-the binding constraint. hazync#207 was closed as already-fixed on this evidence — its ~107 s serial
-execute measures **13.2 s**, removed by `read_slice` (#136) landing after the N=2 ceiling was
-observed.
-
-⚠ Measured at N=1 and N=2 only. This refutes the stated *mechanism* of an N=2 ceiling, not a ceiling
-at higher N, which still needs four cards to settle.
-
-### The aggregate, taken apart (2026-08-28)
-
-| lever | worth | where | `METHOD_ID`? |
-|---|---|---|---|
-| **witness read → `write_slice`** | **2.05x** on the aggregate | guest | yes — rides #139 |
-| **pipeline the join tree** | up to **~1.4x at 32 cards** | **host** | **no — ships alone** |
-| ~~resolution~~ | ~4.5 s at 16 chunks — not a floor | — | — |
-| ~~drop `tx_prevouts`~~ | ⛔ breaks the anti-substitution binding | — | — |
-| ~~`seg-serve` dispatch~~ | no evidence it binds | — | — |
-
-⛔ **The join tree is level-synchronous** — every level waits for all of its joins. A 116-segment
-aggregate is 7 levels of `[58, 29, 14, 7, 4, 2, 1]`, so efficiency falls from **93% at 2 cards to 40%
-at 32**. The two-card measurement above is in the one regime where this is invisible.
-
-✅ Under the **bounded-lag** framing the narrow tail costs nothing — block *h*'s tail overlaps block
-*h+1*'s wide segment phase. A performance argument for that framing, not just a cost one.
-
-⛔ **`tx_prevouts` is not payload.** The aggregate recomputes every leaf *because* recomputing is the
-check that a chunk verified THIS input and not a different valid spend. → `TEN_MINUTE_BLOCK.md` §8.15
-
-⚠ **hazync#190 must land too**, or the post-#139 straggler goes to **2.45x** and roughly halves the win.
-
-### ⚖ LEANING (not decided) 2026-08-28: the MIDDLE path over wholesale
-
-The wholesale arm is 15% faster (9.10x vs 8.00x) but buys **at most one card**, and only in the
-pessimistic aggregate case:
-
-| | aggregate 767 s | aggregate 497 s |
-|---|---|---|
-| middle path | **6 cards** | 5 cards |
-| wholesale | 5 cards | 5 cards |
-
-⚠ **This is a leaning, not a decision** — the operator has explicitly not committed. Do not treat it
-as settled, and do not let downstream work assume it.
-
-⇒ **One card looks like a cheap price for keeping Core's ECDSA logic** — DER parsing, low-S handling, the r/s
-checks, the inversion and the final `r == x(R) mod n` comparison all stay libsecp's literal code, and
-only the group arithmetic moves.
-
-⇒ **If that leaning holds, it would retire `HELIX_DUAL_BACKEND.md`.** Helix exists to run wholesale for backfill and
-Core at the tip. If the middle path runs **everywhere**, there is no second backend — no height gate,
-no committed cutover constant, no doubled audit surface, and none of the silent-divergence risk of two
-implementations disagreeing across a cutover.
-
-⚠ The middle path is **not** zero-surface: `double_scalar_mul` is Shamir's trick, so it does not
-preserve libsecp's wNAF/GLV. Much smaller than wholesale, not nil — differential testing across chain
-history remains the load-bearing work.
-
-→ `TEN_MINUTE_BLOCK.md` §8.14 for the full curve and the diagnostic.
-
-#### ⛔ CORRECTED BY LATER MEASUREMENT (2026-09-05)
-
-Four of the numbers above have since been measured, and the caveats resolved in opposite directions:
-
-| §0.5 said | MEASURED |
-|---|---|
-| **9.10x** wholesale | ⛔ **never measured at all.** `hazync_ecdsa_verify_full` existed from `3615a8d` and NOTHING EVER CALLED IT until `patches/0014` — the figure was never produced by a run. The 8.00x middle path IS measured |
-| aggregate **1.81x** on 2 workers | **1.90x** (405.6 s). And 1.63x comes free from letting the idle coordinator work: 772.4 s → 473.1 s, no extra hardware |
-| **~7-9 cards** with #139 | **10** (Core) / **5** (Ghost), `BUILDS.md` §1 |
-| caveat 1: "capped at 1.8x ⇒ 865 s, above the 600 s budget at any fleet size" | ⛔ **DEAD.** 405.6 s. hazync#207 closed as already-fixed: its ~107 s serial execute measures **13.2 s**, removed by `read_slice` (#136) landing after the ceiling was observed |
-| caveat 2: "#190 must land or the straggler goes to **2.45x**" | ⚠ **half right.** Ghost's measured cost-packed straggler is **1.477x** at default constants on a taproot-bearing block — bad, but not 2.45x. The cause is real though: the packer prices Schnorr at 13.77x ECDSA where the measured ratio is **1.97x**, so its model is 135.7% wrong. See hazync#209 |
-
-⚠ The aggregate was measured at N=1 and N=2 only. That refutes the stated *mechanism* of an N=2
-ceiling, not a ceiling at higher N, which still needs four cards to settle.
-
-## 1. Fleet size — first decide which question you are answering
-
-The two framings are not variants of one number. They have different answers, different risks, and
-different open blockers.
-
-| framing | what it means | fleet | status |
-|---|---|---|---|
-| **Throughput (bounded lag)** | keep up with the chain, always ~N blocks behind | **~29 L40S** | INFERRED from measured card-seconds |
-| **Latency (a), aggregate distributes** | one block, tip to receipt, inside 600 s | **~32 L40S** | INFERRED — **assumes an unexercised claim** |
-| **Latency (b), only segments distribute** | as above, resolution stays serial | **~48 L40S** | INFERRED |
-| **Latency (c), nothing distributes** | as above | **fails at any size** (34 min at 32) | INFERRED |
-
-#### With hazync#139's middle path — MEASURED 2026-08-28
-
-Per-verify ECDSA drops **1,723,407 → 140,044 cycles (12.31x)**; block 962,000 is 97% EC and 2.7%
-Schnorr, which risc0-crypto cannot accelerate (no BIP340). Chunk work **14,926 → 2,310 card-seconds**:
-
-| framing | today | **with #139** |
-|---|---|---|
-| (a) aggregate distributes | 32 cards | **7 cards** (9.5 min) |
-| (b) segments only, resolution serial | 48 cards | **10 cards** (9.6 min) |
-| (c) aggregate serial | fails | **fails at any N** |
-| throughput (bounded lag) | 29 cards | **7 cards** |
-
-⛔ **#139 makes the aggregate the binding constraint.** It is untouched — no EC verification happens
-there — so it goes from ~10% of one-card cost to **39%**, and under (c) its 1,575 s alone exceeds the
-600 s budget on any hardware. **The entire remaining chunk-side headroom is 7 → 3 cards**, even with
-infinitely fast chunks. ⇒ Whether the aggregate distributes is now worth more than every card, po2 and
-guest-codegen decision combined.
-
-⚠ These assume hazync#190 has landed. Post-#139 ECDSA and Schnorr diverge and #190's simulation puts an
-unaware packer's straggler at **2.45x**, which would roughly halve the win. And 962,000 is only 2.7%
-Schnorr — #190 calls it "the mildest case available", so blocks with more taproot benefit less.
-
----
-
-#### ⛔ CORRECTED BY MEASUREMENT (2026-09-05) — the table above is a projection, and two rows are wrong
-
-The projections here were made before any of it ran on hardware. What ran since:
-
-| this table said | MEASURED |
-|---|---|
-| **7 cards** with #139 | **10 cards** (Core), **5** (Ghost) — `BUILDS.md` §1, two L40S, real proving |
-| (c) *"fails at any N"*, aggregate 1,575 s | aggregate is **405.6 s** on two workers (772.4 s on one with an idle coordinator; 473.1 s once the coordinator also works — 1.63x, free). It does not exceed the budget |
-| bigint2 projected 7.53x | **4.48x** — the projection under-weighted the ~1.96 G non-ECDSA residual |
-
-✅ **The ⚠ above was right, and is now measured.** "Blocks with more taproot benefit less" holds
-sharply: on block 965,500 (7.7% Schnorr, per-chunk spread 0–40.5%) the Ghost arm's straggler measures
-**2.116x** against 1.438x on 2.7%-Schnorr 962,000, and the packer's own model is **135.7% wrong** there
-because it still prices Schnorr at 13.77x ECDSA when the measured ratio is **1.97x** — the liftx hint
-removes decompression from *both* curves. See hazync#209.
-
-⇒ The conclusion this section draws — *"whether the aggregate distributes is worth more than every
-card, po2 and guest-codegen decision combined"* — does **not** survive the aggregate measuring 405.6 s.
-The binding constraint is the packer's calibration, not the aggregate.
-
-**The arithmetic**, on measured block-962,000 figures — 14,926 chunk card-seconds, 1.05x straggler,
-1,575 s aggregate (1,379 s segment proving + 196 s resolution):
+**INFERRED — the card curve**, fitted to 966,108, the heaviest of the three:
 
 ```
-per block, all in:   14,926 x 1.05  +  1,575   =  17,247 card-seconds
-throughput:          17,247 / 600                =  28.7   =>  ~29 cards
-latency (a):         14,926 x 1.05 / 32 + 1,575 / 32  =  539 s  =  9.0 min
+block ≈ (5,075 / N) × straggler  +  19.2  +  (184.6 × 8 / N)
 ```
 
-### Recommendation: ~29 cards on the throughput framing, unless the product needs tip latency
+| cards | 8 | 10 | 12 | **13** | 16 |
+|---|---|---|---|---|---|
+| block | 15.2 min *(measured 15m13s)* | 12.3 min | 10.3 min | **~9.8 min** | 7.8 min |
 
-⇒ It is the cheapest fleet, and — more importantly — **it is the only one whose card count does not
-depend on an unexercised claim.** Under bounded lag the aggregate never has to distribute across
-cards, because concurrency comes from running *different blocks* at once: `prove_chunk` takes no
-previous receipt, and per-block aggregates are independent of one another. Only the **chain fold**
-carries `add_assumption(prev)`.
+⇒ **~13 L40S for a sub-10-minute CORE block.** Only N=8 is measured. Two caveats pull in opposite
+directions: the straggler is likely to get worse above 8 chunks, and the ~19 s execute has since come
+off the critical path (#236, merged after these runs).
 
-⇒ **Cost: lag, and only lag.** Splitting 29 cards by workload share (chunks are 90.9% of card-seconds)
-gives ~26 on chunks and ~3 on aggregates: ~603 s of chunk time plus a serial ~1,575 s aggregate,
-so **≈36 min — about 3.5 blocks behind the tip** — in exchange for one block per 10 min.
+**MEASURED — rented RTX 4090s, block 966,256** (4,741 txs, 9,079 inputs), po2 21, one chunk per card:
 
-⛔ **The one term that is NOT priced: the chain fold.** It is the actual sequential step and its
-per-block cost has never been measured. If it exceeds 600 s the throughput framing fails at any fleet
-size. It is small by construction — one join against the previous receipt, not a re-proof — but that
-is a construction argument, not a measurement. **Measure it on the next box that is up.**
+| run | cards | chunk phase | aggregate | end to end | GPU cost |
+|---|---|---|---|---|---|
+| 1 | 26 | 243.9 s | 139.4 s | **485.2 s** (8.09 min), attested from logs | $1.191 |
+| 4 | 27 | 247.9 s | 241.2 s | **544.0 s** (9.07 min), receipt on disk | $1.387 |
 
-⚠ If you take the latency framing instead, the **distributed-aggregate check (#153/#157/#161) becomes
-the blocking measurement**, and it needs >= 2 boxes. It is what separates 32 from 48 from "cannot get
-there".
+⚠ At 26–27 cards the aggregate is as large as the chunk phase, but it is not a fixed floor. On the same
+27 receipts the #235 N-sweep on A40s measured assembly **162.5 s at N=4 → 63.5 s at N=26**; run 4's
+128.7 s assembly is most likely coordinator round trips across a geographically spread fleet —
+**inferred, not measured** (`MILESTONE_966256_RUN4_2026-09-10.md`, correction; #252).
+
+### 1.2 Throughput — bounded lag
+
+Concurrency comes from proving *different* blocks at once: `prove-chunk` takes no previous receipt and
+per-block aggregates are independent, so nothing has to distribute across cards to keep pace.
+
+**INFERRED**, block 966,108:
+
+```
+per block:   5,075 chunk card-s  +  184.6 × 8 aggregate card-s  +  19.2 s  ≈  6,570 card-seconds
+throughput:  6,570 / 600  ≈  11 L40S
+```
+
+⚠ One near-tip block, and its aggregate card-seconds come from the fit above rather than a meter. Blocks
+vary: the three in §1.1 span 3,942–5,075 chunk card-seconds.
+
+**The chain fold does not threaten it.** MEASURED on the stock guest: **3.76 s/fold** on an L40S, flat in
+range length (`prover/evidence/fold_and_snark_wrap_1_1000.txt`), and 2.0–3.0 s/fold depending on
+concurrency (`prover/evidence/fold_concurrency_2xL40S.txt`). ⚠ Both over early receipts with small UTXO
+boundaries; per-fold VRAM at high-UTXO heights is UNKNOWN.
 
 ---
 
-## 2. The card: L40S
+## 2. The card
 
 | card | verdict | evidence |
 |---|---|---|
-| **L40S 46 GB** | ✅ **use this** | the baseline every other card is measured against |
-| H100 80 GB | ✗ **0.95x** | 3.9x the memory bandwidth returned *less* throughput |
-| B200 | ✗ **0.91x** | ~8.7% slower at ~3x the power, even after native `sm_100` removed the JIT |
-| L4 | ✗ **37% more expensive per proof** | assembly scales with segment count; the VRAM ladder hides it |
-| 4090 / 3090 (24 GB) | ✗ for po2 22 | a full chunk peaks at **40.6 GB**; they must drop to po2 20, measured **1.42x** slower |
+| **L40S 46 GB** | ✅ the baseline | §1.1 — 8 cards measured |
+| **RTX 4090 24 GB** | ✅ runs the CUDA default po2 21 | 26 and 27 cards on block 966,256; peak **22,478 MiB** of 24,564 (91%) |
+| H100 80 GB | ✗ **0.95x** (stock) | more memory bandwidth bought less throughput — `docs/history/ACCELERATION.md` |
+| B200 | ✗ 8.7% slower than an L40S even with native `sm_100` (stock) | `docs/history/ACCELERATION.md` |
+| L4 | ✗ 37% more expensive per proof (stock) | `docs/history/TEN_MINUTE_BLOCK.md` |
 
-**Three architectures within 9% across a 4x bandwidth difference is a fact about our kernels, not about
-cards.** The card axis is closed — do not re-open it without a new kernel result.
+⚠ **24 GB cards cannot run po2 22** — a stock chunk peaked at 40.6 GB there. At the default po2 21 they
+fit, as measured above.
 
 ---
 
@@ -277,132 +115,57 @@ cards.** The card axis is closed — do not re-open it without a new kernel resu
 
 | setting | value | label | why |
 |---|---|---|---|
-| `HAZYNC_SEG_PO2` | **22 — but you must SET it** | MEASURED | ⛔ **21 is the CUDA default, not 22** (`seg_po2()` in `main.rs`). Setting 22 is worth **~11.5%** and peaks ~40.6 GB, fitting a 46 GB card at 88%. See §3.1 |
-| GPU concurrency | **1** | MEASURED | rejected **three times** at 0.95-1.03x, including on an H100 with 47 GB of 80 free |
-| worker processes / card | 1 today; ceiling **≤1.09x** | MEASURED | the "1.20x" ceiling was corrected downward once the GPU was measured at 91.5% busy |
-| disk per segment work dir | ~**1.6 GB** | MEASURED | boxes have run tight; watch `df` |
-| po2 23 | **do not** | MEASURED | needs ~79 GB (B200-only) **and** two code changes — see §7 |
+| `HAZYNC_LIFTX_HINT` | **`1`, at run time** | MEASURED | the CORE guest's chunk mode reads a pubkey-hint block, so a chunked command (`prove-chunk`, `prove-seg`, `seg-serve`, …) run without it dies with `DeserializeUnexpectedEnd`, which reads as a corrupt fixture. `provision-vps.sh` exports it in `.bashrc`; board workers (`coordinator/hazync`) do not take the chunk path. → `docs/LIFTX_HINT.md` §6 |
+| `HAZYNC_CHUNKS` | **= card count** | MEASURED | 8 vs 16 chunks on 8 cards: mean **+0.2%** over three blocks, sign inconsistent, all six receipts digest-identical. A free operational choice, not a tuning lever |
+| `HAZYNC_SEG_PO2` | **21** (CUDA default; 20 on CPU) | MEASURED | `seg_po2()` in `prover/host/src/main.rs`; every CORE fleet run above used it. po2 22 measured ~11–12% faster on the stock and #139 arms at ~40.6 GB peak — 46 GB cards only, and GPU work must then be serialised. Not measured on CORE |
+| GPU concurrency | **1** | MEASURED (stock) | rejected three times at 0.95–1.03x. `hazync` serialises proves through a GPU lock; a direct `host prove-*` does not (#97) |
+| disk per segment work dir | ~1.6 GB | MEASURED (stock) | watch `df` |
+| po2 23 | **do not** | MEASURED (stock) | ~79 GB (B200-only) and two code changes — §6 |
 
-### 3.1 ⛔ The CUDA default is po2 21, and it leaves ~11.5% on the table
+⚠ **`nvidia-smi utilization.gpu` is kernel residency, not useful work.** Never tune from it.
 
-`docs/SEGMENT_DISTRIBUTION.md` said for a long time that "22 is the default on CUDA". It is not.
-`main.rs` is unambiguous:
-
-```rust
-fn seg_po2() -> u32 {
-    std::env::var("HAZYNC_SEG_PO2").ok().and_then(|s| s.parse().ok())
-        .unwrap_or(if cfg!(feature = "cuda") { 21 } else { 20 })
-}
-```
-
-**MEASURED 2026-08-28**, L40S, one accelerated chunk of block 140,000, two runs each:
-
-| arm | po2 21 | po2 22 | gain |
-|---|---|---|---|
-| stock libsecp | 446, 446, 446 s (189 seg) | **396, 396 s** (93 seg) | **1.126x** |
-| bigint2 | 48, 49 s (18 seg) | **43, 44 s** (9 seg) | **1.111x** |
-| peak VRAM | 22,521 / 22,009 MiB | **40,661 / 40,345 MiB** | 1.8x |
-
-⇒ **po2 22 is ~11-12% faster for ~1.8x the VRAM**, and the gain is **consistent across two
-independent arms** (1.126x and 1.111x), which is what licenses treating it as a property of the setting
-rather than of one workload, and 40.6 GB fits a 46 GB card at 88%. `ACCELERATION.md`'s
-sweep found ~8% on a 415-segment chunk; this confirms the gain **transfers down to a 9-segment chunk**,
-which its own caveat said could not be assumed in the other direction.
-
-⚠ **Two consequences of the doc being wrong.** Any run that did not set the variable was at po2 21, so
-figures labelled "at po2 22" elsewhere were only that if someone set it. And the ~22 GB peak at the real
-default is **half** the 40.6 GB the docs implied, which is the number a fleet's VRAM headroom was being
-sized against.
-
-⛔ **Setting po2 22 carries an obligation: serialise GPU work.** At 88% of the card, two concurrent
-proves OOM — `hazync run` serialises through a lock, a direct `host prove-*` does not (#97). Reproduced
-2026-08-28 by running three proves back to back.
-
-⚠ **`nvidia-smi utilization.gpu` is kernel RESIDENCY, not useful work.** It read 100% at concurrency 1
-and 2 alike while throughput *fell*. Never tune from it.
-
-⛔ **The GPU is ~91.5% busy, not 65% idle.** The older "65% idle" framing came from `vmstat` showing
-the *host* single-threaded, which is a different claim. Anything budgeting for "filling the idle" is
-sized against a gap that is not there.
+hazync#119 — 5 faults in 80 chunk attempts on the 8-card fleet, each restarting a chunk from segment
+zero — is fixed in v0.21.1 (#245) by the vendored `risc0-circuit-rv32im-sys` in `prover/Cargo.toml`.
 
 ---
 
-## 4. Guest build settings
+## 4. Guest build settings — all shipped
 
-⛔ **Every row here moves `METHOD_ID`, and a guest re-baseline resets the board to genesis.** They are
-individually small and collectively worth taking — **batch them all onto the next change that is
-already paying for a re-baseline.** Do not land any of them alone.
+Every row moves `METHOD_ID`, so none is an operator knob. The codegen and window rows shipped in v0.20.0
+(`42417d2`); the libsecp patches became canonical in v0.21.0 (`c12ad67`).
 
-| setting | shipped | best known | gain | label |
-|---|---|---|---|---|
-| C/C++ opt level | `-O2` | **`-O3`** | −0.264% | MEASURED |
-| Rust `lto` | default | **`"fat"`** | −0.486% | MEASURED |
-| Rust `codegen-units` | 16 | **1** | −0.361% | MEASURED |
-| `NDEBUG` | absent | leave absent | −0.0018% | MEASURED — not worth the fidelity question |
-| `ECMULT_WINDOW_SIZE` | 19 | **21** | **−1.245%** | MEASURED — see §4.1 |
-| `ECMULT_GEN_KB` | 22 | **2** | 0% cycles, frees ~10/11 of the table | MEASURED |
-
-The three codegen arms are **additive to within 0.001%** (naive sum −1.159%, combined arm −1.160%), and
-the combined arm is gate-validated: byte-identical journal digest, `ChunkOut` unchanged, and the two
-`METHOD_ID`s differ — proving both arms genuinely rebuilt rather than one answering from a stale binary.
-
-**`ECMULT_GEN_KB` is inert** for this workload: 2, 22 and 86 give bit-identical cycles. It sizes the
-`ecmult_gen` table for computing `k·G` when *signing*; verification uses `secp256k1_ecmult` against
-`pre_g`, sized by `ECMULT_WINDOW_SIZE`, and Hazync only ever verifies. Set it to 2 and reclaim the
-memory for free, during the same re-baseline.
-
-### 4.1 `ECMULT_WINDOW_SIZE` — **21**, settled 2026-08-28
-
-**MEASURED on block 140,000, 212 inputs** — the same workload, harness and metric TIER0 used, so the
-arms are directly comparable:
-
-| window | guest cycles | vs shipped 19 |
+| setting | shipped | measured gain |
 |---|---|---|
-| **19 (shipped)** | 376,662,184 | — |
-| 20 | 375,914,975 | −0.198% |
-| **21** | **371,971,773** | **−1.245%** |
+| C/C++ opt level | `-O3` | −0.264% |
+| Rust `lto` | `"fat"` | −0.486% |
+| Rust `codegen-units` | `1` | −0.361% |
+| `ECMULT_WINDOW_SIZE` | **21** | **−1.245%** — §4.1 |
+| `ECMULT_GEN_KB` | 22, unchanged | 0% — inert for verification, see below |
+| `NDEBUG` | absent | −0.0018%, not worth the fidelity question |
+| field backend + `lift_x` hint | `patches/0012` + `0013` | **4.095x** fewer cycles on block 962,000, journal byte-identical to stock (`docs/BUILDS.md`) |
 
-✅ **This run reproduces `TIER0_RESULTS_2026-08-26.md` exactly** — its control (376,662,184), its
-window-20 figure (375,914,975) and its journal digest
-`607f4a7e259b5570e0acbd74ff649ed5991f1552fef270faf03b3883e8f15fea` all match bit-for-bit, and the
-digest is identical across all three arms here (`all_valid=1 binds=212`). The new arm is therefore a
-clean extension of the existing sweep, not a separate experiment that happens to agree.
+The codegen, window and `NDEBUG` figures are guest cycles on block 140,000 (212 inputs) with stock
+libsecp (`docs/history/TIER0_RESULTS_2026-08-26.md`); the codegen arms were additive to within 0.001%.
 
-⇒ **Ship window 21.** It is worth **−1.245%**, roughly **6x** the −0.198% that window 20 was going to
-buy, and it is the arm E4 specified and never ran.
+**`ECMULT_GEN_KB` is inert**: 2, 22 and 86 give bit-identical cycles, because it sizes the `k·G` table
+used for *signing* and Hazync only verifies. Setting it to 2 would reclaim memory; it moves
+`METHOD_ID`, so it waits for a re-baseline that is happening anyway.
 
-### The "local bump at 20" story was a small-workload artefact
+### 4.1 `ECMULT_WINDOW_SIZE` — 21, shipped
 
-An earlier sweep on block 130,000 with **10 inputs** put window 20 *above* 19 (+0.29%) and read that as
-a local bump that hill-climbing would get stuck behind. At 212 inputs there is **no bump** — the curve
-falls monotonically 19 → 20 → 21. The bump was real at 10 inputs and irrelevant to production, where
-chunks carry **64-180 inputs**.
+MEASURED on block 140,000, 212 inputs, stock libsecp: window 19 **376,662,184** cycles, 20
+**375,914,975** (−0.198%), 21 **371,971,773** (−1.245%). The journal digest is identical across all
+three and reproduces `docs/history/TIER0_RESULTS_2026-08-26.md` bit for bit. Window 21 is the guest
+`build.rs` default and `provision-vps.sh` exports it.
 
-⚠ **The transferable lesson is about workload size, not about windows.** Ten inputs is too little EC
-work to amortise the `pre_g` table, so a small-workload sweep systematically under-rates larger
-windows. Any guest-codegen arm measured on a toy block should be re-run at a realistic input count
-before it is believed — in either direction.
-
-### Consequences
-
-- **The Tier 0 bundle roughly doubles.** TIER0's combined arm measured **−1.160%** using window 20.
-  Swapping in 21 adds ~1.05 percentage points, for an estimated **~−2.2%** — subject to the additivity
-  TIER0 demonstrated (naive sum −1.159% vs combined −1.160%), which has not been re-verified with 21 in
-  the bundle. ⚠ **Re-run the combined arm before quoting −2.2% as measured.**
-- At `GOALS.md`'s scale that is worth roughly **twice** what the bundle was worth — TIER0 priced 1.16%
-  at ~€1,950 across the chain.
-- ⚠ **The `pre_g` table doubles with each window step** (~16 MB at 19 → ~64 MB at 21). The cycle figure
-  above is *net* of the paging that costs, so the win is real as measured — but the guest's memory
-  footprint grows, and nobody has checked that against segment sizing. Check before landing.
-
-⛔ **Do not land it alone.** It moves `METHOD_ID` like every other row in §4; it rides the next
-re-baseline with the bundle.
+⚠ **A small-workload sweep under-rates large windows.** On block 130,000 (10 inputs) window 20 measured
+*worse* than 19; at 212 inputs the curve falls monotonically. Re-run any guest-codegen arm at a
+realistic input count before believing it, in either direction.
 
 ⛔ **Windows ≤15 cannot be swept naively.** `build.rs` regenerates `precomputed_ecmult.c` only above
-window 15; at ≤15 it reuses whatever table is on disk, which after any >15 arm is the wrong one.
-⚠ **And any sweep mutates the shared source tree at `$HAZYNC_BASE`** — back up
-`secp256k1/src/precomputed_ecmult.c` and restore it afterwards, or the canonical build inputs are left
-carrying the last arm's table.
+window 15; at ≤15 it reuses whatever table is on disk. **And any sweep mutates the shared source tree at
+`$HAZYNC_BASE`** — back up `secp256k1/src/precomputed_ecmult.c` and restore it afterwards, or the
+canonical build inputs carry the last arm's table.
 
 ---
 
@@ -410,71 +173,45 @@ carrying the last arm's table.
 
 | setting | value | why |
 |---|---|---|
-| CUDA | **12.8** | stock images ship 13.2; RISC0 3.0.5's kernels do not build on 13.x |
-| `SKIP_GROTH16=1` | on any profiling/benchmark box | `risc0-groth16 0.1.0` hangs on download and costs 3 x 300 s ≈ **15 min of paid GPU time**; only `host snark-wrap` needs it |
-| split phases | `HAZYNC_PROVISION=deps` then `build` | requires the `CUDA_VER` fix — see §7 |
+| CUDA | **12.8** | RISC0 3.0.5's kernels do not build against 13.x (`provision-vps.sh` phase 7; `HAZYNC_CUDA_VER` overrides) |
+| `SKIP_GROTH16=1` | on proving and benchmark boxes | skips `risc0-groth16`; the box proves but cannot `snark-wrap` |
+| split phases | `HAZYNC_PROVISION=deps` then `build` | |
+| CUDA release binary | `sm_80 sm_86 sm_89 sm_90 sm_100` | `prover/build-release.sh` |
 
-⚠ **Check the per-box evidence directory before commissioning a run.** A B200 was provisioned to
-re-test po2 23 before anyone read `~/hazync-b200-evidence-2026-08-25/README.md`, which has the result
-table at the top.
-
----
-
-## 6. Chunking
-
-| setting | value | label |
-|---|---|---|
-| chunks per block, `N` | **fan-out is free** — pick N for latency, not cost | MEASURED |
-| packer | cost-packing worth **1.18x on the slowest chunk** for +0.06% total cycles | MEASURED |
-
-**Fan-out is free.** N=4 vs N=8 on one box, one card, one binary, only N moving: the aggregate moved
-**115.8 s → 116.6 s, +0.7%**, while chunk card-seconds stayed within 1% (1,511 vs 1,525). The
-aggregate's cost is a function of the **block**, not of how many pieces it is split into. An earlier
-`N^1.79` reading was an artefact — its two points changed the block as well as N, from ~670 inputs to
-8,006 — and acting on it would have argued against buying cards, which was exactly backwards.
-
-⚠ **The packer's straggler metric is computed from PREDICTIONS.** It prints 1.00x for a partition that
-measures 1.059x. Do not read it as a measurement.
+⚠ **Check the per-box evidence directory before commissioning a run.** A B200 was once provisioned to
+re-test po2 23 before anyone read the evidence that already answered it.
 
 ---
 
-## 7. What is NOT settled
+## 6. What is NOT settled
 
-Ranked by what changes a decision, not by expected payoff.
+1. **The card curve above 8 chunks on one fleet.** ~13 L40S is inferred from N=8; no L40S fleet between
+   9 and 26 cards has run.
+2. **po2 22 on CORE.** ~11–12% on the stock and #139 arms; unmeasured on CORE, and 46 GB cards only.
+3. **Per-fold cost and VRAM at high-UTXO heights** (§1.2).
+4. **po2 23.** Needs **two** changes: raise `DEFAULT_MAX_PO2` **and** recompute and ship
+   `allowed_control_root("poseidon2", 23)` — raising the cap alone moves the computed root away from
+   the baked `ALLOWED_CONTROL_ROOT` and every proof fails verification. B200-only (~79 GB).
 
-1. **Latency or bounded lag?** No GPU, no code, no measurement — and it decides whether items 2 and 3
-   matter. **Do this first.**
-2. **The chain fold's per-block cost.** UNKNOWN. The only thing that could invalidate the bounded-lag
-   framing outright. Minutes of work on any box.
-3. **Does the aggregate distribute?** (#153/#157/#161.) UNKNOWN, needs >= 2 boxes. Decision-critical
-   *only* under the latency framing.
-4. **#139** — a fidelity decision, ~1.1x on chunks. Nobody has asked what the *smallest* concession
-   worth the bar looks like; the board only prices the two variants that happen to exist.
-5. **po2 23.** Needs **two** changes, not one: raise `DEFAULT_MAX_PO2`, **and** recompute and ship
-   `allowed_control_root("poseidon2", 23)` — raising the cap alone changes the computed root away from
-   the baked `ALLOWED_CONTROL_ROOT` and every proof fails verification. That is what the 2026-08-25
-   B200 run hit. B200-only (~79 GB). Lowest priority: unquantified, paid, and gated on a compatibility
-   decision nobody has taken.
-
-**Closed — do not re-open without new evidence:** the card axis (§2); GPU concurrency (rejected 3x);
-the CUDA kernel lever at the compiler level (5 arms, stock is best); coordinator egress (~18 Mbps
-measured against a ~320 Mbps estimate); `NDEBUG`; C/C++ LTO (`rust-lld` cannot read GCC LTO bytecode);
-a newer risc0.
+**Closed — do not re-open without new evidence:** chunk count (§3); GPU concurrency (rejected 3x); the
+card axis (§2); the CUDA kernel lever at the compiler level (5 arms, stock is best); coordinator egress;
+`NDEBUG`; C/C++ LTO (`rust-lld` cannot read GCC LTO bytecode); a newer risc0.
 
 ---
 
-## 8. Superseded numbers — do not quote these
+## 7. Superseded numbers — do not quote these
 
 | number | status |
 |---|---|
-| aggregate ">3,300 s" | ⛔ **STALE.** Measured 115.8-117.3 s at N=4 on block 741,000; 1,575 s on block 962,000 |
-| aggregate "1,575 s" on 962,000 | ⚠ **SUPERSEDED.** 405.6 s on two workers, 473.1 s with the coordinator also working (2026-09-02) |
-| "the aggregate is the binding constraint / impossible at any N" | ⛔ **FALSE.** The chunk side binds |
-| `N^1.79` aggregate scaling | ⛔ **ARTEFACT.** The block changed, not N |
-| "83 s floor, inferred from a two-worker run" | ⛔ Wrong in size **and shape** — it is the whole aggregate, and it is constant in N |
-| "the GPU is 65% idle" | ⛔ **REFUTED.** 91.5% busy; the `vmstat` evidence showed the *host* single-threaded |
-| "worker processes are worth 1.20x" | ⚠ ceiling corrected to **≤1.09x** |
-| "the guest field-mul is ~50 instructions, 5x52 limbs" | ⛔ It is `field_10x26`, ~200-400 instructions |
-| "14.34 G chunk cycles" (modelled) | ⚠ **measured 14.057 G**, +2.0% high |
-| "nothing above N=2 has ever been run" | ⛔ N=4 and N=8 run 2026-08-27 |
-| "the kernels have never been profiled" | ⛔ Profiled 2026-08-27 |
+| **~29 L40S** throughput, **32–48** latency | ⛔ **stock guest**, priced on block 962,000 before CORE. CORE: ~11 throughput, ~13 latency (§1) |
+| **~7–9 cards** with #139 | ⛔ projection. Measured **10** CORE / **5** Ghost on block 962,000 (`docs/BUILDS.md` §1) |
+| **9.10x** wholesale bigint2 | ⛔ **never produced by a run** — nothing called the wholesale entry point until `patches/0014` (`9b767b5`) |
+| "aggregate scaling past 2 cards is UNMEASURED" | ⛔ 3 workers **2.78x** (stock, `2facde4`); 8 workers 203.8 s (§1.1); the #235 N-sweep to N=26 |
+| "the chain fold's per-block cost is UNKNOWN" | ⛔ 3.76 s/fold (§1.2) |
+| "24 GB cards must drop to po2 20" | ⛔ po2 21 fits, 22,478 MiB peak (§2) |
+| aggregate 1,575 s / 627 s on block 962,000 | ⚠ superseded: 473.1 s with the coordinator also working, 405.6 s on two workers (`docs/BUILDS.md` §1) |
+| "the aggregate saturates at N=2" / "is the binding constraint" | ⛔ false (§1.1) |
+| aggregate ">3,300 s" | ⛔ stale |
+| `N^1.79` aggregate scaling | ⛔ artefact — the block changed, not N |
+| "the GPU is 65% idle" | ⛔ refuted: 91.5% busy |
+| "worker processes are worth 1.20x" | ⚠ ceiling ≤1.09x (stock) |
