@@ -147,12 +147,38 @@ def held_now():
     return held
 
 
-def submit(lo, hi):
+def new_key(tag):
+    """A signing key of its own: (pubkey, sign)."""
+    if server.HAVE_ED:
+        sk = Ed25519PrivateKey.generate()
+        pub = sk.public_key().public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw).hex()
+        return pub, (lambda m, sk=sk: sk.sign(m).hex())
+    return f"{tag:02x}" * 32, (lambda m: "00" * 64)
+
+
+def register(pub, sid):
+    """What the sponsor bot does before a pod uses a key: record it against the sponsorship."""
+    c = server.db()
+    c.execute("INSERT OR REPLACE INTO sponsor_keys(pubkey, sponsorship_id, handle, created_at) VALUES(?,?,?,?)",
+              (pub.lower(), sid, f"SPONSOR: sponsor {sid}", time.time()))
+    c.commit()
+    c.close()
+
+
+def credited(rid):
+    c = server.db()
+    r = c.execute("SELECT pubkey FROM vranges WHERE id=?", (rid,)).fetchone()
+    c.close()
+    return r["pubkey"] if r else None
+
+
+def submit(lo, hi, key=None):
     """Drive the real submit() end to end. Returns (code, obj)."""
+    pub, sign = key or (PUB, _sign)
     rid = str(lo) if lo == hi else f"{lo}-{hi}"
-    receipt = f"receipt-for-{rid}".encode()
-    return server.submit({"range": rid, "pubkey": PUB, "handle": "tester",
-                          "sig": _sign(receipt), "receipt": base64.b64encode(receipt).decode()})
+    receipt = f"receipt-for-{rid}-{pub[:8]}".encode()
+    return server.submit({"range": rid, "pubkey": pub, "handle": "tester",
+                          "sig": sign(receipt), "receipt": base64.b64encode(receipt).decode()})
 
 
 print("== 1. held blocks are never offered to a normal worker ==")
@@ -255,6 +281,7 @@ reset()
 chain(10)
 P = sponsor(11, 14, "proving")
 Q = sponsor(20, 21, "paid", paid=999)                  # below its minimum: never a hold, never moved
+register(PUB, P)                                       # the bot's key for P (section 6 tests anyone else)
 for h in (11, 12, 13):
     code, r = submit(h, h)
     check(code == 200, f"block {h} is accepted (got {code} {r.get('note')})")
@@ -267,6 +294,38 @@ check(not (set(range(11, 15)) & held_now()) or not proven_at, "its hold is over"
 for h in (20, 21):
     submit(h, h)
 check(status_of(Q)[0] == "paid", "a row below its minimum is never moved: it held nothing")
+
+print("== 6. only the sponsor's registered key can prove a held block ==")
+reset()
+chain(10)
+S1 = sponsor(11, 12)
+S2 = sponsor(13, 13)
+S3 = sponsor(20, 22)
+bot1, bot2, bot3, intruder = new_key(1), new_key(2), new_key(3), new_key(9)
+register(bot1[0], S1)
+register(bot2[0], S2)
+register(bot3[0], S3)
+code, r = submit(11, 11, intruder)
+check(code == 403 and f"sponsorship #{S1}" in (r.get("error") or "") and credited("11") is None,
+      f"another prover's proof of held block 11 is refused, and nobody is credited (got {code} {r}, credited {credited('11')})")
+code, r = submit(11, 11, bot2)
+check(code == 403 and credited("11") is None, f"a key registered for a DIFFERENT sponsorship is refused too (got {code} {r})")
+code, r = submit(11, 11, bot1)
+check(code == 200 and credited("11") == bot1[0], f"the sponsorship's own key proves block 11 (got {code})")
+code, r = submit(12, 12, bot1)
+check(code == 200 and status_of(S1)[0] == "proven", f"and block 12, which proves the sponsorship (got {code}, {status_of(S1)[0]})")
+code, r = submit(13, 13, intruder)
+check(code == 403 and f"sponsorship #{S2}" in (r.get("error") or ""), f"held block 13 is refused to another prover (got {code} {r})")
+for h in (20, 21):
+    submit(h, h, bot3)
+check(status_of(S3)[0] == "paid" and 22 in held_now(), "S3's bot proves 20 and 21; block 22 is still held")
+code, r = submit(20, 21, intruder)
+check(code == 200, f"a FOLD of held blocks already proven takes nothing, so anyone may submit it (got {code} {r})")
+code, r = submit(21, 22, intruder)
+check(code == 409 or code == 403, f"a wide range reaching the unproven held block 22 is refused (got {code} {r})")
+check(credited("22") is None, "and block 22 is credited to nobody")
+code, r = submit(30, 30, intruder)
+check(code == 200 and credited("30") == intruder[0], f"blocks that are not held are proven by anyone, as always (got {code})")
 
 print()
 if CONTROL:

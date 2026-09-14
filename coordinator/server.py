@@ -318,14 +318,48 @@ def handle_reserved(h):
     norm = "".join(ch for ch in str(h or "").lower() if ch.isalnum())
     return norm in HANDLE_DENY
 
-def clean_handle(h):
+# Handles beginning "SPONSOR" belong to the sponsor proving bot's registered keys (`sponsor_keys`): the
+# bot submits a sponsorship's blocks as "SPONSOR: <name>". Checked on a folded form so the obvious fakes
+# are caught too: NFKC (fullwidth letters), lowercase, letters and digits only, and the digits that pass
+# for the prefix's letters (0 for o, 5 for s). "SPONSOR :", "s.p.o.n.s.o.r" and "Sp0nsor" all fold to
+# "sponsor...". NOT caught: look-alike letters from other scripts (a Cyrillic о). Also refused: any
+# ordinary handle that happens to start that way ("Sponsorship fan"), which is the price of the rule.
+SPONSOR_HANDLE_PREFIX = "SPONSOR: "
+_HANDLE_FOLD = str.maketrans({"0": "o", "5": "s"})
+
+def _handle_fold(h):
+    t = unicodedata.normalize("NFKC", str(h or "")).lower()
+    return "".join(ch for ch in t if ch.isalnum()).translate(_HANDLE_FOLD)
+
+def sponsor_key_registered(pubkey):
+    if not pubkey:
+        return False
+    try:
+        c = db()
+        try:
+            return c.execute("SELECT 1 FROM sponsor_keys WHERE pubkey=?", (str(pubkey).lower(),)).fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.OperationalError:          # a database from before the table: nothing is registered
+        return False
+
+def handle_cap(pubkey):
+    """MAX_HANDLE, except a registered sponsor key's handle, which fits "SPONSOR: " and a whole name."""
+    return max(MAX_HANDLE, len(SPONSOR_HANDLE_PREFIX) + SPONSOR_NAME_MAX) if sponsor_key_registered(pubkey) else MAX_HANDLE
+
+def handle_refused(handle, pubkey):
+    """handle_reserved, plus the sponsor prefix for any key the sponsor bot has not registered."""
+    return handle_reserved(handle) or (_handle_fold(handle).startswith("sponsor") and not sponsor_key_registered(pubkey))
+
+def clean_handle(h, cap=None):
     """A display handle: printable, trimmed, length-capped, and stripped of HTML-significant characters
     (< > & " ') so it is safe to render on the public dashboard. This is the single server-side choke
     point (CLI, API, and any future consumer all pass through it); the dashboard also escapes at every
-    render sink, so the two layers are defence-in-depth against stored XSS."""
+    render sink, so the two layers are defence-in-depth against stored XSS. `cap` defaults to MAX_HANDLE
+    (handle_cap gives a registered sponsor key room for a whole name)."""
     h = "".join(ch for ch in str(h or "anon")
                 if ch.isprintable() and ch not in "<>&\"'").strip()
-    return (h[:MAX_HANDLE] or "anon")
+    return (h[:(cap or MAX_HANDLE)] or "anon")
 
 def is_hex(s, nbytes):
     """True if s is exactly nbytes of lowercase/upper hex (ed25519 pubkey=32, sig=64)."""
@@ -441,6 +475,11 @@ def init_db():
         min_usd INTEGER, min_sats INTEGER, pledged_sats INTEGER, paid_sats INTEGER,
         invoice_id TEXT, paid_at REAL, proven_at REAL, token_hash TEXT, note TEXT);
       CREATE INDEX IF NOT EXISTS sponsorships_span ON sponsorships(lo, hi);
+      -- The sponsor proving bot's keys: one per sponsorship (sponsorship_id NULL for its trial key). A
+      -- handle beginning "SPONSOR" is refused for any key that is not here, so nobody else can put a
+      -- sponsor's name on the board. The bot inserts a key before any pod uses it.
+      CREATE TABLE IF NOT EXISTS sponsor_keys(
+        pubkey TEXT PRIMARY KEY, sponsorship_id INTEGER, handle TEXT NOT NULL, created_at REAL NOT NULL);
     """)
     # A table from before the minimum and the link (a preview copy made on 2026-09-13) has neither, and
     # CREATE TABLE IF NOT EXISTS leaves it as it is. Add what is missing before indexing token_hash.
@@ -1124,8 +1163,8 @@ def rotate(body):
         # The head needs a contributors row for its handle, and it may never have submitted anything —
         # rotating to a brand-new key is the whole point. Carry the old handle unless one was supplied.
         row = c.execute("SELECT handle FROM contributors WHERE pubkey=?", (old,)).fetchone()
-        handle = clean_handle(body.get("handle") or (row["handle"] if row else None))
-        if handle_reserved(handle):
+        handle = clean_handle(body.get("handle") or (row["handle"] if row else None), handle_cap(new))
+        if handle_refused(handle, new):
             c.close()
             return 400, {"error": "that handle is reserved — please pick another"}
         c.execute("INSERT OR IGNORE INTO contributors(pubkey,handle,first_seen) VALUES(?,?,?)",
@@ -1137,9 +1176,9 @@ def rotate(body):
 def submit_spine(body):
     """Accept an extended spine. Monotonic: a head that does not advance is refused."""
     pk, sig = body.get("pubkey", ""), body.get("sig", "")
-    receipt_b64, handle = body.get("receipt", ""), clean_handle(body.get("handle"))
+    receipt_b64, handle = body.get("receipt", ""), clean_handle(body.get("handle"), handle_cap(pk))
     if not receipt_b64: return 400, {"error": "receipt required"}
-    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
+    if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
     if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
     if HAVE_ED and not is_hex(sig, 64): return 400, {"error": "sig must be 64-byte hex (ed25519)"}
     if len(receipt_b64) > MAX_BODY: return 413, {"error": "receipt too large"}
@@ -1813,7 +1852,7 @@ SPONSOR_PUBLIC_SQL = ("status IN ('paid','proving','proven') AND paid_sats IS NO
 
 # A HOLD (docs/SPONSORSHIP.md, "Holds"): a sponsorship paid at least its minimum and not yet proven keeps
 # its blocks for the sponsor proving bot. No claim or pick ever offers a held block to anyone, and a proof of
-# a held block is still accepted from anyone, as every proof is. The hold ends when the whole span is covered
+# a held block is accepted only from a key registered for that sponsorship (_hold_refusal). The hold ends when the whole span is covered
 # (submit() moves the sponsorship to `proven`) or it is cancelled or refunded. It has no expiry, so /api/state
 # reports a hold on the frontier's next block once it is older than SPONSOR_HOLD_ALERT.
 SPONSOR_HOLD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL"
@@ -1848,6 +1887,33 @@ def _sponsor_mark_proven(c, lo, hi, now=None):
                       (now or time.time(), sp["id"]))
             done.append(sp["id"])
     return done
+
+def _hold_refusal(c, lo, hi, pubkey):
+    """(sponsorship id, first block) if [lo..hi] would newly prove a block held for a sponsorship and `pubkey`
+    is not a key registered for THAT sponsorship in sponsor_keys; else None.
+
+    The sponsor paid for those blocks, so another prover must not take them, and their credit, by submitting
+    them directly: claims never offer them (coverage_and_held), and this closes the other door. Only blocks
+    not yet covered by verified ranges count, so a fold that re-expresses blocks already proven takes nothing."""
+    for sp in _sponsor_holds(c, lo, hi):
+        a, b = max(lo, sp["lo"]), min(hi, sp["hi"])
+        covered = set()
+        for r in c.execute("SELECT lo, hi FROM vranges WHERE lo<=? AND hi>=?", (b, a)):
+            covered.update(range(max(a, r["lo"]), min(b, r["hi"]) + 1))
+        first = next((h for h in range(a, b + 1) if h not in covered), None)
+        if first is None:
+            continue
+        try:
+            mine = c.execute("SELECT 1 FROM sponsor_keys WHERE pubkey=? AND sponsorship_id=?",
+                             (str(pubkey).lower(), sp["id"])).fetchone() is not None
+        except sqlite3.OperationalError:          # a database from before the table
+            mine = False
+        if not mine:
+            return sp["id"], first
+    return None
+
+def _hold_message(held):
+    return {"error": f"block {held[1]:,} is held for sponsorship #{held[0]}: only the sponsor's prover can prove it"}
 
 def _is_public_sponsorship(r):
     return (r["status"] in SPONSOR_PUBLIC and r["paid_sats"] is not None and r["min_sats"] is not None
@@ -2436,7 +2502,9 @@ def claim(body):
     and the one worth keeping.
     """
     pk = body.get("pubkey", "")
-    handle = clean_handle(body.get("handle"))
+    handle = clean_handle(body.get("handle"), handle_cap(pk))
+    # A claim writes the handle to `contributors`, so it takes the same handle rules as a submit.
+    if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
     nonce = str(body.get("nonce") or "")[:64] or None
     now = time.time()
     _blocker = frontier_hi() + 1        # read OUTSIDE the lock — see the note at its use below
@@ -2711,9 +2779,9 @@ def _tiled_by_verified(c, lo, hi):
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
-    handle = clean_handle(body.get("handle"))
+    handle = clean_handle(body.get("handle"), handle_cap(pk))
     if not (rid and pk and receipt_b64): return 400, {"error": "range, pubkey, receipt required"}
-    if handle_reserved(handle): return 400, {"error": "that handle is reserved — please pick another"}
+    if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
     if not parse_any_range(rid): return 400, {"error": "invalid range id"}
     # #281: refuse a wide range that starts INSIDE existing coverage without being backed by it.
     #
@@ -2782,6 +2850,14 @@ def submit(body):
             r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
             c.close()
     if r["status"] == "verified": return 409, {"error": "already proven"}
+    # A held block is proven only by its sponsorship's registered key (_hold_refusal). Checked here, before
+    # the expensive verification, and again when committing, in case a hold started in between.
+    with _lock:
+        c = db()
+        _held = _hold_refusal(c, int(r["lo"]), int(r["hi"]), pk)
+        c.close()
+    if _held:
+        return 403, _hold_message(_held)
     # 2. expensive verification OUTSIDE the lock (concurrent submits for different ranges run in parallel),
     #    but bounded by _verify_sem so a burst can't spawn unlimited STARK verifications and OOM the box.
     with _verify_sem:
@@ -2795,6 +2871,10 @@ def submit(body):
         if r2 and r2["status"] == "verified":
             c.close()
             return 409, {"error": "already proven"}   # another submit won the race while we were verifying
+        _held = _hold_refusal(c, int(r["lo"]), int(r["hi"]), pk)
+        if _held:
+            c.close()
+            return 403, _hold_message(_held)
         c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
                   " VALUES(?,?,?,?,?,?,?,?)", (rid, pk, handle, sha, sig, int(ok), note, time.time()))
         if ok:
