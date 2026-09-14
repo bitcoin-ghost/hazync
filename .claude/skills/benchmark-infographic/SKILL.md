@@ -27,13 +27,16 @@ pod is terminated there is no way to reconstruct it, and the graphic loses its w
 cd <skill dir>
 python3 build_data.py <evidence-dir> run_data.json   # bundle + energy integral
 
+# Every renderer reads sys.argv[1] and falls back to run4_data.json, so PASS THE FILE to each one.
+# Output names are hard-coded to run 4's and overwrite the previous run's; rename after each step.
+
 # full version -- every card labelled, phase markers, fleet and chunk stats
-python3 render.py      run_data.json                 # poster.png + animated .gif
-python3 render_svg.py  run_data.json                 # poster.svg (vector)
+python3 render.py      run_data.json                 # run4-poster.png + run4.gif
+python3 render_svg.py  run_data.json                 # run4-poster.svg (vector)
 
 # minimal version -- for social; traces recede to texture, stats cut to three figures
-python3 make_min.py                                  # run4-min.png + run4-min.gif
-python3 render_credits.py                            # run4-credits.png
+python3 make_min.py    run_data.json                 # run4-min.png + run4-min.gif
+python3 render_credits.py run_data.json              # run4-credits.png
 
 python3 -c "d=open('run_data.json').read();t=open('artifact_template.html').read();\
 open('trace.html','w').write(t.replace('__DATA__',d))"
@@ -86,7 +89,9 @@ driver log. Set it per run or the start/end offsets are meaningless.
   that reads as visual noise across 27 stacked rows; power is smooth and shows the ramp, plateau and
   fall-off cleanly. Utilisation is a toggle on the HTML master.
 - **The aggregate window carries its own breakdown.** The chunk traces stop well before the run does
-  — on run 4 at +263 s of 544 s — and the aggregate is the *larger* half. Left as blank axis it reads
+  — on run 4 the chunk phase ended at +287.9 s of 544.0 s (the slowest single chunk took 263.3 s) —
+  and from there to VERIFIED is 256.1 s, longer than the chunk phase's 247.9 s. (The aggregate's own
+  accounting, 241.2 s, is slightly *shorter*: 14.9 s of that window falls outside it.) Left as blank axis it reads
   as nothing happening. It gets a shaded band with its three sub-phases and a note that the workers
   were attached but the per-card samplers had already exited, so there is genuinely nothing to plot.
 - **Colour by site**, from the house palette. Six tonally-matched hues, with the accent going to the
@@ -120,10 +125,11 @@ seventh country into the run 4 write-up before it was caught.
 
 ## What is still missing
 
-⛔ **The join tree has no timing.** `seg-serve` prints `joins N/584` progress lines throughout
-assembly, but the run driver's poll only greps `VERIFIED|digest|TOTAL|execution|worker wall|assembly`,
-so they are never captured and the pod is gone by the time anyone wants them. Add `joins` to that
-grep and a real fold curve becomes drawable — it is the most interesting line the graphic could
+⛔ **Run 4's join tree has no timing.** `seg-serve` prints `joins N/584` progress lines throughout
+assembly, and run 4's driver poll did not capture them. Since #243 (`9c745e8`)
+`tools/milestone/run_continuous.sh` does: each aggregate poll appends `<offset> <n>/<total>` to
+`$S/joins.tsv`. `build_data.py` does not read that file yet, so a run made with the new driver has the
+data for a real fold curve and nothing draws it — it is the most interesting line the graphic could
 carry, and the only reason assembly is shown as a shape rather than a trace.
 
 ## Gotchas hit while building this

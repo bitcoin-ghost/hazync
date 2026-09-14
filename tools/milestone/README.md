@@ -59,8 +59,8 @@ verified digest was lost. Match `^hazync-host-cud`, or use `ps -eo args`.
 
 - **The poll fans out.** It used to make 27 ssh round-trips one after another, so a tick cost ~20 s
   and the last chunk of run 4 sat finished and unnoticed for 24.9 s — the largest recoverable waste
-  in the run. Probes now run in parallel into `$S/_probe/` and a tick is ~1 s, with the sleep cut
-  from 8 s to 3 s.
+  in the run. Probes now run in parallel into `$S/_probe/` and a tick is ~1 s, with the chunk-phase
+  sleep cut from 8 s to 3 s. The aggregate/joins poll still sleeps 8 s.
 - **The join tree is recorded.** `seg-serve` prints `joins N/584` throughout assembly and nothing
   captured it, so the 128.7 s fold had no timing anywhere. The aggregate poll now greps it and
   appends `<offset> <n>/<total>` to `$S/joins.tsv`.
@@ -78,5 +78,7 @@ VRAM, temperature, power, clocks), `host.txt`, and `aggw.log` — the worker's o
 aggregate work.
 
 ⚠ `facts.json` has a field-shifting defect: its `gpu` object was built by splitting `nvidia-smi` CSV
-on spaces rather than commas, so `name`/`uuid`/`driver`/`vram_total_mib` are offset by one.
+on spaces rather than commas (`pod-prove.sh`, `read -r GNAME GUUID …`), so every field after `name` is
+shifted by one fewer than the number of words in the GPU name — by three for `NVIDIA GeForce RTX
+4090` — and the last field swallows the rest of the line.
 `host.txt` carries the same data correctly.
