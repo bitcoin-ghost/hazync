@@ -247,6 +247,14 @@ jobs:
         run: |
           cd coordinator
           python3 test_genesis.py --control
+      - name: One spelling per range, and a block with its own proof is not proved again
+        # `5-5`, `05`, `+5` and ` 5` each named block 5 afresh, so a proven block could be verified and
+        # stored again without limit. A block covered only by a wide range can still get its own proof.
+        run: cd coordinator && python3 test_canonical_ids.py
+      - name: Canonical ids POSITIVE CONTROL (guards removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_canonical_ids.py --control
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls

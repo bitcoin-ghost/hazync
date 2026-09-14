@@ -1042,6 +1042,22 @@ def cmd_selftest(args):
     else:
         sys.exit("SETUP INCOMPLETE — fix the ✗ items above before `hazync run`.")
 
+def _own_proof(n):
+    """(handle, proof path) if block n already has its OWN single-block proof on the board, else None.
+
+    A wide range covering n does not count: a block proven only inside a range may still get its own
+    proof (that is how a missing per-block receipt is repaired). Advisory only -- an older coordinator
+    without /api/block, or any error, means "not known" and proving goes on; the coordinator refuses a
+    duplicate at submit regardless."""
+    try:
+        d = json.loads(get(f"/api/block/{n}"))
+    except (urllib.error.HTTPError, SystemExit, ValueError):
+        return None
+    for p in d.get("proofs") or []:
+        if p.get("lo") == n and p.get("hi") == n:
+            return p.get("handle"), p.get("proof") or f"/api/proof/{n}"
+    return None
+
 def cmd_run(args):
     # FREE-RUNNING (#37). There is no claim, no lease, no heartbeat and nothing to hand back: proving
     # is unallocated, so a worker that dies mid-block leaves no state behind. That removes the entire
@@ -1067,6 +1083,14 @@ def cmd_run(args):
         for probe in sorted({lo, hi}):
             if not witness_in_window(probe):
                 sys.exit(f"block {probe} has no witness on the coordinator yet — nothing was started.")
+        # A block that already has its own proof is refused at submit. Ask first, so that refusal costs
+        # nothing instead of a whole prove.
+        if lo == hi:
+            _mine = _own_proof(lo)
+            if _mine:
+                _by = f", by {_mine[0]}" if _mine[0] else ""
+                sys.exit(f"block {lo} is already proven{_by} — proving it again adds nothing. Check that proof "
+                         f"yourself: {COORD}{_mine[1]}  (`hazync run` with no argument picks a block nobody has proven).")
     else:
         # Claim the earliest block nobody has taken or finished. One block, one hour, no heartbeat.
         #
