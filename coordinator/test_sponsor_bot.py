@@ -73,6 +73,7 @@ class FakeRunPod:
         self.deploys, self.terminations = [], []
         self.agents = []                    # the User-Agent of every request
         self.refuse_deploy = False          # answer deploys with an API error instead of a pod
+        self.delay = 0.0                    # seconds every answer takes, to stand in for a slow machine
         self.max_live, self.n = 0, 0
         self.lock = threading.Lock()
         fake = self
@@ -82,6 +83,7 @@ class FakeRunPod:
                 pass
 
             def do_POST(self):
+                time.sleep(fake.delay)
                 agent = self.headers.get("User-Agent") or ""
                 fake.agents.append(agent)
                 if not agent or agent.startswith("Python-urllib"):
@@ -216,6 +218,22 @@ class FakeRunner:
 def fast_clock(speed=3600.0):
     t0 = time.time()
     return lambda: t0 + (time.time() - t0) * speed
+
+
+class VirtualTime:
+    """Simulated time that moves only when the bot sleeps, `speed` simulated seconds per real second slept. How
+    slow the machine is then cannot add simulated time between two of the bot's looks. The fake pods still
+    prove on real time."""
+
+    def __init__(self, speed=3600.0):
+        self.t, self.speed = time.time(), speed
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s * self.speed
+        time.sleep(s)
 
 
 IDHOME = tempfile.mkdtemp(prefix="sponsor_ids_")
@@ -475,16 +493,28 @@ check(len(api.deploys) == 1 and not api.live() and "over the" in note,
 
 # ---------- the total cap ----------
 print("== the total cap ==")
-reset()
-api = FakeRunPod()
-held = sponsor(4000, 4099)
-bot = make_bot(api, FakeRunner(per_block=0.3), max_pods=2, max_usd=0.5, max_usd_per_hour=2.0, blocks_per_pod=10)
-check(bot.run() == "budget", "the run stops on the total cap")
-spent = bot.spend()
-check(api.deployed() <= set(api.terminations) and not api.live(), "reaching the total cap terminates every pod")
-check(0 < spent <= 0.55, f"spend stops at the cap (${spent:.3f} of $0.50)")
-check(status_of(held) in ("paid", "proving"), "an unfinished sponsorship stays held")
-check(q("SELECT COUNT(*) AS n FROM sponsor_work WHERE outcome IS NULL")[0]["n"] == 0, "no work row is left in flight")
+# The cap is checked once a look, so spend may pass it by at most one look's worth: a 0.01 s tick is 36 simulated
+# seconds, at most $0.02 at the $2.00/h cap. On wall time at 3,600x, every millisecond the machine is slow adds a
+# simulated second too, and a slow CI runner reached $0.566 (2026-09-14, #313). An API that takes 30 ms to answer
+# reproduces it: $0.516 with none, $0.544 at 10 ms, $0.585 at 30 ms. So these runs use simulated time that moves
+# only when the bot sleeps. --control keeps wall time, and the slow run must then go over.
+ONE_LOOK_USD = 2.0 * 0.01
+for delay, what in ((0.0, "a fast API"), (0.03, "an API that takes 30 ms to answer")):
+    reset()
+    api = FakeRunPod()
+    api.delay = delay
+    held = sponsor(4000, 4099)
+    vt = VirtualTime()
+    timing = {} if CONTROL else {"clock": vt.clock, "sleep": vt.sleep}
+    bot = make_bot(api, FakeRunner(per_block=0.3), max_pods=2, max_usd=0.5, max_usd_per_hour=2.0, blocks_per_pod=10,
+                   **timing)
+    check(bot.run() == "budget", f"the run stops on the total cap ({what})")
+    spent = bot.spend()
+    check(api.deployed() <= set(api.terminations) and not api.live(), f"reaching the total cap terminates every pod ({what})")
+    check(0.5 <= spent <= 0.5 + ONE_LOOK_USD + 1e-9,
+          f"spend stops within one look of the cap, however slow the machine (${spent:.3f} of $0.50, {what})")
+    check(status_of(held) in ("paid", "proving"), f"an unfinished sponsorship stays held ({what})")
+    check(q("SELECT COUNT(*) AS n FROM sponsor_work WHERE outcome IS NULL")[0]["n"] == 0, f"no work row is left in flight ({what})")
 
 # ---------- a stalled pod ----------
 print("== a stalled pod ==")
