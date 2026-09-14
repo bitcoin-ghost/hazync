@@ -1,6 +1,11 @@
+> **Historical record — outcome as of 2026-09-14.** Superseded by `docs/BUILDS.md`. Three of the four levers
+> shipped via #208 (merged 2026-09-05, released in v0.21.0): Tier 0 codegen, the aggregate witness encoder
+> (`PackedHash`), and join-tree pipelining in `seg-serve`. The #139 middle path did not ship in CORE (GHOST
+> channel only). The 6-card target was not met: CORE measured 10 L40S (`docs/BUILDS.md` §1).
+
 # The four-lever stack — plan of record
 
-**Status: IN FORCE from 2026-08-28.** This document exists because the implementation of one of
+**Status (2026-08-28): plan of record at the time** — see the outcome banner above. This document exists because the implementation of one of
 these levers was lost to a WSL2 VM death while sitting uncommitted in `/tmp`. Everything needed to
 rebuild each lever is written down here. **Commit early on every branch; do not hold work in a
 worktree under `/tmp`.**
@@ -12,7 +17,7 @@ worktree under `/tmp`.**
 Every row of the stack table this document used to lead with was a PROJECTION. The one row that has
 since been measured moved by 40%: bigint2 on block 962,000 was projected at 7.53x and **measures
 4.48x** (execute mode). The projection was built from measured primitives and still under-weighted
-the non-ECDSA residual. → `TIP_BLOCK_BIGINT2_2026-08-28.md` · [[feedback_only_measured_numbers]]
+the non-ECDSA residual. → `TIP_BLOCK_BIGINT2_2026-08-28.md`
 
 ⇒ **No fleet size is stated in this document until a proving measurement exists.**
 
@@ -60,8 +65,8 @@ beside any figure taken from it.**
 | # | branch | lever | worth | side | moves `METHOD_ID`? |
 |---|---|---|---|---|---|
 | 1 | `archive/feat-bigint2-middle` | #139 middle path | 32 -> 8 cards | guest | **yes** |
-| 2 | `feat/aggregate-witness-read` | aggregate witness deserialisation | see 2.2 | guest + host | **yes** |
-| 3 | `feat/join-tree-pipelining` | remove the level barrier | ~1.4x at 32 cards; 7-8% margin at 6 | **host** | **no** |
+| 2 | `archive/feat-aggregate-witness-read-v2` | aggregate witness deserialisation | see 2.2 | guest + host | **yes** |
+| 3 | `archive/feat-join-tree-pipelining-v2` | remove the level barrier | ~1.4x at 32 cards; 7-8% margin at 6 | **host** | **no** |
 | 4 | `archive/feat-tier0-codegen` | guest codegen flags | ~2% | guest build | **yes** |
 
 Three of four move `METHOD_ID`, so they ship as **one re-baseline batch**. Lever 3 is host-side and
@@ -83,7 +88,7 @@ handling, r/s checks, inversion and the final comparison.
 ECDSA figure — this is a ceiling, not a tip number. Exhaustive differential testing over the
 historical signature set is **not started and load-bearing**.
 
-### 2.2 `feat/aggregate-witness-read` — MEASURE FIRST, do not write an encoder yet
+### 2.2 `archive/feat-aggregate-witness-read-v2` — MEASURE FIRST, do not write an encoder yet
 
 `write_aggregate_env` does `b.write(w)`; `write_chunk_inputs` already does `write_slice(&padded(..))`
 from #136. The aggregate never got that fix, and 78% of block validation is deserialising the witness
@@ -106,7 +111,7 @@ instrument `to_vec` per sub-structure *before* writing an encoder. **First commi
 instrumentation.** At 1.54x, six cards runs ~9.6 min rather than 9.1 — so the stack needs levers 3
 and 4 to hold the margin.
 
-### 2.3 `feat/join-tree-pipelining` — host-side, ships alone
+### 2.3 `archive/feat-join-tree-pipelining-v2` — host-side, ships alone
 
 The join driver is **level-synchronous**: every level waits for all of its joins before the next
 starts. `prover/host/src/main.rs:4500-4528`, and a second site in `seg_serve_cmd` near line 5115:
@@ -157,6 +162,8 @@ Two guards, both from real failures:
 
 **#190, the type-aware packer, must land** — without it the post-#139 straggler goes to 2.45x and
 roughly halves the win. It is open with checks pending. Treat it as a gate on the whole stack.
+*(2026-09-14: #190 was closed unmerged on 2026-08-31 as superseded; the per-curve packing constants
+landed with #208.)*
 
 ## 4. Integration and benchmarking
 

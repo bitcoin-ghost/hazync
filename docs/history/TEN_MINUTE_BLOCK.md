@@ -1,3 +1,8 @@
+> **Historical record.** Superseded by `docs/TOPOLOGY_AND_SETTINGS.md` and `docs/BUILDS.md` (what to run) and
+> `MILESTONE_966256_RUN4_2026-09-10.md` — what is current: the 600 s target was met (block 966,256 in 544.0 s on
+> 27 rented RTX 4090s), and measured L40S card counts are 10 CORE / 5 GHOST (`docs/BUILDS.md` §1). Corrections
+> dated 2026-09-14 are marked inline.
+
 # The ten-minute block — one denominator, and how the fleet question was actually answered
 
 **Target, stated as a number instead of an aspiration: prove a near-tip block in 600 seconds.**
@@ -16,7 +21,7 @@ spill test (§8.1-8.3), the fan-out N=4/N=8 run and its cross-box control (§8.1
 witness-read finding (§7.5), the flow map (§7), and the post-mortems on the stale `>3,300 s` aggregate
 (§8.4) and the backwards `N^1.79` fit (§8.12).
 
-⇒ **For "what should we actually run", read `TOPOLOGY_AND_SETTINGS.md`.** It is the reference sheet and
+⇒ **For "what should we actually run", read `../TOPOLOGY_AND_SETTINGS.md`.** It is the reference sheet and
 it is deliberately short. This file is why those numbers are believed, which is the part that stops
 them circulating without their labels.
 
@@ -142,14 +147,14 @@ engineering one, and it is now the cheapest question on the board — it needs n
 | Preflight overlap (E9, risc0#3201 fork) | **≤1.09x** | — | none | no | see §3 — **should now close** |
 | More cards | — (latency only) | — | none | no | not a *cost* lever — but see §8.12/§8.13, it is the live *latency* lever |
 | **#139 middle path** | 5.25x | — | **~85% of Core** | yes | measured execute-derived |
-| **#139 wholesale + type-aware packer** | **6.95x** | — | **~95% of Core** | yes | 7.18x MEASURED at proving time |
+| **#139 wholesale + type-aware packer** | **6.95x** | — | **~95% of Core** | yes | ~~7.18x MEASURED at proving time~~ *2026-09-14: 7.18x is a block bound derived from the n=256 `ec-bench` signature microbenchmark (10.20x proved), not a block measurement; the middle path on block 962,000 measured 4.48x in execute mode (`TIP_BLOCK_BIGINT2_2026-08-28.md`)* |
 | Bounded-lag pipelining (§1.1) | 1.15x-equivalent (bar 1.92x → 1.66x) | **removes it** | none | no | UNPRICED — free to settle |
 | **Witness read via `read_slice`** (§7.5-7.7) | **1.06x now, ~1.34x after #139** | — | **none** | **yes** — batch it | MEASURED 2026-08-27 |
 
 **The conclusion is arithmetic, not judgement:**
 
 ```
-all known zero-fidelity levers, multiplied:  1.012 x 1.09  =  1.106x
+all known zero-fidelity levers, multiplied:  1.012 x 1.09  =  1.103x
 wall(16) after all of them:  83 + 14,331/16  =  979 s  =  16.3 min
 target:                                          600 s  =  10.0 min
 ```
@@ -163,6 +168,7 @@ a measurement, and a search:
 
 1. **Take a fidelity trade (#139).** Even the *middle* path overshoots: `wall(16) = 350 s = 5.8 min`.
    Wholesale with the type-aware packer gives 305 s, and reaches 600 s on **~7 cards**.
+   *(2026-09-14: a projection. Measured on L40S on 2026-09-02: 10 cards CORE, 5 GHOST — `docs/BUILDS.md` §1.)*
 2. **Take the free 1.15x-equivalent** by accepting bounded lag (§1.1) — real, but not sufficient alone.
 3. **Find a lever class nobody has enumerated.** §4 argues there is one, and names where it is.
 
@@ -769,7 +775,9 @@ Normalising by EC verifies gives ~2.06 s/EC across chunks 0-3, with chunk 4 (the
 **2.38 s/EC**. ⇒ the witness read is real but **worth ~15% on the most byte-heavy chunk**, not the
 ~50% that #136's per-chunk figure implies at tip scale.
 
-⛔ **This downgrades #139 on the chunk side to roughly 1.1x, not the 1.5x §7.7 would suggest.** §7.7
+⛔ **This downgrades the witness-read fix on the chunk side to roughly 1.1x, not the 1.5x §7.7 would suggest.**
+*(2026-09-14: this sentence originally named #139. The figure is the witness read's — §7.7 prices
+`read_slice`; #139's ECDSA acceleration is priced separately in §2.)* §7.7
 priced it against `validate_block`; `validate_block` is ~3% of the aggregate (110.9 M cycles of a
 run whose block-validation share is ~107 s of 1,575 s), and a small share of a chunk. The fix is
 still worth taking — it is cheap and it compounds — but it is not the lever.
@@ -790,7 +798,7 @@ already at roofline, ~22.6% unprofiled NTT/bit-reverse assumed flat):
 | optimistic | 1.7x | 4x | **1.54x** |
 
 §8.2 argues the true ceiling is above the 1.70x roofline bound used for `eval_check` here, so these
-are, if anything, conservative. **Every other known zero-fidelity lever combined is 1.106x.**
+are, if anything, conservative. **Every other known zero-fidelity lever combined is 1.103x.**
 
 | | 16 cards |
 |---|---|
@@ -981,6 +989,62 @@ than compared against the previous box's number: 116 s against 117.3 s, resoluti
 16.3 s, chunk times within 1.8% across all four. Two boxes, ~1% apart. That cost 25 extra minutes
 and is the only reason N=8 can be read as a clean single-variable comparison.
 
+### 8.13 What it costs to reach ten minutes
+
+*(Moved on 2026-09-14 from the end of the file, where it had been appended after §8.15, back into
+numeric order. Its text predates §8.14 and §8.15.)*
+
+From measured block-962,000 figures: 14,926 chunk card-seconds, 1.05x straggler, 1,575 s aggregate
+(1,379 s segment proving + 196 s resolution).
+
+| | 32 cards | 48 cards |
+|---|---|---|
+| **(a)** aggregate fully distributes (#153/#157/#161) | **9.0 min** ✅ | 6.0 min ✅ |
+| **(b)** only its segments distribute; resolution serial | 12.2 min | **9.2 min** ✅ |
+| **(c)** nothing distributes | 34 min ❌ | 31 min ❌ |
+
+⇒ **The ten-minute block is now a purchasing decision: ~32 cards under (a), ~48 under (b).** The
+sixteen-card target is not reachable — §8.5's chunk floor alone is 16.3 min — but the goal is, at
+roughly twice the fleet. And §1.1's throughput framing, which needs ~28 cards for the same result,
+is still unpriced and cheaper than all of them.
+
+⏰ **Under the latency framing, the one remaining blocker is scenario (c), and it is the only one that
+fails.** Whether the distributed aggregate works is claimed by #153/#157/#161 and has never been
+exercised *(2026-09-14: it was exercised the same day — §8.14 measured 1.81x on two cards)*. It needs >= 2 boxes rather than one, and it separates "buy 32 cards" from "buy 48" from
+"the fleet cannot get there".
+
+⚠ **But §1.1, priced 2026-08-28, dissolves scenario (c) rather than solving it.** Under bounded-lag
+throughput the aggregate never needs to distribute — several run concurrently on different blocks —
+and the fleet comes out at **29 cards**. So the distributed-aggregate measurement is decision-critical
+only if the product requires tip latency. **Settle the framing before paying for the measurement.**
+
+⇒ **Ranked, what is left (revised 2026-08-28, after §1.1 was priced):**
+
+1. **Decide the framing — latency or bounded lag.** §1.1 is now priced at **29 cards + ~36 min lag**
+   against 32-48 cards at tip latency. It needs no GPU, no code and no measurement; it is a product
+   decision, and **it determines whether items 2 and 4 matter at all.** Do this first.
+2. **The distributed-aggregate check** (>= 2 boxes). Decision-critical *only* under the latency
+   framing, where it separates "buy 32" from "buy 48" from "the fleet cannot get there". Under
+   bounded lag it is an optimisation, because per-block aggregates run concurrently on different
+   blocks. See §1.1.
+3. **The chain fold's per-block cost** — the one term §1.1 could not price, and the only thing that
+   could invalidate the bounded-lag framing outright. Minutes of work on any box that is up; pair it
+   with item 2.
+4. **#139** — a fidelity decision *(2026-09-14: this item read "for ~1.1x on chunks", which is §8.6's
+   witness-read figure, not #139's; #139's middle path measured 4.48x in execute mode on block 962,000,
+   `TIP_BLOCK_BIGINT2_2026-08-28.md`)*, and §2's note that nobody has asked what the
+   *smallest* concession worth the bar looks like still stands.
+5. **po2 23 on a B200**, never quantified — and note it takes **two changes, not one**: raising
+   `DEFAULT_MAX_PO2` also changes the computed `ALLOWED_CONTROL_ROOT` away from the constant baked
+   into `risc0-circuit-recursion`, which is why the 2026-08-25 B200 run produced invalid proofs. The
+   lift programs for po2 23 exist (`lift_rv32im_v2_23.zkr`, `MAX_CYCLES_PO2 = 24`), so it is a missed
+   second step rather than a wall — but shipping a recomputed root is a compatibility decision, since
+   proofs would stop verifying against stock `risc0-zkvm`. It also OOMs on a 46 GB L40S (79 GB peak),
+   so it is B200-only. Lowest priority: unquantified, paid, and gated on a decision nobody has taken.
+
+The kernel lever is closed (§8.11) and chunk cost is EC verification (§8.6), which fidelity rightly
+protects.
+
 ### 8.14 ✅ The aggregate DOES distribute — measured 2026-08-28, and it saturates
 
 §8.13 ranked "does the distributed aggregate work?" as the blocker and noted it had **never been
@@ -1132,7 +1196,7 @@ The aggregate recomputes every accumulator leaf via `coin_leaves_batch` even tho
 
 ⇒ The recomputation **is** the anti-substitution check. Sending less is not available.
 
-#### (b) ⛔ The resolution figures in §8.10 are STALE, and resolution is ~40x cheaper than believed
+#### (b) ⛔ The resolution figures in §8.4 are STALE, and resolution is ~40x cheaper than believed
 
 `seg_serve_cmd`'s own comment estimates resolves at *"roughly 11.35 M cycles each — about 175 s for
 sixteen"*. Measured, with resolves pushed to workers (#153):
@@ -1144,7 +1208,7 @@ sixteen"*. Measured, with resolves pushed to workers (#153):
 
 Linear at **0.28 s per resolve** — the chain model is right, the constant was not.
 
-⛔ **§8.10 records 16.3 s for the same block, same po2, same 4 chunks. That is 14x this measurement**,
+⛔ **§8.4 records 16.3 s for the same block, same po2, same 4 chunks. That is 14x this measurement**,
 and the likeliest explanation is that it predates #153 moving resolves off the coordinator — which is
 exactly the win that issue describes. **Its companion 196 s figure for block 962,000 inherits the
 doubt.**
@@ -1209,54 +1273,3 @@ is unverified. The **shape** — efficiency falling as N rises — follows from 
 ⇒ **Ranked: (1) the witness read, 2.05x, guest, rides the #139 re-baseline. (2) join-tree pipelining,
 up to ~1.4x at 32 cards, host-side, ships alone.** Resolution and the coordinator's execute phase are
 not worth attacking.
-
-### 8.13 What it costs to reach ten minutes
-
-From measured block-962,000 figures: 14,926 chunk card-seconds, 1.05x straggler, 1,575 s aggregate
-(1,379 s segment proving + 196 s resolution).
-
-| | 32 cards | 48 cards |
-|---|---|---|
-| **(a)** aggregate fully distributes (#153/#157/#161) | **9.0 min** ✅ | 6.0 min ✅ |
-| **(b)** only its segments distribute; resolution serial | 12.2 min | **9.2 min** ✅ |
-| **(c)** nothing distributes | 34 min ❌ | 31 min ❌ |
-
-⇒ **The ten-minute block is now a purchasing decision: ~32 cards under (a), ~48 under (b).** The
-sixteen-card target is not reachable — §8.5's chunk floor alone is 16.3 min — but the goal is, at
-roughly twice the fleet. And §1.1's throughput framing, which needs ~28 cards for the same result,
-is still unpriced and cheaper than all of them.
-
-⏰ **Under the latency framing, the one remaining blocker is scenario (c), and it is the only one that
-fails.** Whether the distributed aggregate works is claimed by #153/#157/#161 and has never been
-exercised. It needs >= 2 boxes rather than one, and it separates "buy 32 cards" from "buy 48" from
-"the fleet cannot get there".
-
-⚠ **But §1.1, priced 2026-08-28, dissolves scenario (c) rather than solving it.** Under bounded-lag
-throughput the aggregate never needs to distribute — several run concurrently on different blocks —
-and the fleet comes out at **29 cards**. So the distributed-aggregate measurement is decision-critical
-only if the product requires tip latency. **Settle the framing before paying for the measurement.**
-
-⇒ **Ranked, what is left (revised 2026-08-28, after §1.1 was priced):**
-
-1. **Decide the framing — latency or bounded lag.** §1.1 is now priced at **29 cards + ~36 min lag**
-   against 32-48 cards at tip latency. It needs no GPU, no code and no measurement; it is a product
-   decision, and **it determines whether items 2 and 4 matter at all.** Do this first.
-2. **The distributed-aggregate check** (>= 2 boxes). Decision-critical *only* under the latency
-   framing, where it separates "buy 32" from "buy 48" from "the fleet cannot get there". Under
-   bounded lag it is an optimisation, because per-block aggregates run concurrently on different
-   blocks. See §1.1.
-3. **The chain fold's per-block cost** — the one term §1.1 could not price, and the only thing that
-   could invalidate the bounded-lag framing outright. Minutes of work on any box that is up; pair it
-   with item 2.
-4. **#139** for ~1.1x on chunks — a fidelity decision, and §2's note that nobody has asked what the
-   *smallest* concession worth the bar looks like still stands.
-5. **po2 23 on a B200**, never quantified — and note it takes **two changes, not one**: raising
-   `DEFAULT_MAX_PO2` also changes the computed `ALLOWED_CONTROL_ROOT` away from the constant baked
-   into `risc0-circuit-recursion`, which is why the 2026-08-25 B200 run produced invalid proofs. The
-   lift programs for po2 23 exist (`lift_rv32im_v2_23.zkr`, `MAX_CYCLES_PO2 = 24`), so it is a missed
-   second step rather than a wall — but shipping a recomputed root is a compatibility decision, since
-   proofs would stop verifying against stock `risc0-zkvm`. It also OOMs on a 46 GB L40S (79 GB peak),
-   so it is B200-only. Lowest priority: unquantified, paid, and gated on a decision nobody has taken.
-
-The kernel lever is closed (§8.11) and chunk cost is EC verification (§8.6), which fidelity rightly
-protects.

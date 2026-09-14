@@ -1,3 +1,8 @@
+> **Historical record.** Superseded by `docs/BUILDS.md` (what ships), `docs/FIELD_BIGINT2_BACKEND.md` and
+> `TIP_BLOCK_BIGINT2_2026-08-28.md` — what is current: the bigint2 field backend ships as `patches/0012` in the
+> v0.21.0 CORE guest (canonical id `37987b85`, `reproduce/LINEAGE.tsv`); #139's ECDSA swap is GHOST-only; #119
+> was fixed in v0.21.1. Corrections dated 2026-09-14 are marked inline.
+
 # Task: accelerate libsecp256k1 modular multiplication via the RISC0 bigint2 precompile
 
 ## The board as of 2026-08-21
@@ -46,7 +51,7 @@ This section previously read **"Built and measured, not merged"** and said both 
 `bench/135-on-main` -- a branch that no longer exists on origin (it survives as tag
 `archive/rebaseline-135-compose`). That was wrong for five days and it was believed: on 2026-08-26 it
 sent a whole performance investigation out with "the largest available win is already written and
-unmerged" as its headline recommendation. **The 1.96x is BANKED, not available.** It is in the current
+unmerged" as its headline recommendation. **The 1.96x (the pre-merge model; measured 2.00x on the block, table below) is BANKED, not available.** It is in the current
 guest and in every proof made since the re-baseline.
 
 What they actually bought, MEASURED on block 741000 chunk 1 and recorded on the issues:
@@ -117,6 +122,11 @@ against upstream:
 
 So the machinery for po2 23 exists at every layer we can see, and the failure is **unexplained**.
 
+*(2026-09-14: explained later in this file — the 2026-08-28 update under "po2 23 is a SOFTWARE cap": raising
+`DEFAULT_MAX_PO2` changes the computed `ALLOWED_CONTROL_ROOT` away from the constant baked into
+`risc0-circuit-recursion`, so every po2 23 proof fails verification. It was not #119, which was root-caused
+separately — non-canonical LogUp cells in rv32im accum phase 3 — and fixed in v0.21.1, #245.)*
+
 ⚠⚠ **AND THE ERROR IS #119's EXACT SIGNATURE.** `verify segment: verification indicates proof is
 invalid` is the CUDA prover emitting a receipt that fails its own verification — the fault #119 has
 tracked for months at an unknown rate, with upstream dormant.
@@ -129,7 +139,7 @@ tracked for months at an unknown rate, with upstream dormant.
 **If that holds, po2 23 is a deterministic reproducer for #119.** That is exactly what the upstream
 report (risc0 #3798/#3799, no replies) has lacked: an intermittent 0.13% fault is hard to act on,
 whereas "set `segment_limit_po2 = 23` and it fails every time" is not. Worth confirming on a second
-card and at a second po2 before filing, but it is the strongest lead #119 has had.
+card and at a second po2 before filing, but it is the strongest lead #119 has had. *(2026-09-14: it was not a #119 reproducer — see the note above.)*
 
 What this does NOT establish is the security trade-off recorded beside the constant
 (97 bits at po2 21, 1 bit per po2). That question is untouched: nothing valid was produced to trade.
@@ -149,10 +159,10 @@ Anyone revisiting po2 23 needs a risc0 version whose circuits support it, not a 
 | Option | Gain | New `METHOD_ID`? | Core code no longer proven |
 |---|---|---|---|
 | **More cards** | Near-linear | **No** | **None** — chunks are independent and every parallel proof is independently verified |
-| ~~Host-side pipelining~~ | **REMOVED** — deadlocked CUDA (#147), reverted by #148. Superseded by worker processes: **1.20x on one card** | **No** | **None** |
+| ~~Host-side pipelining~~ | **REMOVED** — deadlocked CUDA (#147), reverted by #148. Superseded by worker processes: ~~**1.20x on one card**~~ *ceiling ≤1.09x: the card measured 91.5% busy (`TEN_MINUTE_BLOCK.md` §3)* | **No** | **None** |
 | Host-side tree-fold | **not supported as the serial section** — a profile names preflight instead | **No** | **None** |
 | **#139 middle path** | **5.25x** on the block (execute-derived) | **Yes** | **~85%** |
-| **#139 wholesale** | **7.18x on the block, MEASURED at proving time** (8.85x execute-derived) | **Yes** | **~95%** |
+| **#139 wholesale** | **7.18x on the block — a bound derived from the n=256 `ec-bench` microbenchmark, not a block measurement** (8.85x execute-derived) | **Yes** | **~95%** |
 
 The pipelining row is CLOSED, not open: it was measured, landed, and reverted. Read "Pipelining
 preflight against prove_core" below before proposing it again. The zero-fidelity lever that remains is
@@ -161,7 +171,7 @@ anything in the last two rows is argued about.
 
 ### What #139 actually costs
 
-An ECDSA verification splits, measured in execute mode at n=16 on `exp/bigint2-ecdsa-bench`:
+An ECDSA verification splits, measured in execute mode at n=16 on `exp/bigint2-ecdsa-bench` (branch gone; tag `archive/bigint2-ecdsa-bench`):
 
 | | cycles | share of the verify |
 |---|---|---|
@@ -257,13 +267,15 @@ follows from the 10.4x divergence, which the real packer is equally blind to.
 
 ### The `METHOD_ID` constraint, which orders everything above
 
-There is exactly one pinned id — `4722cec8` — and no allowlist. The recursion asserts
+There is exactly one pinned id — `4722cec8` — and no allowlist. *(2026-09-14: `4722cec8` was canonical from
+2026-08-04. The id has been re-baselined four times since; the current canonical id is `37987b85`, listed with
+every predecessor in `reproduce/LINEAGE.tsv`.)* The recursion asserts
 `self_id == METHOD_ID`, and every past re-baseline reset the board to genesis. There have been six.
 
 **#136, #137 and #139 all require a new id.** Landing them separately pays that cost three times.
 
 That sets the order of the decision, and it is not the order the issues suggest. #136 and #137 are
-finished, cost nothing in fidelity and are worth 1.96x — but merging them alone spends a re-baseline
+finished, cost nothing in fidelity and are worth 1.96x (modelled; measured 2.00x once merged) — but merging them alone spends a re-baseline
 that #139 would want to spend again. So the question is not "is 8.69x worth 95% of Core?" in isolation.
 It is whether that answer is wanted *before* the next id is spent, or whether the free 1.96x should go
 out now and #139 buy its own re-baseline later.
@@ -278,7 +290,7 @@ because the H100 run has already demonstrated the whole harness working on rente
 > **Update 2026-07-26 — profiled + measured the maximal-Core-safe alternatives.** A cycle profile of a
 > signature-bearing block (execute mode, `RISC0_PPROF_OUT`) confirms the shape this doc assumes:
 > **~69% of a small block is `secp256k1_fe_mul_inner` (47%) + `fe_sqr_inner` (22%)** — the field
-> arithmetic only the (rejected) bigint2 backend below would touch. SHA is 3.4% (already accelerated),
+> arithmetic only the (rejected — but see the 2026-09-14 note below) bigint2 backend below would touch. SHA is 3.4% (already accelerated),
 > paging just 3.8%. So there is no *big* maximal-Core guest-compute win — the cost is the field math
 > we've chosen not to reimplement.
 >
@@ -413,6 +425,10 @@ because the H100 run has already demonstrated the whole harness working on rente
 > not a parameter tuned on the wrong workload, but an answer that already existed.
 >
 > **Update 2026-08-19 — the bigint field backend was BUILT and MEASURED at 1.67x, and rejected.**
+>
+> *2026-09-14: that rejection covered this `sys_bigint` backend. The reopen condition stated below — whether
+> bigint2 is materially cheaper than 678 cycles per multiply — was met (an 83-cycle operation, #208), and a
+> bigint2 field backend shipped as `patches/0012` in the v0.21.0 CORE guest (`docs/FIELD_BIGINT2_BACKEND.md`).*
 > Not the naive multiply swap this file already disproved, but the full field-backend rework it
 > recommends instead: a third libsecp backend holding field elements in precompile-native `[u32; 8]`
 > permanently, so nothing converts per operation.
@@ -796,7 +812,8 @@ prover object, and nothing serialised access to it. It **deadlocked**: hazync#14
 variable. This is the documented CUDA failure mode: once one thread hangs inside the driver, every
 other thread hangs on its next driver call.
 
-**What replaced it.** More worker PROCESSES, which do not share a CUDA context: **1.20x on one card**,
+**What replaced it.** More worker PROCESSES, which do not share a CUDA context: **1.20x on one card** *(2026-09-14: an unconditioned single
+point; the card later measured 91.5% busy, capping this lever at ≤1.09x — `TEN_MINUTE_BLOCK.md` §3)*,
 against the ~6% the in-process pipeline delivered end to end. Removing the pipeline also unblocked
 po2 22, worth 1.15x on chunks and 1.42x on the aggregate.
 
