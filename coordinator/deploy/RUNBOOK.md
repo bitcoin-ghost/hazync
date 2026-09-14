@@ -442,6 +442,14 @@ Handles are HTML-sanitised and reserved/impersonation names (`satoshi`, `admin`,
 env `HANDLE_DENY`) are rejected at claim/submit. To **take down** an abusive entry already on the board,
 add its pubkey (hex, one per line) to `MOD_BLOCK_FILE` (default `coordinator/mod_block.txt`) — it is
 re-read live, so the entry disappears from the leaderboard/board within the cache TTL (~1.5s), no restart.
+That list only hides a key: it does not stop it claiming.
+
+**Claim hogs.** One key holds at most `CLAIM_OPEN_MAX` live claims (default 4); a further claim gets `429`
+until one of its blocks is proven or its claim lapses (`CLAIM_GRACE` without a beat, `CLAIM_TTL` after its
+last beat). Added 2026-09-14 after `ghost:dda215` held 26 to 61 never-beaten claims for blocks another
+contributor then proved. A fleet running more than 4 GPUs under ONE key needs it raised (or a key per box).
+Public requests reach the coordinator through the web box, which is in `RATE_EXEMPT`, so the per-IP rate
+limit does not stop a single client there; the per-key cap does.
 
 ### Notes
 - **Served window** = the claimable set = the blocks the archive bridge has emitted bundles for (up to
