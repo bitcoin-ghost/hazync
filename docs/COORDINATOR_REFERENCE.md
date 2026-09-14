@@ -92,6 +92,7 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `CLAIM_MAX` | `'86400'` | constant `CLAIM_MAX` | Hard cap in seconds from `claimed_at`, whatever the beats. |
 | `CLAIM_GRACE` | `'600'` | constant `CLAIM_GRACE` | Seconds before a claim that has never beaten is released (#296). |
 | `CLAIM_OPEN_MAX` | `'4'` | constant `CLAIM_OPEN_MAX` | Live claims one key may hold at once; a further claim is refused with 429 until one is proven or lapses. `0` means no limit. |
+| `CLAIM_RETAKE_WAIT` | `'3600'` | constant `CLAIM_RETAKE_WAIT` | Seconds before a key may re-take a block its own claim let lapse without a heartbeat; other keys are offered it at once. `0` means straight away. |
 | `BEAT_SKEW` | `'120'` | constant `BEAT_SKEW` | Allowed distance in seconds between a beat's signed `ts` and server time. |
 | `MAX_ATTEMPTS` | `'3'` | constant `MAX_ATTEMPTS` | Failure count at which `/api/state` flags the frontier blocker as needing attention. |
 | `MAX_ENV_FAILURES` | `'12'` | constant `MAX_ENV_FAILURES` | Intended cap for environmental failures. ⚠ Read into a constant that nothing in the file uses. |
