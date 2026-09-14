@@ -229,7 +229,7 @@ the board; retaining receipts; serving witness bundles.
 `coordinator/hazync`, released as `hazync-worker`.
 
 **Trusted for:** holding the contributor key and signing only what it produced — receipt bytes from the
-local host, `<range>:<ts>` beats, rotation messages.
+local host, `<range>:<ts>` beats, `claim:<nonce>:<ts>` claims (#310), rotation messages.
 
 **It trusts the coordinator for:** which block to prove, witness bundles, the pairs and receipts to fold
 (`/api/foldable`, `/api/proof/`), `/api/vranges` for the spine, and the expected guest id.
@@ -264,6 +264,18 @@ including the bare `host`.
 
 A source checkout refuses to POST to the default public coordinator (`_guard_dev_writes`). `run-workers.sh`
 also runs a GPU smoke prove before starting any loop.
+
+**Alerts (`hazync notify`, off unless set up).** The worker and `run-workers.sh` POST alerts to the ntfy URL in
+`$HAZYNC_HOME/ntfy` (mode 600) or `HAZYNC_NTFY`: a title with the handle and host name, and a body that can hold
+a block id, the tail of a worker log, or the coordinator's error text (at most 3,500 bytes). Never the key.
+
+- **The topic is the only secret.** Anyone who knows it can read the alerts and post fake ones to the prover's
+  phone; `hazync notify new` generates an unguessable topic. The ntfy server, `ntfy.sh` by default, sees every
+  alert.
+- **A hostile coordinator can put its own text in a push**: a rejected proof or a refused claim quotes the
+  coordinator's `error`. It cannot trigger more than one push per problem an hour (`HAZYNC_NTFY_REPEAT`).
+- **A hostile or unreachable ntfy server cannot stop the work**: `notify()` gives up after 10 s, never raises,
+  and a launcher never exits over an alert.
 
 ## 7. Verifier CLI and C ABI
 
