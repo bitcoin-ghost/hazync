@@ -3,7 +3,7 @@
 Bitcoin Core's own consensus code, executed inside a RISC0 zkVM, so that a block's validity can be
 **proven once and verified by anyone** without re-executing it.
 
-⏰ **Current as of 2026-09-14 (v0.21.4).** Anything not listed here is in [`history/`](history/README.md),
+⏰ **Current as of 2026-09-14 (v0.21.4); where things stand is [`STATUS.md`](STATUS.md).** Anything not listed here is in [`history/`](history/README.md),
 the development record, which **must not be quoted for numbers** without its corrections. Every release is
 in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 
@@ -11,11 +11,13 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 
 | | |
 |---|---|
+| [`STATUS.md`](STATUS.md) | where it stands: release, guest id, board, open issues, decisions (dated) |
 | [`EXPLAINER.md`](EXPLAINER.md) | what this is, in plain terms |
 | [`GOALS.md`](GOALS.md) | what it is for, and what it is not |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | contributing GPU time to the board |
 | [`SPONSORSHIP.md`](SPONSORSHIP.md) | sponsoring blocks |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | every release, newest first |
+| [`GLOSSARY.md`](GLOSSARY.md) | the terms this repository uses, each tied to the code |
 
 ## Run it
 
@@ -26,7 +28,9 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 | [`BUILDS.md`](BUILDS.md) | the CORE (shipped) and GHOST channels: patches, flags, measured card counts |
 | [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | fleet shape, card and per-box settings |
 | [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a board coordinator |
+| [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md) | every coordinator route and setting, and the worker CLI, generated from the code |
 | [`SPONSOR_BOT.md`](SPONSOR_BOT.md) | the sponsor proving bot |
+| [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | cutting a release, deploying the browser verifier, and re-baselining the guest |
 
 ## Review it
 
@@ -34,9 +38,11 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 |---|---|
 | [`SPEC.md`](SPEC.md) | the specification |
 | [`SOUNDNESS.md`](SOUNDNESS.md) | what a proof does and does not establish |
+| [`THREAT_MODEL.md`](THREAT_MODEL.md) | per component: what it is trusted for, what an attacker can do, and the open items |
 | [`../SECURITY.md`](../SECURITY.md) | security policy and the audit rounds |
 | [`EXTERNAL_REVIEW.md`](EXTERNAL_REVIEW.md) | what still needs outside eyes |
 | [`FUZZING.md`](FUZZING.md) | fuzzing posture: independent oracle, positive control, honest scope |
+| [`../prover/evidence/README.md`](../prover/evidence/README.md) | index of the committed evidence files, with provenance and known issues |
 | [`METHOD_ID_DURABILITY.md`](METHOD_ID_DURABILITY.md) | one `METHOD_ID`, and what we would do the day we are forced off it |
 | [`PROOF_DURABILITY.md`](PROOF_DURABILITY.md) | what keeps a receipt verifiable |
 | [`FIELD_BIGINT2_BACKEND.md`](FIELD_BIGINT2_BACKEND.md) | the coprocessor field backend for libsecp (`patches/0012`) |
