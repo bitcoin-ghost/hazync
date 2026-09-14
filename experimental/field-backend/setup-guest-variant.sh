@@ -8,7 +8,7 @@
 #
 # Cycles are counted in EXECUTE mode, which needs no GPU: sys_bigint is emulated by the executor. This
 # is the same method that produced the 2,299,144-cycle baseline and the +10% result for the naive
-# intercept, both recorded in docs/ACCELERATION.md.
+# intercept, both recorded in docs/history/ACCELERATION.md.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

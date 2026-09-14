@@ -17,12 +17,15 @@ every add needs a conditional subtract of p.
 So the rewrite trades faster muls for slower adds, and whether it nets out depends on a ratio nobody
 has measured. If adds dominate the EC inner loop, no amount of precompile speed rescues it.
 
-Measure first. A day here can save the week that `docs/ACCELERATION.md` budgets for Step 1.
+Measure first. A day here can save the week that `docs/history/ACCELERATION.md` budgets for Step 1.
 
 ## What it does
 
 Copies the pinned secp256k1 v0.5.1 source to a scratch dir, injects a counter into each field entry
-point, builds it natively, and runs N ECDSA verifications. Nothing in the repo or in
+point, builds it natively, and runs N ECDSA verifications. Counters are zeroed after key
+creation and signing, so **pubkey parsing and decompression are outside the counted region** — the
+verifications reuse an in-memory `secp256k1_pubkey`. In the guest that decompression is real work
+(`ge_set_xo_var`, a sqrt; see `docs/history/GHOST_GAINS.md` §1). Nothing in the repo or in
 `~/hazync-build/secp256k1` is modified.
 
 ## Run
