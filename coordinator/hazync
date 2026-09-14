@@ -1099,12 +1099,16 @@ def cmd_run(args):
         # perpetually outrun. All three existed to recover, approximately, what an ordered claim gives
         # exactly. The objections that removed claims (#37) were objections to WIDE claims: at width 1
         # a failure costs seconds, not a 67-minute range.
-        _, pub, handle = identity()
+        sk, pub, handle = identity()
         # #268: POST /api/claim is retried when its response is lost -- inside _open on a timeout or a
         # dropped connection, and here on an unreadable reply (a proxy 5xx page). The server had usually
         # committed the first claim, so every retry used to orphan a block for an hour. One nonce per
         # claim, reused by all of its retries, makes the server hand back the block it already gave.
-        body = {"pubkey": pub, "handle": handle, "nonce": os.urandom(16).hex()}
+        # #310: the claim is signed with this key over "claim:<nonce>:<ts>", so nobody else can claim under it. Its
+        # retries below reuse this body; they land within seconds, well inside the coordinator's clock window.
+        nonce, ts = os.urandom(16).hex(), int(time.time())
+        body = {"pubkey": pub, "handle": handle, "nonce": nonce, "ts": ts,
+                "sig": sk.sign(f"claim:{nonce}:{ts}".encode()).hex()}
         for k in range(3):
             try:
                 res = post("/api/claim", body)

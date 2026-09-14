@@ -458,6 +458,12 @@ frontier block 67,532 every time its claim lapsed, and nobody else was offered i
 behind a claimed block anyway, prove that block directly: `hazync run <n>` needs no claim and is accepted
 whoever holds one.
 
+**Signed claims (#310).** A worker that signs its claim (over `claim:<nonce>:<ts>`, like a beat) is the only one
+whose claims count against its own cap and re-take wait; unsigned claims sent under the same key are counted
+apart, so they cannot fill its slots or keep its blocks from it. A signature that does not verify is refused.
+Workers up to v0.21.4 sign nothing, so unsigned claims stay accepted. Once contributors run a release that
+signs, set `CLAIM_REQUIRE_SIG=1` and restart: unsigned claims then get `403`.
+
 ### Notes
 - **Served window** = the claimable set = the blocks the archive bridge has emitted bundles for (up to
   `tip - HAZYNC_BRIDGE_FINALITY`, default 100). Blocks outside it 404 and the CLI says so; the window grows

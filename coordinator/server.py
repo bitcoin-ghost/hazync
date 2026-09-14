@@ -206,6 +206,12 @@ CLAIM_OPEN_MAX = int(os.environ.get("CLAIM_OPEN_MAX", "4"))
 # or one unworked block consumes that key and nobody else is offered it (the 39,318 rule). Measured 2026-09-14:
 # `ghost:dda215` re-claimed frontier block 67,532 every time it lapsed, for over three hours.
 CLAIM_RETAKE_WAIT = int(os.environ.get("CLAIM_RETAKE_WAIT", "3600"))
+# #310: refuse claims that are not signed by their key. Off by default, because workers up to v0.21.4 sign none;
+# until it is on, an unsigned claim still works but cannot use up a signed claim's cap or re-take wait.
+CLAIM_REQUIRE_SIG = os.environ.get("CLAIM_REQUIRE_SIG", "0") == "1"
+# test_claim_signed.py --control sets this to show its checks can fail: every claim is then unsigned, as before
+# #310. Never set it otherwise.
+_CONTROL_CLAIMS_UNSIGNED = False
 # A claim is LIVE (it holds its block) while it beats within CLAIM_TTL, or has never beaten and is inside
 # CLAIM_GRACE, and is younger than CLAIM_MAX. One definition, for the blocks that are held and for the cap.
 LIVE_CLAIM_SQL = ("status='claimed' AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
@@ -480,7 +486,8 @@ def init_db():
     except Exception: pass
     for col in ("attempts INTEGER DEFAULT 0", "env_failures INTEGER DEFAULT 0", "last_error TEXT",
                 "last_failed_at REAL", "last_assignee TEXT",    # failure tracking
-                "claim_nonce TEXT"):                             # #268: makes a retried claim idempotent
+                "claim_nonce TEXT",                              # #268: makes a retried claim idempotent
+                "claim_signed INTEGER"):                         # #310: the claim was signed by its key
         try: c.execute(f"ALTER TABLE ranges ADD COLUMN {col}")
         except Exception: pass
     for col in ("out_leaves INTEGER", "range_work TEXT",
@@ -2568,6 +2575,25 @@ def claim(body):
     # A claim writes the handle to `contributors`, so it takes the same handle rules as a submit.
     if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
     nonce = str(body.get("nonce") or "")[:64] or None
+    # #310: a claim may be signed by its key over "claim:<nonce>:<ts>", the way a beat is. Only a signed claim speaks
+    # for its key: the cap and the re-take wait below count signed and unsigned claims apart, so claims anyone can
+    # send under a key without holding it cannot use up that key's signed slots or keep its own blocks from it. A
+    # claim that carries a signature must verify; it is refused, never quietly treated as unsigned.
+    signed = False
+    if (body.get("sig") is not None or body.get("ts") is not None) and not _CONTROL_CLAIMS_UNSIGNED:
+        try:
+            ts = int(body.get("ts"))
+        except (TypeError, ValueError):
+            return 400, {"error": "a signed claim needs an integer ts (unix seconds)"}
+        if not nonce:
+            return 400, {"error": "a signed claim needs a nonce"}
+        if abs(time.time() - ts) > BEAT_SKEW:
+            return 400, {"error": f"claim timestamp outside +/-{BEAT_SKEW}s — check your clock"}
+        if not verify_sig(pk, str(body.get("sig") or ""), f"claim:{nonce}:{ts}".encode()):
+            return 403, {"error": "the claim signature does not match that pubkey"}
+        signed = True
+    elif CLAIM_REQUIRE_SIG and not _CONTROL_CLAIMS_UNSIGNED:
+        return 403, {"error": "this coordinator accepts only signed claims: update your worker"}
     now = time.time()
     _blocker = frontier_hi() + 1        # read OUTSIDE the lock — see the note at its use below
     with _lock:
@@ -2589,21 +2615,21 @@ def claim(body):
         # slow prover that beats keeps its blocks. A retry of a claim this key already made was answered
         # above, so a lost response is never refused.
         if CLAIM_OPEN_MAX > 0 and pk:
-            open_n = c.execute("SELECT COUNT(*) FROM ranges WHERE assignee=? AND " + LIVE_CLAIM_SQL,
-                               (pk,) + _live_claim_args(now)).fetchone()[0]
+            open_n = c.execute("SELECT COUNT(*) FROM ranges WHERE assignee=? AND COALESCE(claim_signed, 0)=? AND "
+                               + LIVE_CLAIM_SQL, (pk, int(signed)) + _live_claim_args(now)).fetchone()[0]
             if open_n >= CLAIM_OPEN_MAX:
                 c.close()
                 return 429, {"error": f"this key already holds {open_n} claimed blocks that are not finished "
                                       f"(at most {CLAIM_OPEN_MAX}): prove one, or let one lapse, before claiming "
                                       f"another",
-                             "open_claims": open_n, "max": CLAIM_OPEN_MAX}
+                             "open_claims": open_n, "max": CLAIM_OPEN_MAX, "signed": signed}
         proven, held = coverage_and_held(c, now)
         # CLAIM_RETAKE_WAIT: the blocks this key's own never-beaten claims let lapse are held FOR THIS KEY, in both
         # the frontier re-offer and the scan below. Every other key is offered them as soon as the grace ends.
         if pk and CLAIM_RETAKE_WAIT > 0:
             held = held | {r["lo"] for r in c.execute(
-                "SELECT lo FROM ranges WHERE assignee=? AND status='claimed' AND last_beat IS NULL AND claimed_at > ?",
-                (pk, now - CLAIM_RETAKE_WAIT))}
+                "SELECT lo FROM ranges WHERE assignee=? AND COALESCE(claim_signed, 0)=? AND status='claimed'"
+                " AND last_beat IS NULL AND claimed_at > ?", (pk, int(signed), now - CLAIM_RETAKE_WAIT))}
         # A claim blocks EVERY worker for CLAIM_TTL, including the one that made it. That looks like a
         # bug — a worker locked out of retrying its own failed block — and on 2026-08-01 it was
         # "fixed" so a worker could re-pick its own claim. That was wrong, and reverted the same day.
@@ -2665,8 +2691,8 @@ def claim(body):
             else:
                 c.close()
                 return 409, {"error": "nothing available to claim"}
-        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,claim_nonce)"
-                  " VALUES(?,?,?,'claimed',?,?,?,?)", (str(h), h, h, pk, handle, now, nonce))
+        c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,claimed_at,claim_nonce,claim_signed)"
+                  " VALUES(?,?,?,'claimed',?,?,?,?,?)", (str(h), h, h, pk, handle, now, nonce, int(signed)))
         # A contributor may claim long before they ever submit — and if their worker cannot finish,
         # they never submit at all. That is the case this whole thing exists to diagnose, so the
         # version is recorded HERE as well, on a row that may not exist until their first proof.

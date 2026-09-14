@@ -111,22 +111,23 @@ hz = importlib.util.module_from_spec(spec)
 loader.exec_module(hz)
 
 
-class _Sk:
-    def sign(self, m):
-        return b"\x00" * 64
-
+# A real key: the worker signs its claim (#310) and the handler verifies the signature.
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
+from cryptography.hazmat.primitives import serialization  # noqa: E402
+_SK = Ed25519PrivateKey.generate()
+_PK = _SK.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
 
 got = []
 hz.HOSTBIN = sys.executable
-hz.identity = lambda: (_Sk(), PK_A, "tester")
+hz.identity = lambda: (_SK, _PK, "tester")
 hz.cmd_prove = lambda args, claimed=False, submit_leaves=False: got.append(args[0])
 hz.cmd_submit = lambda args: None
 hz.time.sleep = lambda s: None                   # the retry backoff, not what is under test
 
 if CONTROL:
     _post = hz.post
-    hz.post = lambda path, body: _post(path, {k: v for k, v in body.items() if k != "nonce"})
-    print("CONTROL: the worker sends no nonce -- the checks below MUST fail")
+    hz.post = lambda path, body: _post(path, {k: v for k, v in body.items() if k not in ("nonce", "ts", "sig")})
+    print("CONTROL: the worker sends no nonce (nor a signature, as that client did) -- the checks below MUST fail")
 
 hz.cmd_run([])
 rows = claimed_rows()
@@ -134,6 +135,10 @@ check(len(calls) == 2, f"the lost response was retried ({len(calls)} claim reque
 check(len(rows) == 1, f"exactly one block is claimed, none orphaned (claimed: {[r[0] for r in rows]})")
 check(len(got) == 1 and rows and str(rows[0][0]) == got[0],
       f"the worker proves the block the server committed (proves {got}, claimed {[r[0] for r in rows]})")
+_c = server.db()
+_signed = [r[0] for r in _c.execute("SELECT claim_signed FROM ranges WHERE status='claimed'")]
+_c.close()
+check(_signed == [1], f"and its claim was signed with its key and verified (#310) ({_signed})")
 
 httpd.shutdown()
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
