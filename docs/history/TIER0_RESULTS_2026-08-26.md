@@ -1,5 +1,10 @@
 # Tier 0 results — the guest codegen axis, measured
 
+> **Historical record, 2026-08-26.** Superseded on window size: window **21** was measured two days later
+> at **−1.245%** (`8c9b8a5`, #193) and is the shipped default (`prover/methods/guest/build.rs`), so §4's
+> "19 was a good choice" and §5's "ship 20" no longer stand. Tier 0 shipped in the v0.21.0 guest:
+> `-O3` on both `cc::Build`s, guest `lto = "fat"` + `codegen-units = 1`, window 21.
+
 Answers E1–E4 of `PERF_INVESTIGATION_2026-08-26.md`. Every arm was rebuilt from source and measured on
 the same machine in the same session.
 

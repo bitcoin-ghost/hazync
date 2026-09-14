@@ -2,11 +2,12 @@
 
 **As of v0.21.4 (2026-09-14), for the canonical CORE guest `37987b85`.** One page for "what should we
 actually run, and why" — fleet shape, card, per-box settings, guest build, provisioning. It states
-conclusions. The CORE measurements behind them are `docs/history/BENCH_8xL40S_2026-09-08.md`,
-`docs/history/MILESTONE_966256_2026-09-10.md` and `docs/history/MILESTONE_966256_RUN4_2026-09-10.md`;
+conclusions. The CORE measurements behind them are `docs/history/BENCH_8xL40S_2026-09-08.md` and
+`docs/history/MILESTONE_966256_RUN4_2026-09-10.md` (runs 1–4);
 the stock-guest investigations that preceded them are `docs/history/TEN_MINUTE_BLOCK.md`,
 `docs/history/ACCELERATION.md` and `docs/history/TIER0_RESULTS_2026-08-26.md`. Earlier revisions of this
-page priced the stock guest; their headline numbers are in §7 so they are not quoted again.
+page priced the stock guest; their headline numbers are in §7 so they are not quoted again. The last of
+them is archived whole as `docs/history/TOPOLOGY_AND_SETTINGS_2026-09-05.md`.
 
 **Every row is labelled.** MEASURED means it exists in this repo's evidence — on the CORE guest unless it
 says *stock*. INFERRED means arithmetic over measured inputs. UNKNOWN means nobody has measured it.

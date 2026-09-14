@@ -1,5 +1,7 @@
 # Hazync v0.21.3 — a board that frees itself, and work that is credited to whoever did it
 
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.3>
+
 Two threads. One is the frontier: a board that froze for thirteen hours, and a block no worker could
 ever prove. The other is attribution: proving, folding and anchoring are three different jobs, and
 until now the board could only see one of them.
@@ -12,6 +14,9 @@ until now the board could only see one of them.
 > from the v0.21.0 build (`af0534c`) through two releases, so it was missing five releases of host
 > changes including the `.hzk` output naming. This one is built from this release's source. Both
 > hosts now report the same guest and behave the same way.
+>
+> *Correction, 2026-09-14: only two releases (v0.21.1, v0.21.2) separate v0.21.0 from v0.21.3, so "five
+> releases of host changes" cannot be right; "through two releases" is.*
 
 ---
 

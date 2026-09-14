@@ -127,7 +127,7 @@ anchoring gaps:
 
 ## 3c. Anchor identity + completeness (2026-07-22 audit, round 8)
 
-A five-reviewer completeness+verifier audit (full write-up: `AUDIT_2026-07.md`). The soundness core
+A five-reviewer completeness+verifier audit (full write-up: `history/AUDIT_2026-07.md`). The soundness core
 held — accumulator, FFI/VerifyScript boundary, and enforcement gating all came back sound. One
 verifier-hole and five completeness deviations were found; all fixed except the one unprovable rule.
 
@@ -236,7 +236,7 @@ OPEN (none architectural):
    commitment, BIP34/BIP30, and real maturity/BIP68 for real. Also fixed a latent header bug: the
    header builder hardcoded version 1 (invisible on the version-1-era test vectors 100000/130000/140000);
    now threads the real versionbits value, so PoW is correct on modern blocks.
-6. **Scaling → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) ✅ **succinct chunk
+6. **Scaling → history/HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) ✅ **succinct chunk
    receipts — implemented 2026-07-15.** The 1645 s aggregate was dominated by lifting 16 *composite*
    receipts inside its resolve step; each chunk is now proved to a `SuccinctReceipt` up front, so that
    lift moves into the parallel chunk phase and the aggregate's in-guest verifies are fixed-cost. (b) **Archive-node bridge** (hazync-during-IBD) — **BUILT +

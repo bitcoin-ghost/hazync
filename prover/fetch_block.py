@@ -8,7 +8,7 @@ import json, sys, time, urllib.request
 
 # NOTE: this explorer fetcher is a SCAFFOLD for testing the guest without a full node. The real path
 # is the archive-node bridge (ConnectBlock -> witness from CCoinsViewCache, zero requests). See
-# HAZYNC_ARCHITECTURE.md "archive-node bridge". Kept resumable so rate-limit deaths don't lose progress.
+# docs/history/HAZYNC_ARCHITECTURE.md "archive-node bridge". Kept resumable so rate-limit deaths don't lose progress.
 BASES = ["https://blockstream.info/api/", "https://mempool.space/api/"]
 
 def get(u, tries=10):

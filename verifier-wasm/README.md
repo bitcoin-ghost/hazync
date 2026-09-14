@@ -5,8 +5,8 @@ device** — a phone, a laptop, anything with a browser. No install, no toolchai
 data, no network.
 
 ```
-raw       1,065,304 bytes
-gzipped     295,139 bytes   ← what a browser actually downloads (`gzip -c < FILE`; passing the path
+raw       1,064,517 bytes
+gzipped     295,077 bytes   ← what a browser actually downloads (`gzip -c < FILE`; passing the path
                                instead writes the filename into the gzip header and changes the count)
 verify           21 ms      ← blocks 1..1000, from a 3,441-byte SNARK  (x86-64, node 24)
 verify          254 ms      ← blocks 1..1789, from a 226,434-byte STARK spine  (measured 2026-08-15)
@@ -93,7 +93,7 @@ cp target/wasm32-unknown-unknown/release/hazync_verify_wasm.wasm hazync-verify.w
 python3 -m http.server 8000     # then open http://localhost:8000/
 ```
 
-Serve the `.wasm` with `Content-Encoding: gzip` — it compresses 3.6× (1,065,304 → 295,139 B with
+Serve the `.wasm` with `Content-Encoding: gzip` — it compresses 3.6× (1,064,517 → 295,077 B with
 `gzip -c`), and nginx will not do it for `application/wasm` unless `gzip_types` includes that type.
 `coordinator/deploy/nginx-hazync.conf` does not set it; the live web box's own nginx configuration
 does (measured 2026-09-14: served with `Content-Encoding: gzip`, 294,729 B on the wire).

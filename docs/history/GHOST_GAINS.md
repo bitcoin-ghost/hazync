@@ -1,19 +1,22 @@
 # Every remaining gain for Ghost — enumerated, priced, and ranked
 
+> **Historical record, moved here on 2026-09-14.** Outcome: G1 was built as `patches/0007` and G3 as
+> `patches/0006` (both Ghost channel), G6 as the memo in `prover/methods/guest/src/liftx_accel.rs`;
+> G4 (`ECMULT_GEN_KB` still defaults to 22) and G5 (`COST_PER_GROUP_BYTE` exists nowhere) were not
+> built. §9's MSM was designed the next day and declined — `MSM_BATCH_VERIFY.md`.
+>
 > ⛔ **DEVELOPMENT RECORD — landed from an experiment branch `archive/feat-stack-integration`, 2026-08-29.**
 > Kept because the reasoning is worth having; **read the corrections below before quoting any number.**
 >
 > - **the aggregate is not 1,575 s** — measured **405.6 s** on two workers (2026-09-02).
 > - Ghost's packer calibration has since been MEASURED: straggler **1.462x → 1.189x**, and the
->   Schnorr:ECDSA ratio is **1.97x**, not 13.77x. See `docs/GHOST_NEXT_BUILD.md` and hazync#209.
-
-
+>   Schnorr:ECDSA ratio is **1.97x**, not 13.77x. See `../BUILDS.md` §3.1 and hazync#209.
 
 **2026-08-29.** Ghost's goal is to be radically fast within what is *safe* — sound, and verifiable.
 This enumerates what is left after the measured three-arm A/B, with the evidence for each.
 
 ⛔ Labels are load-bearing. **MEASURED** = run on hardware. **DERIVED** = arithmetic over measured
-parts. **UNPRICED** = no number, and none should be quoted. → `feedback_only_measured_numbers`
+parts. **UNPRICED** = no number, and none should be quoted.
 
 ## 0. The measured baseline
 
@@ -28,7 +31,7 @@ itself proof the packer changed the partition and not the computation.
 | **P** | **+ armed type-aware packer** | **3,546 s** | **1.390** | **4.151x** | **~11** |
 
 ✅ The aggregate **distributes** — 1.96x segments, 2.03x with joins, 98% parallel efficiency, and
-confirmed end to end on this block. Card counts use that. → `SEGMENT_DISTRIBUTION.md`
+confirmed end to end on this block. Card counts use that. → `SEGMENT_DISTRIBUTION.md` (history)
 
 ## 1. Where the remaining work is
 

@@ -663,7 +663,7 @@ Easy to miss, and each fails in a way that looks like something else:
       failing `ci_snark_verify.sh`. Regenerate per `prover/testdata/snark/README.md`.
 - [ ] **the archive bridge's binary** — it produces the bundles everyone else consumes. Missing it once
       already stalled the board dead while every other component looked healthy.
-- [ ] docs stating the current id (`docs/PROVING.md`, `SECURITY.md`, `docs/ROADMAP.md`) — `check-versions.sh` enforces.
+- [ ] docs stating the current id (`docs/PROVING.md`, `SECURITY.md`, `README.md`) — `check-versions.sh` enforces.
 
 The coordinator derives the id it expects from its **own** `HAZYNC_HOST` binary (`expected_method_id()`,
 served at `/api/meta`), so the swap is: new binary in, board cleared, workers restarted.
