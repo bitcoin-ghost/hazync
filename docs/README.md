@@ -3,55 +3,53 @@
 Bitcoin Core's own consensus code, executed inside a RISC0 zkVM, so that a block's validity can be
 **proven once and verified by anyone** without re-executing it.
 
-⏰ **Current as of 2026-09-01.** Anything not listed here is in [`history/`](history/README.md),
-which is the development record and **must not be quoted for numbers**.
+⏰ **Current as of 2026-09-14 (v0.21.4).** Anything not listed here is in [`history/`](history/README.md),
+the development record, which **must not be quoted for numbers** without its corrections. Every release is
+in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 
-## Start here
+## Use it
 
 | | |
 |---|---|
 | [`EXPLAINER.md`](EXPLAINER.md) | what this is, in plain terms |
 | [`GOALS.md`](GOALS.md) | what it is for, and what it is not |
-| [`HAZYNC_ARCHITECTURE.md`](HAZYNC_ARCHITECTURE.md) | how the pieces fit together |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | contributing GPU time to the board |
+| [`SPONSORSHIP.md`](SPONSORSHIP.md) | sponsoring blocks |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | every release, newest first |
+
+## Run it
+
+| | |
+|---|---|
+| [`PROVING.md`](PROVING.md) | proving, end to end |
+| [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md) | one block across many GPUs: `seg-serve` / `seg-connect`, knobs, failure handling |
+| [`BUILDS.md`](BUILDS.md) | the CORE (shipped) and GHOST channels: patches, flags, measured card counts |
+| [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | fleet shape, card and per-box settings |
+| [`GHOST_NEXT_BUILD.md`](GHOST_NEXT_BUILD.md) | the Ghost channel's next build |
+| [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a board coordinator |
+| [`SPONSOR_BOT.md`](SPONSOR_BOT.md) | the sponsor proving bot |
+
+## Review it
+
+| | |
+|---|---|
 | [`SPEC.md`](SPEC.md) | the specification |
-
-## Trust and correctness
-
-| | |
-|---|---|
 | [`SOUNDNESS.md`](SOUNDNESS.md) | what a proof does and does not establish |
-| [`AUDIT_2026-07.md`](AUDIT_2026-07.md) | audit record |
-| [`EXTERNAL_REVIEW.md`](EXTERNAL_REVIEW.md) | external review record |
+| [`../SECURITY.md`](../SECURITY.md) | security policy and the audit rounds |
+| [`EXTERNAL_REVIEW.md`](EXTERNAL_REVIEW.md) | what still needs outside eyes |
 | [`FUZZING.md`](FUZZING.md) | fuzzing posture: independent oracle, positive control, honest scope |
+| [`METHOD_ID_DURABILITY.md`](METHOD_ID_DURABILITY.md) | one `METHOD_ID`, and what we would do the day we are forced off it |
+| [`PROOF_DURABILITY.md`](PROOF_DURABILITY.md) | what keeps a receipt verifiable |
+| [`FIELD_BIGINT2_BACKEND.md`](FIELD_BIGINT2_BACKEND.md) | the coprocessor field backend for libsecp (`patches/0012`) |
+| [`LIFTX_HINT.md`](LIFTX_HINT.md) | recovering a pubkey's Y from a verified hint (`patches/0013`) |
 
-## Running it
-
-| | |
-|---|---|
-| [`PROVING.md`](PROVING.md) | proving a block |
-| [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a coordinator |
-| [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | topology and tuning |
-| [`GPU_EXPERIMENT_RUNBOOK.md`](GPU_EXPERIMENT_RUNBOOK.md) | reproducing a measurement on GPUs |
-| [`SEGMENT_DISTRIBUTION.md`](SEGMENT_DISTRIBUTION.md) | distributing segments across workers |
-
-## Performance — the two operating modes
-
-⏰ **[`CORE_VS_GHOST.md`](CORE_VS_GHOST.md) is the authority on which mode costs what.** Everything
-else in this section is supporting detail.
+## History
 
 | | |
 |---|---|
-| [`CORE_VS_GHOST.md`](CORE_VS_GHOST.md) | the two modes, what each concedes, and the measured cost of each |
-| [`FIELD_BIGINT2_BACKEND.md`](FIELD_BIGINT2_BACKEND.md) | the coprocessor field backend for libsecp, and the levers rejected around it |
-| [`LIFTX_HINT.md`](LIFTX_HINT.md) | recovering a pubkey's Y from a verified hint |
-| [`FLEET_SIZING.md`](FLEET_SIZING.md) | ⚠ **card counts here predate 2026-09-01 and are being revised** |
-
-## Plans
-
-| | |
-|---|---|
-| [`ROADMAP.md`](ROADMAP.md) | where this is going |
-| [`RELEASE_PLAN.md`](RELEASE_PLAN.md) | how a release is cut |
+| [`history/README.md`](history/README.md) | the development record, with its known-stale figures |
+| [`history/releases/`](history/releases/) | copies of release bodies (v0.20.0 draft, v0.21.1–v0.21.4) |
+| [`RELEASE_NOTES_v0.21.0.md`](RELEASE_NOTES_v0.21.0.md) | the v0.21.0 release body, kept at this path while external links still point here |
 
 ## ⛔ How to read a number in this repository
 
@@ -59,12 +57,15 @@ Every performance figure should say **what was measured, on what, and with what 
 This project has repeatedly been wrong by believing a projection, and the corrections are recorded
 rather than quietly edited out:
 
-- a bigint2 projection of **7.53x** measured **4.48x**
-- a field-backend projection of **3.67x** first measured **2.381x** — the shortfall was three
-  redundant memory copies in an FFI wrapper, worth 38% of the block, not the design
+- a bigint2 projection of **7.53x** on the tip block measured **4.48x**
+  (`history/TIP_BLOCK_BIGINT2_2026-08-28.md`)
+- a field-backend projection of **3.67x** first measured **2.381x**: limb copies at the Rust/C boundary
+  cost 2,191 M cycles, 38% of the block, and removing them gave **3.836x** (`FIELD_BIGINT2_BACKEND.md`)
 - `fe_sqrt` sized at **9.83%** from a flat profile was **6.17%** cumulative once the field ops
-  beneath it were accelerated
-- a straggler reported as a perfect **1.00x** was **1.563x** on real cycles: it was computed on
-  *predicted* cost, and the packer balances its own predictor by construction
+  beneath it were accelerated (`patches/0013` header)
+- a packer whose model priced every chunk identically had an actual straggler of **1.563x** on real
+  cycles, worse than not packing (`prover/host/src/main.rs`, packer notes)
+- a CORE card count of **10** L40S, computed from measurements on two cards, became **~13** once an
+  eight-card fleet was run (`BUILDS.md` §1, `history/BENCH_8xL40S_2026-09-08.md`)
 
 **If a figure does not say how it was obtained, treat it as a projection.**
