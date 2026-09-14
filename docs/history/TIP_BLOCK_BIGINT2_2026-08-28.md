@@ -1,5 +1,10 @@
 # bigint2 on block 962,000 — MEASURED, and it lands ~40% below the projection
 
+> **Historical record, 2026-08-28.** The 4.48x below is **Tier 0 + bigint2 against the control**;
+> bigint2 alone (against the Tier 0 arm) is 27,515,818,284 / 6,276,323,320 = **4.384x**. The proving
+> run this document asks for was taken the next day: **4.112x** GPU wall on one L40S (arm S against
+> arm C, `GHOST_GAINS.md` §0). The middle path never shipped in CORE.
+
 Block 962,000, 8,006 inputs, `HAZYNC_CHUNKS=16`, both partitions, execute mode, no GPU.
 Three arms, same block, same partitions, same machine, one sitting.
 
@@ -63,7 +68,6 @@ separate coprocessor circuit and linearity must not be assumed.
 path on, against a projection of 7.53x.
 ⇒ **What is NOT measured:** the proving ratio on this block, and therefore the fleet size. An
 earlier draft of this document put a figure on both. It should not have.
-→ [[feedback_only_measured_numbers]]
 
 ⏰ **The run that settles it: one GPU prove of a block 962,000 chunk with `HAZYNC_BIGINT2_ECDSA=1`,
 against the stock control.** That is a direct measurement of the thing the fleet size depends on,

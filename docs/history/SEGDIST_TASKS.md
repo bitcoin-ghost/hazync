@@ -1,6 +1,11 @@
 # Segment distribution — final state
 
-Complete. Design: `docs/SEGMENT_DISTRIBUTION.md`. Full measurement log: `~/hazync-b200-results.txt`
+> **Historical record, 2026-08-24.** Two items below are stale: the last segment moved to the workers
+> the same day (#157/#158, `2facde4`), and the #152 rescue is dead — the tests target an
+> `ecdsa_der.rs` that never reached `main` (#152's closing comment); tag `archive/pipeline-preflight`
+> holds it. The step-2 design, formerly `SEGDIST_STEP2.md`, is merged at the end.
+
+Complete. Design: `SEGMENT_DISTRIBUTION.md` (this directory). Full measurement log: `~/hazync-b200-results.txt`
 §29–§64.
 
 ## What was built
@@ -81,7 +86,8 @@ soundness. That is what allows a heterogeneous fleet.
 ## Known limits
 
 - **The last segment cannot move to a worker.** The session journal and assumptions merge into its
-  claim before lifting, and a worker has no session.
+  claim before lifting, and a worker has no session. *(Lifted the same day: #157/#158 prove the last
+  segment on a worker; the coordinator only merges and lifts.)*
 - **`assemble_from_joined` has no `CompositeReceipt`**, so its integrity and claim checks are gone.
   What remains: per-receipt verification, `join`'s continuity check, and the final `METHOD_ID`
   verify. Weaker against a *buggy prover*, not against a dishonest worker.
@@ -113,3 +119,89 @@ So the rescue is **blocked on #139 landing**, not on anyone remembering to cherr
 #152 was defensible. What is NOT safe is deleting the tag: it is the sole copy of both the tests and
 the guest modules under test. Verified by build, not by inspection -- restoring the two files onto
 `main` fails to compile with `could not find ecdsa_der in guest_pure_fuzz`.
+
+*(2026-09-14: dead, not blocked. #139 shipped only as C patches (`0005`, `0014`) on the Ghost channel, and
+`ecdsa_der.rs` never reached `main`; #152's closing comment: "Nothing to rescue, and the premise was
+wrong".)*
+
+---
+
+## Step 2 — worker-side lifts (formerly `SEGDIST_STEP2.md`)
+
+*(Written as a design before the join-tree gate. Built in #148 as `HAZYNC_WORKER_LIFTS`, gated in the
+table at the top of this document: undivided work 58% → 2.1%.)*
+
+Blocked deliberately on the join-tree correctness gate. Do not build this on top of an
+unvalidated tree: if the digest comes out wrong, there would be two candidate causes.
+
+### Why it is worth doing
+
+Lifts are per-segment and fully independent — the one part of assembly that needs no
+restructuring at all to distribute. On the measured 44-segment CPU chunk they are
+44 x 13.8 s = **607 s of the ~1300 s assembly**, i.e. 47% of it, sitting on the coordinator
+for no reason.
+
+### The obstacle, and it is the whole design
+
+`assemble_from_segment_receipts` merges the session journal and assumptions into the **last**
+segment receipt's claim *before* anything is lifted:
+
+```rust
+segments.last_mut()?.claim.output.merge_with(&session.journal...)
+```
+
+So the last segment cannot be lifted by a worker — the worker does not have the session and
+could not do the merge. Everything else can.
+
+### Split
+
+```
+worker, segment i < N-1     prove_segment -> lift -> write lift_NNNN.bin  (SuccinctReceipt)
+worker, segment i = N-1     prove_segment         -> write rcpt_NNNN.bin  (SegmentReceipt)
+coordinator                 read lifts 0..N-2
+                            take rcpt N-1, merge session output into its claim, lift it
+                            join tree over all N
+                            resolve assumptions
+                            Receipt::new, verify vs METHOD_ID
+```
+
+A worker knows whether it holds the last segment: it has the index and the count from
+MANIFEST. No new coordination.
+
+### New entry point needed
+
+```rust
+fn assemble_from_lifted(
+    &self,
+    ctx: &VerifierContext,
+    session: &Session,
+    lifted_head: Vec<SuccinctReceipt<ReceiptClaim>>,  // segments 0..N-2, session order
+    last_segment: SegmentReceipt,                     // segment N-1, NOT yet merged
+) -> Result<ProveInfo>
+```
+
+It performs the merge on `last_segment`, lifts it, appends, runs the join tree, resolves
+assumptions, and builds the `Receipt` — reusing the tail of `assemble_from_segment_receipts`
+so the three paths (monolithic, distributed-from-segments, distributed-from-lifts) keep
+sharing assembly rather than growing copies.
+
+### What is lost, and it is worth stating
+
+`assemble_from_segment_receipts` builds a `CompositeReceipt` and calls
+`verify_integrity_with_context` plus `check_claims` on it. With only lifted receipts there is
+no composite to check, so those two self-consistency checks go away. What remains is:
+
+- each returned `SuccinctReceipt` verified on arrival (the untrusted-worker defence, unchanged)
+- `join` checking `a.post == b.pre` at every level, which catches an out-of-place segment
+- the final `Receipt::verify(METHOD_ID)`, which is the actual gate
+
+That is a real reduction in defence in depth against a *buggy prover*, not against a
+malicious worker. Worth a flag in review, not a blocker.
+
+### Expected effect
+
+Coordinator assembly at 44 segments drops from ~1300 s to the joins alone, ~602 s, with the
+607 s of lifts moved onto workers. Combined with distributing join levels (step 3) the
+projection is ~112 s at 22 workers.
+
+**Projection, not measurement.** One machine cannot show it.
