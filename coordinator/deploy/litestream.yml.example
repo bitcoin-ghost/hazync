@@ -1,0 +1,22 @@
+# /etc/litestream.yml on the coordinator: root:hazync 0640 (it holds the R2 keys, so never commit the live file).
+# Continuous copy of the ledger to Cloudflare R2, bucket hazync-ledger. Litestream 0.5.x.
+#
+# Restore (into a scratch path; never over the live database while the coordinator runs):
+#   runuser -u hazync -- litestream restore -config /etc/litestream.yml -o /var/lib/hazync/restore-test/coordinator.db /var/lib/hazync/coordinator.db
+#   sqlite3 /var/lib/hazync/restore-test/coordinator.db 'PRAGMA integrity_check'
+logging:
+  level: info
+snapshot:
+  interval: 6h        # a full snapshot every 6 h ...
+  retention: 168h     # ... kept for a week, so a restore can land anywhere in the last 7 days
+dbs:
+  - path: /var/lib/hazync/coordinator.db
+    replica:
+      type: s3
+      bucket: hazync-ledger
+      path: coordinator
+      endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+      region: auto
+      force-path-style: true
+      access-key-id: <R2 access key id>
+      secret-access-key: <R2 secret access key>

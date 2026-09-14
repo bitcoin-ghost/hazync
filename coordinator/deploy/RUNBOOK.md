@@ -333,6 +333,42 @@ The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (th
 receipts — the artifacts the "you don't have to trust us" claim depends on) must **both** be backed up,
 offsite. A same-disk copy dies with the box.
 
+### Offsite copies in Cloudflare R2 (since 2026-09-15)
+
+Until 2026-09-15 the receipts had **no** copy off the coordinator: the nightly `backup.sh` shipped the
+ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. Two things now run beside it:
+
+| What | How | Where in R2 | How far behind |
+|---|---|---|---|
+| Proof receipts | `hazync-offsite-proofs.timer`, hourly: `hazync-offsite-proofs.py copy`, then `check` | `hazync-proofs/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
+| Ledger | Litestream (`litestream.service` + `dropins/litestream-*.conf`, config from `litestream.yml.example`) | `hazync-ledger/coordinator/` | ~1 s |
+
+- **Receipts are append-only**, as in `backup.sh`: a file already in R2 is never overwritten or deleted,
+  and names are namespaced by guest id because they repeat across re-baselines. `check` fails the unit,
+  and so pages the phone, if any receipt older than 30 min is missing from R2 or differs in size.
+- **Why a Python script and not rclone.** Ubuntu 24.04's rclone 1.60 reports `501 NotImplemented` for every
+  upload to R2: the PUT succeeds, and the HEAD it sends afterwards is refused (fixed by `no_head = true`).
+  Even then it never started a transfer against the flat 97,000-file directory. The script lists R2
+  once and uploads the difference. It measured 35 receipts/s at a 64 Mbit/s cap.
+- **Litestream 0.5 allows one replica per database.** The second copy of the ledger has to come from
+  `backup.sh`, not from a second Litestream replica.
+- **Keys:** `/etc/hazync/backup/r2.keys`, `root:root 0600`, one line `<key id> <secret> <endpoint>`. It is a
+  Cloudflare *account* API token with Object Read & Write on `hazync-proofs` and `hazync-ledger` only.
+  Listing all buckets or opening any other bucket returns `AccessDenied`.
+
+**Restore the ledger from R2** (into a scratch path, never over the live file):
+
+```bash
+install -d -o hazync -g hazync -m 700 /var/lib/hazync/restore-test
+runuser -u hazync -- litestream restore -config /etc/litestream.yml \
+  -o /var/lib/hazync/restore-test/coordinator.db /var/lib/hazync/coordinator.db
+sqlite3 /var/lib/hazync/restore-test/coordinator.db 'PRAGMA integrity_check'
+```
+
+Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contributor counts were identical to live, 5 s behind.
+
+**Check the receipt mirror by hand:** `/usr/local/sbin/hazync-offsite-proofs check --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs`
+
 > ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of
 > the two schedulers below and confirm a snapshot actually lands (`ls $HZ_HOME/backups`). Until then the
 > ledger + receipts live only on one disk.
