@@ -185,7 +185,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 
 ## Launcher (`coordinator/run-workers.sh`, shipped as `hazync-run-workers.sh`)
 
-`run-workers.sh [N] [--stop]`: N defaults to `4`. It checks the host's guest id against `/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command until it exits `78` (`EX_CONFIG`).
+`run-workers.sh [N] [--stop]`: N defaults to `4`. It checks the host's guest id against `/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command until it exits `78` (`EX_CONFIG`). Exit `75` (`EX_TEMPFAIL`, nothing to claim right now) waits 30 s and is not a failure. With alerts set up (`hazync notify`), a loop pushes after `NOTIFY_FAIL_STREAK` failures in a row, on recovery and when it stops, and the launcher pushes when it refuses to start.
 
 ### Environment
 

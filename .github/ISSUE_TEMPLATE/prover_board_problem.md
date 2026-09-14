@@ -25,6 +25,11 @@ about: A worker that fails, stalls or is rejected, or a board that looks wrong
 - Handle shown on the board:
 - Approximate time (UTC):
 
+**Alert** (if `hazync-worker notify` pushed one: its title and text)
+
+```
+```
+
 **`hazync-worker selftest` output**
 
 ```

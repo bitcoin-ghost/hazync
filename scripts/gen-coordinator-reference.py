@@ -768,7 +768,9 @@ def build(root):
     w("")
     w(f"`run-workers.sh [N] [--stop]`: N defaults to `{n_default}`. It checks the host's guest id against "
       "`/api/meta` and runs a GPU smoke prove before starting any loop, then restarts each loop's command "
-      "until it exits `78` (`EX_CONFIG`).")
+      "until it exits `78` (`EX_CONFIG`). Exit `75` (`EX_TEMPFAIL`, nothing to claim right now) waits 30 s and is not "
+      "a failure. With alerts set up (`hazync notify`), a loop pushes after `NOTIFY_FAIL_STREAK` failures in a row, on "
+      "recovery and when it stops, and the launcher pushes when it refuses to start.")
     w("")
     w("### Environment")
     w("")
