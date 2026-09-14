@@ -45,15 +45,18 @@ retention gate silently.
 
 ## Why drop-ins and not the unit files next door
 
-**The live units have drifted substantially from `../hazync-*.service`.** They are not slightly
-different — they are a different deployment:
+> **This section records the state on 2026-08-02. The drift it describes has since been closed —
+> see "Since #168" below.**
 
-| | repo unit | live |
+**On 2026-08-02 the live units had drifted substantially from `../hazync-*.service`.** They were not
+slightly different — they were a different deployment:
+
+| | repo unit (then) | live (then) |
 |---|---|---|
 | paths | `/opt/hazync/...` | everything under `/root` |
 | user | `User=hazync` | root, no `User=` |
 | bind | `127.0.0.1` | `0.0.0.0` |
-| extras | — | `ratelimit.conf`, `canonical-binary.conf`, `height-cap.conf` |
+| extras | — | `ratelimit.conf`, `canonical-binary.conf`, `height-cap.conf` (live names) |
 
 Those extra drop-ins carry real operational history: a rate-limit correction, a binary override that
 fixed a board stall at block 18310, and an emergency height cap added when the bridge was on course to
@@ -62,6 +65,22 @@ and, because of the `ProtectHome` conflict below, would have silently broken wit
 same time.
 
 So the hardening was added as drop-ins, leaving every existing directive untouched.
+
+### Since #168 (2026-08-25)
+
+The repo's base units now describe the post-#58 deployment: `User=hazync` and every data path under
+`/var/lib/hazync` (the bridge unit caught up in `2841206`, #176). The per-box settings that had lived
+only in the hand-edited base unit on the box, `COORD_BIND=0.0.0.0` and `TRUSTED_PROXIES`, are committed
+as `hazync-coordinator-network.conf`; the rate limits and the bridge height cap as
+`hazync-coordinator-ratelimit.conf` and `hazync-bridge-height-cap.conf`. There is no
+`canonical-binary.conf` in this repo: the binary path is set by the `*-paths*` drop-ins
+(`/usr/local/bin/hazync-host`). `scripts/check-unit-drift.sh <ssh-host>` (#168 part C) now fails on any
+drop-in or environment key running on the box that is neither committed here nor declared in
+`../unit-drift-allow.txt`.
+
+The hardening drop-ins' own comments still explain why `User=` and `ProtectHome=` are absent from
+*them*; those comments date from before the migration, and the `*-paths*` drop-ins that load after
+them now set both.
 
 ## What is still NOT possible, and why
 
@@ -73,14 +92,28 @@ Nothing is held back on the hazync side any more. The one remaining item is bitc
 
 ## Applying
 
+Every `.conf` in this directory, each installed as `<service>.service.d/<name>.conf` — the naming
+`scripts/check-unit-drift.sh` expects. The service is spelled out rather than parsed from the file
+name, because `hazync-coordinator-backup-paths` would otherwise read as a `hazync-coordinator` drop-in.
+**Edit `hazync-coordinator-network.conf` and `hazync-coordinator-ratelimit.conf` first**: they carry
+the public board's proxy address, which is wrong for any other box.
+
 ```bash
-for f in hazync-coordinator-hardening hazync-coordinator-paths-and-user \
-         hazync-bridge-hardening hazync-bridge-paths \
-         hazync-coordinator-backup-paths hazync-retention-check-paths; do
-  svc=$(echo "$f" | sed -E 's/-(hardening|paths-and-user|paths)$//')
-  name=$(echo "$f" | grep -oE '(hardening|paths-and-user|paths)$')
-  install -D -m 0644 "$f.conf" "/etc/systemd/system/$svc.service.d/$name.conf"
-done
+[ "$(ls *.conf | wc -l)" -eq 10 ] || echo "⚠ this directory no longer holds 10 drop-ins — update the list below"
+while read -r svc name; do
+  install -D -m 0644 "$svc-$name.conf" "/etc/systemd/system/$svc.service.d/$name.conf"
+done <<'EOF'
+hazync-coordinator hardening
+hazync-coordinator paths-and-user
+hazync-coordinator network
+hazync-coordinator ratelimit
+hazync-bridge hardening
+hazync-bridge paths
+hazync-bridge height-cap
+hazync-coordinator-backup paths
+hazync-coordinator-backup receipts
+hazync-retention-check paths
+EOF
 systemctl daemon-reload
 systemctl restart hazync-bridge hazync-coordinator
 ```

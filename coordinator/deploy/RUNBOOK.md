@@ -35,15 +35,21 @@ Verifying is light, so the cheap coordinator box runs the binary fine — only t
 
 ```bash
 sudo useradd -r -m -d /opt/hazync -s /usr/sbin/nologin hazync   # or reuse an existing user
-sudo mkdir -p /opt/hazync/coordinator-state
+# Every data path in the shipped units is under /var/lib/hazync, and nothing here creates it. It must
+# exist and be hazync-owned BEFORE the first start, or sqlite cannot create the DB and the service
+# dies at startup with "unable to open database file".
+sudo install -d -o hazync -g hazync /var/lib/hazync /var/lib/hazync/coord_state /var/lib/hazync/proofs \
+     /var/lib/hazync/spine /var/lib/hazync/witnesses /var/lib/hazync/bridge_bundles
 # place the repo at /opt/hazync (host binary at /opt/hazync/prover/target/release/host)
+# The bridge unit authenticates to bitcoind with its own rpcauth datadir,
+# /var/lib/hazync/bitcoin-client — set that up first; see coordinator/deploy/dropins/README.md.
 
 # Run a full bitcoind on this box (no-prune). Then start the archive bridge: it drives the accumulator
 # forward and writes per-block bundles the coordinator serves — there is NO witness window to pre-generate.
 sudo cp coordinator/deploy/hazync-bridge.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now hazync-bridge     # emits bundles into HAZYNC_BRIDGE_OUT
 
-sudo chown -R hazync:hazync /opt/hazync
+# the checkout stays root-owned: the services write only under /var/lib/hazync
 sudo cp coordinator/deploy/hazync-coordinator.service /etc/systemd/system/    # HAZYNC_BRIDGE_OUT must point at the bridge's bundle dir
 sudo systemctl daemon-reload && sudo systemctl enable --now hazync-coordinator
 curl -s localhost:8899/api/state | head -c 300      # smoke test
@@ -153,7 +159,8 @@ curl -s https://bitcoinghost.org/hazync/api/state | head -c 300   # now reachabl
 
 ## 3. Go-live page (one page) — DONE
 
-`hazync.html` already carries the live Proof Party (`#party` section) in one scroll, wired to the proxied
+The page is not in this repository: `hazync.html` and `hazync-party.html` live in the website's own
+repository and web root. As recorded when this step was done: `hazync.html` already carries the live Proof Party (`#party` section) in one scroll, wired to the proxied
 API (`/hazync/api/...`), and `hazync-party.html` redirects to it. Until this proxy is live it shows a
 clearly-labelled **sample-data preview**; the moment `/hazync/api/state` returns real progress it flips to
 live data automatically. Nothing to do here except stand up steps 1–2.
@@ -177,9 +184,10 @@ end to end.
 Prove blocks 1..N to build a genuine genesis frontier. Tiny early blocks are CPU-provable (~60–110s
 each) — no GPU capital needed to seed. Scale with a GPU box later.
 
-## 6. Then post to Delving
+## 6. Then post to Delving — DONE (historical)
 
-Once the page feels right and the board shows real (even if small) frontier data.
+Once the page feels right and the board shows real (even if small) frontier data. The post is linked
+from the top of the root `README.md`.
 
 ---
 
@@ -229,14 +237,16 @@ data-durability gaps a public write endpoint exposes:
 
 ## Tunables (claim lifecycle, folding, wide ranges)
 
-All default to the previous behaviour, so deploying changes nothing until one is set deliberately.
+The defaults are what the coordinator does when a variable is unset.
 
 | Variable | Where | Default | Effect |
 |---|---|---|---|
 | `MAX_ATTEMPTS` | coordinator | `3` | Park a range as `failed` after this many **block-implicating** failures |
 | `MAX_ENV_FAILURES` | coordinator | `12` | Looser cap for **capacity** failures (OOM, worker restarts) |
 | `CLAIM_WIDTH` | coordinator | `1` | blocks per claim-next assignment; `1` = per-block |
-| `CLAIM_TTL` | coordinator | `1800` | Reap a claim with no heartbeat for this long |
+| `CLAIM_TTL` | coordinator | `3600` | A claim stops being held after this long with no heartbeat |
+| `CLAIM_GRACE` | coordinator | `600` | …or after this long if it never sent one (#296) |
+| `CLAIM_MAX` | coordinator | `86400` | …and after this long regardless |
 | `HAZYNC_FOLD_CONCURRENCY` | worker CLI | `1` | Folds run concurrently within a tree level |
 
 Two counters, not one, because attempt counting alone cannot tell *"this block is unprovable"* from
@@ -257,11 +267,13 @@ Deploy in this order, verifying each before the next. Each stage is independentl
 1. **`backup.sh`** — inert until `BACKUP_REMOTE` is set. Verify: the next nightly run still writes a
    snapshot. Rollback: restore the file.
 2. **Worker CLI** — deploy to **one** worker first, leave the others on the old build. Verify: that
-   worker proves and submits several blocks. Rollback: restore `/root/v10_hazync_cli`.
+   worker proves and submits several blocks. Rollback: put back the previous worker CLI (the
+   `hazync-worker` asset of the prior release). This used to name `/root/v10_hazync_cli`, a pre-#58 path.
 3. **Coordinator** — take a fresh DB backup first. The schema migration is **additive**, and the
    previous coordinator runs unchanged against the migrated schema, so rollback is a file swap and a
    restart, *not* a backup restore. Verify: claims granted, submits verified, frontier advancing, and
-   `/api/state` returning the new `failed[]` and `frontier_blocker` fields.
+   `/api/state` returning its `failed` and `blocked` fields (`blocked` replaced `frontier_blocker`,
+   which was removed in `d8d71d2`).
 4. **`CLAIM_WIDTH`** — as its own change, never on the same restart as step 3, or a regression is
    ambiguous between the two. Verify by watching a range **COMPLETE**: claim, prove, fold locally,
    submit, frontier advances by the full width.
@@ -377,7 +389,11 @@ systemctl list-timers hazync-coordinator-backup.timer   # confirm it is schedule
 
 **Size `BACKUP_KEEP` against the receipt store, not out of habit.** Every snapshot is a *full* copy of
 the receipts, so 14 of them is 14x the thing being protected, against a store that grows with the
-party. On 2026-08-17 that was 78 GB of local backups for an 8.6 GB live store; it is now `2`.
+party. On 2026-08-17 that was 78 GB of local backups for an 8.6 GB live store, and the live box was set
+to `2` (not re-checked since). The script default is still `14`, and no drop-in in this repo sets
+`BACKUP_KEEP`: a box that overrides it should commit the override as a drop-in, or declare the key in
+`unit-drift-allow.txt`, or `scripts/check-unit-drift.sh` (run with `HAZYNC_UNITS` including
+`hazync-coordinator-backup`) reports it as drift.
 
 **Think before enabling `BACKUP_REMOTE_PROOFS`.** It was enabled when the store was 759 MB and the
 target had 14 GB free. Two weeks later it filled that target's root filesystem to 100%, nginx could no
@@ -397,13 +413,16 @@ prevent local retention from happening.
 
 **Restore drill** (do this once so you know it works):
 
+The paths below are the shipped units' (`BACKUP_DIR`, `COORD_DB`, `COORD_PROOFS` under
+`/var/lib/hazync`); read yours with `systemctl show` as above. The checkout stays root-owned.
+
 ```bash
-D=/opt/hazync/backups/<STAMP>            # or fetch the snapshot back from the offsite target
+D=/var/lib/hazync/backups/<STAMP>        # or fetch the snapshot back from the offsite target
 cd "$D" && sha256sum -c SHA256SUMS       # verify integrity
 sudo systemctl stop hazync-coordinator
-cp "$D/coordinator.db" /opt/hazync/coordinator/coordinator.db
-tar -C /opt/hazync/coordinator -xzf "$D/proofs.tar.gz"
-sudo chown -R hazync:hazync /opt/hazync/coordinator
+sudo install -o hazync -g hazync -m 0644 "$D/coordinator.db" /var/lib/hazync/coordinator.db
+sudo tar -C /var/lib/hazync -xzf "$D/proofs.tar.gz"      # entries are proofs/..., so this is COORD_PROOFS
+sudo chown -R hazync:hazync /var/lib/hazync/proofs
 sudo systemctl start hazync-coordinator
 curl -s localhost:8899/api/state | head -c 200   # frontier/proven should match pre-restore
 ```
@@ -498,7 +517,8 @@ few minutes during the toolkit unpack, so a comfortable-looking figure five minu
 
 - `docker system prune -af` — 5.3 GB of unused images, always safe
 - `/usr/local/cuda-13.x` — RISC0 3.0.5 kernels do NOT build against 13.x, so a host-side 13.x install
-  is dead weight for this purpose (~4.8 GB). `provision-vps.sh` installs 12.6 inside the container.
+  is dead weight for this purpose (~4.8 GB). `provision-vps.sh` installs 12.8 by default
+  (`HAZYNC_CUDA_VER`) inside the container.
 - `~/.hazync/receipts` — the prover's LOCAL copies. The coordinator holds the board's own store, so
   clearing these loses nothing, and a re-baseline invalidates them regardless (~3.7 GB for 17k).
 
@@ -581,8 +601,8 @@ That is the whole point: the gate finding something should be rare and should te
    script cannot write that, and it is the part future readers actually need.
 2. **Regenerate `prover/testdata/snark/*.snark`.** They are PROOFS made by the old guest; a proof
    carries its guest id inside it, so they cannot be re-pointed, only re-made. Until then `snark-verify`
-   fails, and it *should*. Needs Groth16 on a **CPU** host — it crashes on every CUDA build we ship
-   (#20).
+   fails, and it *should*. Needs Groth16 on a **CPU** host — it crashed on every CUDA build tested
+   (#20, closed 2026-07-28 as an upstream defect; the CUDA path has not been re-measured since).
 3. **Check the WASM and the published verifiers by EMBEDDED ID, never by size.** Swapping one 64-hex
    literal for another is length-preserving, so a stale artifact is byte-identical in size to a correct
    one, and sha256 + PGP both pass over it — they attest the bytes are the bytes, not that they are
@@ -634,9 +654,11 @@ other than together.
 Easy to miss, and each fails in a way that looks like something else:
 
 - [ ] `reproduce/METHOD_ID` — the source of truth; update it FIRST.
-- [ ] `verifier/src/main.rs` `METHOD_ID_HEX` — the standalone verifier embeds the id as a literal (it
-      cannot import it without dragging in the guest build). `scripts/check-versions.sh` fails the build
-      if this drifts, but it CANNOT check `verifier/dist/*` — rebuild and replace those binaries too.
+- [ ] `verifier/src/lib.rs` and `verifier-ffi/src/lib.rs` `METHOD_ID_HEX` — the verifiers embed the id
+      as a literal (they cannot import it without dragging in the guest build).
+      `scripts/check-versions.sh` fails the build if either drifts. The published verifier binaries are
+      built by `release-sign.yml`, which asserts their embedded id; nothing is committed under
+      `verifier/dist/` any more (#85), so there is nothing there to replace — cut a release.
 - [ ] `prover/testdata/snark/*.snark` — the CI Groth16 fixtures are pinned to the id and will start
       failing `ci_snark_verify.sh`. Regenerate per `prover/testdata/snark/README.md`.
 - [ ] **the archive bridge's binary** — it produces the bundles everyone else consumes. Missing it once
@@ -646,10 +668,13 @@ Easy to miss, and each fails in a way that looks like something else:
 The coordinator derives the id it expects from its **own** `HAZYNC_HOST` binary (`expected_method_id()`,
 served at `/api/meta`), so the swap is: new binary in, board cleared, workers restarted.
 
-Read the real paths off the unit first — they are env-driven, so do not assume a layout:
+Read the real paths off the unit first — they are env-driven, so do not assume a layout. Use
+`systemctl show`, not `systemctl cat`, which prints lines a drop-in has superseded (see Backup &
+restore):
 
 ```bash
-systemctl cat hazync-coordinator | grep -E 'WorkingDirectory|COORD_DB|COORD_PROOFS|HAZYNC_HOST'
+systemctl show hazync-coordinator -p WorkingDirectory -p Environment | tr ' ' '\n' \
+  | grep -E 'WorkingDirectory|COORD_DB|COORD_PROOFS|COORD_SPINE|HAZYNC_HOST'
 ```
 
 On the production coordinator those are `COORD_DB=/var/lib/hazync/coordinator.db`,
@@ -734,7 +759,8 @@ real time to spot, because the coordinator was serving the correct bundle the wh
 On every prover:
 
 ```bash
-pkill -f reprove_worker.sh; pkill -f 'hazync run'
+./coordinator/run-workers.sh 4 --stop           # stops the loops AND their children; a bare pkill misses
+                                                 # them (the child is `python3 ./hazync-worker run`)
 rm -rf "$BUNDLE_DIR" ~/.hazync/bundles          # whatever BUNDLE_DIR the workers use
 ./coordinator/run-workers.sh 4                   # re-fetches cleanly; refuses to start on an id mismatch
 ```

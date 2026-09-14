@@ -1,7 +1,7 @@
-# `hazync-verify` — the whole trust check, in 1.6 MB
+# `hazync-verify` — the whole trust check, in 1.7 MB
 
-Verifies a genesis-anchored Hazync SNARK range proof. No node, no peers, no chain data, no proving.
-Just the file.
+Verifies a genesis-anchored Hazync range proof: the STARK receipt the board serves as its spine, or a
+Groth16 SNARK wrap of one. No node, no peers, no chain data, no proving. Just the file.
 
 ```sh
 cargo build --release --manifest-path verifier/Cargo.toml
@@ -21,14 +21,16 @@ few-KB proof. Until this existed, the only thing that could check one was `host 
 binary built around a full RISC0 **prover** and the guest ELF. So we could produce the artifact and not
 hand anyone a way to check it. That was the gap in #19 / #24.
 
-| Binary | Size |
+| Binary (v0.21.4 release asset) | Size |
 |---|---|
-| `host` (CUDA) | 312 MB |
-| `host` (CPU) | 69 MB |
-| **`hazync-verify`** | **1.6 MB** |
+| `hazync-host-x86_64-linux-gnu-cuda` | 410 MB |
+| `hazync-host-x86_64-linux-gnu` | 241 MB |
+| **`hazync-verify-x86_64-linux-gnu`** | **1.7 MB** |
 
-Measured on x86-64 Linux: **sub-millisecond** verification, **2.4 MB** peak RSS, and the only dynamic
-dependencies are `libc` and `libgcc`.
+Measured on x86-64 Linux at v0.10.0 (2026-07-28, a 3,441-byte SNARK): **sub-millisecond** verification
+and **2.4 MB** peak RSS. Re-measured 2026-09-14 with the v0.21.4 binary on the live 227,746-byte STARK
+spine `[1..24,827]`, on a WSL2 laptop with `/usr/bin/time`: 0.02 s wall including process start,
+3.2 MB peak RSS. The only dynamic dependencies are `libc` and `libgcc` (`ldd`, same binary).
 
 The size comes from what it *doesn't* have. `risc0-zkvm` is pulled with `default-features = false`, so
 there is no prover, and it deliberately does **not** depend on the `methods` crate — that crate builds
@@ -68,7 +70,7 @@ shows you a proof of something real and hopes you read it as a proof of somethin
 
 ## The embedded image id
 
-`METHOD_ID_HEX` is a literal, because importing it from `methods` would drag in the guest build. That
+`METHOD_ID_HEX` (`src/lib.rs`) is a literal, because importing it from `methods` would drag in the guest build. That
 makes it invisible to the doc-drift scan, so `scripts/check-versions.sh` has an explicit check that it
 equals `reproduce/METHOD_ID`. **A re-baseline must update this constant**, or the verifier will silently
 reject every current proof. CI fails the build if it drifts.
@@ -76,13 +78,16 @@ reject every current proof. CI fails the build if it drifts.
 ## Limitations, stated plainly
 
 - **ARM64 is demonstrated; a handset is not.** It cross-compiles to `aarch64-unknown-linux-gnu` with
-  no source changes (1,643,112 bytes) and, executed as ARM64 code under `qemu-aarch64-static`, both
+  no source changes (1,643,112 bytes at v0.10.0, 2026-07-28; the v0.21.4 release asset
+  `hazync-verify-aarch64` is 1,708,656 bytes) and, executed as ARM64 code under `qemu-aarch64-static`, both
   verifies a genuine genesis-anchored proof and rejects a non-genesis one on the pin — see
   `prover/evidence/verifier_aarch64.txt`. What is still *not* shown is execution on physical phone
   hardware or an Android/iOS package; the latter needs the NDK, which is packaging rather than
   portability. Timing under emulation is not representative and is deliberately not quoted.
 - It verifies **range** proofs (`KIND_RANGE`) that are genesis-anchored. It is not a general receipt
   verifier; `host verify-any` remains the tool for un-anchored ranges.
-- The `RangeState` layout is mirrored from the guest by hand. Field order is load-bearing — the journal
-  decodes positionally, so a reordering misinterprets a valid proof rather than failing loudly. The
-  struct is currently duplicated in three places (guest, host, here) with no shared crate.
+- `RangeState` comes from the shared `hazync-rangestate` crate (`rangestate/`, imported since
+  `ba975b0`), which `verifier-ffi` also uses. The guest keeps its own copy, because linking the crate
+  into the guest would move `METHOD_ID`, and the host keeps a mirror. Field order is load-bearing — the
+  journal decodes positionally, so a reordering misinterprets a valid proof rather than failing loudly —
+  and `scripts/check-rangestate.sh` asserts the three agree and that no importer re-declares the struct.
