@@ -17,7 +17,7 @@ Config via env:
 The full submit→verify→credit loop is real; VERIFY_MODE=mock only stubs the STARK check so the rest
 can be tested without a GPU.
 """
-import os, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata, secrets, bisect, math
+import os, sys, json, sqlite3, hashlib, subprocess, base64, time, threading, tarfile, io, re, unicodedata, secrets, bisect, math
 from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
@@ -1373,15 +1373,45 @@ def foldable(limit=8):
     return out
 
 FRONTIER_TTL = float(os.environ.get("FRONTIER_CACHE_TTL", "2"))
+# #324: how far past its TTL a background-refreshed entry may still be served. Beyond this the caller
+# rebuilds in line, so a refresh that keeps failing surfaces as an error instead of an ever-older board.
+CACHE_MAX_STALE = float(os.environ.get("CACHE_MAX_STALE", "60"))
 _sf_lock = threading.Lock()
 _sf = {}            # key -> {"t": ts, "v": value} and key+":busy" -> threading.Event while recomputing
 
 
-def _single_flight(key, ttl, fn):
+def _sf_store(key, fn):
+    v = fn()
+    with _sf_lock:
+        _sf[key] = {"t": time.time(), "v": v}
+    return v
+
+
+def _sf_refresh(key, fn, ev):
+    """The background half of `_single_flight(background=True)`. It always releases the busy flag, so one
+    failed rebuild cannot leave the entry marked as refreshing for ever."""
+    try:
+        _sf_store(key, fn)
+    except Exception as ex:
+        print(f"[cache] background refresh of {key} failed, serving the previous value: {ex!r}",
+              file=sys.stderr, flush=True)
+    finally:
+        with _sf_lock:
+            _sf.pop(key + ":busy", None)
+        ev.set()
+
+
+def _single_flight(key, ttl, fn, background=False):
     """#265: a TTL cache that recomputes on ONE thread. While a recompute is running, other callers get
     the previous value (stale-while-revalidate); only a cold start makes them wait for the first value.
     A plain TTL cache stampedes the moment a recompute takes longer than its TTL -- every request misses
-    and recomputes, which is exactly what piled 148 threads onto the coordinator."""
+    and recomputes, which is exactly what piled 148 threads onto the coordinator.
+
+    #324: that still left ONE caller paying: the one that found the entry stale ran the rebuild itself.
+    /api/state takes ~3.5 s to rebuild against a 1.5 s TTL, so on 2026-09-14 one board request in every
+    ~5.5 s waited 3.4-4.4 s, and nginx queued every visitor behind it. With `background`, that caller
+    also gets the previous value and the rebuild runs on its own thread. A cold start, or an entry more
+    than CACHE_MAX_STALE past its TTL, still rebuilds in line."""
     now = time.time()
     with _sf_lock:
         e = _sf.get(key)
@@ -1399,11 +1429,14 @@ def _single_flight(key, ttl, fn):
             e = _sf.get(key)
         if e is not None:
             return e["v"]
+    if background and e is not None and now - e["t"] < ttl + CACHE_MAX_STALE:
+        try:
+            threading.Thread(target=_sf_refresh, args=(key, fn, ev), daemon=True, name="sf:" + key).start()
+            return e["v"]
+        except RuntimeError:
+            pass                     # no thread to spare: rebuild in line below, as before #324
     try:
-        v = fn()
-        with _sf_lock:
-            _sf[key] = {"t": time.time(), "v": v}
-        return v
+        return _sf_store(key, fn)
     finally:
         if leader:
             with _sf_lock:
@@ -1850,7 +1883,9 @@ def block_status_cached(prover=None):
     def build():
         v = json.dumps(block_status(prover)).encode()
         return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
-    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build)
+    # #324: background for the same reason as state_cached: the map's visitor must not wait on a rebuild.
+    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build,
+                          background=True)
 
 def _parse_price_bands(raw):
     """SPONSOR_PRICE_BANDS: a JSON list of [lo, hi, usd_per_block], heights inclusive, the price a WHOLE
@@ -2524,8 +2559,9 @@ def state_cached(slim=False):
     whichever was computed last to both callers."""
     # #265: single-flight. The old "a rare cold-start double-compute is harmless" stopped being rare once a
     # recompute took longer than STATE_TTL under load: every request missed and recomputed at once.
+    # #324: background, so the caller that finds it stale is not the one who waits ~3.5 s for the rebuild.
     return _single_flight("state:" + ("slim" if slim else "full"), STATE_TTL,
-                          lambda: json.dumps(state(slim=slim)).encode())
+                          lambda: json.dumps(state(slim=slim)).encode(), background=True)
 
 _MID_CACHE = {"v": None}
 
