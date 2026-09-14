@@ -83,11 +83,15 @@ practice. The first three weeks added Core rules steadily:
 Those sets nest. Proofs from that period assert less than today's — not because anything was broken,
 but because less had been built yet, and nothing depended on them.
 
-**Since 2026-08-03 the rule set has been stable.** Every guest change across the 7 ids after that
-date is performance or build work: chunk payload encoding, segment distribution and the join tree,
-ECMULT window knobs, the coprocessor field backend, and a warning fix. So the candidate set is a
-date boundary rather than a per-id verdict — **7 of 17 share today's rule set; 10 are development
-era.**
+**Since 2026-08-03 no rule has been added.** 7 of the 17 ids carry today's rule set: `dfc9eeda`, the
+BIP30 id itself, and the 6 after it. Five of those six changes are performance or build work — the id's
+independence from the checkout path, chunk payload encoding, segment distribution and parallel block
+validation, the coprocessor field backend with the ECMULT and codegen knobs, and CORE becoming the
+shipped guest. The sixth, `4722cec8` (audit #5), is soundness hardening rather than performance:
+`coin_leaf` bounds guards, a 32-bit-safe overflow check in `coinbase_value`, and a missing
+`return true` — latent undefined behaviour, never shown reachable, closed without adding a rule. So the
+candidate set is a date boundary rather than a per-id verdict — **7 of 17 share today's rule set; 10
+are development era.**
 
 ### ⛔ It is not a question the top-level verifier can answer alone
 
@@ -102,7 +106,8 @@ artifact, but it could never be folded into a chain, and the spine would restart
 regardless. Any version of this that actually preserves accumulated work requires **the guest** to
 accept children under earlier ids — which moves the set inside the circuit and undoes the S1 pinning
 that is currently verifier-asserted, and requires journal-format compatibility across the accepted
-ids (broken before, at `68819a54`).
+ids — broken before, when `dfc9eeda` added the coinbase-SMT roots to `RangeState`. (An earlier revision
+of this line said `68819a54`; that id changed the *witness* wire format, not the journal.)
 
 ### What makes it hard
 

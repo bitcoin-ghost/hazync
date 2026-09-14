@@ -6,19 +6,23 @@ machine-generated coverage inputs that libFuzzer regenerates, and they were 1,16
 
 What is kept here is the small amount that carries meaning:
 
-- **`sec2-position-crash.bin`** — the input that crashes the *unhardened* reference `Stump`
+- **`sec2-position-crash.bin`** — the input that crashed the reference `Stump`
   (`delete_soundness_reference`, the positive control) on the SEC-2 location-confusion class: an
-  attacker-chosen out-of-range position, which the pre-SEC-2 code panics on at
-  `accumulator/src/lib.rs`. The **hardened guest rejects the same input cleanly** and returns `false`.
+  attacker-chosen out-of-range position, on which the reference panicked in `tree_of`
+  (`accumulator/src/lib.rs`). The **hardened guest rejects the same input cleanly** and returns `false`.
 
-  This is the evidence that the accumulator fuzzing means anything. A clean run of
-  `delete_soundness` only demonstrates soundness if the harness provably detects the bug class —
-  and this input is that proof. If the control ever stops crashing on it, the harness has been
-  broken, not the bug fixed.
+  ⚠ **The seed predates the reference's own hardening.** External review L-2 (`8e789a9`, #63) made the
+  reference return `false` on an out-of-range `i` instead of panicking, so this input should no longer
+  crash it. **A control that does not crash on this seed is therefore expected, and is not by itself
+  evidence that the harness broke.** Whether the reference still trips the harness on some *other*
+  input — it still lacks the guest's position pin — is unverified; `audit-fuzz/FINDINGS.md` gives the
+  rerun that settles it.
+
+  `scripts/check-test-surfaces.sh` checks only that this file exists, not that anything crashes on it.
 
 ```bash
-# control MUST crash:
-cd audit-fuzz && cargo +nightly fuzz run delete_soundness_reference seeds/sec2-position-crash.bin
-# the hardened guest MUST NOT:
-cargo +nightly fuzz run delete_soundness seeds/sec2-position-crash.bin
+# the hardened guest MUST NOT crash:
+cd audit-fuzz && cargo +nightly fuzz run delete_soundness seeds/sec2-position-crash.bin
+# the reference crashed on this before #63; since #63 it is expected to reject it (unverified):
+cargo +nightly fuzz run delete_soundness_reference seeds/sec2-position-crash.bin
 ```

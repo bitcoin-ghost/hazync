@@ -6,7 +6,7 @@
 >
 > Background and the layer-by-layer detail are in
 > [`PROOF_DURABILITY.md`](PROOF_DURABILITY.md) and issue #244. Two claims in that issue are corrected
-> there and restated at the end of this document.
+> there and summarised at the end of this document.
 
 ## Where we are: Method 1, one id
 
@@ -14,8 +14,8 @@ A Hazync proof is checked against a **`METHOD_ID`** — a hash committing to the
 produced it. The verifier has one compiled in and accepts a proof only if it matches. The coordinator
 does the same and rejects anything else as a build mismatch.
 
-So a guest change retires the whole back catalogue at once. That has happened **17 times**
-(2026-07-18 → 2026-09-07); the record is
+So a guest change retires the whole back catalogue at once. The record holds **17 ids — 16
+supersessions** — between 2026-07-18 and 2026-09-07; it is
 [`reproduce/LINEAGE.tsv`](https://github.com/bitcoin-ghost/hazync/blob/main/reproduce/LINEAGE.tsv),
 derived from git history rather than typed by hand, so a row cannot be quietly dropped.
 
@@ -24,8 +24,11 @@ One build can produce an accepted proof, and that is the entire trust surface. N
 classified, so nothing can be misclassified. It is easy to state to an auditor and easy to reason
 about at three in the morning.
 
-**And the canonical guest is more stable than the re-baseline count suggests.** Its rule coverage has
-been unchanged since 2026-08-03; the changes since have been performance and build work. The
+**And the canonical guest is more stable than the re-baseline count suggests.** No consensus rule has
+been added since 2026-08-03. One change since was soundness hardening — `4722cec8` (audit #5): bounds
+guards on `coin_leaf`, an overflow check in `coinbase_value`, and a missing `return true` that was
+undefined behaviour — which closed latent paths without adding a rule. The rest has been performance
+and build work, including the two libsecp patches that made CORE the shipped guest. The
 experimental **GHOST** build, where new speed levers land first, is deliberately separate — it does
 not ship and cannot contribute to the board — so exploring it costs the board nothing.
 
@@ -70,12 +73,11 @@ current id excludes them by construction rather than by anyone's judgement.
 the identical statement, and exactly the kind we would want proofs to survive. Equality is the harder
 claim.
 
-The cautionary case is already ours. `1d6c3792` genuinely left Core's consensus code untouched, but
-relocated three values (wtxids, coin leaves, sequence numbers) so the aggregate *receives* them from
-chunks rather than recomputing them — changing what it checks versus what it trusts. Establishing
-that this preserved the statement took **two same-run differentials over 8,006 inputs plus a 16-chunk
-end-to-end on block 962,000**, and within the same change one relocation was deliberately *not* made
-because getting it wrong would have been fail-open.
+The cautionary case is already ours: `1d6c3792` left Core's consensus code untouched yet changed what
+the aggregate checks versus what it trusts, and establishing that the statement survived took two
+same-run differentials and a 16-chunk end-to-end run
+([`PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md) §2,
+"What makes it hard").
 
 "No rule changed" was a **finding**, not an observation. A scheme that admits ids because someone
 asserted the relation while reading a diff is resting on the weakest part of this.
@@ -87,19 +89,16 @@ matter of evidence.
 
 ## One structural constraint, so nobody designs around the wrong thing
 
-Composition is **homogeneous by construction, enforced inside the circuit**: a fold verifies both
-children with `env::verify(self_id, …)` then asserts `l.self_id == self_id && rr.self_id ==
-self_id`, and the verifier asserts the final `self_id` equals `METHOD_ID`.
-
-So widening only the top-level verifier would leave an old proof checkable as a standalone artifact
-but never foldable, and the spine would restart at every re-baseline regardless. **For accumulated
-chain work to survive, the guest itself must carry the accepted set** — which puts the list inside
-the thing whose correctness everything else rests on.
+Composition is homogeneous and enforced inside the circuit, so widening only the top-level verifier
+would leave old proofs checkable but never foldable. **For accumulated chain work to survive, the guest
+itself must carry the accepted set** — which puts the list inside the thing whose correctness
+everything else rests on. The mechanism is in
+[`PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md) §2.
 
 ## Open questions
 
-These are the questions we would most like answered, and they are
-put to the community in the linked discussion rather than settled here.
+These are the questions we would most like answered, and they are put to the community in
+[Discussion #299](https://github.com/bitcoin-ghost/hazync/discussions/299) rather than settled here.
 
 1. **Is "starts at the id we are moving to, and only ever tightens" sound?** It is the load-bearing
    claim, and we would rather it failed here than in production.
@@ -116,9 +115,6 @@ put to the community in the linked discussion rather than settled here.
 
 Two claims in the original issue (#244) have since been corrected in
 [`docs/PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md),
-and both are worth knowing before replying: the soft-fork analogy as *originally* stated does not
-transfer — Bitcoin's version is safe because permissive old nodes are covered by an enforcing
-majority, which a proof system has not got, so an accept-everything set would simply invite picking
-the most permissive entry. The constraints above are what answer that. And recursion cannot lift a
-proof from a narrower guest into a stricter one: lifting preserves the *statement*, so it yields
-"guest X accepted this block", not "this block satisfies the current rules".
+and both are worth reading before replying: the soft-fork analogy does not transfer as originally
+stated (the constraints above are what answer it), and recursion cannot lift a proof from a narrower
+guest into a stricter one.

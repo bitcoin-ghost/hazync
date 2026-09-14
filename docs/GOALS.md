@@ -16,23 +16,16 @@ marked otherwise.
 Not an intermediate to be folded and deleted. A sceptic must be able to be handed one block and check
 it alone, rather than being told "we proved a range".
 
-**Status: achieved, and at risk.** A receipt exists and is served for each proven height. Verified on a
-real artifact — a single-block receipt proved from a coordinator witness bundle, then Groth16-wrapped,
-and checked with the released v0.16.0 binaries (2026-08-04):
+**Status: achieved, and at risk.** A receipt exists and is served for each proven height, and a receipt
+of a mid-chain range can be checked on its own. That check lives in CI rather than in a transcript
+here: `prover/testdata/snark/neg500.snark` is a Groth16-wrapped mid-chain range, regenerated under the
+current guest on 2026-09-07 (`prover/testdata/snark/README.md`), and `.github/workflows/adversarial.yml`
+asserts that `hazync-verify` exits exactly `2` on it — a valid SNARK that is not genesis-anchored. That
+is the verdict every per-block receipt above block 1 gets, and checking one alone is what G1 asks for.
 
-```
-$ hazync-verify neg500.snark
-NOT A GENESIS-ANCHORED CHAIN PROOF
-
-  The SNARK is VALID and was produced by guest 37987b85.
-  It proves blocks 500..500 — a mid-chain SEGMENT, not a chain from genesis.
-$ host verify-any range_500.hzk
-RANGE-OK lo=500 hi=500 out_leaves=503 range_work=4295032833 anchored=no
-```
-
-(`hazync-verify` exits 2 here: the SNARK is valid but this is a mid-chain **segment**, not a
-genesis-anchored proof. That is the expected result for a per-block receipt, and is what G1 asks for
-— one block, checkable alone.)
+(An earlier revision printed a transcript of this check "with the released v0.16.0 binaries". Its
+guest-id line was later rewritten to each new id at re-baselines, so it stopped describing the run it
+claimed to be; it was removed rather than relabelled.)
 
 The count of retained receipts is not restated here, because it is a property of the coordinator's
 proof store rather than of this document, and quoting it goes stale on every re-baseline.
@@ -67,17 +60,16 @@ goals document reads as a claim rather than as a snapshot. The
 same numbers as JSON.
 
 > **Re-baselines reset the board to genesis**, because receipts made against a superseded guest do not
-> verify under the new one. The current guest `1d6c3792` was pinned on **2026-08-23** (parallel block validation), superseding
-> `b62d2a60` of **2026-08-04** (audit #5,
-> shipped in v0.17.0). It followed `b161735a` (v0.16.0, #88 — the id no longer depends on where the
-> repo is checked out) and `dfc9eeda` (2026-08-03, BIP30 closed by a coinbase-only SMT, #54, with
-> audit #3's 91842/91880 grandfather), which in turn followed `71790584`.
+> verify under the new one. The current guest is `37987b85`. Every id that has ever been canonical is
+> in [`reproduce/LINEAGE.tsv`](../reproduce/LINEAGE.tsv) — one row per id, oldest first, with the date
+> it became canonical, the commit that pinned it and the risc0 toolchain it was built with — and
+> `reproduce/METHOD_ID` records why each was superseded.
 >
-> Four resets in three days is the real cost of changing the guest at all. `reproduce/METHOD_ID`
-> carries the full history and the rule it established: **any guest edit that moves line numbers
-> changes the id, including comments.**
+> The rule that history established: **any guest edit that moves line numbers changes the id,
+> including comments.**
 
-That gap is the important part and it has been consistently understated:
+That gap is the important part and it has been consistently understated. Measured on the **stock**
+guest, before CORE:
 
 | | measured |
 |---|---|
@@ -89,55 +81,43 @@ That gap is the important part and it has been consistently understated:
 Extrapolating the 2,220 blocks/hr figure to the remaining 931,664 blocks gives ~17 GPU-days and is
 wrong by orders of magnitude.
 
-⚠ **The ~17 GPU-years figure that replaced it is also too low, by roughly an order of magnitude.** It
-assumed a 10-minute average per block. A near-tip block measured on 2026-08-24 took **289 minutes** of
-card time on its own.
+⚠ **The ~17 GPU-years figure that replaced it was also too low, by roughly an order of magnitude.** It
+assumed a 10-minute average per block; a near-tip block measured on the stock guest on 2026-08-24 took
+**289 minutes** of card time on its own.
 
 **Cost the work by INPUTS, not blocks.** Early blocks are nearly empty, so a per-block average is
-meaningless; script verification dominates and it scales with inputs. Measured on an L40S at po2 22:
-**2.41 card-seconds per input** (17,340 s over ~7,200 inputs), which agrees with the independently
-estimated ~2.7 s/GPU-input in `ACCELERATION.md`.
+meaningless; script verification dominates and it scales with inputs.
 
-Bitcoin's history is somewhere around 1.8–3.0 billion inputs, so:
+| guest | block | card-seconds per input | source |
+|---|---|---|---|
+| stock | 962,000 (~7,200 inputs), L40S, po2 22 | **2.41** (17,340 s) — MEASURED | 2026-08-24 |
+| **CORE** | 966,108 (8,562 prevouts), 8 × L40S, po2 21 | **~0.77** (5,075 chunk + ~1,500 aggregate card-s) — INFERRED | `docs/history/BENCH_8xL40S_2026-09-08.md` |
 
-| total inputs | card-years | on L40S (€1.11/hr) | on RTX 4090 (\$0.39/hr) | on RTX 4090 (\$0.13/hr) |
-|---|---|---|---|---|
-| 1.8bn | ~138 | £1.15m | £0.53m | £0.18m |
-| 2.4bn | ~183 | £1.53m | £0.70m | £0.23m |
-| 3.0bn | ~229 | £1.92m | £0.88m | £0.29m |
+Bitcoin's history is somewhere around 1.8–3.0 billion inputs, an estimate. At CORE's ~0.77 card-seconds
+per input that is roughly **44–73 L40S card-years**, against the stock guest's 138–229 — INFERRED from one
+near-tip block. Per-input cost varies with script type and era, and the input count is itself a range,
+so read the order of magnitude, not the digits. The stock guest's figures were also priced in money;
+that has not been re-derived for CORE.
 
-**Keeping up with the tip** — one block per 600 s — needs about **29 L40S** continuously (~£20k/month),
-or **~41 RTX 4090s** at the lower po2 they can hold (~£3k–9k/month depending on the listing).
+**Keeping up with the tip** at a bounded lag needs about **11 L40S** on that block, and a sub-10-minute
+block about **13** (`TOPOLOGY_AND_SETTINGS.md` §1) — both INFERRED from an 8-card fleet that measured
+15m13s. On rented RTX 4090s, block 966,256 has been proved end to end in **8.09 minutes on 26 cards**
+and **9.07 minutes on 27** (`docs/history/MILESTONE_966256_2026-09-10.md`,
+`docs/history/MILESTONE_966256_RUN4_2026-09-10.md`).
 
-⛔ **That 29 is the STOCK, unaccelerated guest.** The coprocessor field backend has since MEASURED
-**10 cards for Core and 5 for Ghost** on real proving (`BUILDS.md` §1), so 29 is the baseline the
-acceleration work is measured *against*, not a current requirement. The pound figures above scale
-with it: Core's 2.9x is a direct division of the monthly cost, and the backfill card-years below
-divide the same way.
-
-⚠ **This is the THROUGHPUT number, and it is not the same question as `FLEET_SIZING.md`'s ~32.** This
-page prices keeping up with the chain at a bounded lag, where consecutive blocks overlap;
-`FLEET_SIZING.md` prices one block start-to-finish inside 600 s. Both are right about their own
-question and they are ~3 cards apart, so quoting either without naming the framing produces an
-argument. `TOPOLOGY_AND_SETTINGS.md` §1 reconciles them and states which risks attach to each — in
-particular, the ~32 figure assumes the aggregate distributes across cards, which has never been
-exercised, and the ~29 figure does not need it.
-
-⚠ **The card matters, and the constraint is VRAM rather than price.** A full chunk at po2 22 peaks at
-**40.6 GB**, so 24 GB cards (4090, 3090) cannot run it and must drop to po2 20 — measured at **1.42x**
-slower. They need more cards for the same throughput, and are still several times cheaper per unit of
-work. Do not quote a fleet size without saying which po2 it assumes.
-
-These are ballparks with real uncertainty: the input count is an estimate, per-input cost varies with
-script type, and everything is priced at spot rates that move. The order of magnitude is the point —
-**hundreds of card-years, not tens.**
+⚠ **Name the framing, the card and the po2 with any fleet size.** Throughput (consecutive blocks
+overlap, so a bounded lag) and latency (one block inside 600 s) are different questions; the stock
+guest's ~29 here and `FLEET_SIZING.md`'s ~32 answered them for a guest that no longer ships. 24 GB cards
+run the CUDA default po2 21 (peak 22,478 MiB on a 4090); only po2 22, which peaked at 40.6 GB on the
+stock guest, is out of their reach.
 
 Two consequences:
 
-- **Guest performance carries enormous leverage.** At this scale the `ECMULT_WINDOW_SIZE` change that
-  bought 1.8–2.3% is worth roughly four months of GPU time across the chain. `ACCELERATION.md` is not
-  a nice-to-have. (⚠ That 1.8–2.3% is the **15 → 19** move against libsecp's default. What the window
-  is worth *beyond* 19 is a separate and smaller question — see `TOPOLOGY_AND_SETTINGS.md` §4.1.)
+- **Guest performance carries enormous leverage.** At the CORE figure above, a 1% cycle saving is worth
+  roughly half a card-year of backfill. `docs/history/ACCELERATION.md` records how the stock guest's
+  levers were found. (⚠ The often-quoted 1.8–2.3% for `ECMULT_WINDOW_SIZE` is the **15 → 19** move
+  against libsecp's default; beyond 19, window 21 measured −1.245% — see `TOPOLOGY_AND_SETTINGS.md`
+  §4.1.)
 - **This is a fleet problem, not a procurement problem.** It is why the proof party exists.
 
 ### The bridge WAS the binding constraint. It is not any more.
@@ -211,12 +191,13 @@ nothing, reports the canonical guest id, and — driven through the page's own `
 returns `verified` for the live genesis-anchored spine (71 ms) and `not_anchored` for a mid-chain
 segment (46 ms). Both verdicts correct; evidence in `prover/evidence/wasm_verifier_live.txt`.
 
-Still open, and the weaker half of the same question: the native `hazync-verify-aarch64` binary's peak
-RSS on real silicon (#41). It has only ever run under `qemu-aarch64-static`. The WASM path already
-answers the memory ceiling, so this is confirmation rather than an unknown.
+The native `hazync-verify-aarch64` binary's peak RSS on real ARM silicon was never measured — it has only
+run under `qemu-aarch64-static` — and #41, which asked for it, was closed on 2026-08-01 as superseded by
+the WASM measurement above, which answers the memory ceiling portably.
 
-**Done when:** the verifier is shown running on a real small device — a browser on a phone is
-sufficient and is now the cheapest route — with the result recorded in `prover/evidence/`.
+**Done when** — met: the verifier runs in a browser with no host imports, and the deployed module was
+checked against the signed release (`prover/evidence/wasm_verifier_live.txt`). A run on a physical
+phone or Pi has not been recorded.
 
 Related: the artifact a small device should fetch is the SNARK wrap, measured at **1,841 bytes** for
 `[1..8]`, not the ~200–300 B quoted in older docs (#21, #22). CUDA Groth16 crashes (#20), so wrapping
@@ -257,23 +238,16 @@ handed a UTXO set and establish that it is exactly what a proven chain produces,
 developer-chosen hash anywhere in the trust chain** — which is what separates this from Core's
 `assumeutxo`, where the snapshot is checked against a hash the developers picked:
 
-```
-$ ghostd -hazyncproof=fold_8.snark -hazyncutxo=dump_h8.bin
-[hazync] proof VERIFIED against guest 37987b85…
-[hazync]   genesis-anchored through height 8
-[hazync]   UTXO dump … MATCHES the proven set (8 coins)
-```
+Run against a height-8 proof (`ghostd -hazyncproof=fold_8.snark -hazyncutxo=dump_h8.bin`), the node
+reports the proof verified, genesis-anchored through height 8, and the UTXO dump matching the proven
+set of 8 coins. (The transcript that stood here was recorded under an earlier guest, `4722cec8`, and
+its id line was later rewritten at re-baselines; it was removed rather than left misattributed.)
 
 Driven on real data: the dump is emitted by the archive bridge (`host dump-snapshot`) and checked by
 rebuilding the accumulator and comparing its roots against the ones the proof commits to. A single
 flipped byte in one coin's value is refused — *"UTXO SET DOES NOT MATCH THE PROOF — rebuilt
 accumulator roots differ from the proven ones"*. `getblockchaininfo.hazync.utxodumpmatched` reports
 the verdict on a running node.
-
-**What is still missing is adoption itself:** nothing is loaded into a chainstate. The node verifies
-the set and then validates every block from genesis anyway, so there is no speed to report yet. That
-is deliberate — a change that alters how a node validates should not land before the verification
-path it rests on has been reviewed.
 
 Demonstrated at height 8, which proves the *mechanism* and nothing about the *saving*: blocks 1..1000
 hold ~1,020 transactions in total, so a meaningful measurement needs a proof somewhere in 200k–400k,
@@ -341,19 +315,19 @@ is served with an empty coinbase scriptSig — the payload genuinely destroyed, 
 Without this G2 is unreachable by definition: a genesis→tip proof is stale the moment it is made, and
 the frontier never converges on a moving tip.
 
-**Status: not met, by a wide margin.** ~~One block measured at **55 minutes** of GPU time against a
-**10-minute** block interval — a single card is **5.5× too slow to stand still**. Roughly six
-L40S-equivalents are needed to hold position.~~
+**Status: not met — sustained throughput above one block per 10 minutes has not been measured — but
+sized.** On the CORE guest, on near-tip blocks:
 
-⚠ **CORRECTED 2026-08-28 — "roughly six" was derived from block 741,000 and is stale by ~5x at
-tip-era input counts.** G2 of this same document measures a near-tip block (962,000, ~7,200 inputs) at
-**17,340 s = 4.8 hours** of L40S time. Against a 600 s interval:
+| framing | fleet | label |
+|---|---|---|
+| one block inside 600 s | **~13 L40S** | INFERRED from 8 × L40S measuring 15m13s on block 966,108 |
+| keep pace at a bounded lag | **~11 L40S** | INFERRED, ~6,570 card-seconds per block on 966,108 |
+| one block on rented RTX 4090s | 26 cards **8.09 min**; 27 cards **9.07 min** | MEASURED on block 966,256 |
 
-```
-17,340 s per block / 600 s interval  =  28.9  =>  ~29 L40S to hold position
-```
+The derivations are in `TOPOLOGY_AND_SETTINGS.md` §1. The stock guest needed ~29 L40S on the same
+throughput framing; that figure is superseded.
 
-⇒ **~29 cards is BREAK-EVEN.** It matches the chain's growth rate exactly and **burns down none of
+⇒ **The throughput figure is BREAK-EVEN.** It matches the chain's growth rate and **burns down none of
 the backlog**. Proving history is a separate purchase on top of it — see "Two operating modes" below.
 
 This constrains only the **proving fleet**. Nodes consuming proofs (G3, G4, G5) are unaffected.
@@ -386,18 +360,18 @@ belongs to produces an argument rather than an answer.
 | | **Backfill** (G2) | **Tip-following** (G6) |
 |---|---|---|
 | what it is | prove genesis → frontier | prove each new block as it arrives |
-| the work | **138-229 card-years** (1.8-3.0bn inputs at 2.41 card-s/input) | **~29 L40S continuously** |
+| the work | **~44–73 L40S card-years** on CORE, INFERRED (1.8–3.0bn inputs at ~0.77 card-s/input; 138–229 on the stock guest) | **~11 L40S continuously**, INFERRED |
 | what matters | throughput per pound; calendar | keeping pace |
-| per-block latency | **irrelevant** — 880,000 are queued | the only thing that matters, *eventually* |
+| per-block latency | **irrelevant** — the whole chain is queued | the only thing that matters, *eventually* |
 | sized by | budget and how long you will wait | the block interval |
 
-**The two add, they do not overlap.** ~29 cards holds position and closes nothing. Catching up is
-whatever you buy on top:
+**The two add, they do not overlap.** ~11 cards holds position and closes nothing. Catching up is
+whatever you buy on top — INFERRED from the CORE card-years above (G2), so no more precise than they are:
 
-| cards above break-even | time to backfill |
+| L40S above break-even | time to backfill |
 |---|---|
-| +100 | ~1.4-2.3 years |
-| +500 | ~0.3-0.5 years |
+| +50 | ~0.9–1.5 years |
+| +100 | ~0.4–0.7 years |
 
 ⚠ **Consequence for planning: tip latency is not a live question yet.** While backfilling you are by
 definition nowhere near the tip, so "is this block proved within 600 s of appearing?" cannot be
@@ -410,11 +384,12 @@ Backfill proves a **closed, enumerable** set of blocks: every signature it will 
 exists and can be differential-tested exhaustively against libsecp. Tip proving cannot be, because
 its inputs have not been written yet.
 
-⇒ **An acceleration that is unacceptable at the tip may be perfectly testable for history.** Since
-backfill is where 138-229 card-years live and tip-following is ~29 cards, that asymmetry points at
-taking a fidelity trade on the expensive workload while keeping full Core semantics on the cheap one.
-hazync#139 (bigint2 ECDSA, 13.78x per verify) is exactly such a decision, and it makes the same
-distinction in its own text. **Nothing here is decided; it is written down so the option is visible.**
+⇒ **An acceleration that is unacceptable at the tip may be perfectly testable for history.** Backfill
+is where the card-years live and tip-following is ~11 cards, so that asymmetry points at taking a
+fidelity trade on the expensive workload while keeping Core semantics on the cheap one. hazync#139
+(bigint2 ECDSA, 13.78x per verify) was exactly such a decision. It is closed (2026-08-23), and v0.21.0
+settled it for the shipped guest: CORE ships without #139, and the #139 middle path lives only in the
+experimental Ghost build (`docs/BUILDS.md`).
 
 ## Dependencies between goals
 

@@ -61,25 +61,34 @@ famously full of tiny, load-bearing quirks that have to match *exactly*.
 
 **Hazync doesn't rewrite the part that's hard to get right.** We took Bitcoin Core's own actual source
 code for the fiddly, edge-case-heavy heart of validation — the script interpreter, the
-signature-hashing, the transaction checks, and the cryptography — the exact same code the whole network
-runs, unchanged — and ran *that* inside the magic-stamp machine. For that part there is no "did we
+signature-hashing, the transaction checks, and the cryptography — the same code the whole network
+runs — and ran *that* inside the magic-stamp machine. For the rules themselves there is no "did we
 translate it faithfully?" gap, because there is no translation. The difficulty adjustment is Core's
 real code too now (its own `pow.cpp`). What's left outside is a sliver — the halving schedule and the
 handful of soft-fork switch-on heights — short, simple arithmetic we did re-express, and we check it
 against Core's (the retarget carve against the *actual* difficulty of every real adjustment in Bitcoin's
 history). This is the part everyone else got stuck on, and it's the part we cracked.
 
-*(For the technically curious: we compile Bitcoin Core v28's real script interpreter, signature-hashing,
-and its cryptography library and run them, unmodified, inside a zero-knowledge virtual machine. The
-full details, and an honest list of what's proven vs still open, are in `docs/SOUNDNESS.md` and
-`SECURITY.md`.)*
+We should be exact about one thing, because "unchanged" would be too strong. Underneath Core's rules sit
+a few small pieces of our own: the bookkeeping that tracks which coins exist, and two changes to how the
+cryptography library does its lowest-level arithmetic, so that it runs fast inside the proof machine.
+One of those takes a shortcut answer from a helper and has Core's own code check it before using it.
+They are designed not to change what counts as valid, and tested against Core's untouched code — but
+they are ours, not Core's, which makes them exactly where we most want people to look.
+
+*(For the technically curious: we compile Bitcoin Core v28's real script interpreter, signature-hashing
+and libsecp256k1 and run them inside a zero-knowledge virtual machine. It is "maximal-Core", not "pure
+Core": two small libsecp256k1 patches change the field arithmetic beneath its own checks, and the UTXO
+and BIP30 commitments are our own code. The full list, and an honest account of what's proven vs still
+open, are in `docs/SOUNDNESS.md` and `SECURITY.md`.)*
 
 ## What actually works today (and what doesn't — honestly)
 
 We are allergic to hype, so here's the straight version.
 
 **What's proven and working:**
-- Real Bitcoin Core code, unmodified, running inside the proof machine. ✅
+- Real Bitcoin Core code running inside the proof machine, with a small, listed set of our own code
+  underneath it. ✅
 - Every kind of Bitcoin transaction — old-style, modern "SegWit", and the newest "Taproot". ✅
 - Whole real blocks from the actual Bitcoin chain, checked end-to-end, producing a real certificate you
   can verify. We did this on genuine mainnet blocks, including a big modern one with hundreds of inputs. ✅
@@ -90,9 +99,13 @@ We are allergic to hype, so here's the straight version.
 - The full run from Bitcoin's first block to today. Not because we don't know how — we do, and we've
   proven every piece works — but because making the certificate for fifteen years of history takes a
   **lot** of computing power (lots of graphics cards, for a while). We have the method; we don't yet
-  have all the machines. That's the honest bottleneck.
-- Independent experts poking holes in it. We've audited our own work hard and fixed what we found, but
-  self-review isn't the same as outside review. We *want* people to try to break it.
+  have all the machines. That's the honest bottleneck. The run is happening in public: the
+  [live board](https://bitcoinghost.org/hazync.html) shows how far the proven chain reaches right now,
+  and `CONTRIBUTING.md` explains how to add a graphics card to it.
+- A professional security audit. We've audited our own work hard and fixed what we found, and two
+  outside reviews — by people outside the project, working with AI tools — read the whole source and
+  found no flaw that would let a bad block pass. That's encouraging, but nobody has yet been paid to
+  audit it professionally, and that isn't the same thing. We *want* people to try to break it.
 
 This is roughly where a well-known earlier project called ZeroSync stopped and moved on. We think we've
 gone past the wall they hit — mainly by not rewriting the rules — but we say "we think" on purpose. The
@@ -119,8 +132,9 @@ kind of thing you want to exist, here's how you can move it forward — pick wha
 - **Lend computing power.** The one big remaining task — making the certificate for all of history — is
   the kind of job that splits into thousands of independent pieces. Many people each proving a small
   chunk, then stitching the results, gets it done far faster than any single group. If you have
-  graphics cards (a gaming PC counts) or cloud credits, you can prove a slice. Think of it as a
-  community barn-raising for Bitcoin's history.
+  graphics cards (a gaming PC counts) or cloud credits, you can prove a slice — `CONTRIBUTING.md` walks
+  through it, and the [live board](https://bitcoinghost.org/hazync.html) shows your work landing. Think
+  of it as a community barn-raising for Bitcoin's history.
 - **Donate.** Renting the graphics cards to complete the full run costs real money. Funding buys
   compute time directly. Small amounts add up; a handful of committed cards can keep the tip current
   once the history is done.
@@ -136,5 +150,5 @@ kind of thing you want to exist, here's how you can move it forward — pick wha
 
 *Want the deep version? `README.md` is the technical overview, `docs/SOUNDNESS.md` is the exact security
 claim and trust assumptions, `SECURITY.md` is our own hole-poking (and an open invitation to poke
-harder), and `docs/HAZYNC_ARCHITECTURE.md` is how the full run gets done. We keep the honest caveats in writing on
-purpose — a project like this is only worth anything if the claims are true.*
+harder), `CONTRIBUTING.md` is how to join the full run, and `docs/GOALS.md` is where it stands. We keep the
+honest caveats in writing on purpose — a project like this is only worth anything if the claims are true.*
