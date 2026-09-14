@@ -1,6 +1,6 @@
 # Hazync accumulator — adversarial fuzz report
 
-**Target:** the Utreexo UTXO accumulator, the one non-Core component and the soft spot most
+**Target:** the Utreexo UTXO accumulator, a non-Core component and the soft spot most
 flagged in `SECURITY.md` (SEC-2 was an accumulator `delete` bug; the top external-audit ask is
 "especially of the accumulator"). It is also the only part fuzzable *hard* without a GPU or a
 Core build.
@@ -36,17 +36,34 @@ proofs, non-rightmost `proof_last`, out-of-range `i`. After every op the harness
   positions/leaves/siblings, wrong heights, non-rightmost `proof_last`, out-of-range `i`), **fully
   attacker-authored proofs** (junk leaf / giant position / arbitrary sibling stack), and arbitrary
   `verify` calls (panic-safety).
-- The single input that crashes the unhardened reference (below) is handled by the guest
+- The single input that crashed the then-unhardened reference (below) is handled by the guest
   cleanly in 1 ms (rejected, no mutation).
 
-### Reference `Stump` — positive control (expected, NOT a shipping bug)
-- `delete_soundness_reference` target: **crashes in < 1 s**, panic at
-  `accumulator/src/lib.rs:120` (`tree_of` "position out of range").
-- Mechanism: the reference `delete` verifies `proof_i`'s *membership* but trusts the caller's
-  global index `i`; feeding an in-set `proof_i` with an out-of-range `i` reaches `tree_of(i)`
-  and panics — the SEC-2 "trusted an unverified position" class. The guest closes it with the
-  `if i >= self.num_leaves { return false }` guard (line 115) plus the position pin
-  (`proof_i.position == i - off`, lines 118-121).
+### Reference `Stump` — positive control ⚠ NEEDS A RERUN
+- **As recorded (before 2026-08-02):** `delete_soundness_reference` crashed in < 1 s, panicking in
+  the reference's `tree_of` ("position out of range", `accumulator/src/lib.rs`). The reference
+  `delete` verified `proof_i`'s *membership* but trusted the caller's global index `i`; an in-set
+  `proof_i` with an out-of-range `i` reached `tree_of(i)` and panicked — the SEC-2 "trusted an
+  unverified position" class.
+- **That panic no longer exists.** External review L-2 hardened the reference in `8e789a9` (#63):
+  `tree_of` returns `Option`, and `delete` returns `false` when `i >= num_leaves` or `tree_of` finds
+  nothing. The committed seed (`seeds/sec2-position-crash.bin`) is that out-of-range input, so the
+  reference should now reject it.
+- **Whether the control still fires is UNVERIFIED.** The reference still lacks the guest's two pins —
+  `proof_i.siblings.len()` equal to the height of `i`'s tree, and `proof_i.position == i - off` (the
+  checks straight after `if i >= self.num_leaves { return false }` in
+  `prover/methods/guest/src/utreexo.rs`). So an honest proof for one coin presented with a different
+  in-range `i` plausibly still returns `true` with the wrong roots, which `run_reference` reports as
+  `REFERENCE SOUNDNESS: accepted forged delete diverged from oracle`. Plausible, not measured: the
+  campaign has not been rerun since #63. The rerun that settles it:
+
+  ```bash
+  cd audit-fuzz && cargo +nightly fuzz run delete_soundness_reference -- -max_total_time=300
+  ```
+
+  A `REFERENCE SOUNDNESS` or `REFERENCE accepted out-of-range delete` crash means the harness still
+  detects the class. A clean 300 s means the control is dead, and the clean guest campaigns above have
+  no positive control until a new one is written.
 - This is a **positive control**, not a vulnerability: the reference `Stump` is documented as
   the readable spec, never run in the zkVM, and the host only ever feeds it honest proofs. Its
   value here is proving the harness is sensitive to exactly the bug class in question — a fuzzer
@@ -58,7 +75,7 @@ proofs, non-rightmost `proof_last`, out-of-range `i`. After every op the harness
 cd audit-fuzz
 cargo test --release                              # harness self-tests + SEC-2 rejection unit test
 cargo +nightly fuzz run delete_soundness -- -max_total_time=120        # guest (clean)
-cargo +nightly fuzz run delete_soundness_reference -- -max_total_time=60  # reference (fast crash, control)
+cargo +nightly fuzz run delete_soundness_reference -- -max_total_time=60  # reference control — unverified since #63, see above
 ```
 
 ## Honest limits of this pass
