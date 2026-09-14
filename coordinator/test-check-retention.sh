@@ -89,6 +89,18 @@ rm -rf "$TMP/proofs"
 if run_checker; then bad "a missing proof dir reported success — that is a silent all-clear"
 else note "ok   missing proof dir -> refuses to report a clean run"; fi
 
+echo "== 6. the genesis seed: block 0 is the anchor, not a missing receipt =="
+build_fixture
+python3 - "$TMP/c.db" <<'PY2'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO ranges VALUES('0-2',0,2,'verified')"); c.commit()
+PY2
+if run_checker; then note "ok   verified [0..2] with receipts for 1 and 2 -> exit 0 (block 0 is owed no receipt)"
+else bad "a verified genesis seed reported height 0 missing — an alarm no amount of proving can clear"; cat "$TMP/out"; fi
+rm -f "$TMP/proofs/proof_1.bin"
+if run_checker; then bad "the genesis seed masked a missing receipt for block 1"; cat "$TMP/out"
+else note "ok   ...but block 1 inside the seed is still owed its own receipt"; fi
+
 echo
 if [ "$fail" -ne 0 ]; then echo "G1 retention gate is NOT trustworthy — see failures above."; exit 1; fi
 echo "G1 retention gate detects what it is supposed to detect."

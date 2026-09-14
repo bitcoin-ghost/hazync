@@ -153,6 +153,16 @@ reset()
 submit(100, 103)
 check(submit(101, 101)[0] == 200, "a single block inside an existing wide range is still accepted")
 
+# ── a range starting at block 0 never reaches the fold rule ───────────────────────────────────────
+# The guard used to skip `lo == 0` outright, so an unbacked `[0..hi]` could add `hi` blocks of coverage
+# with no per-block receipt. Block 0 is now refused as genesis before this rule runs (test_genesis.py);
+# asserted here only for what it means to THIS rule: nothing starting at 0 adds coverage.
+print("== a range starting at block 0 adds no coverage ==")
+reset()
+code, obj = submit(0, 3)
+check(code == 400 and obj.get("genesis") is True, "an unbacked [0..3] is refused (as genesis), not accepted")
+check(not (covered() & {1, 2, 3}), "  ...so blocks 1..3 stay uncovered and claim() still hands them out")
+
 # ── a board that ALREADY holds a bad range must still be repairable ───────────────────────────────
 # Not hypothetical, and worth being blunt about: the guard refuses the wide REPAIR range too, because
 # it overlaps the bad one. Replayed against the live board on 2026-09-12, it refuses 5 of 4,783 wide

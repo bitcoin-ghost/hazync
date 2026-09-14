@@ -289,6 +289,44 @@ Deploy in this order, verifying each before the next. Each stage is independentl
 Before deploying to a live coordinator, dry-run the migration against a **copy of the real DB** (the
 newest backup snapshot works). A migration that fails on production is the worst place to discover it.
 
+## Alerts
+
+Every hazync failure pushes to a phone via [ntfy](https://ntfy.sh). Added 2026-09-14, after the G1
+retention check had failed every night since 2026-09-12 with nobody knowing.
+
+| what | where it runs | fires when |
+|---|---|---|
+| `OnFailure=hazync-alert@%n.service` | coordinator: retention check, backup, node tip, coordinator, bridge | the unit enters `failed` |
+| `ExecStopPost=+hazync-alert.sh --crash %n` | coordinator: `hazync-coordinator`, `hazync-bridge` | an unclean stop (`SERVICE_RESULT != success`), max 1 per unit per 15 min |
+| `hazync-watchdog.timer` (every 5 min) | **web box** | `/api/meta` fails 2 probes in a row (direct and via nginx); re-sends hourly, one RECOVERED |
+
+⚠ The crash hook is not optional: `Restart=always` with `RestartSec>=3` never reaches systemd's start
+limit, so a crash-looping coordinator never enters `failed` and `OnFailure=` never fires. ⚠ The
+watchdog is off-box on purpose: a dead coordinator runs no hook of its own.
+
+Config: `/etc/hazync/alert.env` (`0600 root`) holds `NTFY_URL=https://ntfy.sh/<topic>` on BOTH boxes.
+The topic is the only secret (anyone with it can read and post) and is not in git. Subscribe to it
+in the ntfy app.
+
+```bash
+# coordinator (root)
+install -m 0755 coordinator/deploy/hazync-alert.sh /usr/local/bin/
+install -m 0644 coordinator/deploy/hazync-alert@.service /etc/systemd/system/
+for u in hazync-coordinator hazync-bridge hazync-coordinator-backup hazync-retention-check hazync-node-tip; do
+  install -D -m 0644 coordinator/deploy/dropins/$u-alert.conf /etc/systemd/system/$u.service.d/alert.conf
+done
+systemctl daemon-reload                      # no restart needed; ExecStopPost= applies to the next stop
+# web box
+sudo install -m 0755 coordinator/deploy/hazync-alert.sh coordinator/deploy/watchdog/hazync-watchdog.sh /usr/local/bin/
+sudo install -m 0644 coordinator/deploy/watchdog/hazync-watchdog.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hazync-watchdog.timer
+```
+
+**Test the live path, not just the script** — a push that never reaches the phone is the failure:
+`hazync-alert.sh "Hazync: test" "hello"` on each box, and on the coordinator a throwaway unit with
+`ExecStart=/bin/false` + `OnFailure=hazync-alert@%n.service` proves the systemd wiring end to end.
+`coordinator/deploy/test-alerting.sh` (CI) covers the scripts only.
+
 ## Backup & restore
 
 The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (the re-verifiable STARK

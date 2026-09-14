@@ -1,0 +1,7 @@
+[Unit]
+Description=Hazync alert: %i failed
+# Pulled in by `OnFailure=hazync-alert@%n.service` in each unit's alert.conf drop-in.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hazync-alert.sh --unit %i

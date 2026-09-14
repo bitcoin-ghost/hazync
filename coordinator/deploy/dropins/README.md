@@ -141,3 +141,9 @@ and `ProtectSystem=strict`; unprivileged `getblockcount` returned 960691; `/api/
 `/api/witness/500` and `/api/spine` all 200; a write lock taken and released on the DB as `hazync`;
 retention gate `exit=0`; backup `exit=0`; and the public board at 46,177 proven with frontier ==
 proven throughout.
+
+## Alerts (2026-09-14)
+
+`<unit>-alert.conf` → live `/etc/systemd/system/<unit>.service.d/alert.conf`, for the coordinator,
+bridge, backup, retention check and node tip. They route failures (and, for the two `Restart=always`
+services, crashes) to `hazync-alert.sh`. See RUNBOOK § Alerts.
