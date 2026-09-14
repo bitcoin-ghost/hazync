@@ -127,7 +127,7 @@ receipt at every configuration. Measured since on a different block: 966,256 pro
 **544.0 s across 27 rented RTX 4090s**
 ([run 4](docs/history/MILESTONE_966256_RUN4_2026-09-10.md)). A worker needs
 only the segment in front of it, so it cannot forge a receipt, only fail to return one.
-[`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+[`docs/FLEET_OPERATIONS.md`](docs/FLEET_OPERATIONS.md).
 
 The board **resets with v0.21.0**, as it does at every re-baseline: guest `37987b85` (2026-09-06)
 supersedes `3867611d` (2026-09-04), because Core's two levers — the coprocessor field backend and the
@@ -171,7 +171,7 @@ accelerator, byte-identical output) and, since v0.21.0, two to libsecp256k1 (`00
 field backend selected at the field-backend interface libsecp already parameterises; `0013`, a
 `lift_x` witness hint that libsecp's own arithmetic checks before accepting). wNAF, GLV, the ECDSA
 and Schnorr logic and every check above the field stay libsecp's. That makes the shipped guest
-*maximal-Core*, not pure Core: [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md) §1 draws the line.
+*maximal-Core*, not pure Core: [`docs/SPEC.md`](docs/SPEC.md) §12 lists every piece of the circuit that is not Core's.
 
 What is *not* compiled from Core is a thin, self-contained slice: the subsidy halving schedule and the
 script-flag activation heights, each differentially tested against Core (the flag schedule is proven a
@@ -262,14 +262,13 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - Soundness statement (a reviewer's best first read): [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
 - Audit record: [`SECURITY.md`](SECURITY.md) (status, open items) · every round, 1–11, the last two
   external: [`docs/history/SECURITY_AUDIT_LOG.md`](docs/history/SECURITY_AUDIT_LOG.md) · round 8's
-  full write-up: [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)
+  full write-up: [`AUDIT_2026-07.md`](docs/history/AUDIT_2026-07.md)
 - Adversarial fuzzing (what was fuzzed, what wasn't): [`docs/FUZZING.md`](docs/FUZZING.md)
 - What we're for, and how far along: [`docs/GOALS.md`](docs/GOALS.md), six goals, measured status
-- What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
 - **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
 - Why those numbers, and what we got wrong reaching them:
-  [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md)
+  [`docs/BUILDS.md`](docs/BUILDS.md)
 - How it's built: [`docs/`](docs/) — current only. The development record is in
   [`docs/history/`](docs/history/README.md), which names its own stale figures.
 

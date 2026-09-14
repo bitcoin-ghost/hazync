@@ -230,7 +230,7 @@ VRAM (22,521–22,917 MiB measured on an L40S, 2026-08-28); at po2 22, which you
 `HAZYNC_SEG_PO2`, it is about 40.6 GB, so a 48 GB card holds exactly one. Running two on the same card
 leaves no headroom at po2 21 and will exhaust it at po2 22, and it would buy roughly 3% even if it fit.
 
-Details, the aggregate case, and every knob: [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
+Details, the aggregate case, and every knob: [`docs/FLEET_OPERATIONS.md`](docs/FLEET_OPERATIONS.md).
 
 ## Just want to check a proof, not make one?
 
