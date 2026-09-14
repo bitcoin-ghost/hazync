@@ -283,3 +283,5 @@ The coordinator (`coordinator/`) is optional and reusable. If you want to run yo
 ## Reviewing the code
 
 If you would rather try to break it than prove blocks, that is the most valuable thing you can do. `SECURITY.md` is the map of where the soft spots are.
+
+Everyone taking part is covered by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md); conduct and security reports go through the private form it names.
