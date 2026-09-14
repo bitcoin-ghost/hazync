@@ -81,6 +81,18 @@ sponsor was proven last.
 - **Termination is confirmed.** `podTerminate` is repeated until RunPod no longer lists the pod. A run also
   sweeps any pod carrying its own name prefix, in case a deploy's answer was lost. A pod that cannot be
   confirmed gone is printed loudly and the bot exits with code 4: terminate it by hand.
+- **RunPod must accept the bot's requests.** Every RunPod call sends the bot's own User-Agent: RunPod's
+  API sits behind Cloudflare, which refuses Python's default `Python-urllib` User-Agent with HTTP 403
+  (`error code: 1010`). Without it the first live trial (2026-09-14) could not deploy, list or terminate
+  a pod, and logged every refusal as "no GPU capacity". A refused request is now logged with RunPod's
+  status and message; after 3 refused deploy requests in a row the bot stops (nothing is running, since
+  every deploy was refused) and exits with code 5.
+- **A pod that cannot start its work is replaced, not fatal.** Work is launched with
+  `setsid -f bash sponsor-run.sh >> sponsor-run.log 2>&1 < /dev/null`, so the ssh that starts it returns at
+  once. The first trial backgrounded the whole `cd && ... && setsid nohup ...` list instead, which kept the
+  ssh channel open until the proving run ended; the call timed out and the uncaught timeout stopped the bot
+  (its cleanup still terminated the pod). A timed-out ssh or scp is now a failed step: the pod is terminated
+  with its blocks logged `failed`, and those blocks go to the next pod.
 - **`stop-all`** terminates every pod whose name starts with `hz-sponsor-`.
 
 ## Pods

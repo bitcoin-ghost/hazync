@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 DB = os.environ.get("COORD_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "coordinator.db"))
@@ -52,6 +53,13 @@ HELD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL AND min_sats
 CLAIM_TTL = int(os.environ.get("CLAIM_TTL", "3600"))   # a claim taken or beaten this recently is live
 POD_PREFIX = "hz-sponsor-"
 GRAPHQL_URL = "https://api.runpod.io/graphql"
+# RunPod's API sits behind Cloudflare, which refuses Python's default "Python-urllib/3.x" User-Agent with
+# HTTP 403 "error code: 1010" (measured 2026-09-14). Without this header the bot could not deploy, list or
+# terminate a pod, and every refusal was logged as "no GPU capacity".
+USER_AGENT = "hazync-sponsor-bot/1 (+https://github.com/bitcoin-ghost/hazync)"
+# After this many refused deploy requests in a row the bot stops: an API it cannot talk to will not start
+# answering by itself, and it could not terminate a pod either.
+RUNPOD_REFUSALS_MAX = 3
 IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 # 4090 community hosts often never expose public SSH; A40s always did (board fleet, 2026-09-11).
 GPU_TYPES = ("NVIDIA GeForce RTX 4090", "NVIDIA A40")
@@ -317,12 +325,19 @@ class RunPod:
         return json.dumps(str(v))            # a JSON string literal is a valid GraphQL string literal
 
     def _gql(self, query):
-        req = urllib.request.Request(self.url, data=json.dumps({"query": query}).encode(),
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": f"Bearer {self.key}"})
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.key}"}
+        if USER_AGENT:
+            headers["User-Agent"] = USER_AGENT
+        req = urllib.request.Request(self.url, data=json.dumps({"query": query}).encode(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 d = json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read()[:200].decode(errors="replace").strip()
+            except Exception:
+                body = ""
+            raise RunPodError(f"HTTP {e.code} {e.reason}: {body}") from e
         except Exception as e:
             raise RunPodError(f"{type(e).__name__}: {e}") from e
         if d.get("errors") and not d.get("data"):
@@ -330,7 +345,11 @@ class RunPod:
         return d.get("data") or {}
 
     def deploy(self, name, ssh_pubkey, gpu_types=GPU_TYPES):
-        """One on-demand 1-GPU pod, trying each GPU type in turn. None when none has capacity."""
+        """One on-demand 1-GPU pod, trying each GPU type in turn. None when RunPod answered and no type had
+        capacity. RunPodError when RunPod refused the request for every type: that is not a capacity miss,
+        and treating it as one hid a Cloudflare 403 behind "no GPU capacity" on the first trial."""
+        refused = None
+        answered = False
         for gt in gpu_types:
             q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: ALL, gpuCount: 1, volumeInGb: 0, "
                  f"containerDiskInGb: 40, gpuTypeId: {self._s(gt)}, name: {self._s(name)}, "
@@ -338,10 +357,13 @@ class RunPod:
                  f"env: [{{key: \"PUBLIC_KEY\", value: {self._s(ssh_pubkey)}}}] }}) {{ id costPerHr }} }}")
             try:
                 p = self._gql(q).get("podFindAndDeployOnDemand")
-            except RunPodError:
-                p = None
+                answered = True
+            except RunPodError as e:
+                refused, p = e, None
             if p and p.get("id"):
                 return {"id": p["id"], "name": name, "gpu_type": gt, "cost_per_hr": float(p.get("costPerHr") or 0)}
+        if refused is not None and not answered:
+            raise refused
         return None
 
     def pods(self):
@@ -486,15 +508,22 @@ class SshRunner:
                 "-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "GlobalKnownHostsFile=/dev/null",
                 "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes"]
 
+    # A timed-out ssh or scp is a FAILED STEP for that pod, never an exception: on the first trial an uncaught
+    # TimeoutExpired from starting work stopped the whole bot.
+    @staticmethod
+    def _run(argv, timeout):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout}s")
+
     def _ssh(self, pod, cmd, timeout=60):
         ip, port = pod.ssh
-        return subprocess.run(["ssh", "-n", *self._opts(), "-p", str(port), f"root@{ip}", cmd],
-                              capture_output=True, text=True, timeout=timeout)
+        return self._run(["ssh", "-n", *self._opts(), "-p", str(port), f"root@{ip}", cmd], timeout)
 
     def _scp(self, pod, paths, dest):
         ip, port = pod.ssh
-        return subprocess.run(["scp", "-q", *self._opts(), "-P", str(port), *paths, f"root@{ip}:{dest}"],
-                              capture_output=True, text=True, timeout=120)
+        return self._run(["scp", "-q", *self._opts(), "-P", str(port), *paths, f"root@{ip}:{dest}"], 120)
 
     def boot(self, pod):
         detail = "not attempted"
@@ -530,7 +559,7 @@ class SshRunner:
                     or self._scp(pod, [os.path.join(w["home"], "key.hex"), os.path.join(w["home"], "handle")],
                                  dest + "/").returncode != 0
                     or self._ssh(pod, f"chmod 600 {dest}/key.hex").returncode != 0):
-                raise RuntimeError(f"could not copy identity {w['tag']} to {pod.name}")
+                raise StartFailed(f"could not copy identity {w['tag']} to {pod.name}")
             copied.add(w["tag"])
         lines = ["#!/bin/bash", "cd /workspace"]
         for w in work:
@@ -542,11 +571,10 @@ class SshRunner:
         with open(script, "w") as f:
             f.write("\n".join(lines) + "\n")
         if self._scp(pod, [script], "/workspace/sponsor-run.sh").returncode != 0:
-            raise RuntimeError(f"could not copy the work list to {pod.name}")
-        r = self._ssh(pod, "cd /workspace && : > sponsor-run.log && setsid nohup bash /workspace/sponsor-run.sh"
-                           " >> /workspace/sponsor-run.log 2>&1 < /dev/null & disown; exit 0")
+            raise StartFailed(f"could not copy the work list to {pod.name}")
+        r = self._ssh(pod, launch_command())
         if r.returncode != 0:
-            raise RuntimeError(f"could not start work on {pod.name}: {r.stderr.strip()[:200]}")
+            raise StartFailed(f"could not start work on {pod.name}: {r.stderr.strip()[:200]}")
 
     def status(self, pod):
         try:
@@ -558,10 +586,26 @@ class SshRunner:
         return "finished" if r.stdout.strip() == "ALLDONE" else "running"
 
 
+def launch_command(workdir="/workspace"):
+    """Start the work list detached, so the ssh that starts it returns at once.
+
+    Only `setsid -f` goes to the background, with stdin, stdout and stderr all redirected. The first trial used
+    `cd ... && : > log && setsid nohup bash run.sh >> log 2>&1 < /dev/null & disown`: `&` backgrounds the whole
+    `&&` list in a subshell whose own stdout and stderr are still the ssh channel, so ssh waited for the proving
+    run to end and the call timed out (reproduced with pipes: the old command held them open, this returns)."""
+    return (f"cd {workdir} && : > sponsor-run.log && setsid -f bash {workdir}/sponsor-run.sh"
+            f" >> {workdir}/sponsor-run.log 2>&1 < /dev/null; exit 0")
+
+
 # ---------- the bot ----------
 
 class BotRefused(RuntimeError):
     pass
+
+
+class StartFailed(RuntimeError):
+    """Work could not be started on ONE pod (an ssh or scp step failed or timed out). The bot terminates that
+    pod and puts its blocks back in the queue; it is not a reason to stop the run."""
 
 
 class Pod:
@@ -615,6 +659,7 @@ class Bot:
         self.prefix = f"{POD_PREFIX}{int(time.time())}-"   # wall time, not self.clock: unique per run
         self._n = 0
         self._capacity_at = 0.0
+        self._refusals = 0
 
     # --- money ---
     def _live(self):
@@ -660,6 +705,8 @@ class Bot:
                     break
                 self._assign(c, now)
                 self._launch(c, now)
+                if self.stop_reason == "runpod":
+                    break
                 if not self._live() and not pending_work(c, (), self.trial):
                     self.stop_reason = self.stop_reason or "done"
                     break
@@ -780,7 +827,13 @@ class Bot:
             p.assigned, p.state = items, "working"
             p.segment_start = p.last_progress = now
             p.finished_since = None
-            self.runner.start(p, work)
+            try:
+                self.runner.start(p, work)
+            except StartFailed as e:
+                # This pod could not start its work: terminate it and let the blocks go back to the queue for
+                # another pod. Anything else still stops the run, with every pod terminated.
+                self._terminate(c, p, f"could not start work: {e}", outcome="failed")
+                continue
             self.log(f"{p.name}: proving {len(chunk)} block(s) from {chunk[0][1]}")
 
     def _launch(self, c, now):
@@ -795,7 +848,18 @@ class Bot:
             if self.spend(now) + (self.hourly() + self.ceiling) * self.budget_lead_s / 3600.0 >= self.max_usd:
                 break
             self._n += 1
-            info = self.api.deploy(f"{self.prefix}{self._n}", self.runner.ssh_pubkey)
+            try:
+                info = self.api.deploy(f"{self.prefix}{self._n}", self.runner.ssh_pubkey)
+            except RunPodError as e:
+                self._refusals += 1
+                self._capacity_at = now + self.capacity_backoff_s
+                if self._refusals >= RUNPOD_REFUSALS_MAX:
+                    self.stop_reason = "runpod"
+                    self.log(f"RunPod refused the deploy request {self._refusals} times in a row ({e}): stopping")
+                else:
+                    self.log(f"RunPod refused the deploy request ({e}); trying again later")
+                break
+            self._refusals = 0
             if not info:
                 self._capacity_at = now + self.capacity_backoff_s
                 self.log("no GPU capacity on RunPod; trying again later")
@@ -1005,7 +1069,9 @@ def main(argv=None):
             raise SystemExit(f"sponsor_bot: {e}")
     if not a.live:
         print("\n".join(plan_text(DB, trial)))
-        raise SystemExit("sponsor_bot: dry run; add --live with --max-pods, --max-usd and --max-usd-per-hour to rent GPUs")
+        print("sponsor_bot: dry run; add --live with --max-pods, --max-usd and --max-usd-per-hour to rent GPUs",
+              file=sys.stderr)
+        return 2
     missing = [f for f, v in (("--max-pods", a.max_pods), ("--max-usd", a.max_usd),
                               ("--max-usd-per-hour", a.max_usd_per_hour)) if v is None]
     if missing:
@@ -1031,6 +1097,8 @@ def main(argv=None):
         c.close()
     if bot.unconfirmed:
         return 4
+    if reason == "runpod":
+        return 5
     return 3 if reason == "budget" else 0
 
 

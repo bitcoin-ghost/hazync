@@ -64,6 +64,8 @@ class FakeRunPod:
         self.prices = {"NVIDIA GeForce RTX 4090": 0.34, "NVIDIA A40": 0.49}
         self.capacity = {"NVIDIA GeForce RTX 4090": True, "NVIDIA A40": True}
         self.deploys, self.terminations = [], []
+        self.agents = []                    # the User-Agent of every request
+        self.refuse_deploy = False          # answer deploys with an API error instead of a pod
         self.max_live, self.n = 0, 0
         self.lock = threading.Lock()
         fake = self
@@ -73,6 +75,17 @@ class FakeRunPod:
                 pass
 
             def do_POST(self):
+                agent = self.headers.get("User-Agent") or ""
+                fake.agents.append(agent)
+                if not agent or agent.startswith("Python-urllib"):
+                    # What api.runpod.io's Cloudflare does to Python's default User-Agent (measured 2026-09-14).
+                    out = b"error code: 1010\n"
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(out)))
+                    self.end_headers()
+                    self.wfile.write(out)
+                    return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 out = json.dumps(fake.handle(body["query"], self.headers.get("Authorization"))).encode()
                 self.send_response(200)
@@ -95,6 +108,8 @@ class FakeRunPod:
         with self.lock:
             if auth != "Bearer test-key":
                 return {"errors": [{"message": "unauthorized"}], "data": None}
+            if "podFindAndDeployOnDemand" in q and self.refuse_deploy:
+                return {"errors": [{"message": "simulated refusal"}], "data": None}
             if "podFindAndDeployOnDemand" in q:
                 gt = re.search(r'gpuTypeId: "([^"]+)"', q).group(1)
                 name = re.search(r'name: "([^"]+)"', q).group(1)
@@ -124,9 +139,10 @@ class FakeRunner:
     """A pod that proves its assigned blocks by writing verified proofs into the coordinator database."""
     ssh_pubkey = "ssh-ed25519 AAAAFAKE sponsor-bot@test"
 
-    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False):
+    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=()):
         self.per_block, self.boot_fail, self.stall = per_block, set(boot_fail), set(stall)
         self.raise_on_start = raise_on_start
+        self.start_fail = set(start_fail)       # pods (1st, 2nd, ...) whose work cannot be started
         self.booted, self.started, self.threads, self.status_at_start = [], [], {}, {}
         self.work, self.unregistered_at_start = [], []
         self.lock = threading.Lock()
@@ -143,6 +159,8 @@ class FakeRunner:
     def start(self, pod, work):
         if self.raise_on_start:
             raise RuntimeError("simulated failure while starting work")
+        if self.nth(pod) in self.start_fail:
+            raise sponsor_bot.StartFailed(f"simulated: could not start work on {pod.name}")
         heights = [w["height"] for w in work]
         self.started.append((pod.id, heights))
         self.work.extend((pod.id, dict(w)) for w in work)
@@ -261,6 +279,35 @@ for kw, why in ((dict(max_pods=0), "zero pods"), (dict(max_usd=0), "a zero total
     except sponsor_bot.BotRefused:
         refused = True
     check(refused, f"the bot refuses {why}")
+
+# ---------- RunPod: the User-Agent, and a refusal is not a capacity miss ----------
+print("== RunPod: User-Agent and refusals ==")
+reset()
+api = FakeRunPod()
+make_bot(api, FakeRunner(), trial=[9700]).run()
+check(api.agents and all(a == sponsor_bot.USER_AGENT and a for a in api.agents),
+      f"every RunPod call carries the bot's own User-Agent, not Python's default ({sorted(set(api.agents))[:2]})")
+check(len(api.deploys) == 1, f"so a pod is deployed through the Cloudflare-like guard ({len(api.deploys)} deploys)")
+saved_agent, sponsor_bot.USER_AGENT = sponsor_bot.USER_AGENT, ""
+try:
+    sponsor_bot.RunPod("test-key", url=FakeRunPod().url, timeout=10).deploy("hz-sponsor-x", FakeRunner.ssh_pubkey)
+    raised = ""
+except sponsor_bot.RunPodError as e:
+    raised = str(e)
+sponsor_bot.USER_AGENT = saved_agent
+check("403" in raised and "1010" in raised,
+      f"without it RunPod refuses (403, 1010) and the client says so instead of returning 'no capacity' ({raised!r})")
+reset()
+api = FakeRunPod()
+api.refuse_deploy = True
+logs = []
+reason = make_bot(api, FakeRunner(), trial=[9701], capacity_backoff_s=0, log=logs.append).run()
+refusals = [m for m in logs if "RunPod refused the deploy request" in m]
+check(reason == "runpod" and len(refusals) == sponsor_bot.RUNPOD_REFUSALS_MAX,
+      f"{sponsor_bot.RUNPOD_REFUSALS_MAX} refused deploys in a row stop the run as 'runpod' (reason {reason}, {len(refusals)} refusals)")
+check(not any("no GPU capacity" in m for m in logs), "a refusal is never logged as a capacity miss")
+check(not api.live(), "and nothing is left running")
+check(sponsor_bot.main(["trial", "--blocks", "9702"]) == 2, "a dry run exits with code 2, as the docs say")
 
 # ---------- the queue: only holds, oldest payment first ----------
 print("== the queue ==")
@@ -424,6 +471,60 @@ note = q("SELECT note FROM sponsor_pods WHERE pod_id=?", (first,))[0]["note"] or
 check(first in api.terminations and first not in [p for p, _ in runner.started] and note.startswith("boot failed"),
       f"a pod whose boot fails is terminated before it is given work ({note})")
 check(status_of(s) == "proven", "a second pod proves the blocks")
+
+# ---------- a pod whose work cannot be started ----------
+print("== a pod whose work cannot be started ==")
+reset()
+s1 = sponsor(9800, 9803)
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01, start_fail={1})
+logs = []
+reason = make_bot(api, runner, max_pods=1, blocks_per_pod=5, log=logs.append).run()
+check(reason == "done" and status_of(s1) == "proven",
+      f"the run carries on and the sponsorship is proven by another pod (reason {reason}, {status_of(s1)})")
+check(len(api.deploys) >= 2 and not api.live(), f"the pod that could not start was terminated and replaced ({len(api.deploys)} deploys, live {api.live()})")
+check(q("SELECT COUNT(*) n FROM sponsor_work WHERE outcome='failed'")[0]["n"] == 4,
+      "its four blocks are logged as failed on that pod, then proven on the next")
+check(q("SELECT note FROM sponsor_pods WHERE note LIKE 'could not start work%'"), "and the pod's note says why")
+
+print("== starting work returns at once, and a timeout is a failed step ==")
+wd = tempfile.mkdtemp(prefix="launch_")
+with open(os.path.join(wd, "sponsor-run.sh"), "w") as f:
+    f.write("#!/bin/bash\nsleep 30\necho ALLDONE\n")
+t0 = time.time()
+try:
+    r = sponsor_bot.subprocess.run(["bash", "-c", sponsor_bot.launch_command(wd)], capture_output=True, text=True, timeout=5)
+    took, timed_out = time.time() - t0, False
+except sponsor_bot.subprocess.TimeoutExpired:
+    took, timed_out = time.time() - t0, True
+sponsor_bot.subprocess.run(["pkill", "-f", os.path.join(wd, "sponsor-run.sh")], capture_output=True)
+check(not timed_out and took < 2, f"the launch command returns with its output pipes free while the work runs on ({took:.2f}s)")
+real_run = sponsor_bot.subprocess.run
+
+
+def hang(argv, **kw):
+    raise sponsor_bot.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+
+class _Pod:
+    id, name, ssh = "podT", "hz-sponsor-t", ("127.0.0.1", 22)
+
+
+sponsor_bot.subprocess.run = hang
+try:
+    sr = sponsor_bot.SshRunner.__new__(sponsor_bot.SshRunner)
+    sr.key, sr.known_hosts, sr.dir = "/nonexistent/key", "/dev/null", wd
+    res = sr._ssh(_Pod(), "true")
+    try:
+        _Pod.identities = {"trial"}
+        sr.start(_Pod(), [{"height": 1, "tag": "trial", "home": wd, "pubkey": "p", "handle": "h"}])
+        raised = None
+    except Exception as e:
+        raised = e
+finally:
+    sponsor_bot.subprocess.run = real_run
+check(res.returncode == 124, f"a timed-out ssh comes back as a failed result, not an exception (rc {res.returncode})")
+check(isinstance(raised, sponsor_bot.StartFailed), f"so starting work on an unreachable pod raises StartFailed ({type(raised).__name__})")
 
 # ---------- an exception mid-run ----------
 print("== an exception mid-run ==")
