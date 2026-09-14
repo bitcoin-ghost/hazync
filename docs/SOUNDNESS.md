@@ -15,18 +15,39 @@ committed* — checkable by verifying one succinct proof, without re-executing h
    `CalculateNextWorkRequired` / `CheckProofOfWorkImpl`, driven through the real `CBlockIndex` /
    `chain.cpp` with consensus constants from `kernel/chainparams.cpp` and `primitives/block.cpp`), and
    libsecp256k1 are the *actual* Core sources compiled into the zkVM — not a reimplementation. The shims
-   are portability-only (`serialize.h` 32-bit int overload; SHA256 routed to the RISC0 accelerator,
-   byte-identical; single-thread no-op `coreshim/{sync,threadsafety,logging}.h`) plus libc/unwinder glue.
-   **No consensus-logic changes.** This is the property that removes the reimplementation-soundness gap
-   every prior effort carries. Auditable: `patches/000{1,2}` + the TU list in
-   `prover/methods/guest/build.rs`.
-2. **SHA-256 collision resistance** — the accumulator (Utreexo) and merkle/commitment checks are
-   SHA-256; that's their entire security. The accumulator is *our* code but it's a commitment ABOVE
-   consensus, not a Core reimpl — the proven version is the guest's `prover/methods/guest/src/utreexo.rs`, differentially fuzzed against a reference model (`accumulator/src/lib.rs`). Being the one non-Core
-   component, it is the single most likely location of any remaining soundness bug; it is differentially
-   fuzzed but has **not** been externally audited.
-3. **RISC0 zkVM soundness** — the STARK/SNARK proving system. Standard cryptographic assumption.
-4. **The anchor checkpoint** — the chain proof starts from a trusted state (genesis, or a trusted
+   under Core's own sources are portability-only (`serialize.h` 32-bit int overload; SHA256 routed to the
+   RISC0 accelerator, byte-identical; single-thread no-op `coreshim/{sync,threadsafety,logging}.h`) plus
+   libc/unwinder glue. **No consensus logic is changed.** This is the property that removes the
+   reimplementation-soundness gap every prior effort carries. Auditable: `patches/000{1,2}` + the TU list
+   in `prover/methods/guest/build.rs`.
+2. **Non-Core code beneath libsecp256k1 (since v0.21.0).** The canonical guest also applies
+   `patches/0012` and `patches/0013` (`provision-vps.sh` phase 5a). Every signature check runs through
+   them, so they are consensus-relevant, and they are ours rather than Core's:
+   - **`0012` — the `field_bigint2` backend** (`prover/methods/guest/field_bigint2.h`,
+     `field_bigint2_impl.h`, `src/field_bigint2.rs`). A narrow substitution at the field interface libsecp
+     already parameterises: lazy 8×32-bit limbs, with add/sub/negate/half in C and multiply/square/inversion
+     through the RISC0 bigint2 coprocessor. wNAF, GLV, the ECDSA and Schnorr logic and every check above
+     the field stay libsecp's. Evidence: a mod-p harness against arbitrary precision, libsecp's own suite
+     at `-DVERIFY`, mutation controls — two broken lazy backends pass libsecp's suite and are caught only
+     by the harness — and a block-962,000 journal digest byte-identical to stock
+     (`scripts/field-backend-tests.sh`, `docs/FIELD_BIGINT2_BACKEND.md` §5b). ⚠ No corrupt-signature
+     negative control has run on a CORE build (§7).
+   - **`0013` — the `lift_x` witness hint** (`prover/methods/guest/src/liftx_hint.rs`). Replaces the
+     square root in `secp256k1_ge_set_xo_var` with a host-supplied Y, accepted only if `y² == x³ + 7`
+     under libsecp's own `fe_sqr`/`fe_equal`; the existing parity fix-up then determines y uniquely, and a
+     missing or wrong hint falls back to libsecp's square root. Advice-and-verify: a hint can skip work,
+     not change a result (`docs/LIFTX_HINT.md` §3) — but that check is itself computed on the `0012`
+     backend.
+3. **SHA-256 collision resistance** — the accumulator (Utreexo), the coinbase SMT and the
+   merkle/commitment checks are SHA-256; that's their entire security. Both accumulators are *our* code,
+   but commitments ABOVE consensus rather than Core reimplementations. The proven Utreexo is the guest's
+   `prover/methods/guest/src/utreexo.rs`, differentially fuzzed against a reference model
+   (`accumulator/src/lib.rs`); the coinbase SMT that carries BIP30 is `coinbase-smt/src/{roots,bip30}.rs`,
+   compiled into the guest by path and checked in CI against a naive oracle that shares no code. With the
+   `0012` backend they are the non-Core code most likely to hold any remaining soundness bug, and none of
+   it has been externally audited.
+4. **RISC0 zkVM soundness** — the STARK/SNARK proving system. Standard cryptographic assumption.
+5. **The anchor checkpoint** — the chain proof starts from a trusted state (genesis, or a trusted
    block-hash checkpoint). Everything after the anchor is proven; the anchor itself is a trust input
    (documented; which anchor to trust is the deployment's trust-ladder choice).
 
@@ -90,9 +111,17 @@ anchoring gaps:
 - **H6 — genesis in-boundary (high).** `verify-range` now pins the FULL genesis boundary
   (`assert_genesis_in_boundary`: `in_epoch_start`, `in_roots`, `in_recent`, `in_time`, not just
   `in_tip`/`in_leaves`/`in_nbits`); `verify-any` applies the same pin whenever a range claims genesis.
-  Closes a forgeable first-retarget difficulty and a phantom-root UTXO seed.
-- **H7 (fixed).** Coordinator now chains ranges on difficulty/MTP continuity, not tip-hash alone
-  (`verify-any` exposes nbits/epoch; `_frontier_chain` enforces `out==in` across each seam).
+  Closes a forgeable first-retarget difficulty and a phantom-root UTXO seed. **`in_smt_root` joined the
+  pin later.** #54 added the coinbase-SMT root to the boundary and to `RangeState::is_genesis_anchored`,
+  but neither the standalone verifier (audit #3 F-2) nor this host gate (F-3) got it, so a range starting
+  from a fabricated BIP30 history verified as genesis-anchored. Both now require it to equal the empty
+  tree's root — the verifier by calling the shared predicate.
+- **H7 (fixed).** Coordinator now chains ranges on the full boundary, not tip-hash alone: `verify-any`
+  emits a boundary digest over height, tip, roots, leaves, nBits, time, epoch start, recent times and the
+  SMT root, and `_frontier_chain` (`coordinator/server.py`) requires, across each seam, tip linkage,
+  digest equality (`in_bhash == out_bhash`) and **height contiguity** `b.lo == a.hi + 1` (H9, round 6).
+  Among every chain meeting that, it selects the one with the **most cumulative work** from genesis, not
+  the tallest — so a longer low-difficulty fork cannot shadow the real chain.
 - **H8 (fixed).** Every recursion-consumed journal (`ChainState`/`RangeState`/`ChunkOut`) commits a
   domain tag as its first field, asserted on decode — no cross-mode journal can be laundered in.
 
@@ -198,7 +227,7 @@ OPEN (none architectural):
 1. ✅ **S1 recursion hardening** — self_id committed + verifier asserts `==METHOD_ID` at every level;
    positive chain VERIFIED, adversarial wrong-id chain REJECTED (proven on a box).
 2. ✅ **S2 real coin height/coinbase** threaded from the bridge — maturity + BIP68-height live on real
-   blocks (validated on 741000). (BIP68-time/`coin_mtp` completes with the archive-node bridge.)
+   blocks (validated on 741000). (BIP68-time `coin_mtp` was fixed separately, without the bridge — §5.)
 3. ✅ **BIP34 + BIP30** checks added and validated on 741000.
 4. ✅ **Execute-mode regression** (`regress`, `check-full`) — block 170 chain_step tip-match + adversarial
    inflation; runs in seconds, no proving. `check-full` is the standard pre-flight before any GPU prove.
@@ -207,20 +236,33 @@ OPEN (none architectural):
    commitment, BIP34/BIP30, and real maturity/BIP68 for real. Also fixed a latent header bug: the
    header builder hardcoded version 1 (invisible on the version-1-era test vectors 100000/130000/140000);
    now threads the real versionbits value, so PoW is correct on modern blocks.
-6. **Scaling → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) **succinct chunk receipts** — the 1645s
-   aggregate was dominated by verifying 16 *composite* receipts in-guest; succinct receipts make that
-   cheap and fixed-cost (biggest single win). (b) **Archive-node bridge** (hazync-during-IBD) — **BUILT +
+6. **Scaling → HAZYNC_ARCHITECTURE.md**, reprioritised by the 741000 run: (a) ✅ **succinct chunk
+   receipts — implemented 2026-07-15.** The 1645 s aggregate was dominated by lifting 16 *composite*
+   receipts inside its resolve step; each chunk is now proved to a `SuccinctReceipt` up front, so that
+   lift moves into the parallel chunk phase and the aggregate's in-guest verifies are fixed-cost. (b) **Archive-node bridge** (hazync-during-IBD) — **BUILT +
    running as of 2026-07-23**: it drives one resident Utreexo forest over the real chain and emits each
    block's witness with the real `root_prev` + inclusion proofs, replacing the explorer fetcher, giving
    real coin metadata + MTP for free, and closing S3 operationally (real-UTXO binding) — the receipt is
    byte-identical to the replay path, so the trust base is unchanged. (c) **Parallel backfill** across a
    GPU fleet → tree fold.
 
-The §2 trust base is untouched — the hard part (real Core code proving) is done and is the core of the design.
-Items 1-5 are complete; item 6 is the scaling work (the bridge, 6b, is now built and running).
+Items 1–6 did not change the §2 trust base. It grew in v0.21.0, when the two libsecp patches in §2 item 2
+became part of the canonical guest. Items 1–5 are complete; of item 6, (a) and (b) are done.
 
 ## 7. Known open issues (security)
-This is a self-review, not an external audit. The living security status — including three findings
-(SEC-1/2/3) found and fixed in a 2026-07-16 adversarial pass, plus the remaining open items (negative
-regression tests, BIP68-time metadata, and the standing request for independent audit) — is tracked in
-**`SECURITY.md`**. Read it before relying on any "undeniable" framing.
+There has been no commissioned audit. `SECURITY.md` records nine rounds of self-audit and two AI-assisted
+full-source reviews by people outside the project (rounds 10 and 11); neither found a soundness break in
+the guest, the verifier or the coordinator frontier, and neither is a professional audit. The two items
+this section used to list as open — negative regression tests and BIP68-time metadata — are done
+(`SECURITY.md`, open items 1 and 2). What remains:
+
+- **Independent audit**, especially of the non-Core code in §2 — the accumulator, the coinbase SMT, the
+  `field_bigint2` backend and the `lift_x` hint — and of the recursion binding. Rounds 10 and 11 predate
+  both libsecp patches.
+- **A corrupt-signature negative control on the shipped CORE guest** (`docs/FIELD_BIGINT2_BACKEND.md`
+  §5b, gate 4). The byte-flip control in `fuzz-native/realvector.cpp` runs natively on libsecp's stock
+  field backend, and the negative corpus has no signature case.
+- The standalone `build_full` real-MTP anchor (§5), which matters only for proving an isolated real
+  time-locked block.
+
+Read `SECURITY.md` before relying on any "undeniable" framing.

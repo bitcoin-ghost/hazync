@@ -19,9 +19,13 @@ Key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 A Hazync range proof for blocks `[lo..hi]` attests:
 
 > Every block from `lo` to `hi` is valid under Bitcoin Core's consensus rules, as implemented by
-> Bitcoin Core's own unmodified consensus source compiled into the proof circuit — including every
-> script, signature and sighash — and the UTXO set transitions from the committed in-boundary to the
+> Bitcoin Core's own consensus source compiled into the proof circuit — including every script,
+> signature and sighash — and the UTXO set transitions from the committed in-boundary to the
 > committed out-boundary exactly.
+
+The circuit is *maximal-Core*, not pure Core. Core's consensus logic is compiled as it stands, but
+non-Core code runs beneath and beside it — the UTXO and BIP30 commitments, and two libsecp256k1
+patches on the signature path — and §12 lists all of it.
 
 A **genesis-anchored** proof is one where `lo = 1` and the in-boundary is genesis itself (§9). Only a
 genesis-anchored proof attests that a chain is valid *from the start*. A mid-chain segment proof is
@@ -206,20 +210,25 @@ A proof is genesis-anchored iff **all** hold:
 - `lo == 1`
 - `in_tip_hash` equals the genesis block hash
 - `in_leaves == 0` and `in_roots` normalises to empty
+- `in_smt_root` equals the empty coinbase-SMT root — `e[256]`, where `e[0]` is 32 zero bytes and
+  `e[d] = SHA256(0x11 || e[d-1] || e[d-1])` (`empty_root()`, `coinbase-smt/src/roots.rs`), which is not zero
 - `in_nbits == 0x1d00ffff`
 - `in_epoch_start == 1231006505` and `in_time == 1231006505`
 - `in_recent == [1231006505]`
 
-All six MUST be checked. Checking only `lo == 1` admits a proof that claims to start at block 1 from a
-fabricated in-boundary.
+All seven MUST be checked. Checking only `lo == 1` admits a proof that claims to start at block 1 from a
+fabricated in-boundary. Omitting only `in_smt_root` admits one that starts from a fabricated BIP30
+history — a coinbase it intends to duplicate already recorded as spent — and two verifiers did exactly
+that until audit #3 (F-2, F-3). The reference predicate is `RangeState::is_genesis_anchored`
+(`rangestate/src/lib.rs`); `scripts/check-spec.sh` checks this list against it.
 
 ---
 
 ## 10. Composition
 
 Two adjacent range proofs `[a..b]` and `[b+1..c]` compose into `[a..c]` when the left's out-boundary
-equals the right's in-boundary in full — tip hash, roots, leaf count, nBits, epoch start and recent
-times. `range_work` sums. Composition is a tree, not a chain: any adjacent pair may be folded in any
+equals the right's in-boundary in full — tip hash, roots, leaf count, nBits, time, epoch start, recent
+times and coinbase-SMT root. `range_work` sums. Composition is a tree, not a chain: any adjacent pair may be folded in any
 order, so only *anchoring* is sequential.
 
 Each proof commits `self_id`, the image id of the guest that produced it, and the circuit verifies its
@@ -328,8 +337,22 @@ What a verifier is trusting, exhaustively:
    trusted setup for the wrap.
 2. **That the canonical image id corresponds to the published source.** This is checkable: the guest
    builds bit-reproducibly at fixed paths in a container, and CI asserts the id.
-3. **The accumulator implementation** — the one component that is not Bitcoin Core's own code, and
-   correspondingly the piece most worth auditing.
+3. **The non-Core code in the circuit** — the pieces that are not Bitcoin Core's own code, and
+   correspondingly the most worth auditing:
+   - the Utreexo accumulator (`prover/methods/guest/src/utreexo.rs`; host oracle `accumulator/`);
+   - the coinbase SMT that carries BIP30 non-membership (`coinbase-smt/src/{roots,bip30}.rs`, compiled
+     into the guest by path);
+   - libsecp256k1's `field_bigint2` backend (`patches/0012`; `prover/methods/guest/field_bigint2.h`,
+     `field_bigint2_impl.h`, `src/field_bigint2.rs`) — a substitution beneath libsecp's field interface
+     that routes 256-bit modular multiply, square and inversion to the RISC0 bigint2 coprocessor;
+   - the `lift_x` witness hint (`patches/0013`; `prover/methods/guest/src/liftx_hint.rs`) — a
+     host-supplied Y accepted only if `y² = x³ + 7` holds under libsecp's own field arithmetic, falling
+     back to libsecp's square root otherwise;
+   - the portability patches `0001` (a `Serialize(int)` overload for ILP32) and `0002` (SHA-256 through
+     the RISC0 accelerator), and the single-threaded `coreshim` headers.
+
+   `patches/0012` and `0013` have been in the canonical guest since v0.21.0 (`provision-vps.sh` phase
+   5a).
 
 Explicitly *not* trusted: the prover, the witness, the bridge, the coordinator, and any host-supplied
 value the circuit can recompute.
@@ -352,9 +375,13 @@ the consensus regression, which is what detects that.
 
 - **Mainnet only.** The guest compiles `CChainParams::Main()`. A testnet or regtest proof requires a
   different guest and therefore a different image id.
-- **No external audit yet.** Nine rounds of adversarial self-audit are recorded in `SECURITY.md`;
-  self-audit is not review.
-- **The wrapped proof is 2,033 bytes**, not the ~200–300 B quoted in some older docs.
+- **No commissioned audit.** `SECURITY.md` records nine rounds of self-audit and two AI-assisted
+  external reviews (rounds 10 and 11); neither is a professional audit, and both predate the libsecp
+  patches in §12.
+- **A wrapped proof is a few KB, not the ~200–300 B quoted in some older docs.** The whole serialised
+  Groth16 receipt measured 2,033 B for block 170 (`prover/evidence/groth16_snark_wrap.txt`) and 3,441 B
+  for the genesis-anchored `[1..1000]` fold (`prover/evidence/fold_and_snark_wrap_1_1000.txt`). It grows
+  with the UTXO roots the boundary commits, so no fixed size is safe to quote.
 - **The journal commits no transaction count.** A node adopting a proof therefore has no attested
   figure for `CBlockIndex::m_chain_tx_count` at the adopted height, and must substitute something —
   a proven lower bound such as `height + 1` is the honest choice. The value is not consensus-relevant

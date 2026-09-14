@@ -32,18 +32,24 @@
 > is stale the moment it is written. Measured 7,852 at 2026-09-07 09:56Z and climbing ~10/min;
 > the real cost is whatever `/api/meta` reports the instant the swap happens.
 >
-> `provision-vps.sh` says the same of the Ghost lever: *"a box provisioned with this must never
-> produce a shipped proof. This box is for benchmarking only."*
+> `provision-vps.sh` says the same of the #139 lever it can apply (patch 0005, phase 5b): *"⛔ It
+> MOVES METHOD_ID, so a box provisioned with this must never produce a shipped proof"*, and it prints
+> *"This box is for benchmarking only."* when it applies it.
 
-⏰ **Pinned 2026-09-01** against `feat/liftx-accel`. Everything here was measured in **execute mode
-on one laptop** — CPU only, no GPU — on block 962,000, single chunk, against a stock control built
-from the same tree. ⛔ **Wall-clock and therefore card counts are DERIVED, not measured.** Section 4
-says exactly what a GPU run would settle.
+⏰ **How the card counts here are made.** Cycle counts and journal digests were first measured in
+execute mode on one laptop (block 962,000, single chunk, against a stock control built from the same
+tree, 2026-09-01). §1 replaces the derived wall-clock with real GPU proving — but each build's 16
+chunks were proved **serially on one card** (`scripts/gpu-benchmark.sh`), so the chunk times, straggler
+and aggregate are measured and the **card count is computed from them**, not observed on that many
+cards at once. The fleet check of that arithmetic is CORE on 8 × L40S, block 966,108, one chunk per
+card: **15m13s measured against 15.2 min projected**, which puts a sub-10-minute block at **~13 L40S**
+(`docs/history/BENCH_8xL40S_2026-09-08.md`). That is a different block from §1's, so the two card counts
+are not directly comparable.
 
 ## 1 · Results — MEASURED ON HARDWARE, 2026-09-02
 
-Two NVIDIA L40S. Block 962,000, 16 chunks, real proving. **Every card count below is measured, not
-derived**, which is what §4 of the previous revision said was outstanding.
+Two NVIDIA L40S. Block 962,000, 16 chunks, real proving. The chunk times, stragglers and aggregate
+below are measured; the card count is computed from them for a 600 s block.
 
 | build | chunk work | straggler | aggregate | **cards** |
 |---|---|---|---|---|
@@ -108,9 +114,11 @@ occurrence costs the whole aggregate — `agg-chunks` needs all 16 receipts.
 0013-lift-x-via-witness-hint.patch
 # build
 HAZYNC_FIELD_BIGINT2=1 HAZYNC_LIFTX_HINT=1 HAZYNC_ECMULT_WINDOW=21 cargo build --release
-# packing constants -- REFITTED, and they matter: 1.557 -> 1.311 straggler
+# packing constants -- Core's per-curve fit, BUILT IN since v0.21.0 (c12ad67); shown for reference
 HAZYNC_COST_EC_OP=417798 HAZYNC_COST_SCHNORR_OP=462435
 HAZYNC_COST_INPUT_BYTE=2 HAZYNC_COST_INPUT_BASE=41387
+# run time -- every chunked command (prove-chunk, prove-seg, seg-serve) also needs this
+HAZYNC_LIFTX_HINT=1
 ```
 
 ⏰ **The constants above are the PER-CURVE fit (2026-09-01), not the earlier curve-blind one.**
@@ -140,55 +148,67 @@ its real sqrt.
 HAZYNC_BIGINT2_ECDSA=1 HAZYNC_LIFTX_HINT=1 HAZYNC_FIELD_BIGINT2=1 HAZYNC_BIGINT2_SCHNORR=1 \
 HAZYNC_SCALAR_INV_ACCEL=1 HAZYNC_SHA_FASTPATH=1 HAZYNC_AGG_READSLICE=1 HAZYNC_SHA_D64_ACCEL=1 \
 HAZYNC_ECMULT_WINDOW=21 cargo build --release
-# packing constants -- DEFAULTS. Do NOT apply Core's refit here.
-```
-
-⛔ **The same refit helps Core and hurts Ghost.** Core 1.557 → 1.311; Ghost 1.407 → **1.884**, and
-1.996 on GHOST. It costs a card. ⚠ The 1.407 baseline is the ASSUMED no-backend figure (§4.2); the
-backend arm's derived baseline is 1.469 (§2, and the value `scripts/gpu-benchmark.sh` cites) and its
-MEASURED default-constants straggler is **1.438** (§1). The regression is real on any of the three —
-they are quoted here so a reader is not left reconciling two numbers for one claim. The likely cause is rescaling Ghost's Schnorr constant by the old
-13.77x ECDSA ratio, when the hint removes decompression from *both* curves — taproot key-path spends
-call `lift_x` too — so that ratio should have narrowed.
-
-✅ **Ghost DOES now have its own calibration — measured 2026-09-05, two L40S, real GPU proving on
-block 962,000.** The predicted narrowing is confirmed: the fitted Schnorr:ECDSA ratio is **1.97x**,
-not the old 13.77x.
-
-```
+# packing constants -- Ghost's OWN fit (#227). The built-in defaults are Core's; do not use them here
 HAZYNC_COST_EC_OP=85636  HAZYNC_COST_SCHNORR_OP=168542
 HAZYNC_COST_INPUT_BYTE=2 HAZYNC_COST_INPUT_BASE=53162
 ```
 
+⏰ **Since v0.21.0 the built-in constants ARE Core's per-curve fit** (§2). They are global consts in
+`prover/host/src/main.rs`, each overridable by its `HAZYNC_COST_*` variable — there is no per-channel
+default, so Ghost's fit is something a Ghost run sets in its own environment. Before `c12ad67` the
+defaults were the older curve-blind constants, which is what "defaults" means in the Ghost
+measurements below and in §1.
+
+✅ **Ghost's calibration — MEASURED 2026-09-05** (`af0534c`, #227): two L40S, real GPU proving on block
+962,000, 16 chunks, one arm per box, differing only in the four `HAZYNC_COST_*` values. Fitted on block
+965,500 (7.7% Schnorr), intercept forced to zero; Schnorr:ECDSA **1.97x**, not the 13.77x Ghost had
+been rescaled by — the hint removes decompression from *both* curves.
+
 | arm | straggler | max | mean |
 |---|---|---|---|
-| shipped defaults | 1.462x | 149 s | 102 s |
+| defaults at the time (pre-`c12ad67`) | 1.462x | 149 s | 102 s |
 | Ghost refit | **1.189x** | 124 s | 104 s |
 
-⚠ These are GHOST's constants and they are NOT Core's (§2). Neither set transfers: Core's refit
-moves Ghost 1.407 → 1.884, about a card. Each channel carries its own fit, and a build that takes
-the wrong one is worse off than one that takes none.
+§1's separate run measured 1.438 for Ghost at those same defaults. ⚠ Neither fit transfers: Core's
+refit moved Ghost's straggler the wrong way in the earlier derived, cycle-based comparison
+(1.407 → 1.884), and Ghost's constants have not been measured on Core.
 
-⚠ The card arithmetic was not re-derived — read this as "the ≤1.35 straggler target of §4.2 is
-met", not as a card count.
+⚠ **Re-run an outlier before believing it.** The refit first measured 1.567x — worse than doing nothing
+— from one chunk at 4.89 s/segment, when 31 of 32 chunk timings sat at 2.4–3.0 s/segment. Re-run twice:
+94 s both times, 2.69 s/segment. The segment straggler (57 → 49 max segments) had already said the
+opposite; prefer it, since proving bills whole segments.
 
-✅ **#139 and the field backend are orthogonal and stack**: 10.676x → 11.467x, +7.4%. They accelerate
-different things — #139 replaces `secp256k1_ecmult`; the field backend replaces the representation
-*underneath everything else*.
+✅ **#139 and the field backend are orthogonal and stack**: 10.676x → 11.467x in execute-mode cycles,
++7.4%. #139 replaces `secp256k1_ecmult`; the field backend replaces the representation *underneath
+everything else*.
 
-## 4 · ⛔ What is NOT measured
+### 3.1 · Ghost's next build — hazync#209
 
-0. ⏰ **How many GPUs.** **Two** measures both builds' 16-chunk proving in parallel and turns every
-   derived card count into a measured one. **Four** is required for the aggregate: issue #207's
-   ceiling is a table at 1, 2 and 4 workers, and an N=2 saturation cannot be reproduced or fixed with
-   two boxes. The aggregate is 25% of Ghost's budget and 12% of Core's — it is where the remaining
-   cards are. `scripts/gpu-benchmark.sh core|ghost` runs it.
-1. **Wall-clock, on a GPU.** Every card count here converts cycles at a fixed ratio. Proving time is
-   quantised by segment (`ceil(cycles / 2^po2)`), so the real straggler can differ from the cycle
-   straggler. **This is the one thing that needs hardware.**
-2. **GHOST's straggler at default constants** — assumed 1.407 from the no-backend arm, never
-   measured for the backend arm. ⏰ It decides 5 cards vs 4: at 1.35 GHOST is **four cards**.
-3. **Aggregate** — both modes assume 627 s and a 1.881x two-worker split, measured previously.
+Ghost measured **5 cards** on block 962,000 (§1); a fourth needs a straggler ≤ 1.35. The refit above
+meets that, but **the card count was not re-derived** at 1.189 — read it as "the straggler target is
+met", not as four cards.
+
+- **What pointed at the packer** (2026-09-05, #139 arm, block 741000): chunks 1 and 11 carry the same
+  42 inputs and 42 EC verifies and differ only in bytes (765,282 vs 37,933). They measured 1.293x apart
+  against a modelled 1.574x, because the byte term then in force (6 per byte) was ~2x the measured 3.13
+  cycles/byte. Both fits now use 2.
+- **Remaining levers**, as #209 lists them now that Ghost is defined as "fastest wins": MSM batch
+  verification (rejected before on fidelity, sized at one card; `docs/history/MSM_BATCH_VERIFY.md`);
+  wholesale bigint2, which needs measuring from scratch because the recorded "15% faster" was never
+  produced by a run (nothing called `hazync_ecdsa_verify_full` until `patches/0014`, `9b767b5`); and
+  re-measuring the G3 Schnorr lane and the scalar inverse, both sized before the hint landed. The
+  aggregate — 473.1 s with the coordinator working, 405.6 s on two workers (§1) — is the other
+  candidate for a card.
+
+## 4 · What is still NOT measured
+
+1. **CORE's aggregate on block 962,000.** §1 assumes it equals Ghost's 473 s. CORE's aggregate has been
+   measured on other blocks since — 203.8 s over 8 workers on 966,108
+   (`docs/history/BENCH_8xL40S_2026-09-08.md`), 241.2 s over 27 on 966,256
+   (`docs/history/MILESTONE_966256_RUN4_2026-09-10.md`) — but not on 962,000.
+2. **The straggler above 8 chunks on a fleet.** Only N=8 has run one chunk per card; the ~13-L40S figure
+   assumes the straggler does not worsen past that.
+3. **Ghost's card count at its refit constants** (§3.1).
 
 ## 5 · Reproducing
 
