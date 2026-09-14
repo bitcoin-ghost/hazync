@@ -36,7 +36,7 @@ flowchart LR
   RN --> A
   A --> J["journal digest<br/>4fb3e3c5…4656d"]
   A --> S["recursion into the spine<br/>genesis-anchored"]
-  S --> K["SNARK wrap<br/>222 KB, verifies in ~1s"]
+  S --> K["spine receipt, blocks 1..N<br/>~227 KB STARK, verifies in ms<br/>(a Groth16 wrap is a few KB)"]
   style B fill:#161b22,stroke:#30363d,color:#c9d1d9
   style A fill:#1f2937,stroke:#58a6ff,color:#c9d1d9
   style J fill:#132e1a,stroke:#3fb950,color:#c9d1d9
@@ -82,7 +82,7 @@ being the constraint — it exists to price that trade honestly, not to replace 
 ```bash
 curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl -fLO https://bitcoinghost.org/hazync/api/spine/proof   # lands as hazync-spine-1-<hi>.hzk
+curl -fLOJ https://bitcoinghost.org/hazync/api/spine/proof  # -J: lands as hazync-spine-1-<hi>.hzk
 ./hazync-verify-x86_64-linux-gnu hazync-spine-1-*.hzk
 ```
 
@@ -93,7 +93,7 @@ curl -fLO https://bitcoinghost.org/hazync/api/spine/proof   # lands as hazync-sp
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules, checked in **milliseconds** on a laptop, with no node, no peers, no chain data and
 nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
-verifier is a WebAssembly module served in **~285 KB** gzipped (1,066,001 bytes raw) that peaks at
+verifier is a WebAssembly module served in **~295 KB** gzipped (1,065,304 bytes raw) that peaks at
 **1.9 MiB of memory**, small enough for a phone.
 
 N is however far the anchored proof currently reaches, and it grows as the board does. Swap the URL
@@ -123,7 +123,9 @@ What remains is scale, and there is now an answer to it. **Proving a block divid
 machines**: segments prove independently, the recursion that folds them is a tree rather than a
 chain, and both halves scale. Measured end to end on three GPUs: a near-tip block goes from **4.9
 hours on one card to 100 minutes on three — 2.92x**, against a ceiling of 3.0x, with a byte-identical
-receipt at every configuration. Roughly thirty cards would bring it under ten minutes. A worker needs
+receipt at every configuration. Measured since on a different block: 966,256 proved end to end in
+**544.0 s across 27 rented RTX 4090s**
+([run 4](docs/history/MILESTONE_966256_RUN4_2026-09-10.md)). A worker needs
 only the segment in front of it, so it cannot forge a receipt, only fail to return one.
 [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
 
@@ -141,8 +143,8 @@ accumulated work; it is what has been re-proved since that re-baseline.
 and a genesis-anchored proof is downloadable there whether or not anyone is proving today. Proving
 Bitcoin's real cryptography is deliberately expensive, and that cost *is* the security argument.
 
-**Two independent external reviews ran in August 2026 ([`SECURITY.md`](SECURITY.md), rounds
-10 and 11). Neither found a way to make the guest ACCEPT an invalid chain.** Both found real defects
+**Two independent external reviews ran in August 2026
+([`docs/history/SECURITY_AUDIT_LOG.md`](docs/history/SECURITY_AUDIT_LOG.md), rounds 10 and 11). Neither found a way to make the guest ACCEPT an invalid chain.** Both found real defects
 anyway, and both landed on the same two places as the residual risk: the C++ shim layer compiled
 into the guest, and the accumulator. Everything they raised is fixed or tracked. Those were
 AI-assisted code reviews, not a commissioned professional audit; that has still not happened.
@@ -162,8 +164,14 @@ exception for them. Fixed in v0.15.0, with the real blocks now in the fixture se
 
 The script interpreter (`interpreter.cpp`), `SignatureHash`, `CheckTransaction`,
 `ComputeMerkleRoot`, the transaction/weight/sigop machinery, the difficulty retarget (`pow.cpp`'s
-`CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1`, all unmodified,
-with two narrow portability shims and zero consensus-logic changes.
+`CalculateNextWorkRequired`, driven through the real `CBlockIndex`), and `libsecp256k1`, with zero
+consensus-logic changes. The canonical build applies four patches, all in `patches/`: two to Core
+(`0001`, an ILP32 `Serialize` overload; `0002`, SHA-256 compression routed through the zkVM
+accelerator, byte-identical output) and, since v0.21.0, two to libsecp256k1 (`0012`, a coprocessor
+field backend selected at the field-backend interface libsecp already parameterises; `0013`, a
+`lift_x` witness hint that libsecp's own arithmetic checks before accepting). wNAF, GLV, the ECDSA
+and Schnorr logic and every check above the field stay libsecp's. That makes the shipped guest
+*maximal-Core*, not pure Core: [`docs/CORE_VS_GHOST.md`](docs/CORE_VS_GHOST.md) §1 draws the line.
 
 What is *not* compiled from Core is a thin, self-contained slice: the subsidy halving schedule and the
 script-flag activation heights, each differentially tested against Core (the flag schedule is proven a
@@ -190,7 +198,8 @@ Prebuilt binaries need Linux x86-64, glibc 2.34+. An `aarch64` build is publishe
 can check this" is a file you can download rather than a claim. On an older distro, run the same
 binary in a container rather than rebuilding.
 
-**The ~187 MB host** does everything else: proving, and `verify-any`, which accepts any single proof
+**The host** (241 MB CPU, 410 MB CUDA, as released in v0.21.4) does everything else: proving, and
+`verify-any`, which accepts any single proof
 rather than only genesis-anchored ones.
 
 ```bash
@@ -251,7 +260,9 @@ commissioned audit. Trying to break it is the most useful thing you can do,
 - Run your own coordinator (archive node + bridge + board): [`docs/RUN_YOUR_OWN_COORDINATOR.md`](docs/RUN_YOUR_OWN_COORDINATOR.md)
 - **Specification** (formats, invariants, how to verify independently): [`docs/SPEC.md`](docs/SPEC.md)
 - Soundness statement (a reviewer's best first read): [`docs/SOUNDNESS.md`](docs/SOUNDNESS.md)
-- Audit record: [`SECURITY.md`](SECURITY.md) · latest round: [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)
+- Audit record: [`SECURITY.md`](SECURITY.md) (status, open items) · every round, 1–11, the last two
+  external: [`docs/history/SECURITY_AUDIT_LOG.md`](docs/history/SECURITY_AUDIT_LOG.md) · round 8's
+  full write-up: [`AUDIT_2026-07.md`](docs/AUDIT_2026-07.md)
 - Adversarial fuzzing (what was fuzzed, what wasn't): [`docs/FUZZING.md`](docs/FUZZING.md)
 - What we're for, and how far along: [`docs/GOALS.md`](docs/GOALS.md), six goals, measured status
 - What's left to build: [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
@@ -291,14 +302,17 @@ proof system for instant chain-state sync, a developer toolkit, and the case for
 Bitcoin itself. Read that first.
 
 **[RISC Zero](https://risczero.com)** is the zkVM this runs in. `prover/` was scaffolded from their
-template; `vendor/risc0-zkvm` carries their crate with two local changes. Apache-2.0.
+template; `vendor/risc0-zkvm` carries their 3.0.5 crate with two local changes (segment-distributed
+assembly and a balanced join tree), and `vendor/risc0-circuit-rv32im-sys` carries their 4.0.3 crate
+with one prover-side fix for #119. Apache-2.0.
 
-**Bitcoin Core** and **libsecp256k1** are compiled in, unmodified but for two portability patches.
+**Bitcoin Core** and **libsecp256k1** are compiled in with the four patches listed above, none of
+which changes Core's consensus logic.
 Full attribution in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Licence
 
-MIT (see [`LICENSE`](LICENSE)). The guest compiles in Bitcoin Core and libsecp256k1 (both MIT); the
-patches are portability-only and change no consensus logic. `prover/` carries an additional Apache-2.0
+MIT (see [`LICENSE`](LICENSE)). The guest compiles in Bitcoin Core and libsecp256k1 (both MIT) with
+the patches in `patches/`, none of which changes Core's consensus logic. `prover/` carries an additional Apache-2.0
 notice for the risc0-derived build scaffolding. Third-party components are attributed in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
