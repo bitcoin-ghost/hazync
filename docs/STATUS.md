@@ -1,18 +1,18 @@
 # Status — 2026-09-14
 
 One page for where the project stands. It replaces the status blocks scattered through other docs, and
-it is rewritten at each release. Goals are in [`GOALS.md`](GOALS.md); what changed in each release is in
-[`../CHANGELOG.md`](../CHANGELOG.md) and the `RELEASE_NOTES_*` files. Board figures move by the minute, so
-use the live API; the snapshot below is dated.
+it is rewritten at each release ([`RELEASE_PROCESS.md`](RELEASE_PROCESS.md)). Goals are in
+[`GOALS.md`](GOALS.md); every release is in [`../CHANGELOG.md`](../CHANGELOG.md). Board figures move by the
+minute, so use the live API; the snapshot below is dated.
 
 ## Release
 
 - **Latest: [v0.21.4](https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.4)**, published
-  2026-09-13 ([`RELEASE_NOTES_v0.21.4.md`](RELEASE_NOTES_v0.21.4.md)). Assets: `hazync-host-x86_64-linux-gnu`,
+  2026-09-13 ([notes](history/releases/RELEASE_NOTES_v0.21.4.md)). Assets: `hazync-host-x86_64-linux-gnu`,
   `hazync-host-x86_64-linux-gnu-cuda`, `hazync-worker`, `hazync-run-workers.sh`, `hazync-coordinator.py`,
   `hazync-verify-x86_64-linux-gnu`, `hazync-verify-aarch64`, `hazync-verify.wasm`, `SHA256SUMS.txt`,
   `SHA256SUMS.txt.asc`. Check them as in [`SECURITY.md`](../SECURITY.md#verifying-releases).
-- `main` is 8 commits past the tag, at `951a08a`.
+- `main` is 9 commits past the tag, at `ff439ec`.
 
 ## Guest
 
@@ -22,7 +22,7 @@ use the live API; the snapshot below is dated.
 - Inputs: Bitcoin Core v28.0, secp256k1 v0.5.1, risc0 `=3.0.5` (rzup `cargo-risczero` 3.0.5, rust 1.94.1,
   cpp 2024.1.5).
 - The CORE channel ships: Core patches `0001`/`0002` and libsecp patches `0012` (field backend) and `0013`
-  (`lift_x` hint), applied by `provision-vps.sh`. See [`CORE_VS_GHOST.md`](CORE_VS_GHOST.md).
+  (`lift_x` hint), applied by `provision-vps.sh`. See [`BUILDS.md`](BUILDS.md).
 - Lineage: 17 canonical ids in [`reproduce/LINEAGE.tsv`](../reproduce/LINEAGE.tsv), gated by
   `scripts/lineage.sh --check`.
 
@@ -34,20 +34,21 @@ Live: [`/api/state?slim=1`](https://bitcoinghost.org/hazync/api/state?slim=1) ·
 [`/api/spine/proof`](https://bitcoinghost.org/hazync/api/spine/proof) (check with `hazync-verify`). Every
 route: [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md).
 
-Snapshot at **2026-09-14 08:00:49 UTC**:
+Snapshot at **2026-09-14 08:31:46 UTC**:
 
 | | |
 |---|---|
-| proven | 65,636 blocks |
-| folded | 24,606 blocks, 20,280 folds |
-| frontier (genesis-anchored, contiguous) | 65,619 |
-| spine | `[1..25,350]` |
-| chain tip / `pct` | 966,936 / 6.786 |
+| proven | 65,939 blocks |
+| folded | 24,840 blocks, 20,475 folds |
+| frontier (genesis-anchored, contiguous) | 65,751 |
+| spine | `[1..25,590]` |
+| chain tip / `pct` | 966,938 / 6.8 |
 | contributors | 7 |
 | `verify_mode` / `signatures` | `real` / `ed25519` |
 | `/api/meta` `method_id` | canonical |
-| `/api/meta` `source_sha256` | equals `coordinator/server.py` at `951a08a` |
+| `/api/meta` `source_sha256` | equals `coordinator/server.py` at `ff439ec` |
 | sponsorship (`/api/sponsor`) | `open: false`, `payments: false`, `priced: true`, `btc_usd: null` |
+| browser verifier | 1,064,517 bytes at both `bitcoinghost.org/hazync/verify/` and `hazync.org/verify/` |
 
 ## Shipped in v0.21
 
@@ -70,20 +71,35 @@ From GitHub on 2026-09-14.
 | [#252](https://github.com/bitcoin-ghost/hazync/issues/252) | Aggregate assembly is latency, not work; two of three levers shipped, the measurement has not run |
 | [#253](https://github.com/bitcoin-ghost/hazync/issues/253) | Measure #236 (streaming `seg-serve` execute), which shipped unmeasured in v0.21.1 |
 | [#277](https://github.com/bitcoin-ghost/hazync/issues/277) | Anchor warp: prove backwards from the anchor in the tip cluster's idle time |
+| [#310](https://github.com/bitcoin-ghost/hazync/issues/310) | `/api/claim` is unsigned, so anyone can hold blocks under any public key |
+| [#311](https://github.com/bitcoin-ghost/hazync/issues/311) | Key rotation cannot be revoked, so a stolen key can take a contributor's attribution for good |
+| [#312](https://github.com/bitcoin-ghost/hazync/issues/312) | `_find_host()` will run a prover binary it finds in the current directory |
 
-Open pull requests: #306 (sponsor bot User-Agent), #307 and #308 (documentation).
+Open pull requests: #307 and #308 (documentation), #309 (sponsor bot).
 
-## Needs the operator
+## Decisions for the operator
 
 Each verified on 2026-09-14; detail in [`THREAT_MODEL.md`](THREAT_MODEL.md#open-items).
 
-- **Decide #244 layer 2**: which method ids a verifier accepts.
-- **Run field-backend gate 4**, the corrupt-signature negative control, on the CORE guest
+- **#244 layer 2**: which method ids a verifier accepts.
+- **Field-backend gate 4**: run the corrupt-signature negative control on the CORE guest
   ([`FIELD_BIGINT2_BACKEND.md`](FIELD_BIGINT2_BACKEND.md) §5b records it not run).
-- **Rerun the accumulator reference fuzz control** (`audit-fuzz/`), not recorded since #63 changed the
-  reference `Stump`.
-- **CORE card counts and card-years rest on one block** (962,000); measure across eras before quoting them.
-- **Bound the worker's reads** of coordinator responses (`get()` in `coordinator/hazync`).
-- **Sponsorship**: payments are not built ([`SPONSORSHIP.md`](SPONSORSHIP.md)).
-  [`SPONSOR_BOT.md`](SPONSOR_BOT.md) says the bot has never run live, yet the live leaderboard lists a
-  `SPONSOR: Hazync trial` contributor; one of the two needs updating.
+- **The accumulator reference fuzz control**: rerun it (`audit-fuzz/FINDINGS.md` marks it "NEEDS A RERUN"
+  since #63).
+- **Whether to publish CORE card-years**: [`GOALS.md`](GOALS.md) G2's 44–73 L40S card-years are INFERRED
+  from one near-tip block.
+
+## Also open, tracked
+
+- The three coordinator and worker weaknesses in #310, #311 and #312.
+- The worker reads coordinator responses without a bound (`get()` in `coordinator/hazync`).
+- Sponsorship payments are not built ([`SPONSORSHIP.md`](SPONSORSHIP.md)). [`SPONSOR_BOT.md`](SPONSOR_BOT.md)
+  says the bot has never run live, yet the live leaderboard lists a `SPONSOR: Hazync trial` contributor; one
+  of the two needs updating.
+
+## Resolved on 2026-09-14
+
+- **Reporting route**: security and conduct reports go through GitHub private vulnerability reporting
+  ([`SECURITY.md`](../SECURITY.md#reporting-a-vulnerability), [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)).
+- **The three weaknesses found by the threat model** stay documented and are filed as #310, #311 and #312.
+- **`docs/COORDINATOR_REFERENCE.md` drift** stays a failing CI check.
