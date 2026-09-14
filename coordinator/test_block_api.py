@@ -158,9 +158,10 @@ with open(_tmpblock.name, "w") as f:
     f.write("")
 
 print("== sponsorship: price bands ==")
-check(server.SPONSOR_PRICE_BANDS_DEFAULT == [(1, 100000, 1), (100001, 150000, 2), (150001, 180000, 3),
-                                             (180001, 200000, 4), (200001, 230000, 5)],
-      "the default ladder is the approved one: $1, $2, $3, $4, $5 a block up to block 230,000")
+check(server.SPONSOR_PRICE_BANDS_DEFAULT == [(1, 200000, 1), (200001, 400000, 2), (400001, 600000, 3),
+                                             (600001, 800000, 4), (800001, 1000000, 5), (1000001, 10 ** 9, 6)],
+      "the default ladder is the approved one: $1 a block to 200,000, $2 to 400,000, $3 to 600,000, $4 to 800,000,"
+      " $5 to 1,000,000 and $6 above")
 check(server.SPONSOR_PRICE_BANDS == server.SPONSOR_PRICE_BANDS_DEFAULT, "with SPONSOR_PRICE_BANDS unset, the default ladder applies")
 check(server.SPONSOR_BTC_USD == 100000, "SPONSOR_BTC_USD is read from the environment")
 check(server._parse_price_bands("") is None, "SPONSOR_PRICE_BANDS set but empty: unpriced")
@@ -175,13 +176,19 @@ for raw, why in ((None, "unset"), ("", "empty"), ("abc", "not a number"), ("0", 
     check(server._parse_btc_usd(raw) is None, f"bitcoin price refused: {why}")
 check(server._parse_btc_usd("77400") == 77400 and server._parse_btc_usd("77400.5") == 77400.5, "a bitcoin price parses")
 server.SPONSOR_PRICE_BANDS = server.SPONSOR_PRICE_BANDS_DEFAULT
-check(server.sponsor_min_usd(99999, 100001) == 1 + 1 + 2 and server.sponsor_min_usd(229999, 230000) == 10,
-      "the default ladder sums across its bands ($1 + $1 + $2 at 99,999-100,001; $5 + $5 at 229,999-230,000)")
-check(server.sponsor_min_usd(230000, 230001) is None and server.sponsor_min_usd(230001, 230001) is None,
-      "with the default ladder, nothing above block 230,000 has a price")
+check(server.sponsor_min_usd(199999, 200001) == 1 + 1 + 2 and server.sponsor_min_usd(999999, 1000001) == 5 + 5 + 6,
+      "the default ladder sums across its bands ($1 + $1 + $2 at 199,999-200,001; $5 + $5 + $6 at 999,999-1,000,001)")
+check(server.sponsor_min_usd(400000, 400001) == 2 + 3 and server.sponsor_min_usd(5000000, 5000000) == 6,
+      "every block has a price up to the open top band: $2 + $3 at 400,000-400,001, $6 at 5,000,000")
 BANDS = server._parse_price_bands("[[1,55,1],[56,1000,3]]")
 
 print("== sponsorship: the quote ==")
+# Bundles for blocks 50-55 only, and no legacy witnesses, so `waiting` is known.
+_bundles, _no_witness = tempfile.mkdtemp(prefix="bundles_"), tempfile.mkdtemp(prefix="witness_")
+_saved_dirs = (server.BRIDGE_DIR, server.WITNESS)
+server.BRIDGE_DIR, server.WITNESS = _bundles, _no_witness
+for _h in range(50, 56):
+    open(os.path.join(_bundles, f"bundle_{_h}.json"), "w").close()
 server.SPONSOR_PRICE_BANDS = None
 code, q = server.sponsor_quote(50, 60)
 check(code == 200 and q["min_usd"] is None and q["min_sats"] is None and q["priced"] is False,
@@ -189,8 +196,9 @@ check(code == 200 and q["min_usd"] is None and q["min_sats"] is None and q["pric
 server.SPONSOR_PRICE_BANDS = BANDS
 code, q = server.sponsor_quote(50, 60)
 check(code == 200 and q == {"lo": 50, "hi": 60, "blocks": 11, "min_usd": 6 * 1 + 5 * 3, "min_sats": 21000,
-                            "btc_usd": 100000, "priced": True},
-      f"blocks 50-60 across two bands: 6 x $1 + 5 x $3 = $21, 21,000 sats at $100,000 (got {code} {q})")
+                            "btc_usd": 100000, "priced": True, "waiting": 5},
+      f"blocks 50-60 across two bands: 6 x $1 + 5 x $3 = $21, 21,000 sats at $100,000; 5 have no bundle yet (got {code} {q})")
+check(server.sponsor_quote(50, 55)[1]["waiting"] == 0, "blocks that all have bundles: nothing waits")
 server.SPONSOR_BTC_USD = 77400
 code, q = server.sponsor_quote(50, 50)
 check(code == 200 and q["min_usd"] == 1 and q["min_sats"] == 1292,
@@ -206,6 +214,7 @@ server.SPONSOR_BTC_USD = 100000
 server.SPONSOR_PRICE_BANDS = server._parse_price_bands("[[1,55,1]]")
 code, q = server.sponsor_quote(50, 60)
 check(code == 200 and q["min_sats"] is None, f"a span partly outside every band is unpriced (got {q})")
+server.BRIDGE_DIR, server.WITNESS = _saved_dirs
 server.SPONSOR_PRICE_BANDS = BANDS
 check(server.sponsor_quote(1, 2)[0] == 409, "quote refused: blocks already anchored (same as the request)")
 check(server.sponsor_quote(60, 50)[0] == 400, "quote refused: hi below lo")

@@ -46,30 +46,30 @@ price, and a sponsor may pay more. The minimum is a deliberate **overestimate** 
 change by the hour, and it is better to know a paid block can be proven than to take too little and have to
 withhold the sponsor's name. Paying at least the minimum is what earns the name; less is kept as a donation.
 
-### The price ladder (decided 2026-09-13)
+### The price ladder (decided 2026-09-14)
 
-| Blocks | Minimum per block | 2x the estimated cost of the heaviest 1% of blocks |
-|--------|------------------:|---------------------------------------------------:|
-| 1 to 100,000 | $1 | about $0.31 or less |
-| 100,001 to 150,000 | $2 | $0.81 |
-| 150,001 to 180,000 | $3 | $1.26 |
-| 180,001 to 200,000 | $4 | $4.31 |
-| 200,001 to 230,000 | $5 | $5.43 |
-| above 230,000 | **no price** | not measured |
+| Blocks | Minimum per block | What is measured |
+|--------|------------------:|------------------|
+| 1 to 200,000 | $1 | trial: slowest block $0.18 (2.0 MB); heaviest 1% about $0.27 |
+| 200,001 to 400,000 | $2 | trial to 230,000: slowest block $0.22 (3.7 MB); heaviest 1% to 230,000 about $0.57; above 230,000 nothing |
+| 400,001 to 600,000 | $3 | nothing |
+| 600,001 to 800,000 | $4 | nothing |
+| 800,001 to 1,000,000 | $5 | one block: 966,256, $1.39 of GPU time |
+| above 1,000,000 | $6 | nothing; no block there is mined yet |
 
-- **Basis.** Each band is twice the estimated GPU cost of the heaviest 1% of its blocks, rounded up to whole
-  dollars. The cost is priced at **$0.74 per RTX 4090 card-hour**, the dearer of two prices RunPod charged
-  the project (the other was $0.34). Up to about 57,000 the per-block cost is **measured** from the proof
-  party fleet (mean about $0.003 a block, all-in). From there to 230,000 it is **extrapolated** from each
-  block's measured bundle size: card-seconds = 18 + 3.0 x segments, with segments = bundle bytes / bytes
-  per segment, using the middle of the four measured bytes-per-segment ratios.
-- **The top two bands are about 1.85x, not 2x**, because the ladder stops at $5.
-- **Above 230,000 there is no price.** The bridge cannot prove those blocks yet (bundles stop at 230,000)
-  and nothing there has been measured, so they cannot be sponsored. The cheapest measurement is CPU only:
-  execute a handful of sampled blocks per band and count their segments.
-- **What it does not cover.** A rare block far heavier than the 1% line (block 55,862 took at least 9,600
-  card-seconds) costs more than its band's price when sponsored alone. A range of ordinary blocks pays well
-  over its cost; the difference funds proving time.
+- **The trial (2026-09-14).** The sponsor bot proved two blocks in each of the old bands up to 230,000 on
+  one RTX 4090 at $0.74 an hour: 20 s ($0.004) at 90,002 up to 1,047 s ($0.22) at 220,000. That is 248 to
+  441 seconds per MB of bundle. At the slowest rate, the heaviest 1% of blocks (by bundle size, measured on
+  the coordinator) cost about $0.27 up to 200,000 and $0.57 from 200,000 to 230,000: under half the price.
+  The heaviest single blocks, 8.68 MB at 197,678 and 16.87 MB at 228,538, cost about $0.79 and $1.53:
+  under their price, but not by 2x.
+- **Above 230,000 no bundles exist yet,** so no pod can prove those blocks. A sponsorship there is taken and
+  held, and waits until the bridge builds its bundles. The quote's `waiting` counts the blocks that wait, and
+  the form says so before anyone pays. The bot never rents a pod for them.
+- **From 230,000 to 1,000,000 the prices are not checked against a measurement,** except block 966,256
+  ($1.39 of GPU time across 27 cards, 2026-09-10). Run a trial in each band once its bundles exist.
+- **Above 1,000,000** the top band runs to `SPONSOR_BAND_TOP` (10^9), which stands for "and above". A block
+  cannot be sponsored before it is mined.
 
 ### Setting it
 
@@ -133,7 +133,7 @@ A sponsorship **holds** its blocks from the moment it is paid at least its minim
 | Call | What it does |
 |------|--------------|
 | `GET /api/sponsor` | `{"open": bool, "max_blocks": n, "payments": false, "priced": bool, "bands": [[lo, hi, usd], ...], "btc_usd": n or null, "name_max": 40}` |
-| `GET /api/sponsor/quote?lo=&hi=` | `{"lo", "hi", "blocks", "min_usd": n or null, "min_sats": n or null, "btc_usd": n or null, "priced": bool}`; answers while closed too |
+| `GET /api/sponsor/quote?lo=&hi=` | `{"lo", "hi", "blocks", "min_usd": n or null, "min_sats": n or null, "btc_usd": n or null, "priced": bool, "waiting": n}`; `waiting` counts blocks with no bundle yet; answers while closed too |
 | `POST /api/sponsor` `{"lo", "hi", "name", "amount_sats"}` | `503` while closed, unpriced, or with no bitcoin price. `400` (with `min_sats` and `min_usd`) below the minimum. Open: records a `requested` row, `202` with `id, token, status, lo, hi, blocks, name, min_usd, min_sats, pledged_sats, message` |
 | `GET /api/sponsor/status/<token>` | one sponsorship: `id, lo, hi, blocks, name, status, min_usd, min_sats, pledged_sats, paid_sats, created_at, paid_at, proven_at, proven_blocks, queue_ahead, public`; `404` for an unknown link |
 | `GET /api/sponsors` | `{"sponsorships": [{id, name, lo, hi, blocks, status, paid_sats, min_usd, min_sats, paid_at, proven_at, proven_blocks, queue_ahead}], "open", "priced"}`, public rows only |
@@ -153,12 +153,10 @@ as `/api/blockstatus`.
 
 ## Not built, in the order it has to be built
 
-1. **Measure what a block costs, and check the ladder against it.** The ladder above rests on a measured
-   fleet cost up to about 57,000 and bundle-size extrapolation to 230,000. Run the bot on the project's own
-   budget first and compare what blocks in each band really cost, overhead included, with their price;
-   measure above 230,000 before pricing any of it. Prices stay at about **twice** the estimated cost
-   (decided 2026-09-13): rented GPU prices move, and a sponsorship that pays its minimum must be enough to
-   prove its blocks.
+1. **Measure what a block costs above 230,000.** The ladder is checked against the 2026-09-14 trial up to
+   230,000 only. Once the bridge builds bundles in a band, run a trial there and compare what its blocks cost,
+   overhead included, with their price. Prices stay at about **twice** the estimated cost: rented GPU prices
+   move, and a sponsorship that pays its minimum must be enough to prove its blocks.
 2. **Payments.** BTCPay invoices, settlement moving a row to `paid` (or `underpaid`, kept as a donation),
    expiry, and refunds.
 3. **The bot** (`coordinator/sponsor_bot.py` is a dry-run skeleton): RunPod pods, a spending limit, the

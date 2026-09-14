@@ -1819,15 +1819,17 @@ def _parse_price_bands(raw):
 SPONSOR_OPEN = os.environ.get("SPONSOR_OPEN", "0") == "1"
 SPONSOR_MAX_BLOCKS = int(os.environ.get("SPONSOR_MAX_BLOCKS", "1000"))
 SPONSOR_NAME_MAX = 40                               # characters (code points); the site's form reads it from GET /api/sponsor
-# The minimum per block, in whole dollars, by height (decided 2026-09-13). Each band is twice the estimated
-# GPU cost of the heaviest 1% of its blocks at $0.74 per RTX 4090 card-hour (the dearer of two RunPod
-# prices paid), from measured bundle sizes and the middle bytes-per-segment estimate, rounded UP to whole
-# dollars: 1-100k about $0.31 or less, 100k-150k $0.81, 150k-180k $1.26. The ladder stops at $5, so the top
-# two bands are about 1.85x rather than 2x ($4 against $4.31, $5 against $5.43). Above 230,000 there is no
-# price: the bridge cannot prove those blocks yet (bundles stop at 230k) and nothing there is measured.
-# docs/SPONSORSHIP.md has the figures and where they come from.
-SPONSOR_PRICE_BANDS_DEFAULT = [(1, 100000, 1), (100001, 150000, 2), (150001, 180000, 3),
-                               (180001, 200000, 4), (200001, 230000, 5)]
+# The minimum per block, in whole dollars, by height (decided 2026-09-14, after the first sponsor bot trial).
+# Measured on one RTX 4090 at $0.74 an hour, the slowest trial block cost $0.18 at 180k-200k (a 2.0 MB bundle)
+# and $0.22 at 200k-230k (3.7 MB), 248 to 441 seconds per MB. At the slowest rate the heaviest 1% of blocks
+# cost about $0.27 up to 200,000 and $0.57 from there to 230,000. Above 230,000 the only measured block is
+# 966,256 ($1.39 of GPU time), and the bridge has built no bundles there yet: a sponsorship above them is held
+# until it does, and the quote's `waiting` says how many blocks wait. Blocks above 1,000,000 are $6 each; the
+# top band runs to SPONSOR_BAND_TOP, meaning "and above", and no block can be sponsored before it is mined.
+# docs/SPONSORSHIP.md has the figures.
+SPONSOR_BAND_TOP = 10 ** 9
+SPONSOR_PRICE_BANDS_DEFAULT = [(1, 200000, 1), (200001, 400000, 2), (400001, 600000, 3),
+                               (600001, 800000, 4), (800001, 1000000, 5), (1000001, SPONSOR_BAND_TOP, 6)]
 SPONSOR_PRICE_BANDS = (_parse_price_bands(os.environ["SPONSOR_PRICE_BANDS"]) if "SPONSOR_PRICE_BANDS" in os.environ
                        else list(SPONSOR_PRICE_BANDS_DEFAULT))
 
@@ -2074,8 +2076,11 @@ def sponsor_quote(lo, hi):
         return code, v
     lo, hi = v
     usd = sponsor_min_usd(lo, hi)
+    # Blocks with nothing to prove from yet (no bridge bundle or witness): a sponsorship holds them until the
+    # bridge builds them, and the form says so before anyone pays.
+    waiting = sum(1 for h in range(lo, hi + 1) if bundle_path(h) is None)
     return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_usd": usd, "min_sats": sponsor_min_sats(usd),
-                 "btc_usd": SPONSOR_BTC_USD, "priced": usd is not None}
+                 "btc_usd": SPONSOR_BTC_USD, "priced": usd is not None, "waiting": waiting}
 
 def sponsor_request(body):
     """POST /api/sponsor {lo, hi, name, amount_sats}. Closed unless SPONSOR_OPEN=1, and even open it only

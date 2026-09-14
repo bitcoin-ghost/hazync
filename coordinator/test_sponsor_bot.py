@@ -34,6 +34,10 @@ os.environ["VERIFY_MODE"] = "mock"
 os.environ["COORD_ALLOW_MOCK"] = "1"
 os.environ["TIP_CACHE_TTL"] = "0"
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
+# Bundles for blocks 1 to 10,000, the heights these tests use; block 400,000 has none.
+os.environ["HAZYNC_BRIDGE_OUT"] = tempfile.mkdtemp(prefix="bundles_")
+for _h in range(1, 10001):
+    open(os.path.join(os.environ["HAZYNC_BRIDGE_OUT"], f"bundle_{_h}.json"), "w").close()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
@@ -43,7 +47,10 @@ server.init_db()
 DB = os.environ["COORD_DB"]
 if CONTROL:
     sponsor_bot._CONTROL_SKIP_CLEANUP_ON_ERROR = True
-    print("CONTROL: pods are not terminated when the bot errors -- the checks below MUST fail")
+    sponsor_bot._CONTROL_IGNORE_LANDED = True
+    sponsor_bot._CONTROL_IGNORE_BUNDLES = True
+    print("CONTROL: pods are not terminated when the bot errors, proofs that land before a pod is stopped are"
+          " ignored, and every block counts as having a bundle -- the checks below MUST fail")
 
 fails = []
 
@@ -139,10 +146,11 @@ class FakeRunner:
     """A pod that proves its assigned blocks by writing verified proofs into the coordinator database."""
     ssh_pubkey = "ssh-ed25519 AAAAFAKE sponsor-bot@test"
 
-    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=()):
+    def __init__(self, per_block=0.01, boot_fail=(), stall=(), raise_on_start=False, start_fail=(), prove_then_fail=()):
         self.per_block, self.boot_fail, self.stall = per_block, set(boot_fail), set(stall)
         self.raise_on_start = raise_on_start
         self.start_fail = set(start_fail)       # pods (1st, 2nd, ...) whose work cannot be started
+        self.prove_then_fail = set(prove_then_fail)     # pods whose blocks land, then starting reports a failure
         self.booted, self.started, self.threads, self.status_at_start = [], [], {}, {}
         self.work, self.unregistered_at_start = [], []
         self.lock = threading.Lock()
@@ -161,6 +169,15 @@ class FakeRunner:
             raise RuntimeError("simulated failure while starting work")
         if self.nth(pod) in self.start_fail:
             raise sponsor_bot.StartFailed(f"simulated: could not start work on {pod.name}")
+        if self.nth(pod) in self.prove_then_fail:
+            # Trial 2: the work ran and its blocks landed, but the command that started it timed out.
+            c = sqlite3.connect(DB, timeout=30)
+            for w in work:
+                c.execute("INSERT OR IGNORE INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES(?,?,?,?,?,?)",
+                          (f"bot-{w['height']}", w["height"], w["height"], w["pubkey"], "SPONSOR: test", time.time()))
+            c.commit()
+            c.close()
+            raise sponsor_bot.StartFailed(f"simulated: {pod.name} proved its blocks, then its launch timed out")
         heights = [w["height"] for w in work]
         self.started.append((pod.id, heights))
         self.work.extend((pod.id, dict(w)) for w in work)
@@ -385,6 +402,31 @@ rows = q("SELECT sponsorship_id, height, outcome FROM sponsor_work ORDER BY heig
 check([(r["sponsorship_id"], r["height"], r["outcome"]) for r in rows] == [(None, 505, "proven"), (None, 506, "proven")],
       "trial blocks are logged with no sponsorship")
 
+# ---------- blocks with no bundle ----------
+print("== blocks with no bundle wait ==")
+reset()
+c = sponsor_bot.connect(DB)
+bad = sponsor_bot.trial_refusals(c, [505, 400000])
+c.close()
+check(len(bad) == 1 and "400000" in bad[0] and "no bundle" in bad[0], f"a trial refuses a block with no bundle ({bad})")
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01)
+s_wait = sponsor(400000, 400001, paid_at=100)
+s_now = sponsor(9500, 9501, paid_at=200)
+logs = []
+reason = make_bot(api, runner, max_pods=2, blocks_per_pod=5, log=logs.append).run()
+check(reason == "done" and status_of(s_now) == "proven" and [hs for _, hs in runner.started] == [[9500, 9501]],
+      f"a run proves the blocks it can and never gives a pod a block with no bundle ({runner.started})")
+check(len(api.deploys) == 1 and not api.live() and status_of(s_wait) == "paid",
+      f"it rents nothing for the earlier sponsorship with no bundles, which stays held ({len(api.deploys)} deploys, {status_of(s_wait)})")
+check(any("2 held block(s) have no bundle yet" in m for m in logs), "and the log says how many held blocks wait")
+plan_lines = sponsor_bot.plan_text(DB)
+check(any("2 more block(s) wait for bundles" in line for line in plan_lines), f"so does the plan ({plan_lines[-2:]})")
+reset()
+api = FakeRunPod()
+sponsor(400000, 400001)
+check(make_bot(api, FakeRunner()).run() == "done" and not api.deploys, "a queue of only waiting blocks rents no pod at all")
+
 # ---------- a run: max pods, proving on start, the cost log, every pod terminated ----------
 print("== a run ==")
 reset()
@@ -525,6 +567,56 @@ finally:
     sponsor_bot.subprocess.run = real_run
 check(res.returncode == 124, f"a timed-out ssh comes back as a failed result, not an exception (rc {res.returncode})")
 check(isinstance(raised, sponsor_bot.StartFailed), f"so starting work on an unreachable pod raises StartFailed ({type(raised).__name__})")
+
+# ---------- proofs that land before a pod is stopped ----------
+print("== a block proven just before its pod is stopped is logged proven ==")
+reset()
+s1 = sponsor(9900, 9901)
+api = FakeRunPod()
+runner = FakeRunner(per_block=0.01, prove_then_fail={1})
+reason = make_bot(api, runner, max_pods=1, blocks_per_pod=5).run()
+first = runner.booted[0]
+rows = q("SELECT height, outcome, seconds FROM sponsor_work WHERE pod_id=? ORDER BY height", (first,))
+check([(r["height"], r["outcome"]) for r in rows] == [(9900, "proven"), (9901, "proven")]
+      and all(r["seconds"] is not None for r in rows),
+      f"blocks that landed before the pod was stopped are logged proven, not failed ({[(r['height'], r['outcome']) for r in rows]})")
+check(reason == "done" and status_of(s1) == "proven" and len(api.deploys) == 1 and not api.live(),
+      f"no second pod is rented for them and the sponsorship is proven ({len(api.deploys)} deploys, {status_of(s1)})")
+
+print("== work rows logged as stopped whose block was proven are corrected ==")
+import contextlib  # noqa: E402
+import io  # noqa: E402
+reset()
+c = sponsor_bot.connect(DB)
+sponsor_bot.ensure_tables(c)
+K, OTHER = "k" * 64, "o" * 64
+c.execute("INSERT INTO sponsor_pods(pod_id, name, cost_per_hr, created_at, terminated_at, usd_estimate)"
+          " VALUES('old', 'hz-sponsor-x-2', 0.74, 1000, 1100, 0.02)")
+for h, outcome in ((90000, "cancelled"), (90001, "failed"), (90002, "cancelled"), (90003, "stalled"),
+                   (90004, "cancelled"), (90005, "proven")):
+    c.execute("INSERT INTO sponsor_work(height, pod_id, cost_per_hr, assigned_at, outcome, pubkey, seconds)"
+              " VALUES(?,?,?,?,?,?,?)", (h, "old", 0.74, 1010, outcome, K, 10 if outcome == "proven" else None))
+for vid, h, key, ts in (("e", 90005, K, 1020), ("a", 90000, K, 1040), ("b", 90001, K, 1058),
+                        ("c", 90003, OTHER, 1050), ("d", 90004, K, 1200)):
+    c.execute("INSERT INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES(?,?,?,?,?,?)", (vid, h, h, key, "h", ts))
+c.commit()
+c.close()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    code = sponsor_bot.main(["report"])
+out = buf.getvalue()
+got = {r["height"]: r for r in q("SELECT * FROM sponsor_work")}
+check(code == 0 and "corrected 2 work row(s)" in out, f"report corrects the log before counting ({out.splitlines()[:1]})")
+check(got[90000]["outcome"] == got[90001]["outcome"] == "proven"
+      and abs((got[90000]["seconds"] or 0) - 20) < 1e-9 and abs((got[90001]["seconds"] or 0) - 18) < 1e-9
+      and got[90001]["proven_at"] == 1058 and abs((got[90001]["usd_estimate"] or 0) - 18 * 0.74 / 3600) < 1e-12,
+      "blocks proven under the row's key while its pod was alive become proven, timed from that pod's previous proof")
+check((got[90002]["outcome"], got[90003]["outcome"], got[90004]["outcome"]) == ("cancelled", "stalled", "cancelled"),
+      "a block never proven, one proven by another key and one proven after the pod was stopped are left as they were")
+check("outcomes: cancelled 2, proven 3, stalled 1" in out, f"so the report counts them ({out.splitlines()[-1:]})")
+c = sponsor_bot.connect(DB)
+check(sponsor_bot.reconcile_work(c) == 0, "a second pass changes nothing")
+c.close()
 
 # ---------- an exception mid-run ----------
 print("== an exception mid-run ==")
@@ -713,7 +805,7 @@ reset()
 c = sponsor_bot.connect(DB)
 sponsor_bot.ensure_tables(c)
 for h, secs, usd, outcome in ((1000, 10, 0.001, "proven"), (2000, 30, 0.003, "proven"), (3000, 20, 0.002, "proven"),
-                              (120000, 100, 0.02, "proven"), (4000, None, None, "stalled")):
+                              (250000, 100, 0.02, "proven"), (4000, None, None, "stalled")):
     c.execute("INSERT INTO sponsor_work(height, seconds, usd_estimate, outcome) VALUES(?,?,?,?)", (h, secs, usd, outcome))
 c.execute("INSERT INTO sponsor_pods(pod_id, terminated_at, usd_estimate) VALUES('a', 1, 0.5)")
 c.execute("INSERT INTO sponsor_pods(pod_id, terminated_at, usd_estimate) VALUES('b', 1, 0.25)")
@@ -722,8 +814,8 @@ rep = sponsor_bot.report(c)
 c.close()
 b1, b2 = rep["bands"][0], rep["bands"][1]
 check((b1["lo"], b1["blocks"], b1["median_seconds"], b1["max_seconds"], b1["median_usd"], b1["max_usd"])
-      == (1, 3, 20, 30, 0.002, 0.003), f"band 1 to 100,000: 3 blocks, median 20 s, max 30 s ({b1})")
-check((b2["lo"], b2["blocks"], b2["median_seconds"]) == (100001, 1, 100), f"band 100,001 to 150,000 ({b2})")
+      == (1, 3, 20, 30, 0.002, 0.003), f"band 1 to 200,000: 3 blocks, median 20 s, max 30 s ({b1})")
+check((b2["lo"], b2["blocks"], b2["median_seconds"]) == (200001, 1, 100), f"band 200,001 to 400,000 ({b2})")
 check(rep["blocks_proven"] == 4 and abs(rep["pod_usd"] - 0.75) < 1e-9 and abs(rep["all_in_usd_per_block"] - 0.1875) < 1e-9,
       "all in: $0.75 of pods over 4 proven blocks is $0.1875 a block")
 check(rep["outcomes"] == {"proven": 4, "stalled": 1}, f"outcomes are counted ({rep['outcomes']})")
