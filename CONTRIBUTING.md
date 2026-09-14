@@ -22,7 +22,9 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 CUDA build, where bigger segments prove ~6% faster; 20 on CPU, where the extra memory buys nothing), and
 the CLI automatically retries smaller if a prove fails. But **swapping is not a failure**, so if your box
 is RAM-tight it will crawl rather than fall back — set `HAZYNC_SEG_PO2=20` (or 19) explicitly. For scale:
-even block 170, a 2.3M-cycle toy block, peaks around 8.7 GB at po2 21.
+an 11 GB CPU box proving block 170, a 2.3M-cycle toy block, peaked at 8.7 GB RSS and went to swap. That
+run's po2 was not recorded; it predates v0.10.0, when both the binary default and the CLI's retry ladder
+started at 20.
 
 ## Step 1: get the prover (no build needed)
 
@@ -47,7 +49,8 @@ sudo apt install -y python3-cryptography
 
 (`run-workers.sh` is optional — it keeps several workers going for you. Keep it **next to** the
 CLI; it finds `hazync-worker` or `hazync` beside itself. `MODE=fold` runs folders instead of
-provers, `MODE=mixed` runs both.)
+provers, `MODE=mixed` runs both plus one spine worker, and `MODE=spine` runs only the spine, which
+only ever needs one.)
 
 **No GPU?** Use the CPU binary instead (`hazync-host-x86_64-linux-gnu`) — it proves too, just slower.
 
@@ -67,9 +70,9 @@ Take the CLI from the **release**, not from a raw source URL: it holds your ed25
 decides what gets submitted under your name, so it is the artifact most worth having a signature on.
 Both it and the prover are covered by the signed `SHA256SUMS.txt`.
 
-Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`SECURITY.md`](SECURITY.md#verifying-releases) — or, stronger, run `./host method-id` and confirm it matches `reproduce/METHOD_ID`.
+Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`SECURITY.md`](SECURITY.md#verifying-releases) — or, stronger, run `./hazync-host-x86_64-linux-gnu-cuda method-id` (or the CPU binary) and confirm it matches `reproduce/METHOD_ID`.
 
-> **Building from source instead?** You *must* build the **canonical guest** (via `reproduce/Dockerfile`, or the pinned inputs at fixed paths — see the repo README) so your `METHOD_ID` matches `reproduce/METHOD_ID`. If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
+> **Building from source instead?** You *must* build the **canonical guest** so your `METHOD_ID` matches `reproduce/METHOD_ID`. [`reproduce/`](reproduce/) is how: `docker build -t hazync-repro -f reproduce/Dockerfile .` builds at the fixed paths the id depends on and `docker run --rm hazync-repro` prints the id; the `host` it built is at `/hazync-zkvm/prover/target/release/host` inside the image (the `docker cp` steps are in `prover/testdata/snark/README.md`). If it doesn't, the coordinator rejects every proof you submit (`METHOD_ID` mismatch). The prebuilt binary above sidesteps this entirely.
 
 ## Step 2: set your name and point at the party
 
@@ -132,10 +135,13 @@ It confirms your prover is present, its guest `METHOD_ID` matches the coordinato
 > The coordinator now refuses those bounds at submit, and `hazync run` prints the span and the block
 > count before it starts proving — check that line if you are proving a span by hand.
 
-**Nothing is reserved and nothing is allocated.** The coordinator will *suggest* a block that would be
-most useful next, but you may prove any height you want and submit it — the suggestion is advisory.
-That means a worker that dies mid-block leaves nothing behind to expire or hand back, and a block
-nobody can prove no longer blocks anyone else.
+**A bare `run` claims its block; a named height or span claims nothing.** `./hazync run` with no
+argument takes the earliest open block through `/api/claim` and heartbeats while it proves. The claim is
+released on its own: after `CLAIM_GRACE` (600 s by default) if it never sent a heartbeat, after
+`CLAIM_TTL` (3,600 s) without one, and at `CLAIM_MAX` (86,400 s) regardless. `./hazync run 5` or a span
+takes no claim at all. Either way the claim is only about who is offered what: the coordinator accepts
+a valid proof at any height from anyone, and a lapsed claim cancels nothing, so a worker that dies
+mid-block costs at most a delay before the block is offered again.
 
 `run` fetches the witness it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
 
@@ -219,9 +225,10 @@ your segment coordinator.
 
 Measured on two matched L40S: **2.03x**, with a verifying receipt each run.
 
-⚠ **One prove per card.** At the default segment size a prove peaks at about 40.6 GB of VRAM, so a
-48 GB card holds exactly one. Running two on the same card will exhaust it, and it would buy roughly
-3% even if it fit.
+⚠ **One prove per card.** At the CUDA default segment size (po2 21) a prove peaks at about 22 GB of
+VRAM (22,521–22,917 MiB measured on an L40S, 2026-08-28); at po2 22, which you only get by setting
+`HAZYNC_SEG_PO2`, it is about 40.6 GB, so a 48 GB card holds exactly one. Running two on the same card
+leaves no headroom at po2 21 and will exhaust it at po2 22, and it would buy roughly 3% even if it fit.
 
 Details, the aggregate case, and every knob: [`docs/SEGMENT_DISTRIBUTION.md`](docs/SEGMENT_DISTRIBUTION.md).
 
@@ -237,13 +244,13 @@ ln -sf hazync-host-x86_64-linux-gnu host   # shorter to type; the real file keep
                                            # which is what SHA256SUMS.txt lists
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code
-curl -fLO https://bitcoinghost.org/hazync/api/proof/1   # lands as hazync-1.hzk
+curl -fLOJ https://bitcoinghost.org/hazync/api/proof/1  # -J: lands as hazync-1.hzk
 ./host verify-any hazync-1.hzk
 ```
 
 (Want to check the verifier binary itself before trusting it? SHA256 + PGP signature steps are in [`SECURITY.md`](SECURITY.md#verifying-releases); or confirm `./host method-id` equals `reproduce/METHOD_ID`.)
 
-If it prints a line starting with `RANGE-OK`, the proof is genuine — with one nuance: `verify-any` attests *that single step* (this block is a correct consensus transition between its stated boundaries); `verify-chain` / `verify-range` (or the board's connected frontier) are what pin it back to the genesis anchor. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see the repo README — but the prebuilt binary is the one-step path.)
+If it prints a line starting with `RANGE-OK`, the proof is genuine — with one nuance: `verify-any` attests *that single step* (this block is a correct consensus transition between its stated boundaries); `verify-chain` / `verify-range` (or the board's connected frontier) are what pin it back to the genesis anchor. That is the whole point of this project: every proof is public and anyone can check it, no trust required. (Building the `host` from source works too — see [`reproduce/`](reproduce/) — but the prebuilt binary is the one-step path.)
 
 The `.hzk` is a **binary STARK receipt** (a RISC0 proof, a few hundred KB), not text — opening it in a text editor just shows gibberish, which is expected. You *use* it with `verify-any`, you don't read it.
 
@@ -251,7 +258,7 @@ If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instea
 
 ## If something breaks
 
-- `./host: cannot execute` or a `GLIBC` error — the prebuilt binaries need glibc 2.34+ (Ubuntu 22.04+). On an older distro (pre-22.04, e.g. Ubuntu 20.04 / Debian 11), build from source (canonical guest — see the repo README) or run in the reproducible container.
+- `./host: cannot execute` or a `GLIBC` error — the prebuilt binaries need glibc 2.34+ (Ubuntu 22.04+). On an older distro (pre-22.04, e.g. Ubuntu 20.04 / Debian 11), build from source (canonical guest — see [`reproduce/`](reproduce/)) or run in the reproducible container.
 - The CUDA prover needs **only the NVIDIA driver** (`libcuda.so.1`), not a CUDA toolkit or runtime.
   Verified on a stock Ubuntu 24.04 cloud GPU image shipping **CUDA 13.2** and no `nvcc` at all: the
   binary reported the canonical `METHOD_ID`, passed `selftest` including a real GPU prove, and went
@@ -263,15 +270,15 @@ If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instea
   ```
 
   CUDA **12** is a BUILD requirement, not a runtime one: risc0-sys 1.5.0's kernels do not compile
-  under CUDA 13 (see `prover/build-release.sh`). `provision-vps.sh` installs `cuda-toolkit-12-6` for
-  that reason. If you are downloading the prebuilt binary you are not building, and it does not
+  under CUDA 13 (see `prover/build-release.sh`). `GPU=1 ./provision-vps.sh` installs CUDA 12.8 for
+  that reason (`HAZYNC_CUDA_VER` pins another 12.x). If you are downloading the prebuilt binary you are not building, and it does not
   apply to you. If proving genuinely cannot find the GPU, check the driver with `nvidia-smi`.
 - The coordinator rejects your proof with a `METHOD_ID` mismatch — you're proving with a non-canonical guest. Use the prebuilt binary, or reproduce the canonical id with `reproduce/Dockerfile`.
 - Anything else, open an issue on the repo.
 
 ## Running your own party
 
-The coordinator (`coordinator/`) is optional and reusable. If you want to run your own proving effort, for a testnet, another chain, or a private run, `coordinator/deploy/RUNBOOK.md` walks through standing one up. Contributors point their `COORD_URL` at your coordinator, and their proofs land in your ledger, not ours. Each coordinator is its own island: separate ledger, separate frontier, separate stored proofs. The proofs themselves are universal, so anyone can verify a proof from any party, but coordinators do not share state with each other.
+The coordinator (`coordinator/`) is optional and reusable. If you want to run your own proving effort, for a testnet, another chain, or a private run, [`docs/RUN_YOUR_OWN_COORDINATOR.md`](docs/RUN_YOUR_OWN_COORDINATOR.md) walks through standing one up (`coordinator/deploy/RUNBOOK.md` is the operator's runbook for the public board's own box). Contributors point their `COORD_URL` at your coordinator, and their proofs land in your ledger, not ours. Each coordinator is its own island: separate ledger, separate frontier, separate stored proofs. The proofs themselves are universal, so anyone can verify a proof from any party, but coordinators do not share state with each other.
 
 ## Reviewing the code
 

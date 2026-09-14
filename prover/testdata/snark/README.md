@@ -22,7 +22,9 @@ anything was proved.
 exactly as this file predicts — `verifier REJECTED the genesis-anchored proof (exit 1)`. That is the
 gate working. Lineage: `3867611d…` (the coprocessor-field-backend re-baseline — see
 `reproduce/METHOD_ID`) superseded `1d6c3792…` (2026-08-24, parallel block validation), which
-superseded `b62d2a60…` (2026-08-04, audit #5 guest guards), which superseded `b161735a…`.
+superseded `b62d2a60…` (2026-08-21, the #136 + #137 chunk-payload re-baseline), which superseded
+`4722cec8…` (2026-08-04, audit #5 guest guards; fixtures regenerated under it in `c59e68f`), which
+superseded `b161735a…`. `reproduce/LINEAGE.tsv` is the authority for these dates.
 
 A proof carries its guest id inside it, so a re-baseline cannot be absorbed by editing anything: the
 pair has to be re-proved and re-wrapped. Until it is, `ci_snark_verify.sh`, `ci_verify_any.sh` and
@@ -47,7 +49,7 @@ The `packed_bytes` fix above added the missing `visit_seq` arm, and all nine bun
 straight from `/api/witness/<h>` proved with no preprocessing at all. Fetch and prove; do not write
 a flattener. `leaf`, `txs`, `tx_prevouts` and every SMT field were always flat regardless.
 
-⚠ On the 2026-08-23 re-baseline that produced `1d6c3792…`, the stale pair failed **two** CI jobs, not
+⚠ On the 2026-08-24 re-baseline that produced `1d6c3792…`, the stale pair failed **two** CI jobs, not
 one: `accumulator-tests` at the standalone-verifier step and `reproducible-image-id` at the Groth16
 step. The container build and the METHOD_ID assertion inside that same job both PASSED. If a
 re-baseline shows those two failures together, it is these files, not the Dockerfile.
@@ -68,7 +70,7 @@ test, so the gate asserts not merely that the non-genesis range is rejected but 
 *because of the anchor* — not a missing file, not a parse error. That assertion is what stops a smaller,
 more shareable artifact from checking less than the receipt it replaces.
 
-Note `neg500.snark` (5,633 B) is **larger** than `fold_8.snark` (1,841 B) despite covering one block
+Note `neg500.snark` (6,145 B) is **larger** than `fold_8.snark` (2,353 B) despite covering one block
 instead of eight: a genesis-anchored range has an empty in-boundary, while a mid-chain range commits two
 populated Utreexo root vectors. Size tracks boundary content, not range length.
 
@@ -102,8 +104,10 @@ re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK
 
 ## Regenerating
 
-Needs a host binary with `snark-wrap` **and** a working Groth16 backend. Today that means a **CPU**
-build — Groth16 crashes in sppark on every CUDA build we ship (#20).
+Needs a host binary with `snark-wrap` **and** a working Groth16 backend, which means a **CPU** build.
+Groth16 crashed in sppark on every CUDA build tested (#20, captured 2026-07-28 on an L40S in
+`prover/evidence/groth16_cuda_crash_sm89.txt`); #20 was closed the same day as an upstream defect not
+worth working around, and the CUDA path has not been re-measured since.
 
 **Use a CANONICAL host binary, but do NOT run the wrap inside the container.** Both halves of that
 sentence cost a run on 2026-08-04:
@@ -117,14 +121,19 @@ sentence cost a run on 2026-08-04:
   inside that container. Extract the binary and wrap on the host, where the daemon is reachable.
 
 ```sh
+# work in an EMPTY directory (see below); REPO is your checkout, used only for the verifier build
+REPO=/path/to/hazync; mkdir snark-regen && cd snark-regen && mkdir bundles
+
 # get a canonical host binary OUT of the image, then confirm it is canonical
 cid=$(docker create hazync-repro) && docker cp "$cid:/hazync-zkvm/prover/target/release/host" ./host
 docker rm "$cid" && chmod +x ./host && ./host method-id      # must equal reproduce/METHOD_ID
 
 # block proofs. Use the BRIDGE path: bundles make each block O(1) instead of replaying the
 # accumulator from genesis, which is what makes a mid-chain block like 500 tractable at all.
-for h in 1 2 3 4 5 6 7 8 500; do curl -s "$COORD/api/witness/$h" > bundles/bundle_$h.json; done
-HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h   # ~8 min each, CPU
+for h in 1 2 3 4 5 6 7 8 500; do
+  curl -s "$COORD/api/witness/$h" > bundles/bundle_$h.json
+  HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h   # ~8 min each, CPU
+done
 
 # positive: fold [1..8] as an ALIGNED tree (1+2, 3+4, 5+6, 7+8 -> ... -> [1..8])
 ./host fold-range range_1.bin range_2.bin f12.bin             # ... 7 folds, ~3 min each
@@ -136,8 +145,8 @@ HAZYNC_BRIDGE_OUT=bundles HAZYNC_OUT=range_$h.bin ./host prove-range-bridge $h  
 # ⚠ NOT `./host verify-snark neg500.snark`. That asserts the range starts at block 1 and PANICS
 # (exit 101) on a mid-chain range, which looks like a bad fixture and is not. Check the negative
 # with the STANDALONE verifier, which is also what CI asserts:
-cargo build --release --manifest-path ../../../verifier/Cargo.toml
-../../../verifier/target/release/hazync-verify neg500.snark    # must exit 2 — see below
+cargo build --release --manifest-path "$REPO/verifier/Cargo.toml"
+"$REPO/verifier/target/release/hazync-verify" neg500.snark     # must exit 2 — see below
 ```
 
 ⚠ **Start from an EMPTY directory.** A regeneration script that skips work already on disk
