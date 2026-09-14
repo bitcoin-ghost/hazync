@@ -1,5 +1,7 @@
 # Hazync v0.21.0 — Core becomes the guest that ships
 
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.0>
+
 **The release binary now proves with Core acceleration on.** v0.20.0 shipped the stock guest with
 every lever off; the README meanwhile said *"CORE — what ships"* and *"Core is the project"*. That
 gap is what this release closes. Nothing about the claim changed — the build finally matches it.
@@ -95,6 +97,10 @@ coordinator's — you built a different guest.
 rejections indefinitely without complaining. To contribute, use the release binary or the
 reproducible build — not a hand-rolled one.
 
+> *Correction, 2026-09-14: stale when published. Since `8c8839c` (hazync#99, 2026-08-06) `hazync submit`
+> re-reads `/api/meta` when a rejection names `METHOD_ID` and exits 78 on a genuine mismatch, and
+> `run-workers.sh` stops on 78 instead of retrying.*
+
 ---
 
 ## Packing constants
@@ -132,6 +138,11 @@ invalidate the number being cited. Tracked in hazync#226.
 ```bash
 hazync stop && hazync update && hazync id "<your handle>" && hazync work
 ```
+
+> *Correction, 2026-09-14: `stop`, `update` and `work` are not `hazync` subcommands — `coordinator/hazync`
+> has `id`, `pick`, `prove`, `selftest`, `submit`, `run`, `spine`, `fold` and `rotate`. To upgrade, stop
+> your workers, fetch the release assets as in `CONTRIBUTING.md`'s quick-start, run `hazync id "<your
+> handle>"`, then start `hazync run` or `run-workers.sh`.*
 
 ⚠ Set your identity **before** starting workers. Starting first mints a throwaway key and your
 proofs land under a name you did not choose.
