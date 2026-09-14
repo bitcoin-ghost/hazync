@@ -115,8 +115,76 @@ time.sleep(0.3)                                   # let the cached value go stal
 calls.clear()
 t = time.time()
 out = burst()
+took = time.time() - t
+time.sleep(1.2)                                   # a background rebuild finishes after the burst returns
 check(len(calls) == 1, f"stale cache: 20 concurrent callers -> 1 recompute (got {len(calls)})")
-check(time.time() - t < 2.0, f"...and the others got the previous value instead of waiting ({time.time() - t:.2f}s)")
+check(took < 2.0, f"...and the others got the previous value instead of waiting ({took:.2f}s)")
+
+# 2b. #324: the caller that FINDS the entry stale does not wait for the rebuild either
+gen = [0]
+
+
+def tagged_state(slim=False):
+    calls.append(1)
+    time.sleep(0.8)
+    gen[0] += 1
+    d = real_state(slim=slim)
+    d["_gen"] = gen[0]
+    return d
+
+
+def served_gen():
+    try:
+        return json.loads(server.state_cached(slim=True)).get("_gen")
+    except Exception as ex:
+        return repr(ex)
+
+
+server.state = tagged_state
+server._sf.pop("state:slim", None)                # cold start with tagged values
+first = served_gen()
+time.sleep(0.3)                                   # stale
+t = time.time()
+got = served_gen()
+took = time.time() - t
+check(took < 0.3 and got == first,
+      f"a lone caller that finds the board stale gets the previous board at once ({took:.2f}s, gen {got!r} vs {first!r})")
+time.sleep(1.2)                                   # the rebuild that caller started lands
+got = served_gen()
+check(isinstance(got, int) and isinstance(first, int) and got > first,
+      f"...and the next caller gets the rebuilt board (gen {got!r} after {first!r})")
+time.sleep(1.2)                                   # let the rebuild that call started finish too
+
+# 2c. a failing background rebuild keeps the last good board, lets the next caller try again, and is not
+# hidden for ever: past CACHE_MAX_STALE the caller rebuilds in line and sees the error
+def failing_state(slim=False):
+    calls.append(1)
+    raise RuntimeError("rebuild failed (test)")
+
+
+thread_crashes = []
+threading.excepthook = lambda a: thread_crashes.append(f"{a.exc_type.__name__}: {a.exc_value}")
+server.state = failing_state
+calls.clear()
+time.sleep(0.3)
+got = served_gen()
+time.sleep(0.2)
+check(isinstance(got, int), f"a failing background rebuild still serves the last good board (got {got!r})")
+got2 = served_gen()
+time.sleep(0.2)
+check(len(calls) == 2 and isinstance(got2, int),
+      f"...and releases the refresh, so the next stale caller starts another (rebuilds={len(calls)})")
+_max_stale = getattr(server, "CACHE_MAX_STALE", None)
+server.CACHE_MAX_STALE = 0.3
+time.sleep(0.8)
+got = served_gen()
+check(isinstance(got, str) and "rebuild failed" in got,
+      f"past CACHE_MAX_STALE the caller rebuilds in line and sees the failure (got {got!r})")
+if _max_stale is not None:
+    server.CACHE_MAX_STALE = _max_stale
+# The refresh thread must handle its own failure. The first version logged with `sys`, which server.py
+# never imported, so the handler itself raised NameError: every check above still passed.
+check(not thread_crashes, f"a failed background rebuild is logged, not a crash of its thread ({thread_crashes})")
 server.state = real_state
 
 # 3. the frontier chain (every worker's /api/meta) is single-flight too

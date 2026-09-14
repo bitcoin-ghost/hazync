@@ -179,6 +179,8 @@ ENV = {
     "server:RATE_WINDOW": "Rate-limit window, seconds.",
     "server:RATE_MAP_MAX": "Rate map size at which aged-out keys are evicted.",
     "server:STATE_CACHE_TTL": "Seconds `/api/state` is coalesced.",
+    "server:CACHE_MAX_STALE": "Seconds past its TTL that `/api/state` and `/api/blockstatus` may still be "
+                              "served while they rebuild in the background; beyond it the caller rebuilds.",
     "server:TRUSTED_PROXIES": "Peers whose `X-Forwarded-For` is believed, comma-separated.",
     "server:HANDLE_DENY": "Reserved handles, compared after reducing to lowercase letters and digits.",
     "server:MOD_BLOCK_FILE": "Takedown list of pubkeys hidden from the public board; re-read on every call.",
