@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability or conduct report
+    url: https://github.com/bitcoin-ghost/hazync/security/advisories/new
+    about: Report privately. Please do not open a public issue for a way to make an invalid block prove valid, or for a conduct complaint.
+  - name: Question or discussion
+    url: https://github.com/bitcoin-ghost/hazync/discussions
+    about: Ask how something works, or propose an idea before it becomes an issue.

@@ -1,5 +1,13 @@
 # Hazync — security review & status
 
+## Reporting a vulnerability
+
+Report it privately through GitHub's private vulnerability reporting:
+<https://github.com/bitcoin-ghost/hazync/security/advisories/new> (the **Security** tab, then **Report a
+vulnerability**). A report there is visible only to you and the maintainers. Conduct reports under
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) may use the same form. Please do not open a public issue for a
+way to make an invalid block prove valid.
+
 **No commissioned professional audit has happened.** Most findings in the audit record were surfaced
 by our own adversarial passes over the guest/host code; two rounds (10 and 11) were AI-assisted
 full-source reviews by people outside the project, which is a real distinction but not the same thing
