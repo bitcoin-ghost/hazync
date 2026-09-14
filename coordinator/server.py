@@ -508,6 +508,26 @@ def init_db():
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_token ON sponsorships(token_hash)")
     c.commit(); c.close()
 
+def canonical_range_id(lo, hi):
+    """The one spelling of [lo..hi]: 'N' for a single block, 'lo-hi' (lo < hi) for anything wider."""
+    return str(lo) if lo == hi else f"{lo}-{hi}"
+
+def range_id_refusal(rid, lo, hi):
+    """(400, body) if `rid` is not the canonical spelling of [lo..hi], else None.
+
+    The ranges row, the stored proof file and the "already proven" check are all keyed by the id
+    STRING, and parse_any_range is int()-based, so `5-5`, `05`, `+5` and ` 5` all parse as block 5 while
+    each looks like a block nobody has proven. Measured 2026-09-14 on a scratch board: a second key
+    submitted block 5 under four spellings and every one was accepted, verified (up to 120 s of CPU
+    each) and stored as another proof file. Nothing was overwritten, but the board could be made to
+    verify and store the same block without limit. One spelling per range closes that."""
+    canon = canonical_range_id(lo, hi)
+    if str(rid) == canon:
+        return None
+    return 400, {"error": f"range id {str(rid)!r} is not in canonical form -- submit it as '{canon}' "
+                          f"(one block is 'N', a range is 'lo-hi' with lo < hi; no padding, signs or spaces)",
+                 "canonical": canon}
+
 def parse_any_range(rid):
     """Validate a range id for SUBMISSION (not for claiming). Any `n` or `lo-hi` with lo <= hi < chain_tip().
 
@@ -2802,6 +2822,26 @@ def _tiled_by_verified(c, lo, hi):
     return True
 
 
+def already_proven_body(r):
+    """The 409 for a range that already has its own proof: who proved it, and where to check it.
+
+    Keeps the words "already proven" -- the worker matches them to treat a lost race as success."""
+    rid, lo, hi = r["id"], r["lo"], r["hi"]
+    c = db()
+    try:
+        v = c.execute("SELECT handle, pubkey FROM vranges WHERE id=?", (rid,)).fetchone()
+    finally:
+        c.close()
+    who = None
+    if v:
+        who = "[removed]" if (v["pubkey"] or "").lower() in blocked_pubkeys() else v["handle"]
+    what = f"block {lo}" if lo == hi else f"[{lo}..{hi}]"
+    by = f", by {who}" if who else ""
+    return {"error": f"already proven: {what} has its own proof{by}. Proving it again adds nothing -- anyone "
+                     f"can check that proof in seconds: download /api/proof/{rid} and verify it. "
+                     f"`hazync run` with no argument picks a block nobody has proven.",
+            "already_proven": True, "proof": f"/api/proof/{rid}", "by": who}
+
 def submit(body):
     rid, pk = body.get("range"), body.get("pubkey", "")
     sig, receipt_b64 = body.get("sig", ""), body.get("receipt", "")
@@ -2811,6 +2851,8 @@ def submit(body):
     if not parse_any_range(rid): return 400, {"error": "invalid range id"}
     _genesis = genesis_refusal(*parse_any_range(rid))    # before any row, signature or verification
     if _genesis: return _genesis
+    _spelling = range_id_refusal(rid, *parse_any_range(rid))   # likewise: one id per range
+    if _spelling: return _spelling
     # #281: refuse a wide range that starts INSIDE existing coverage without being backed by it.
     #
     # `_frontier_chain` needs `prev.hi + 1 == lo` EXACTLY (H9), so such a range can never join the
@@ -2881,7 +2923,7 @@ def submit(body):
             c.commit()
             r = c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone()
             c.close()
-    if r["status"] == "verified": return 409, {"error": "already proven"}
+    if r["status"] == "verified": return 409, already_proven_body(r)
     # A held block is proven only by its sponsorship's registered key (_hold_refusal). Checked here, before
     # the expensive verification, and again when committing, in case a hold started in between.
     with _lock:
