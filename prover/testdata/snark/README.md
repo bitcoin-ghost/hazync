@@ -100,7 +100,7 @@ the time they were made. Do not restate that id here: a second copy of it is a s
 step, and `scripts/check-versions.sh` exists because stale ids in documentation are exactly the drift
 that gets shipped. **A guest re-baseline invalidates them** — the verifier will reject proofs made against a
 different image id, and the gate will fail loudly, which is intended. Regenerate them as part of the
-re-baseline, alongside the other artifacts listed in `coordinator/deploy/RUNBOOK.md`.
+re-baseline, alongside the other artifacts listed in `docs/RELEASE_PROCESS.md`.
 
 ## Regenerating
 

@@ -339,6 +339,12 @@ jobs:
         run: ./scripts/check-workflow-injection.sh
       - name: Versions agree (guest id + release refs across docs; a re-baseline must not leave a doc stale)
         run: ./scripts/check-versions.sh
+      - name: Coordinator reference matches server.py, the worker CLI and the launcher (with its positive control)
+        # docs/COORDINATOR_REFERENCE.md is generated. --check fails on drift, including a route or variable
+        # with no description and a description for something the code no longer has; --control mutates
+        # copies of the sources (a route removed, a default changed, a variable added) and fails if --check
+        # misses any of them, so this step cannot go green by checking nothing.
+        run: python3 scripts/gen-coordinator-reference.py --check && python3 scripts/gen-coordinator-reference.py --control
       - name: Guest lineage is append-only and matches git history (#244)
         # A receipt stays verifiable only while we keep its method id AND can rebuild the risc0
         # verifier that checked it, so the thing that destroys a back catalogue is a re-baseline

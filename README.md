@@ -264,6 +264,7 @@ commissioned audit. Trying to break it is the most useful thing you can do,
   external: [`docs/history/SECURITY_AUDIT_LOG.md`](docs/history/SECURITY_AUDIT_LOG.md) · round 8's
   full write-up: [`AUDIT_2026-07.md`](docs/history/AUDIT_2026-07.md)
 - Adversarial fuzzing (what was fuzzed, what wasn't): [`docs/FUZZING.md`](docs/FUZZING.md)
+- Code of conduct, with the private route for reports: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - What we're for, and how far along: [`docs/GOALS.md`](docs/GOALS.md), six goals, measured status
 - **What to actually run** — fleet shape, card, po2, build flags, and what is still unsettled:
   [`docs/TOPOLOGY_AND_SETTINGS.md`](docs/TOPOLOGY_AND_SETTINGS.md)
