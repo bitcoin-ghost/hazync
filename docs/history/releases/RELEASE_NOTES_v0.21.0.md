@@ -76,7 +76,7 @@ experiment isolates exactly the two levers:
 
 ## Running a non-default channel
 
-All three recipes live in [`docs/BUILDS.md`](BUILDS.md). The levers are build-time, not runtime:
+All three recipes live in [`docs/BUILDS.md`](../../BUILDS.md). The levers are build-time, not runtime:
 there is no config file that switches channel, because the channel is compiled into the guest and
 its identity *is* the `METHOD_ID`.
 
