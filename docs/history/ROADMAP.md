@@ -140,7 +140,7 @@ The repo went public fast and reads like working notes. Make it a curated artifa
 
     The leaf counts are one lower than previously recorded on 130000/140000/741000 because the old
     fixtures predated `coin_height` and so could not express an in-block spend; each of those blocks has
-    exactly one. Tip hashes and `cum_work` are unchanged — see the leaf-count note in `../SECURITY.md`.
+    exactly one. Tip hashes and `cum_work` are unchanged — see the leaf-count note in `SECURITY_AUDIT_LOG.md`.
 
 ## 3. External review + writeup
 
