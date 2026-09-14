@@ -14,3 +14,6 @@
 
 ## Docs
 - [ ] Docs updated, or not needed because:
+- [ ] Adds or changes a coordinator route, or an environment variable read by `coordinator/server.py`,
+      `coordinator/hazync` or `coordinator/run-workers.sh`: ran `python3 scripts/gen-coordinator-reference.py`
+      and committed `docs/COORDINATOR_REFERENCE.md` (CI fails on drift)
