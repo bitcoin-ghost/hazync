@@ -7,7 +7,7 @@ code disagree, the code wins. `SECURITY.md` and
 [`history/SECURITY_AUDIT_LOG.md`](history/SECURITY_AUDIT_LOG.md) are the history of findings; this page is
 the current position.
 
-**As of 2026-09-14**, code at `ff439ec` (v0.21.4 plus 9 commits), canonical guest `37987b85`. Terms:
+**As of 2026-09-14**, code at `d5286b8` (v0.21.4 plus 13 commits), canonical guest `37987b85`. Terms:
 [`GLOSSARY.md`](GLOSSARY.md). Routes and configuration: [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md).
 Report a vulnerability privately: [`../SECURITY.md`](../SECURITY.md#reporting-a-vulnerability).
 
@@ -216,8 +216,8 @@ the board; retaining receipts; serving witness bundles.
   and set sponsorship statuses by hand, since payments are not connected (`SPONSORSHIP.md`).
 - Cannot make a receipt verify for anyone else.
 - Deployment drift is visible: `/api/meta` publishes `source_sha256` of the running `server.py`, compared by
-  `scripts/check-deployment.sh`. On 2026-09-14 08:31 UTC it equalled the sha256 of `coordinator/server.py`
-  at `ff439ec`.
+  `scripts/check-deployment.sh`. On 2026-09-14 at 08:31 and 12:02 UTC it equalled the sha256 of
+  `coordinator/server.py` at `d5286b8`.
 
 ## 6. Worker CLI
 

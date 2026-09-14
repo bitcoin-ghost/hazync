@@ -12,7 +12,7 @@ minute, so use the live API; the snapshot below is dated.
   `hazync-host-x86_64-linux-gnu-cuda`, `hazync-worker`, `hazync-run-workers.sh`, `hazync-coordinator.py`,
   `hazync-verify-x86_64-linux-gnu`, `hazync-verify-aarch64`, `hazync-verify.wasm`, `SHA256SUMS.txt`,
   `SHA256SUMS.txt.asc`. Check them as in [`SECURITY.md`](../SECURITY.md#verifying-releases).
-- `main` is 9 commits past the tag, at `ff439ec`.
+- `main` is 13 commits past the tag, at `d5286b8`.
 
 ## Guest
 
@@ -46,7 +46,7 @@ Snapshot at **2026-09-14 08:31:46 UTC**:
 | contributors | 7 |
 | `verify_mode` / `signatures` | `real` / `ed25519` |
 | `/api/meta` `method_id` | canonical |
-| `/api/meta` `source_sha256` | equals `coordinator/server.py` at `ff439ec` |
+| `/api/meta` `source_sha256` | equals `coordinator/server.py` at `ff439ec` and at `d5286b8` (unchanged; re-read 12:02 UTC) |
 | sponsorship (`/api/sponsor`) | `open: false`, `payments: false`, `priced: true`, `btc_usd: null` |
 | browser verifier | 1,064,517 bytes at both `bitcoinghost.org/hazync/verify/` and `hazync.org/verify/` |
 
@@ -75,7 +75,8 @@ From GitHub on 2026-09-14.
 | [#311](https://github.com/bitcoin-ghost/hazync/issues/311) | Key rotation cannot be revoked, so a stolen key can take a contributor's attribution for good |
 | [#312](https://github.com/bitcoin-ghost/hazync/issues/312) | `_find_host()` will run a prover binary it finds in the current directory |
 
-Open pull requests: #307 and #308 (documentation), #309 (sponsor bot).
+Open pull requests at 12:02 UTC: #313 (block 0 and the genesis seed, retention alerts), #314 (sponsor bot proven
+logging), #315 (sponsorship price ladder). The documentation PRs #307, #308 and #316 and the sponsor bot PR #309 have merged.
 
 ## Decisions for the operator
 
