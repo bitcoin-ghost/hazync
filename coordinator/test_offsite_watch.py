@@ -241,6 +241,28 @@ t, prio, body = daily(FakeS3(["proof_1.bin", "proof_2.bin"]))
 check(prio == "high" and "exit-code" in body, "a failed hourly mirror is a problem")
 check(not os.path.exists(W.DRILL_DIR), "the restore drill leaves no copy of the ledger behind")
 
+# 6. the shipped grace outlasts a whole hourly mirror cycle (2026-09-15). `copy` skips receipts younger
+#    than 120 s, so one written just before or during a run is uploaded by the NEXT run, up to an hour
+#    later. At 1800 s the 07:00 UTC summary called 68 such receipts missing; every one was uploaded at :23.
+saved = os.environ.pop("OFFSITE_PROOF_GRACE_SECS", None)
+DEFAULT = load("offsite_watch_default", os.path.join(HERE, "deploy", "hazync-offsite-watch.py")).GRACE
+if saved is not None:
+    os.environ["OFFSITE_PROOF_GRACE_SECS"] = saved
+HOURLY_CYCLE = 3600 + 120 + 120          # timer period + RandomizedDelaySec + copy's --min-age default
+check(DEFAULT > HOURLY_CYCLE, f"the default grace ({DEFAULT} s) is longer than one hourly mirror cycle ({HOURLY_CYCLE} s)")
+W.GRACE, box.mirror_result = DEFAULT, "success"
+for n, age in (("proof_3.bin", 40 * 60), ("proof_4.bin", DEFAULT + 3600)):
+    p = os.path.join(W.PROOFS, n)
+    with open(p, "wb") as f:
+        f.write(b"receipt " + n.encode())
+    os.utime(p, (time.time() - age, time.time() - age))
+t, prio, body = daily(FakeS3(["proof_1.bin", "proof_2.bin", "proof_4.bin"]))
+check(t == "Hazync backups: all good" and "go in the next hourly run" in body,
+      f"a receipt 40 min old that the next hourly run will upload is not called missing ({t})")
+t, prio, body = daily(FakeS3(["proof_1.bin", "proof_2.bin", "proof_3.bin"]))
+check(prio == "high" and "MISSING from R2" in body and "proof_4.bin" in body,
+      f"...but one that has missed a whole cycle still is ({t})")
+
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)
