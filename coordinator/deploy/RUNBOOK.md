@@ -336,12 +336,20 @@ offsite. A same-disk copy dies with the box.
 ### Offsite copies in Cloudflare R2 (since 2026-09-15)
 
 Until 2026-09-15 the receipts had **no** copy off the coordinator: the nightly `backup.sh` shipped the
-ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. Two things now run beside it:
+ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. These now run beside it:
 
 | What | How | Where in R2 | How far behind |
 |---|---|---|---|
-| Proof receipts | `hazync-offsite-proofs.timer`, hourly: `hazync-offsite-proofs.py copy`, then `check` | `hazync-proofs/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
+| Proof receipts, singles and folds (`proof_*.bin`) | `hazync-offsite-proofs.timer`, hourly: `hazync-offsite-proofs.py copy`, then `check` | `hazync-proofs/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
+| The spine (`spine.bin` + `spine.json`) | `hazync-offsite-spine.timer`, every 10 min: `hazync-offsite-proofs.py spine --verify /usr/local/bin/hazync-verify` | `hazync-proofs/spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}`, one pair per height, never overwritten | up to ~10 min |
 | Ledger | Litestream (`litestream.service` + `dropins/litestream-*.conf`, config from `litestream.yml.example`) | `hazync-ledger/coordinator/` | ~1 s |
+
+- **The spine is the one proof that cannot be rebuilt cheaply**: losing it means re-absorbing every block from
+  genesis. Until 2026-09-15 it had no copy off the box. A copy is uploaded only when `spine.bin` matches the
+  sha256 and size in `spine.json` (the coordinator replaces the two one after the other) and
+  `hazync-verify` accepts it as genesis-anchored; otherwise the unit fails and pages the phone. The `.bin`
+  goes up before the `.json`, so a `.json` in R2 marks a complete pair. `hazync-verify` is the signed
+  release asset `hazync-verify-x86_64-linux-gnu`, checked against `SHA256SUMS.txt` before installing.
 
 - **Receipts are append-only**, as in `backup.sh`: a file already in R2 is never overwritten or deleted,
   and names are namespaced by guest id because they repeat across re-baselines. `check` fails the unit,
@@ -375,13 +383,28 @@ Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contribu
 | Litestream crashes | high | `dropins/litestream-alert.conf` |
 | Litestream is not running; the newest ledger change in R2 is over 15 min old; R2 cannot be listed | high, re-sent every 6 h, one low RECOVERED | `hazync-offsite-watch.timer` (every 10 min) |
 | Litestream logs WARN/ERROR lines | default, at most one push an hour | `hazync-offsite-watch.timer` |
-| Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, and a **restore drill** | low if all good, high if not | `hazync-offsite-summary.timer` |
+| The spine copy fails: `spine.bin` and `spine.json` still disagree after 5 reads, `hazync-verify` rejects it, or the upload fails | high | `hazync-offsite-spine.service` `OnFailure=` |
+| Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, a **restore drill**, and the newest **spine copy** downloaded, checked against its sha256, verified with `hazync-verify`, and compared with the live spine (a problem over `OFFSITE_SPINE_LAG_SECS`, 1 h, behind) | low if all good, high if not | `hazync-offsite-summary.timer` |
 
 The restore drill restores the ledger from R2 into `/var/lib/hazync/restore-drill`, checks integrity,
 compares it with the live ledger, and deletes it. Priorities come from `ALERT_PRIORITY` / `ALERT_TAGS`
 in `hazync-alert.sh`; without them every caller still rings at high.
 
 **Check the receipt mirror by hand:** `/usr/local/sbin/hazync-offsite-proofs check --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs`
+
+**Copy the spine by hand:** `/usr/local/sbin/hazync-offsite-proofs spine --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify`
+
+**Restore the spine from R2**: take the newest pair under `spine-<first 8 of METHOD_ID>/` (highest `hi`),
+check it, and only then put it in place with the coordinator stopped:
+
+```bash
+sha256sum spine_1-<hi>.bin        # must equal "sha256" in spine_1-<hi>.json
+hazync-verify spine_1-<hi>.bin    # must say VERIFIED — genesis-anchored
+install -o hazync -g hazync -m 644 spine_1-<hi>.bin  /var/lib/hazync/spine/spine.bin
+install -o hazync -g hazync -m 644 spine_1-<hi>.json /var/lib/hazync/spine/spine.json
+```
+
+The spine workers then absorb forward from `hi`; the receipts they need are in R2 too.
 
 > ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of
 > the two schedulers below and confirm a snapshot actually lands (`ls $HZ_HOME/backups`). Until then the

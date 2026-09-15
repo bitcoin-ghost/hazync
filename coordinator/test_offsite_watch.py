@@ -20,8 +20,11 @@ SQLite files. No network, no boto3, no root.
   python3 test_offsite_watch.py            # must PASS
   python3 test_offsite_watch.py --control  # the watcher sees no problems and every summary check says ok; MUST FAIL
 """
+import hashlib
 import importlib.machinery
 import importlib.util
+import io
+import json
 import os
 import shutil
 import sqlite3
@@ -53,6 +56,27 @@ W.PROOFS = os.path.join(tmp, "proofs")
 W.REPO = os.path.join(tmp, "repo")
 W.KEYS = os.path.join(tmp, "keys")
 W.LAG_ALERT, W.REALERT, W.LOG_REALERT, W.GRACE = 900, 21600, 3600, 1800
+W.SPINE, W.SPINE_LAG_ALERT = os.path.join(tmp, "spine"), 3600
+W.VERIFY = os.path.join(tmp, "fake-verify")
+with open(W.VERIFY, "w") as f:
+    f.write('#!/bin/sh\nif grep -q FORGED "$1"; then echo "VERIFICATION FAILED: the proof is not valid"; exit 1; fi\n'
+            'echo ">>> SNARK RANGE PROOF [1..1000] VERIFIED — genesis-anchored"\n')
+os.chmod(W.VERIFY, 0o755)
+
+
+def spine_json(data, hi=1000, ts=None):
+    return json.dumps({"lo": 1, "hi": hi, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+                       "ts": time.time() if ts is None else ts}).encode()
+
+
+SPINE_BYTES = b"spine proof up to 1000"
+SPINE_JSON = spine_json(SPINE_BYTES)
+os.makedirs(W.SPINE)
+with open(os.path.join(W.SPINE, "spine.bin"), "wb") as f:
+    f.write(SPINE_BYTES)
+with open(os.path.join(W.SPINE, "spine.json"), "wb") as f:
+    f.write(SPINE_JSON)
+GOOD_SPINE = {"spine-37987b85/spine_1-1000.bin": SPINE_BYTES, "spine-37987b85/spine_1-1000.json": SPINE_JSON}
 os.makedirs(W.PROOFS)
 os.makedirs(os.path.join(W.REPO, "reproduce"))
 with open(os.path.join(W.REPO, "reproduce", "METHOD_ID"), "w") as f:
@@ -65,6 +89,7 @@ if CONTROL:
     W.proofs_section = lambda now, client=None, mirror=None: (True, "Proofs in R2: ok")
     W.restore_drill = lambda run, now: (True, "Restore drill: ok")
     W.mirror_section = lambda run: (True, "Hourly mirror: ok")
+    W.spine_section = lambda now, client=None, mirror=None: (True, "Spine in R2: ok")
     print("CONTROL: the watcher sees no problems and every summary check says ok -- the checks below MUST fail")
 
 NOW = time.time()
@@ -203,8 +228,13 @@ for n in ("proof_1.bin", "proof_2.bin"):
 
 
 class FakeS3:
-    def __init__(self, names):
+    def __init__(self, names, spine=None):
+        self.data = dict(GOOD_SPINE if spine is None else spine)
         self.objects = {f"proofs-37987b85/{n}": len(b"receipt " + n.encode()) for n in names}
+        self.objects.update({k: len(v) for k, v in self.data.items()})
+
+    def get_object(self, Bucket, Key):
+        return {"Body": io.BytesIO(self.data[Key])}
 
     def get_paginator(self, _):
         s3 = self
@@ -262,6 +292,33 @@ check(t == "Hazync backups: all good" and "go in the next hourly run" in body,
 t, prio, body = daily(FakeS3(["proof_1.bin", "proof_2.bin", "proof_3.bin"]))
 check(prio == "high" and "MISSING from R2" in body and "proof_4.bin" in body,
       f"...but one that has missed a whole cycle still is ({t})")
+
+# 7. the spine copy (2026-09-15: the spine had no copy off the box). The summary downloads the newest
+#    copy, checks it against its own sha256, verifies it, and compares it with the live spine.
+ALL = ["proof_1.bin", "proof_2.bin", "proof_3.bin", "proof_4.bin"]
+t, prio, body = daily(FakeS3(ALL))
+check(t == "Hazync backups: all good" and "Spine in R2: [1..1,000] of live [1..1,000]" in body and "VERIFIED" in body,
+      f"a verified, current spine copy is all good, and the body says so ({t})")
+t, prio, body = daily(FakeS3(ALL, spine={}))
+check(prio == "high" and "NO copy" in body, f"no spine copy in R2 is a high-priority problem ({t})")
+with open(os.path.join(W.SPINE, "spine.json"), "wb") as f:
+    f.write(spine_json(SPINE_BYTES, hi=1500, ts=time.time() + 2 * 3600))
+t, prio, body = daily(FakeS3(ALL))
+check(prio == "high" and "behind the live spine" in body, f"a copy two hours behind the live spine is a problem ({t})")
+with open(os.path.join(W.SPINE, "spine.json"), "wb") as f:
+    f.write(SPINE_JSON)
+FORGED = b"FORGED spine up to 1000"
+t, prio, body = daily(FakeS3(ALL, spine={"spine-37987b85/spine_1-1000.bin": FORGED,
+                                         "spine-37987b85/spine_1-1000.json": spine_json(FORGED)}))
+check(prio == "high" and "hazync-verify rejected it" in body,
+      f"a copy that matches its own sha256 but fails hazync-verify is a problem ({t})")
+t, prio, body = daily(FakeS3(ALL, spine={"spine-37987b85/spine_1-1000.bin": b"truncated",
+                                         "spine-37987b85/spine_1-1000.json": SPINE_JSON}))
+check(prio == "high" and "do not match the sha256" in body, f"a copy whose bytes disagree with its sha256 is a problem ({t})")
+real_verify, W.VERIFY = W.VERIFY, os.path.join(tmp, "no-such-verify")
+t, prio, body = daily(FakeS3(ALL))
+check(prio == "high" and "cannot verify it" in body, f"no hazync-verify on the box is a problem, not a silent pass ({t})")
+W.VERIFY = real_verify
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:

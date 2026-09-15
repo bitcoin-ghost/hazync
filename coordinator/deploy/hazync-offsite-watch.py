@@ -15,12 +15,15 @@ it clears. The hourly receipt mirror pages through its own OnFailure=, so it is 
 `summary` reports receipts in R2 against the disk, the hourly mirror's last 24 h, how far behind
 the ledger copy is, and a RESTORE DRILL: the ledger is restored from R2 into a scratch file,
 integrity-checked, compared with the live ledger, and deleted. A copy nobody has restored is a hope.
+It also downloads the newest SPINE copy from R2, checks its bytes against its sha256, runs
+hazync-verify on it, and says how far it is behind the live spine.
 All good -> low priority; anything wrong -> high.
 
 Messages go out through hazync-alert.sh with ALERT_PRIORITY / ALERT_TAGS.
 """
 import argparse
 import datetime
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -51,6 +54,10 @@ LOG_REALERT = int(os.environ.get("OFFSITE_LOG_REALERT_SECS", "3600"))
 # next; at 1800 the 07:00 UTC summary (~23 min before the :23 run) flagged those almost every morning
 # (2026-09-15: 68 "missing", every one uploaded by the next run).
 GRACE = int(os.environ.get("OFFSITE_PROOF_GRACE_SECS", "7200"))
+SPINE = os.environ.get("COORD_SPINE", "/var/lib/hazync/spine")
+VERIFY = os.environ.get("HAZYNC_VERIFY", "/usr/local/bin/hazync-verify")
+# The spine is copied every 10 min, so a newest copy an hour older than the live spine means the copy stopped.
+SPINE_LAG_ALERT = int(os.environ.get("OFFSITE_SPINE_LAG_SECS", "3600"))
 
 TITLES = {
     "litestream-down": "Litestream is not running",
@@ -267,17 +274,61 @@ def restore_drill(run, now):
         shutil.rmtree(DRILL_DIR, ignore_errors=True)
 
 
+def spine_section(now, client=None, mirror=None):
+    """Download the newest spine copy in R2, check it against its own sha256, verify it, and compare
+    it with the live spine. A spine copy nobody has verified is a hope, as with the ledger."""
+    m = mirror or load_mirror()
+    parts = open(KEYS).read().split()
+    s3 = client if client is not None else m.make_client(parts[0], parts[1], parts[2], 8)
+    prefix = f"spine-{m.method_prefix(REPO)}/"
+    remote = m.list_remote(s3, BUCKET, prefix)
+    with open(os.path.join(SPINE, "spine.json")) as f:
+        live = json.load(f)
+    pairs = []
+    for key in remote:
+        if key.startswith("spine_") and key.endswith(".json") and key[:-5] + ".bin" in remote:
+            try:
+                lo, hi = (int(x) for x in key[len("spine_"):-5].split("-"))
+            except ValueError:
+                continue
+            pairs.append((hi, lo, key[:-5]))
+    if not pairs:
+        return False, f"Spine in R2: NO copy (live spine [1..{int(live['hi']):,}])\n  ⚠ the spine is not backed up"
+    hi, lo, name = max(pairs)
+    data = s3.get_object(Bucket=BUCKET, Key=prefix + name + ".bin")["Body"].read()
+    meta = json.loads(s3.get_object(Bucket=BUCKET, Key=prefix + name + ".json")["Body"].read())
+    behind = max(0.0, float(live.get("ts") or 0) - float(meta.get("ts") or 0))
+    problems = []
+    if hashlib.sha256(data).hexdigest() != meta.get("sha256") or len(data) != meta.get("bytes"):
+        problems.append("its bytes do not match the sha256 and size recorded beside it")
+    if not os.path.exists(VERIFY):
+        detail = "not verified"
+        problems.append(f"cannot verify it: no hazync-verify at {VERIFY}")
+    else:
+        ok, detail = m.verify_spine(VERIFY, data)
+        if not ok:
+            problems.append(f"hazync-verify rejected it: {detail}")
+    if behind > SPINE_LAG_ALERT:
+        problems.append(f"it is {ago(behind)} behind the live spine (alert above {ago(SPINE_LAG_ALERT)})")
+    line = (f"Spine in R2: [{lo:,}..{hi:,}] of live [1..{int(live['hi']):,}], {ago(behind)} behind, "
+            f"{len(pairs):,} copies · {detail}")
+    for p in problems:
+        line += f"\n  ⚠ {p}"
+    return not problems, line
+
+
 def summary(run=run, send=send, now=None, client=None, mirror=None):
     now = time.time() if now is None else now
     checks = (("proofs", lambda: proofs_section(now, client, mirror)),
               ("hourly mirror", lambda: mirror_section(run)),
               ("ledger", lambda: ledger_section(run, now)),
-              ("restore drill", lambda: restore_drill(run, now)))
+              ("restore drill", lambda: restore_drill(run, now)),
+              ("spine", lambda: spine_section(now, client, mirror)))
     sections = []
     for name, fn in checks:
         try:
             sections.append(fn())
-        except Exception as e:           # one broken check must not silence the other three
+        except Exception as e:           # one broken check must not silence the others
             sections.append((False, f"{name}: could not be checked: {e!r}"))
     bad = sum(1 for ok, _ in sections if not ok)
     body = "\n".join(line for _, line in sections)

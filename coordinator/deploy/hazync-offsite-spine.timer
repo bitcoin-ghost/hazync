@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 10 minutes: copy the Hazync spine to Cloudflare R2
+
+[Timer]
+OnCalendar=*:05/10
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
