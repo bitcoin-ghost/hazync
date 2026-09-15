@@ -9,6 +9,12 @@ Maintenance: add the new entry here in the same change that publishes the releas
 id history, with the commit that produced each id, is [`reproduce/LINEAGE.tsv`](reproduce/LINEAGE.tsv).
 Copies of recent release bodies are kept in [`docs/history/releases/`](docs/history/releases/).
 
+## v0.21.5 — 2026-09-15
+Claims that belong to their key, and workers that tell you when they stop. The worker signs its claims
+(#323) and pushes to the prover's phone when it stops or cannot work (#326); the coordinator's claim grace,
+per-key cap and re-take wait (#297, #319, #321) shipped live beforehand. Not a re-baseline.
+<https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.5>
+
 ## v0.21.4 — 2026-09-13
 A board that explains itself. Every change comes from block 39,413, which pinned the frontier for five hours
 while the coordinator's only account was "a live worker is proving it". Host and coordinator only; not a
