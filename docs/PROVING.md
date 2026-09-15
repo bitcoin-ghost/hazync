@@ -154,7 +154,7 @@ pass added a value to LogUp cells the instruction arm never wrote, which could y
 field element and a receipt that fails `verify()`. It is prover-only — `METHOD_ID`, the circuit and the
 verifier are unchanged — shipped in v0.21.1 (#245), and is to be dropped once upstream ships the fix.
 
-**Releases.** The current release is **v0.21.4**. It ships `METHOD_ID 37987b85`, which became
+**Releases.** The current release is **v0.21.5**. It ships `METHOD_ID 37987b85`, which became
 canonical on 2026-09-07 (`c12ad67`) with the **Core-becomes-canonical** re-baseline: patches `0012` (the
 `field_bigint2` coprocessor backend) and `0013` (`lift_x` via a verified witness hint) are applied
 unconditionally by `provision-vps.sh`, so the guest that ships is the one `docs/BUILDS.md` calls CORE.
