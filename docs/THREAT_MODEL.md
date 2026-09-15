@@ -246,14 +246,15 @@ local host, `<range>:<ts>` beats, `claim:<nonce>:<ts>` claims (#310), rotation m
 **It cannot** steer local paths: range ids pass `parse_range` before becoming a receipt path
 (`cmd_submit`), and `spine_index` only follows `/api/proof/` paths, fetched relative to `COORD_URL`.
 
-**It will run a prover binary it finds**
-([#312](https://github.com/bitcoin-ghost/hazync/issues/312)). When `HAZYNC_HOST` is unset, `_find_host()`
+**It runs the prover binary it finds, but only where the contributor or the release put it**
+([#312](https://github.com/bitcoin-ghost/hazync/issues/312), fixed). When `HAZYNC_HOST` is unset, `_find_host()`
 takes the first executable file named `hazync-host-x86_64-linux-gnu-cuda`, `hazync-host-cuda`,
-`hazync-host-x86_64-linux-gnu`, `hazync-host` or `host` in, in order: the CLI's own directory,
-`$HAZYNC_HOME/bin`, `$HAZYNC_HOME` (default `~/.hazync`), then the **current working directory**. After that
-it searches `PATH`, but only for the `hazync-` names. So a worker started from a directory someone else can
-write to, with no prover in the first three places, runs whatever sits there under one of those names,
-including the bare `host`.
+`hazync-host-x86_64-linux-gnu` or `hazync-host` in, in order: the CLI's own directory, `$HAZYNC_HOME/bin`,
+then `$HAZYNC_HOME` (default `~/.hazync`); the bare name `host` only in the CLI's own directory. After that
+it searches `PATH`, but only for the `hazync-` names. It no longer searches the **current working
+directory**: before the fix, a worker started from a directory someone else can write to, with no prover in
+the first three places, ran whatever sat there under one of those names, including the bare `host`, and a
+planted binary can print the canonical guest id, so no later check caught it.
 
 - **Mitigates:** setting `HAZYNC_HOST`. `run-workers.sh` refuses to start without it (`${HAZYNC_HOST:?}`),
   so its worker loops never reach the search.
@@ -396,8 +397,8 @@ Each verified against the tree or GitHub on 2026-09-14.
 8. **Key rotation cannot be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311). One
    rotation per old key, a second is `409`, and nothing removes one, so a stolen `key.hex` moves attribution
    permanently (§4).
-9. **The worker searches the current directory for a prover** —
-   [#312](https://github.com/bitcoin-ghost/hazync/issues/312). Only when `HAZYNC_HOST` is unset, including
-   the bare name `host`; the guest-id checks do not help, because a planted binary can print the canonical
-   id (§6).
+9. ✅ **Fixed: the worker searched the current directory for a prover** —
+   [#312](https://github.com/bitcoin-ghost/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
+   beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, and takes the bare name `host` only beside the
+   CLI (§6). Kept in this list, numbered, so references to the items below stay valid.
 10. **ghostd's competing-chain and reorg adversarial cases are open** (§10).

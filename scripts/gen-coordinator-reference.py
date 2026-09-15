@@ -222,8 +222,9 @@ ENV = {
     "cli:HAZYNC_HOME": "Identity (`key.hex`, `handle`) and receipts. A different directory is a different "
                        "contributor.",
     "cli:COORD_URL": "Coordinator base URL.",
-    "cli:HAZYNC_HOST": "Prover binary. Unset: looked for beside the CLI, in `$HAZYNC_HOME/bin`, "
-                       "`$HAZYNC_HOME`, the working directory, then `hazync-*` names on `PATH`.",
+    "cli:HAZYNC_HOST": "Prover binary. Unset: looked for beside the CLI, in `$HAZYNC_HOME/bin` and "
+                       "`$HAZYNC_HOME`, then `hazync-*` names on `PATH`. Never the working directory, and "
+                       "the bare name `host` only beside the CLI (#312).",
     "cli:WITNESS_DIR": "Legacy per-block witnesses for the replay path.",
     "cli:BUNDLE_DIR": "Bundles fetched from the coordinator for the bridge path.",
     "cli:HAZYNC_ALLOW_DEV_WRITES": "`1`, `true` or `yes` lets a source checkout (`VERSION = \"dev\"`) POST to "
