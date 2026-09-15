@@ -50,7 +50,8 @@ if CONTROL:
     sponsor_bot._CONTROL_IGNORE_LANDED = True
     sponsor_bot._CONTROL_IGNORE_BUNDLES = True
     print("CONTROL: pods are not terminated when the bot errors, proofs that land before a pod is stopped are"
-          " ignored, and every block counts as having a bundle -- the checks below MUST fail")
+          " ignored, every block counts as having a bundle, and reset() does not wait for the fake pods' threads"
+          " -- the checks below MUST fail")
 
 fails = []
 
@@ -144,6 +145,9 @@ class FakeRunPod:
             return {"errors": [{"message": "unknown query"}], "data": None}
 
 
+RUNNERS = []    # every FakeRunner, so reset() can wait for their proving threads (#341)
+
+
 class FakeRunner:
     """A pod that proves its assigned blocks by writing verified proofs into the coordinator database."""
     ssh_pubkey = "ssh-ed25519 AAAAFAKE sponsor-bot@test"
@@ -156,6 +160,7 @@ class FakeRunner:
         self.booted, self.started, self.threads, self.status_at_start = [], [], {}, {}
         self.work, self.unregistered_at_start = [], []
         self.lock = threading.Lock()
+        RUNNERS.append(self)
 
     def nth(self, pod):
         return self.booted.index(pod.id) + 1
@@ -260,6 +265,18 @@ def q(sql, args=()):
 
 
 def reset():
+    """Clear the tables for the next section, once every fake pod's proving thread has finished.
+
+    #341: those threads sleep, check `pod.terminated`, then write `bot-<height>`. One that had passed its check when a
+    section ended could write into the NEXT section, so a SIGTERM-section proof turned up among the identities
+    section's handles: about 3% of CI runs, never locally. Waiting here makes a section's writes its own."""
+    if not CONTROL:
+        deadline = time.time() + 30
+        for r in RUNNERS:
+            for pid, t in list(r.threads.items()):
+                t.join(max(0.0, deadline - time.time()))
+                if t.is_alive():
+                    check(False, f"reset(): fake pod {pid} is still proving after 30 s, so the next section would share it")
     c = sqlite3.connect(DB, timeout=30)
     for t in ("sponsorships", "vranges", "ranges", "sponsor_work", "sponsor_pods", "sponsor_keys"):
         try:
@@ -681,6 +698,27 @@ finally:
         signal.signal(sg, h)
 check(code == 128 + signal.SIGTERM and api.deploys and api.deployed() <= set(api.terminations) and not api.live(),
       f"SIGTERM stops the bot and terminates every pod (exit {code}, live {api.live()})")
+
+# ---------- #341: a section's fake pods cannot write into the next one ----------
+print("== reset() waits for the fake pods' threads ==")
+reset()
+_home = tempfile.mkdtemp(prefix="leak_home_")
+with open(os.path.join(_home, "handle"), "w") as fh:
+    fh.write("SPONSOR: leak")
+
+
+class _MidProofPod:
+    id, name, terminated = "leak-pod", "hz-sponsor-leak", None
+
+
+_leaky = FakeRunner(per_block=0.2)
+_leaky.boot(_MidProofPod)
+_leaky.start(_MidProofPod, [{"height": h, "home": _home, "pubkey": "leak"} for h in (8500, 8501)])
+reset()                 # both blocks are still asleep when the section ends
+time.sleep(0.6)         # longer than the two blocks take, so a write that outlived reset() has landed by now
+check(not q("SELECT id FROM vranges WHERE id LIKE 'bot-%'"),
+      "a proof still in flight when a section ends does not land in the next one")
+reset()
 
 # ---------- identities: one key per sponsorship, registered before use ----------
 print("== identities ==")
