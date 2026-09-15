@@ -343,7 +343,6 @@ ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. These now run beside it:
 | Proof receipts, singles and folds (`proof_*.bin`) | `hazync-offsite-proofs.timer`, hourly: `hazync-offsite-proofs.py copy`, then `check` | `hazync-proofs/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
 | The spine (`spine.bin` + `spine.json`) | `hazync-offsite-spine.timer`, every 10 min: `hazync-offsite-proofs.py spine --verify /usr/local/bin/hazync-verify` | `hazync-proofs/spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}`, one pair per height, never overwritten | up to ~10 min |
 | Ledger | Litestream (`litestream.service` + `dropins/litestream-*.conf`, config from `litestream.yml.example`) | `hazync-ledger/coordinator/` | ~1 s |
-| Retired guests' proofs, spines and ledgers (`proofs.<id>/`, `spine.<id>/`, `coordinator.db.<id>`) | once, by hand: `hazync-offsite-proofs.py archive --src <path> --prefix archive/<name>/` | `hazync-proofs/archive/<name>/` | a one-off copy |
 
 - **The spine is the one proof that cannot be rebuilt cheaply**: losing it means re-absorbing every block from
   genesis. Until 2026-09-15 it had no copy off the box. A copy is uploaded only when `spine.bin` matches the

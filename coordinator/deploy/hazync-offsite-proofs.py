@@ -4,7 +4,6 @@
     hazync-offsite-proofs.py copy    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
     hazync-offsite-proofs.py check   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
     hazync-offsite-proofs.py spine   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify
-    hazync-offsite-proofs.py archive --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --src DIR_OR_FILE --prefix archive/NAME/
 
 A receipt is immutable once written, so the mirror only ever ADDS: a file already present remotely is
 never re-uploaded or deleted. Keys are namespaced by guest id (`proofs-<first 8 of METHOD_ID>/`),
@@ -20,10 +19,6 @@ own height, `spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}`, and never
 uploaded only if spine.bin matches the sha256 and size in spine.json (the two files are replaced one
 after the other, so a read can land between them) and, with --verify, hazync-verify accepts it. The
 .bin goes up before the .json, so a .json in R2 means its pair is complete. Exits 1 on any failure.
-
-`archive` copies a file, or every file under a directory, to --prefix as it is: for the retired
-guests' proofs, spines and ledgers, which exist nowhere else. Append-only like `copy`, and it exits 1
-unless everything is in R2 at the right size afterwards.
 
 Why not rclone: Ubuntu 24.04's rclone 1.60 reports every upload to R2 as `501 NotImplemented` (the
 PUT succeeds; the HEAD it sends afterwards is refused), and with that worked around it still never
@@ -92,19 +87,6 @@ def list_local(proofs, min_age, now):
             continue
         local[e.name] = st.st_size
     return local, young
-
-
-def list_tree(src):
-    """{relative name: size} for a file, or for every regular file under a directory (symlinks skipped)."""
-    if os.path.isfile(src):
-        return {os.path.basename(src): os.path.getsize(src)}
-    out = {}
-    for root, _, files in os.walk(src):
-        for n in files:
-            p = os.path.join(root, n)
-            if os.path.isfile(p) and not os.path.islink(p):
-                out[os.path.relpath(p, src).replace(os.sep, "/")] = os.path.getsize(p)
-    return out
 
 
 def list_remote(s3, bucket, prefix):
@@ -249,14 +231,12 @@ def spine_copy(s3, bucket, prefix, spine_dir, verify):
 
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check", "spine", "archive"])
+    ap.add_argument("mode", choices=["copy", "check", "spine"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
     ap.add_argument("--spine", default=os.environ.get("COORD_SPINE", "/var/lib/hazync/spine"))
     ap.add_argument("--verify", help="spine: hazync-verify binary; a copy it rejects is not uploaded")
-    ap.add_argument("--src", help="archive: a file, or a directory whose files are copied as they are")
-    ap.add_argument("--prefix", help="archive: key prefix in the bucket, e.g. archive/proofs.4722cec8/")
     ap.add_argument("--repo", default=os.environ.get("HZ_REPO", "/opt/hazync"))
     ap.add_argument("--min-age", type=float, default=120, help="skip proofs modified in the last N seconds")
     ap.add_argument("--threads", type=int, default=16)
@@ -275,22 +255,6 @@ def main(argv=None, client=None):
 
     if a.mode == "spine":
         return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify)
-
-    if a.mode == "archive":
-        if not a.src or not a.prefix:
-            raise SystemExit("archive needs --src and --prefix")
-        prefix = a.prefix if a.prefix.endswith("/") else a.prefix + "/"
-        root = a.src if os.path.isdir(a.src) else os.path.dirname(os.path.abspath(a.src))
-        local = list_tree(a.src)
-        missing, differ = plan(local, list_remote(s3, bucket, prefix))
-        log(f"archive: {a.src} -> {bucket}/{prefix}: {len(local)} files, {len(missing)} to upload "
-            f"({sum(local[n] for n in missing) / 1e9:.2f} GB), {len(differ)} differ in size (NOT overwritten)")
-        upload_all(s3, bucket, prefix, root, missing, local, a.threads, a.bwlimit_mbit)
-        missing, differ = plan(local, list_remote(s3, bucket, prefix))
-        log(f"archive check: missing {len(missing)}, size differs {len(differ)}")
-        for n in (missing + differ)[:10]:
-            log(f"  {'missing' if n in missing else 'differs'}: {n}")
-        return 1 if (missing or differ) else 0
 
     prefix = f"proofs-{method_prefix(a.repo)}/"
     t0 = time.monotonic()

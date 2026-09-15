@@ -203,30 +203,6 @@ rc, out = run(spf, "spine", "--spine", SPINE, "--verify", VERIFY)
 check(rc == 1 and "FAILED" in out and not any(k.endswith(".json") for (_, k) in spf.objects),
       f"a failed upload fails the run and leaves no .json claiming a complete pair (rc={rc})")
 
-# 7. archive: the retired guests' files, copied as they are, append-only
-ARCH = os.path.join(tmp, "proofs.4722cec8")
-os.makedirs(os.path.join(ARCH, "sub"))
-for rel, body in (("proof_7.bin", b"old receipt 7"), ("sub/proof_8-9.bin", b"old fold 8-9")):
-    with open(os.path.join(ARCH, rel), "wb") as f:
-        f.write(body)
-DBF = os.path.join(tmp, "coordinator.db.4722cec8")
-with open(DBF, "wb") as f:
-    f.write(b"an old ledger")
-ar = FakeS3()
-rc, out = run(ar, "archive", "--src", ARCH, "--prefix", "archive/proofs.4722cec8")
-check(rc == 0 and sorted(ar.puts) == ["archive/proofs.4722cec8/proof_7.bin", "archive/proofs.4722cec8/sub/proof_8-9.bin"],
-      f"archive copies every file under a directory, keeping relative paths (rc={rc}, put {sorted(ar.puts)})")
-ar.puts.clear()
-rc, out = run(ar, "archive", "--src", ARCH, "--prefix", "archive/proofs.4722cec8/")
-check(rc == 0 and ar.puts == [], f"archiving it again uploads nothing (put {ar.puts})")
-rc, out = run(ar, "archive", "--src", DBF, "--prefix", "archive/ledgers/")
-check(rc == 0 and ar.puts == ["archive/ledgers/coordinator.db.4722cec8"], "archive copies a single file under its own name")
-ar.objects[("b", "archive/ledgers/coordinator.db.4722cec8")] = b"different size"
-ar.puts.clear()
-rc, out = run(ar, "archive", "--src", DBF, "--prefix", "archive/ledgers/")
-check(rc == 1 and ar.puts == [] and ar.objects[("b", "archive/ledgers/coordinator.db.4722cec8")] == b"different size",
-      f"an archived file that differs in R2 is not overwritten, and the run fails (rc={rc})")
-
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)
