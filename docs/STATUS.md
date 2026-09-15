@@ -72,8 +72,6 @@ From GitHub on 2026-09-15.
 | [#253](https://github.com/bitcoin-ghost/hazync/issues/253) | Measure #236 (streaming `seg-serve` execute), which shipped unmeasured in v0.21.1 |
 | [#277](https://github.com/bitcoin-ghost/hazync/issues/277) | Anchor warp: prove backwards from the anchor in the tip cluster's idle time |
 | [#310](https://github.com/bitcoin-ghost/hazync/issues/310) | `/api/claim` is unsigned, so anyone can hold blocks under any public key (workers sign from v0.21.5; closes with `CLAIM_REQUIRE_SIG=1`) |
-| [#311](https://github.com/bitcoin-ghost/hazync/issues/311) | Key rotation cannot be revoked, so a stolen key can take a contributor's attribution for good |
-| [#341](https://github.com/bitcoin-ghost/hazync/issues/341) | `test_sponsor_bot`: fake pod threads outlive `reset()`, so one assertion fails about 3% of CI runs |
 
 ## Decisions for the operator
 

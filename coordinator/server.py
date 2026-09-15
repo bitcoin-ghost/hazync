@@ -481,6 +481,15 @@ def init_db():
       CREATE TABLE IF NOT EXISTS rotations(
         old_pubkey TEXT PRIMARY KEY, new_pubkey TEXT NOT NULL,
         msg_ts REAL, sig_old TEXT, sig_new TEXT, created REAL);
+      -- #311 operator revocation of a rotation. APPEND-ONLY too: revoking is a new row and so is undoing it
+      -- ('reinstate'), so who changed attribution, when and why is never lost, and the `rotations` row stays.
+      -- The latest row for an (old, new) edge decides; an edge with no row is in force. Written only by
+      -- coordinator/revoke-rotation.py on the box: there is no endpoint.
+      CREATE TABLE IF NOT EXISTS rotation_revocations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, old_pubkey TEXT NOT NULL, new_pubkey TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('revoke', 'reinstate')), reason TEXT NOT NULL,
+        actor TEXT, created REAL NOT NULL);
+      CREATE INDEX IF NOT EXISTS rotation_revocations_edge ON rotation_revocations(old_pubkey, new_pubkey, id);
     """)
     n = c.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
     if n == 0:
@@ -995,22 +1004,42 @@ def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
 ROTATE_MSG_VERSION = "hazync-rotate-v1"
 ROTATE_MAX_SKEW    = float(os.environ.get("ROTATE_MAX_SKEW", "300"))  # seconds either side of our clock
 ROTATE_MAX_DEPTH   = 32   # cycle/runaway guard; a real contributor rotates a handful of times at most
+_CONTROL_REVOCATIONS_IGNORED = False   # test_rotation_revoke.py --control: follow revoked rotations, as before #311
 
 def rotate_message(old_pk: str, new_pk: str, ts) -> bytes:
     """The exact bytes both keys sign. Lowercased and integer-truncated so the client and the server
     cannot disagree about casing or float formatting and produce a signature that will not verify."""
     return f"{ROTATE_MSG_VERSION}:{old_pk.lower()}:{new_pk.lower()}:{int(ts)}".encode()
 
+def revoked_edges(c):
+    """#311: the rotation edges whose LATEST operator record is a revocation, as {(old, new)}.
+
+    A missing table (a database this coordinator has not initialised since #311) means none are revoked. Failing
+    the other way would quietly stop following every rotation on the board."""
+    try:
+        rows = c.execute("SELECT old_pubkey, new_pubkey, action FROM rotation_revocations ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    latest = {}
+    for r in rows:
+        latest[(r["old_pubkey"], r["new_pubkey"])] = r["action"]
+    return {edge for edge, action in latest.items() if action == "revoke"}
+
 def rotation_map():
-    """All rotation edges as {old: new}. Small (one row per rotation ever), so read it whole."""
+    """All rotation edges IN FORCE as {old: new}. Small (one row per rotation ever), so read it whole.
+
+    #311: a rotation the operator has revoked is left out, so attribution stops following it on the next read.
+    Nothing caches this map, so no restart is needed; /api/state shows it on its next rebuild."""
     c = db()
     try:
-        rows = c.execute("SELECT old_pubkey,new_pubkey FROM rotations").fetchall()
-    except Exception:
-        return {}                       # table absent on a coordinator that has not migrated yet
+        try:
+            rows = c.execute("SELECT old_pubkey,new_pubkey FROM rotations").fetchall()
+        except Exception:
+            return {}                   # table absent on a coordinator that has not migrated yet
+        revoked = set() if _CONTROL_REVOCATIONS_IGNORED else revoked_edges(c)
     finally:
         c.close()
-    return {r["old_pubkey"]: r["new_pubkey"] for r in rows}
+    return {r["old_pubkey"]: r["new_pubkey"] for r in rows if (r["old_pubkey"], r["new_pubkey"]) not in revoked}
 
 def resolve_pubkey(pk, rmap=None):
     """Follow rotation edges to the current head. Terminates on a cycle or a corrupt chain rather than
@@ -1219,6 +1248,15 @@ def rotate(body):
 
     with _lock:
         rmap = rotation_map()
+        # Every rotation row counts here, revoked or not. `old_pubkey` is the PRIMARY KEY, so a second row would raise
+        # rather than answer, and a key whose rotation the operator revoked must not simply rotate again (#311):
+        # whoever stole it holds it too, and would take the attribution straight back.
+        c = db()
+        prior = c.execute("SELECT new_pubkey FROM rotations WHERE old_pubkey=?", (old,)).fetchone()
+        c.close()
+        if prior is not None and old not in rmap:
+            return 409, {"error": f"{old[:10]}'s rotation to {prior['new_pubkey'][:10]} was revoked by the operator, "
+                                  f"and a revoked key cannot rotate again (#311)"}
         if old in rmap:
             return 409, {"error": f"{old[:10]} has already rotated to {rmap[old][:10]}"}
         # Following the NEW key must not lead back to the old one. Without this, A->B then B->A makes a

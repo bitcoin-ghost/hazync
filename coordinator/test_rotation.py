@@ -211,6 +211,15 @@ with open(_modf.name, "w") as f:
 code, _ = do_rotate(a, b)
 check(code == 403, f"a blocked key cannot rotate away from a takedown (got {code})")
 
+# ---------------------------------------------------------------- operator revocation (#311) ------
+# Its own file with a --control, run from here because CI already runs this one (no workflow change).
+import subprocess
+_rv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_rotation_revoke.py")
+check(subprocess.run([sys.executable, _rv]).returncode == 0,
+      "an operator revocation stops attribution following a rotation (test_rotation_revoke.py)")
+check(subprocess.run([sys.executable, _rv, "--control"]).returncode == 0,
+      "its control fails when the coordinator ignores revocations (test_rotation_revoke.py --control)")
+
 # ---------------------------------------------------------------- teardown ------------------------
 for _f in (_tmp.name, _modf.name):
     try: os.remove(_f)

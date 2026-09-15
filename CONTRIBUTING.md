@@ -99,7 +99,9 @@ If you still have the old `key.hex`, move its blocks onto the new machine's iden
 ./hazync rotate /path/to/old/key.hex
 ```
 
-Both keys sign one message, so this can neither take someone else's blocks nor push yours onto them.
+Both keys sign one message, so this can neither take someone else's blocks nor push yours onto them, as
+long as nobody else holds your old key. A key rotates only once; if a stolen key was rotated away from you,
+tell the operator, who can revoke that rotation (#311).
 The old secret is read locally to produce that signature and is never transmitted; the coordinator only
 ever sees two public keys and two signatures. Your totals merge and the leaderboard shows one row.
 

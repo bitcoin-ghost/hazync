@@ -634,6 +634,25 @@ add its pubkey (hex, one per line) to `MOD_BLOCK_FILE` (default `coordinator/mod
 re-read live, so the entry disappears from the leaderboard/board within the cache TTL (~1.5s), no restart.
 That list only hides a key: it does not stop it claiming.
 
+**A stolen key rotated away (#311).** Whoever holds a copy of a contributor's `key.hex` can sign both halves of
+`POST /api/rotate` and move that contributor's whole history onto a key of their own; the owner gets `409` if they
+try to move it back. Once you are satisfied the owner is who they say, revoke the rotation, as the coordinator's
+user so SQLite's `-wal`/`-shm` files stay theirs:
+
+```bash
+cd /opt/hazync
+runuser -u hazync -- ./coordinator/revoke-rotation.py list
+runuser -u hazync -- ./coordinator/revoke-rotation.py revoke <old key or 10+ char prefix> --reason "..." --actor <you>
+runuser -u hazync -- ./coordinator/revoke-rotation.py revoke <old key> --reason "..." --actor <you> --apply
+```
+
+Without `--apply` it only says what would change. It never deletes: the `rotations` row stays and the decision is a
+new row in `rotation_revocations`, so `list` shows every rotation's history. Attribution follows the old key again
+on the board's next rebuild (under a minute), with no restart. A revoked key cannot rotate again, since the thief
+holds it too, so the owner should make a new key and stop using the stolen one: anything still submitted under it
+(by either of them) is credited to the owner's old identity. A revocation made in error is undone with
+`reinstate <old key> --reason "..." --apply`, which refuses if it would close a rotation cycle.
+
 **Claim hogs.** One key holds at most `CLAIM_OPEN_MAX` live claims (default 4); a further claim gets `429`
 until one of its blocks is proven or its claim lapses (`CLAIM_GRACE` without a beat, `CLAIM_TTL` after its
 last beat). Added 2026-09-14 after `ghost:dda215` held 26 to 61 never-beaten claims for blocks another

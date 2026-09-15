@@ -229,9 +229,9 @@ is the only secret: keep it private. CONTRIBUTING, "Get a push when a worker nee
   did.
 - **A card with nothing to do still bills.** Stopping the workers does not stop the pod. On 2026-09-12 a card
   was left to finish one block and then sat idle for about three hours at $0.49/h.
-- **Your key is on that machine.** Whoever controls the host can read `~/.hazync/key.hex`, and a key rotation
-  cannot be undone ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). Use hosts you trust with
-  your name.
+- **Your key is on that machine.** Whoever controls the host can read `~/.hazync/key.hex`, sign as you, and
+  rotate your blocks onto a key of their own; only the operator can revoke that rotation, once you report it
+  ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). Use hosts you trust with your name.
 
 ## Identity
 
@@ -242,7 +242,7 @@ is the only secret: keep it private. CONTRIBUTING, "Get a push when a worker nee
 - **`HAZYNC_HOME`** points a worker at a different identity: a separate key and handle, credited
   separately.
 - **A new box**: `hazync rotate /path/to/old/key.hex` moves the old key's blocks onto the new identity. Both
-  keys sign; it cannot be undone.
+  keys sign, and a key rotates only once. Only the operator can revoke a rotation (for a stolen key, #311).
 
 ## When something is wrong
 

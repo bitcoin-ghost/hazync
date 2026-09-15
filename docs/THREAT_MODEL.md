@@ -148,9 +148,12 @@ All untrusted.
   and **rotate the key to one they hold**
   ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). `rotate()` requires signatures from the old
   and the new key over `rotate_message(old, new, ts)` within `ROTATE_MAX_SKEW`, and the thief can make both.
-  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated",
-  and nothing removes or overrides a rotation: no revocation path, no `DELETE FROM rotations`. Attribution
-  moves for good, short of an operator editing the database by hand. Proofs and their verification are
+  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated".
+  Since #311 the operator can **revoke** the rotation with `coordinator/revoke-rotation.py` (RUNBOOK,
+  "Moderation"): an append-only record in `rotation_revocations`, the `rotations` row untouched, after which
+  attribution follows the old key again on the board's next rebuild, and a revoked key cannot rotate again.
+  Nothing detects a theft: until the owner tells the operator, attribution stays moved. The thief can still
+  submit and fold under the stolen key, which credits the owner. Proofs and their verification are
   unaffected.
 - **Sponsor bot pods** receive a per-sponsorship key (`SPONSOR_BOT.md`, "Identities"), and SSH to them runs
   with `StrictHostKeyChecking=no` because pods reuse addresses with new host keys. An on-path attacker could
@@ -394,9 +397,10 @@ Each verified against the tree or GitHub on 2026-09-14.
    and counted apart, so unsigned claims under a key cannot use up its signed cap or re-take wait; unsigned claims
    stay accepted until `CLAIM_REQUIRE_SIG=1`, which needs a worker release that signs. Many fresh keys are not
    limited, and there is no per-address cap behind the web box (§5). The effect on the board is not measured.
-8. **Key rotation cannot be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311). One
-   rotation per old key, a second is `409`, and nothing removes one, so a stolen `key.hex` moves attribution
-   permanently (§4).
+8. ✅ **Fixed: key rotation could not be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311).
+   The operator revokes a rotation with `coordinator/revoke-rotation.py`: an append-only record (undone only by a
+   `reinstate` record), no restart, and a revoked key cannot rotate again. It depends on the owner reporting the
+   theft; nothing detects one (§4).
 9. ✅ **Fixed: the worker searched the current directory for a prover** —
    [#312](https://github.com/bitcoin-ghost/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
    beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, and takes the bare name `host` only beside the
