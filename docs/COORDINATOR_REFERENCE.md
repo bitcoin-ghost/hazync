@@ -191,7 +191,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 
 | variable | default as written | meaning |
 |---|---|---|
-| `COORD_URL` | `https://bitcoinghost.org/hazync` | Coordinator base URL, used for the `/api/meta` guest-id pre-flight. |
+| `COORD_URL` | `https://api.hazync.org` | Coordinator base URL, used for the `/api/meta` guest-id pre-flight. |
 | `LOG_DIR` | `$HOME/hazync-workers` | Per-worker logs `worker_<i>.log` and bundle directories `bundles_<i>`. |
 | `MODE` | `prove` | What the loops run; see the modes table. |
 | `HAZYNC_HOST` | (required) | Prover binary. Required, and must be executable. |

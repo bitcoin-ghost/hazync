@@ -154,7 +154,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now hazync-workers
    every proof rejected:
    ```
    ./hazync-host-x86_64-linux-gnu-cuda method-id
-   curl -s 'https://bitcoinghost.org/hazync/api/meta' | python3 -c 'import json,sys; print(json.load(sys.stdin)["method_id"])'
+   curl -s 'https://api.hazync.org/api/meta' | python3 -c 'import json,sys; print(json.load(sys.stdin)["method_id"])'
    ```
 3. **Graceful stop**, swap the files in (keep the old ones until the new ones have proved something), start
    again, and run `./hazync selftest`.
@@ -167,7 +167,7 @@ itself (exit 78), so a missed upgrade shows up as stopped workers, not as silent
 **The board.** <https://bitcoinghost.org/hazync>, or from a shell:
 
 ```
-curl -s 'https://bitcoinghost.org/hazync/api/state?slim=1' | python3 -c '
+curl -s 'https://api.hazync.org/api/state?slim=1' | python3 -c '
 import json, sys
 d = json.load(sys.stdin); p = d["progress"]; b = d.get("blocked") or {}
 print("frontier", p["frontier"], "| proven", p["proven"], "| spine", p["spine_hi"], "| tip", p["tip"])

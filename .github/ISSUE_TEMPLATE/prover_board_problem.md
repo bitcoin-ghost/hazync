@@ -13,7 +13,7 @@ about: A worker that fails, stalls or is rejected, or a board that looks wrong
 **Versions**
 - `hazync-worker` release (`grep '^VERSION' hazync-worker`):
 - Your guest id (`hazync-host-x86_64-linux-gnu-cuda method-id`, or the CPU host):
-- Coordinator's guest id (`curl -s https://bitcoinghost.org/hazync/api/meta`):
+- Coordinator's guest id (`curl -s https://api.hazync.org/api/meta`):
 - Segment size (`<host> seg-po2`, and `HAZYNC_SEG_PO2` if you set it):
 
 **Machine**

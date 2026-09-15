@@ -79,7 +79,7 @@ Want to check what you downloaded? Verify its SHA256 + PGP signature — see [`S
 ```
 # Both of these are OPTIONAL now — the CLI defaults to the public party and finds the prover
 # beside itself. Set them only if you are pointing somewhere else.
-export COORD_URL=https://bitcoinghost.org/hazync
+export COORD_URL=https://api.hazync.org
 export HAZYNC_HOST=$PWD/hazync-host-x86_64-linux-gnu-cuda
 export WITNESS_DIR=$PWD/w
 ./hazync id yourname
@@ -256,7 +256,7 @@ Details, the aggregate case, and every knob: [`docs/FLEET_OPERATIONS.md`](docs/F
 
 ## Just want to check a proof, not make one?
 
-You never have to trust the party. Every verified proof is public — fetch any proven block from `https://bitcoinghost.org/hazync/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.34+ / Ubuntu 22.04+):
+You never have to trust the party. Every verified proof is public — fetch any proven block from `https://api.hazync.org/api/proof/<block>` (e.g. `/api/proof/1`). Then check it yourself, no GPU needed and **no build required** — grab the prebuilt verifier from the release (Linux x86-64, glibc 2.34+ / Ubuntu 22.04+):
 
 ```
 # 1. get the prebuilt host (it IS the canonical guest — the same one that made the proofs)
@@ -266,7 +266,7 @@ ln -sf hazync-host-x86_64-linux-gnu host   # shorter to type; the real file keep
                                            # which is what SHA256SUMS.txt lists
 
 # 2. download a proof (by block number) and verify it against real Bitcoin Core consensus code
-curl -fLOJ https://bitcoinghost.org/hazync/api/proof/1  # -J: lands as hazync-1.hzk
+curl -fLOJ https://api.hazync.org/api/proof/1  # -J: lands as hazync-1.hzk
 ./host verify-any hazync-1.hzk
 ```
 
