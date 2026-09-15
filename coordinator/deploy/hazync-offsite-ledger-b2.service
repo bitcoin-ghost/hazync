@@ -1,0 +1,19 @@
+[Unit]
+Description=Hazync: daily copy of the coordinator ledger to Backblaze B2 (Litestream allows one replica, and it goes to R2)
+After=network-online.target hazync-coordinator.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hazync-offsite-proofs ledger --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --db /var/lib/hazync/coordinator.db
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# SQLite reads a WAL database through its -shm file beside it, which it must be able to write.
+ReadWritePaths=/var/lib/hazync

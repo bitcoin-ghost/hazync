@@ -5,6 +5,7 @@
     hazync-offsite-proofs.py check   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
     hazync-offsite-proofs.py spine   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify
     hazync-offsite-proofs.py keys    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --pubkey KEY.asc --recipient FINGERPRINT
+    hazync-offsite-proofs.py ledger  --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --db /var/lib/hazync/coordinator.db
 
 A receipt is immutable once written, so the mirror only ever ADDS: a file already present remotely is
 never re-uploaded or deleted. Keys are namespaced by guest id (`proofs-<first 8 of METHOD_ID>/`),
@@ -29,6 +30,13 @@ tar, 16 hex>.tar.gpg`, never overwritten. Only the PUBLIC key is on the box: --p
 scratch keyring each run and refused unless its primary fingerprint is --recipient, and the ciphertext is
 refused unless its packets name that key's encryption subkey. Neither this box nor R2 can decrypt a copy.
 
+`ledger` takes an online SQLite backup of the coordinator ledger (safe while the coordinator writes, and it
+includes what is still in the WAL), refuses it unless `PRAGMA integrity_check` is ok and it has a `ranges`
+table, gzips it and uploads `ledger/coordinator-<UTC stamp>.db.gz`, never overwritten. It is the ledger's
+copy in B2: Litestream 0.5 allows one replica per database, and that one goes to R2. Exits 1 on any failure.
+
+The same script serves both stores; log lines name the store from the endpoint (R2, B2).
+
 Why not rclone: Ubuntu 24.04's rclone 1.60 reports every upload to R2 as `501 NotImplemented` (the
 PUT succeeds; the HEAD it sends afterwards is refused), and with that worked around it still never
 queued a transfer against the flat ~97,000-file proofs directory (measured 2026-09-15).
@@ -36,12 +44,14 @@ queued a transfer against the flat ~97,000-file proofs directory (measured 2026-
 Keys file: one line, "<access key id> <secret> <endpoint> [bucket]", readable by root only.
 """
 import argparse
+import gzip
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -67,6 +77,19 @@ def method_prefix(repo):
                 if len(tok) >= 64:
                     return tok[:8]
     raise SystemExit("could not read a 64-hex METHOD_ID from reproduce/METHOD_ID")
+
+
+def store_name(endpoint):
+    """How log lines name the store: R2, B2, or the endpoint's host."""
+    if "r2.cloudflarestorage.com" in endpoint:
+        return "R2"
+    if "backblazeb2.com" in endpoint:
+        return "B2"
+    return endpoint.split("//")[-1].split("/")[0]
+
+
+def utc_stamp():
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
 
 def make_client(kid, secret, endpoint, threads):
@@ -203,7 +226,7 @@ def upload_all(s3, bucket, prefix, root, names, sizes, threads, bwlimit_mbit):
     return done, failed, sent
 
 
-def spine_copy(s3, bucket, prefix, spine_dir, verify):
+def spine_copy(s3, bucket, prefix, spine_dir, verify, where="R2"):
     data, js, meta, why = read_spine(spine_dir)
     if data is None:
         log(f"spine: NOT uploaded, {why}")
@@ -217,13 +240,13 @@ def spine_copy(s3, bucket, prefix, spine_dir, verify):
         log(f"spine: {detail}")
     else:
         log("spine: WARNING, no --verify given, so this copy is uploaded without being verified")
-    pair = [(name + ".bin", data), (name + ".json", js)]     # .bin first: a .json in R2 means a complete pair
+    pair = [(name + ".bin", data), (name + ".json", js)]     # .bin first: a .json in the store means a complete pair
     remote = list_remote(s3, bucket, prefix)
     uploaded = 0
     for key, body in pair:
         if key in remote:
             if remote[key] != len(body):
-                log(f"spine: WARNING, {prefix}{key} is {remote[key]} bytes in R2, not {len(body)}; NOT overwritten")
+                log(f"spine: WARNING, {prefix}{key} is {remote[key]} bytes in {where}, not {len(body)}; NOT overwritten")
             continue
         try:
             s3.put_object(Bucket=bucket, Key=prefix + key, Body=io.BytesIO(body),
@@ -235,9 +258,9 @@ def spine_copy(s3, bucket, prefix, spine_dir, verify):
     remote = list_remote(s3, bucket, prefix)
     ok = all(remote.get(k) == len(b) for k, b in pair)
     copies = sum(1 for k in remote if k.endswith(".json"))
-    state = "uploaded" if uploaded else "already in R2"
+    state = "uploaded" if uploaded else f"already in {where}"
     log(f"spine: {prefix}{name} [{int(meta['lo']):,}..{int(meta['hi']):,}] {state}, "
-        f"{'complete' if ok else 'INCOMPLETE'} in R2; {copies:,} spine copies there")
+        f"{'complete' if ok else 'INCOMPLETE'} in {where}; {copies:,} spine copies there")
     return 0 if ok else 1
 
 
@@ -315,7 +338,7 @@ def packet_keyids(home, cipher):
     return sorted(set(k.upper() for k in re.findall(r"pubkey enc packet: version \d+, algo \d+, keyid ([0-9A-Fa-f]{16})", text)))
 
 
-def keys_copy(s3, bucket, prefix, src, pubkey, fpr):
+def keys_copy(s3, bucket, prefix, src, pubkey, fpr, where="R2"):
     if not os.path.isdir(src):
         log(f"keys: NOT uploaded, no identities directory at {src}")
         return 1
@@ -329,7 +352,7 @@ def keys_copy(s3, bucket, prefix, src, pubkey, fpr):
         remote = list_remote(s3, bucket, prefix)
         copies = sum(1 for k in remote if k.endswith(".tar.gpg"))
         if name in remote:
-            log(f"keys: {prefix}{name} ({count} files) already in R2; {copies} encrypted copies there")
+            log(f"keys: {prefix}{name} ({count} files) already in {where}; {copies} encrypted copies there")
             return 0
         rc, cipher, err = gpg(home, ["--trust-model", "always", "--recipient", fpr, "--encrypt"], data=tar)
         if rc != 0 or not cipher:
@@ -349,16 +372,68 @@ def keys_copy(s3, bucket, prefix, src, pubkey, fpr):
             return 1
         ok = list_remote(s3, bucket, prefix).get(name) == len(cipher)
         log(f"keys: {prefix}{name} ({count} files, encrypted to {', '.join(subs)}) uploaded, "
-            f"{'complete' if ok else 'INCOMPLETE'} in R2; {copies + 1} encrypted copies there")
+            f"{'complete' if ok else 'INCOMPLETE'} in {where}; {copies + 1} encrypted copies there")
         return 0 if ok else 1
     finally:
         gpg_stop(home)
         shutil.rmtree(home, ignore_errors=True)
 
 
+def ledger_snapshot(db, out):
+    """Online-backup the live ledger db into out. (rows in ranges, None) or (None, why it is refused).
+    Opened read-only, so a wrong path fails instead of creating an empty database."""
+    try:
+        src = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
+        dst = sqlite3.connect(out)
+        src.backup(dst)
+        src.close()
+        integrity = dst.execute("PRAGMA integrity_check").fetchone()[0]
+        ranges = dst.execute("SELECT COUNT(*) FROM ranges").fetchone()[0]
+        dst.close()
+    except sqlite3.Error as e:
+        return None, f"not a usable coordinator ledger: {e}"
+    if integrity != "ok":
+        return None, f"not a usable coordinator ledger: integrity_check says {integrity[:200]!r}"
+    return ranges, None
+
+
+def ledger_copy(s3, bucket, prefix, db, where="B2"):
+    name = f"coordinator-{utc_stamp()}.db.gz"
+    work = tempfile.mkdtemp(prefix="hzl-")
+    try:
+        snap = os.path.join(work, "coordinator.db")
+        ranges, why = ledger_snapshot(db, snap)
+        if why:
+            log(f"ledger: NOT uploaded, {db} is {why}")
+            return 1
+        gz = snap + ".gz"
+        with open(snap, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
+            shutil.copyfileobj(fi, fo, 1 << 20)
+        size = os.path.getsize(gz)
+        remote = list_remote(s3, bucket, prefix)
+        if name in remote:
+            log(f"ledger: {prefix}{name} already in {where} ({remote[name]} bytes); NOT overwritten")
+            return 0 if remote[name] == size else 1
+        try:
+            with open(gz, "rb") as f:
+                s3.put_object(Bucket=bucket, Key=prefix + name, Body=f, ContentType="application/gzip")
+        except Exception as e:
+            log(f"ledger: FAILED {prefix}{name}: {e!r}")
+            return 1
+        remote = list_remote(s3, bucket, prefix)
+        ok = remote.get(name) == size
+        copies = sum(1 for k in remote if k.endswith(".db.gz"))
+        log(f"ledger: {prefix}{name} ({os.path.getsize(snap) / 1e6:.0f} MB, {ranges:,} ranges, "
+            f"{size / 1e6:.0f} MB gzipped) uploaded, {'complete' if ok else 'INCOMPLETE'} in {where}; "
+            f"{copies:,} ledger copies there")
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check", "spine", "keys"])
+    ap.add_argument("mode", choices=["copy", "check", "spine", "keys", "ledger"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
@@ -367,6 +442,8 @@ def main(argv=None, client=None):
     ap.add_argument("--identities", default=os.environ.get("SPONSOR_IDENTITIES", "/var/lib/hazync/sponsor-bot/identities"))
     ap.add_argument("--pubkey", help="keys: the recipient's armored PUBLIC key file")
     ap.add_argument("--recipient", help="keys: the recipient's primary key fingerprint (pinned)")
+    ap.add_argument("--db", default=os.environ.get("COORD_DB", "/var/lib/hazync/coordinator.db"),
+                    help="ledger: the live coordinator database")
     ap.add_argument("--repo", default=os.environ.get("HZ_REPO", "/opt/hazync"))
     ap.add_argument("--min-age", type=float, default=120, help="skip proofs modified in the last N seconds")
     ap.add_argument("--threads", type=int, default=16)
@@ -382,14 +459,18 @@ def main(argv=None, client=None):
     if not bucket:
         raise SystemExit("no bucket: pass --bucket or put it 4th in the keys file")
     s3 = client if client is not None else make_client(kid, secret, endpoint, a.threads)
+    where = store_name(endpoint)
 
     if a.mode == "spine":
-        return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify)
+        return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify, where)
+
+    if a.mode == "ledger":
+        return ledger_copy(s3, bucket, "ledger/", a.db, where)
 
     if a.mode == "keys":
         if not a.pubkey or not a.recipient:
             raise SystemExit("keys needs --pubkey and --recipient")
-        return keys_copy(s3, bucket, "sponsor-keys/", a.identities, a.pubkey, a.recipient)
+        return keys_copy(s3, bucket, "sponsor-keys/", a.identities, a.pubkey, a.recipient, where)
 
     prefix = f"proofs-{method_prefix(a.repo)}/"
     t0 = time.monotonic()

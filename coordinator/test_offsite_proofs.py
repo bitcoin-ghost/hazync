@@ -10,7 +10,11 @@ must hold:
   3. append-only: a remote receipt is never overwritten (even when its size differs), and remote-only
      receipts are never deleted;
   4. a receipt younger than --min-age is left for the next run (it may still be being written);
-  5. a failed upload makes `copy` exit 1, and `check` still reports the receipt missing.
+  5. a failed upload makes `copy` exit 1, and `check` still reports the receipt missing;
+  6-7. the spine and the sponsor keys: verified / encrypted, one object per state, never overwritten;
+  8. `ledger`: an online SQLite backup that includes rows still in the WAL, refused unless it is an intact
+     coordinator ledger, one gzipped object per run, never overwritten, and a wrong path creates nothing;
+  9. with a B2 endpoint the log lines say B2.
 
 Runs against an in-memory S3 stand-in, so it needs no network and no boto3.
 
@@ -71,10 +75,10 @@ def check(cond, what):
     fails += 0 if cond else 1
 
 
-def run(s3, *args):
+def run(s3, *args, keys=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = off.main(list(args) + ["--keys", KEYS, "--bucket", "b", "--proofs", PROOFS, "--repo", REPO,
+        rc = off.main(list(args) + ["--keys", keys or KEYS, "--bucket", "b", "--proofs", PROOFS, "--repo", REPO,
                                      "--bwlimit-mbit", "0", "--threads", "3"], client=s3)
     return rc, buf.getvalue()
 
@@ -87,7 +91,7 @@ with open(os.path.join(REPO, "reproduce", "METHOD_ID"), "w") as f:
     f.write("# guest id\n" + MID + "\n")
 KEYS = os.path.join(tmp, "keys")
 with open(KEYS, "w") as f:
-    f.write("kid secret https://example.invalid\n")
+    f.write("kid secret https://acct.r2.cloudflarestorage.com\n")
 old = time.time() - 3600
 for n in ("proof_1.bin", "proof_2.bin", "proof_3-4.bin", "proof_5.bin"):
     p = os.path.join(PROOFS, n)
@@ -280,6 +284,77 @@ rc, out = run(kf, "keys", *KARGS)
 check(rc == 1 and "FAILED" in out, f"a failed upload fails the run (rc={rc})")
 subprocess.run(["gpgconf", "--homedir", GH, "--kill", "all"], capture_output=True)
 shutil.rmtree(GH, ignore_errors=True)
+
+# 8. the ledger's copy in B2 (Litestream allows one replica, and it goes to R2): an online SQLite backup that
+#    includes what is still in the WAL, integrity-checked, gzipped, one object per run, never overwritten
+import gzip
+import sqlite3
+LDB = os.path.join(tmp, "coordinator.db")
+live = sqlite3.connect(LDB)
+live.execute("PRAGMA journal_mode=WAL")
+live.execute("CREATE TABLE ranges(lo INTEGER, hi INTEGER)")
+live.executemany("INSERT INTO ranges VALUES (?, ?)", [(i, i) for i in range(100)])
+live.commit()
+
+
+def ledger_rows(blob):
+    path = os.path.join(tmp, "restored.db")
+    with open(path, "wb") as f:
+        f.write(gzip.decompress(blob))
+    r = sqlite3.connect(path)
+    got = (r.execute("PRAGMA integrity_check").fetchone()[0], r.execute("SELECT COUNT(*) FROM ranges").fetchone()[0])
+    r.close()
+    os.remove(path)
+    return got
+
+
+L = "ledger/"
+lg = FakeS3()
+off.utc_stamp = lambda: "20260915T044700Z"
+rc, out = run(lg, "ledger", "--db", LDB)
+objs = sorted(k for (_, k) in lg.objects if k.startswith(L))
+check(rc == 0 and objs == [L + "coordinator-20260915T044700Z.db.gz"],
+      f"ledger uploads one gzipped copy named by its UTC time (rc={rc}, {objs})")
+check(bool(objs) and ledger_rows(lg.objects[("b", objs[0])]) == ("ok", 100),
+      "...which unpacks to an intact ledger with every row")
+live.executemany("INSERT INTO ranges VALUES (?, ?)", [(i, i) for i in range(100, 105)])
+live.commit()
+check(os.path.getsize(LDB + "-wal") > 0, "the 5 new rows are committed but still in the -wal file")
+lg.puts.clear()
+off.utc_stamp = lambda: "20260916T044700Z"
+rc, out = run(lg, "ledger", "--db", LDB)
+NEXT = L + "coordinator-20260916T044700Z.db.gz"
+check(rc == 0 and lg.puts == [NEXT] and bool(objs) and ("b", objs[0]) in lg.objects,
+      f"the next day is a new copy, and the older one stays (rc={rc}, put {lg.puts})")
+check(("b", NEXT) in lg.objects and ledger_rows(lg.objects[("b", NEXT)]) == ("ok", 105),
+      "...and it includes the rows still in the WAL (a plain copy of the db file would not)")
+lg.puts.clear()
+bogus = os.path.join(tmp, "not-a-ledger.db")
+b = sqlite3.connect(bogus)
+b.execute("CREATE TABLE other(x)")
+b.commit()
+b.close()
+rc, out = run(lg, "ledger", "--db", bogus)
+check(rc == 1 and lg.puts == [] and "not a usable coordinator ledger" in out,
+      f"a database with no ranges table is refused, nothing uploaded (rc={rc})")
+nowhere = os.path.join(tmp, "no-such.db")
+rc, out = run(lg, "ledger", "--db", nowhere)
+check(rc == 1 and lg.puts == [] and not os.path.exists(nowhere),
+      f"a wrong path fails, uploads nothing, and does not create an empty database (rc={rc})")
+off.utc_stamp = lambda: "20260917T044700Z"
+lgf = FakeS3(fail_names={"coordinator-20260917T044700Z.db.gz"})
+rc, out = run(lgf, "ledger", "--db", LDB)
+check(rc == 1 and "FAILED" in out, f"a failed upload fails the run (rc={rc})")
+live.close()
+
+# 9. the same script writes the B2 copies, and its log lines name the store from the endpoint
+KEYS_B2 = os.path.join(tmp, "keys-b2")
+with open(KEYS_B2, "w") as f:
+    f.write("kid secret https://s3.us-east-005.backblazeb2.com hazync-backup\n")
+b2 = FakeS3()
+run(b2, "spine", "--spine", SPINE, "--verify", VERIFY, keys=KEYS_B2)
+rc, out = run(b2, "spine", "--spine", SPINE, "--verify", VERIFY, keys=KEYS_B2)
+check(rc == 0 and "already in B2" in out and "R2" not in out, f"with a B2 endpoint the log says B2, not R2 (rc={rc})")
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:

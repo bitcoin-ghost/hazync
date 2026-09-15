@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily: copy the Hazync coordinator ledger to Backblaze B2
+
+[Timer]
+OnCalendar=*-*-* 04:47:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

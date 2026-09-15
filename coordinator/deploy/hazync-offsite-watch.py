@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phone notifications (ntfy) for the offsite copies in Cloudflare R2.
+"""Phone notifications (ntfy) for the offsite copies in Cloudflare R2 and Backblaze B2.
 
     hazync-offsite-watch.py watch     # every 10 min: problems as they happen, and once when they clear
     hazync-offsite-watch.py summary   # daily: what is backed up, and whether a restore actually works
@@ -19,12 +19,17 @@ It also downloads the newest SPINE copy from R2, checks its bytes against its sh
 hazync-verify on it, and says how far it is behind the live spine. And it checks that the current sponsor
 identities have an encrypted copy in R2, encrypted to the pinned operator key, and that key is not about to
 expire.
+Then the same for the second copy in B2: receipts, the B2 mirror's 24 h, the spine, the sponsor keys, and the
+newest daily LEDGER copy (B2 has no Litestream), which is downloaded, unpacked, integrity-checked and compared
+with the live ledger. OFFSITE_B2_KEYS= (empty) turns the B2 lines off; a configured keys file that is missing
+is a problem, not a skip.
 All good -> low priority; anything wrong -> high.
 
 Messages go out through hazync-alert.sh with ALERT_PRIORITY / ALERT_TAGS.
 """
 import argparse
 import datetime
+import gzip
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -36,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 ALERT =os.environ.get("HAZYNC_ALERT", "/usr/local/bin/hazync-alert.sh")
 STATE_DIR = os.environ.get("OFFSITE_STATE_DIR", "/var/lib/hazync-offsite")
@@ -67,6 +73,11 @@ SPONSOR_RECIPIENT = os.environ.get("OFFSITE_KEYS_RECIPIENT", "777FE81F8CC077FD3D
 # The keys copy runs hourly, so identities that changed in the last two hours may simply be waiting for it.
 KEYS_GRACE = int(os.environ.get("OFFSITE_KEYS_GRACE_SECS", "7200"))
 KEY_EXPIRY_WARN_DAYS = int(os.environ.get("OFFSITE_KEY_EXPIRY_WARN_DAYS", "60"))
+B2_KEYS = os.environ.get("OFFSITE_B2_KEYS", "/etc/hazync/backup/b2.keys")     # "" turns the B2 checks off
+B2_BUCKET = os.environ.get("OFFSITE_B2_BUCKET", "hazync-backup")
+B2_MIRROR_UNIT = "hazync-offsite-proofs-b2.service"
+# The ledger copy in B2 is taken once a day, so a newest copy older than 26 h means the daily copy stopped.
+B2_LEDGER_LAG_ALERT = int(os.environ.get("OFFSITE_B2_LEDGER_LAG_SECS", "93600"))
 
 TITLES = {
     "litestream-down": "Litestream is not running",
@@ -199,29 +210,36 @@ def load_mirror():
     return mod
 
 
-def proofs_section(now, client=None, mirror=None):
+def store_client(m, keys, client):
+    if client is not None:
+        return client
+    parts = open(keys).read().split()
+    return m.make_client(parts[0], parts[1], parts[2], 8)
+
+
+def proofs_section(now, client=None, mirror=None, keys=None, bucket=None, where="R2"):
     m = mirror or load_mirror()
-    parts = open(KEYS).read().split()
-    s3 = client if client is not None else m.make_client(parts[0], parts[1], parts[2], 8)
-    remote = m.list_remote(s3, BUCKET, f"proofs-{m.method_prefix(REPO)}/")
+    s3 = store_client(m, keys or KEYS, client)
+    remote = m.list_remote(s3, bucket or BUCKET, f"proofs-{m.method_prefix(REPO)}/")
     everything, _ = m.list_local(PROOFS, 0, now)
     settled, young = m.list_local(PROOFS, GRACE, now)
     missing, differ = m.plan(settled, remote)
-    line = (f"Proofs in R2: {sum(1 for n in everything if n in remote):,} of {len(everything):,} on disk, "
+    line = (f"Proofs in {where}: {sum(1 for n in everything if n in remote):,} of {len(everything):,} on disk, "
             f"{sum(remote.values()) / 1e9:.1f} GB")
     if young:
         line += f" ({young:,} newer than {ago(GRACE)} go in the next hourly run)"
     if missing:
-        line += f"\n  ⚠ {len(missing):,} older than {ago(GRACE)} are MISSING from R2, e.g. {missing[0]}"
+        line += f"\n  ⚠ {len(missing):,} older than {ago(GRACE)} are MISSING from {where}, e.g. {missing[0]}"
     if differ:
-        line += f"\n  ⚠ {len(differ):,} differ in size from their R2 copy, e.g. {differ[0]}"
+        line += f"\n  ⚠ {len(differ):,} differ in size from their {where} copy, e.g. {differ[0]}"
     return not missing and not differ, line
 
 
-def mirror_section(run):
-    _, out = run(["systemctl", "show", MIRROR_UNIT, "-p", "Result", "-p", "ExecMainExitTimestamp"], timeout=30)
+def mirror_section(run, unit=None, label="Hourly mirror"):
+    unit = unit or MIRROR_UNIT
+    _, out = run(["systemctl", "show", unit, "-p", "Result", "-p", "ExecMainExitTimestamp"], timeout=30)
     props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-    _, log = run(["journalctl", "-u", MIRROR_UNIT, "--since=-24h", "--no-pager", "-o", "cat"], timeout=60)
+    _, log = run(["journalctl", "-u", unit, "--since=-24h", "--no-pager", "-o", "cat"], timeout=60)
     runs = uploaded = 0
     for line in log.splitlines():
         if "[offsite-proofs] done:" in line:
@@ -232,7 +250,7 @@ def mirror_section(run):
     result = props.get("Result", "unknown")
     ok = result == "success" and failed == 0 and runs > 0
     when = props.get("ExecMainExitTimestamp") or "never"
-    return ok, (f"Hourly mirror: last run {when}, {result} · {runs} run(s), {failed} failed, "
+    return ok, (f"{label}: last run {when}, {result} · {runs} run(s), {failed} failed, "
                 f"{uploaded:,} proofs uploaded in 24 h")
 
 
@@ -283,14 +301,14 @@ def restore_drill(run, now):
         shutil.rmtree(DRILL_DIR, ignore_errors=True)
 
 
-def spine_section(now, client=None, mirror=None):
-    """Download the newest spine copy in R2, check it against its own sha256, verify it, and compare
+def spine_section(now, client=None, mirror=None, keys=None, bucket=None, where="R2"):
+    """Download the newest spine copy in the store, check it against its own sha256, verify it, and compare
     it with the live spine. A spine copy nobody has verified is a hope, as with the ledger."""
     m = mirror or load_mirror()
-    parts = open(KEYS).read().split()
-    s3 = client if client is not None else m.make_client(parts[0], parts[1], parts[2], 8)
+    s3 = store_client(m, keys or KEYS, client)
+    bucket = bucket or BUCKET
     prefix = f"spine-{m.method_prefix(REPO)}/"
-    remote = m.list_remote(s3, BUCKET, prefix)
+    remote = m.list_remote(s3, bucket, prefix)
     with open(os.path.join(SPINE, "spine.json")) as f:
         live = json.load(f)
     pairs = []
@@ -302,10 +320,10 @@ def spine_section(now, client=None, mirror=None):
                 continue
             pairs.append((hi, lo, key[:-5]))
     if not pairs:
-        return False, f"Spine in R2: NO copy (live spine [1..{int(live['hi']):,}])\n  ⚠ the spine is not backed up"
+        return False, f"Spine in {where}: NO copy (live spine [1..{int(live['hi']):,}])\n  ⚠ the spine is not backed up"
     hi, lo, name = max(pairs)
-    data = s3.get_object(Bucket=BUCKET, Key=prefix + name + ".bin")["Body"].read()
-    meta = json.loads(s3.get_object(Bucket=BUCKET, Key=prefix + name + ".json")["Body"].read())
+    data = s3.get_object(Bucket=bucket, Key=prefix + name + ".bin")["Body"].read()
+    meta = json.loads(s3.get_object(Bucket=bucket, Key=prefix + name + ".json")["Body"].read())
     behind = max(0.0, float(live.get("ts") or 0) - float(meta.get("ts") or 0))
     problems = []
     if hashlib.sha256(data).hexdigest() != meta.get("sha256") or len(data) != meta.get("bytes"):
@@ -319,21 +337,21 @@ def spine_section(now, client=None, mirror=None):
             problems.append(f"hazync-verify rejected it: {detail}")
     if behind > SPINE_LAG_ALERT:
         problems.append(f"it is {ago(behind)} behind the live spine (alert above {ago(SPINE_LAG_ALERT)})")
-    line = (f"Spine in R2: [{lo:,}..{hi:,}] of live [1..{int(live['hi']):,}], {ago(behind)} behind, "
+    line = (f"Spine in {where}: [{lo:,}..{hi:,}] of live [1..{int(live['hi']):,}], {ago(behind)} behind, "
             f"{len(pairs):,} copies · {detail}")
     for p in problems:
         line += f"\n  ⚠ {p}"
     return not problems, line
 
 
-def keys_section(now, client=None, mirror=None):
-    """The current sponsor identities have a copy in R2, encrypted to the pinned operator key, and that
+def keys_section(now, client=None, mirror=None, keys=None, bucket=None, where="R2"):
+    """The current sponsor identities have a copy in the store, encrypted to the pinned operator key, and that
     key is not about to expire. The box cannot decrypt the copy, so it checks the recipient in its packets."""
     m = mirror or load_mirror()
-    parts = open(KEYS).read().split()
-    s3 = client if client is not None else m.make_client(parts[0], parts[1], parts[2], 8)
+    s3 = store_client(m, keys or KEYS, client)
+    bucket = bucket or BUCKET
     prefix = "sponsor-keys/"
-    remote = m.list_remote(s3, BUCKET, prefix)
+    remote = m.list_remote(s3, bucket, prefix)
     copies = sum(1 for k in remote if k.endswith(".tar.gpg"))
     _, count, name = m.identities_object(SPONSOR_IDENTITIES)
     newest = max((os.stat(os.path.join(r, f)).st_mtime for r, _, fs in os.walk(SPONSOR_IDENTITIES) for f in fs),
@@ -345,17 +363,17 @@ def keys_section(now, client=None, mirror=None):
         if why:
             problems.append(why)
         if name in remote:
-            state = "current copy in R2"
-            ids = m.packet_keyids(home, s3.get_object(Bucket=BUCKET, Key=prefix + name)["Body"].read())
+            state = f"current copy in {where}"
+            ids = m.packet_keyids(home, s3.get_object(Bucket=bucket, Key=prefix + name)["Body"].read())
             if subs and not set(ids) & set(subs):
                 problems.append(f"the current copy is not encrypted to {SPONSOR_RECIPIENT} "
                                 f"(it is encrypted to {', '.join(ids) or 'nothing readable'})")
         elif now - newest < KEYS_GRACE:
             state = f"changed {ago(now - newest)} ago, goes in the next hourly run"
         else:
-            state = "current identities NOT in R2"
+            state = f"current identities NOT in {where}"
             problems.append(f"the current identities ({count} files, unchanged for {ago(now - newest)}) "
-                            f"have no copy in R2")
+                            f"have no copy in {where}")
         if expires is not None and expires - now < KEY_EXPIRY_WARN_DAYS * 86400:
             problems.append(f"the encryption key expires in {ago(max(0, expires - now))}: extend it "
                             f"(gpg --quick-set-expire) and re-export the public key to {SPONSOR_PUBKEY}")
@@ -363,7 +381,58 @@ def keys_section(now, client=None, mirror=None):
         m.gpg_stop(home)
         shutil.rmtree(home, ignore_errors=True)
     exp = f", key expires in {ago(expires - now)}" if expires else ""
-    line = f"Sponsor keys in R2: {count} identity file(s), {state}, {copies} encrypted copies{exp}"
+    line = f"Sponsor keys in {where}: {count} identity file(s), {state}, {copies} encrypted copies{exp}"
+    for p in problems:
+        line += f"\n  ⚠ {p}"
+    return not problems, line
+
+
+def ledger_copy_section(now, client=None, mirror=None, keys=None, bucket=None, where="B2"):
+    """Download the newest daily ledger copy, unpack it, integrity-check it and compare it with the live
+    ledger. The same drill as the Litestream restore, for the copy that does not come from Litestream."""
+    m = mirror or load_mirror()
+    s3 = store_client(m, keys or B2_KEYS, client)
+    bucket = bucket or B2_BUCKET
+    copies = []
+    for key in m.list_remote(s3, bucket, "ledger/"):
+        if key.startswith("coordinator-") and key.endswith(".db.gz"):
+            try:
+                t = datetime.datetime.strptime(key[len("coordinator-"):-len(".db.gz")], "%Y%m%dT%H%M%SZ")
+            except ValueError:
+                continue
+            copies.append((t.replace(tzinfo=datetime.timezone.utc).timestamp(), key))
+    if not copies:
+        return False, f"Ledger in {where}: NO daily copy\n  ⚠ the ledger has no second copy"
+    ts, name = max(copies)
+    age = max(0.0, now - ts)
+    problems = []
+    if age > B2_LEDGER_LAG_ALERT:
+        problems.append(f"the newest copy is {ago(age)} old (alert above {ago(B2_LEDGER_LAG_ALERT)})")
+    shutil.rmtree(DRILL_DIR, ignore_errors=True)
+    os.makedirs(DRILL_DIR, mode=0o700)
+    try:
+        out_db = os.path.join(DRILL_DIR, "coordinator-copy.db")
+        body = s3.get_object(Bucket=bucket, Key="ledger/" + name)["Body"]
+        with gzip.GzipFile(fileobj=body) as g, open(out_db, "wb") as f:
+            shutil.copyfileobj(g, f, 1 << 20)
+        q = "SELECT (SELECT COUNT(*) FROM submissions), (SELECT COUNT(*) FROM vranges)"
+        r = sqlite3.connect(f"file:{out_db}?mode=ro", uri=True)
+        integrity = r.execute("PRAGMA integrity_check").fetchone()[0]
+        rs, rv = r.execute(q).fetchone()
+        r.close()
+        live = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=30)
+        ls, lv = live.execute(q).fetchone()
+        live.close()
+        if integrity != "ok":
+            problems.append(f"the restored copy fails integrity_check: {integrity[:200]}")
+        detail = (f"restore {'ok' if integrity == 'ok' else 'FAILED'}, integrity {integrity[:40]}, "
+                  f"{rs:,} submissions / {rv:,} verified ranges (live {ls:,} / {lv:,})")
+    except (OSError, EOFError, zlib.error, sqlite3.Error) as e:
+        problems.append(f"the copy is not a usable ledger: {e}")
+        detail = "restore FAILED"
+    finally:
+        shutil.rmtree(DRILL_DIR, ignore_errors=True)
+    line = f"Ledger in {where}: newest daily copy {ago(age)} old, {len(copies):,} copies · {detail}"
     for p in problems:
         line += f"\n  ⚠ {p}"
     return not problems, line
@@ -371,12 +440,21 @@ def keys_section(now, client=None, mirror=None):
 
 def summary(run=run, send=send, now=None, client=None, mirror=None):
     now = time.time() if now is None else now
-    checks = (("proofs", lambda: proofs_section(now, client, mirror)),
+    checks = [("proofs", lambda: proofs_section(now, client, mirror)),
               ("hourly mirror", lambda: mirror_section(run)),
               ("ledger", lambda: ledger_section(run, now)),
               ("restore drill", lambda: restore_drill(run, now)),
               ("spine", lambda: spine_section(now, client, mirror)),
-              ("sponsor keys", lambda: keys_section(now, client, mirror)))
+              ("sponsor keys", lambda: keys_section(now, client, mirror))]
+    if B2_KEYS and not os.path.exists(B2_KEYS):
+        checks.append(("B2", lambda: (False, f"B2: no keys file at {B2_KEYS}, so the second copy is not checked")))
+    elif B2_KEYS:
+        b2 = dict(keys=B2_KEYS, bucket=B2_BUCKET, where="B2")
+        checks += [("proofs in B2", lambda: proofs_section(now, client, mirror, **b2)),
+                   ("hourly mirror to B2", lambda: mirror_section(run, B2_MIRROR_UNIT, "Hourly mirror to B2")),
+                   ("ledger in B2", lambda: ledger_copy_section(now, client, mirror, **b2)),
+                   ("spine in B2", lambda: spine_section(now, client, mirror, **b2)),
+                   ("sponsor keys in B2", lambda: keys_section(now, client, mirror, **b2))]
     sections = []
     for name, fn in checks:
         try:

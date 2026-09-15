@@ -395,8 +395,8 @@ ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. These now run beside it:
   upload to R2: the PUT succeeds, and the HEAD it sends afterwards is refused (fixed by `no_head = true`).
   Even then it never started a transfer against the flat 97,000-file directory. The script lists R2
   once and uploads the difference. It measured 35 receipts/s at a 64 Mbit/s cap.
-- **Litestream 0.5 allows one replica per database.** The second copy of the ledger has to come from
-  `backup.sh`, not from a second Litestream replica.
+- **Litestream 0.5 allows one replica per database.** The second copy of the ledger is a daily snapshot in
+  B2 (below), not a second Litestream replica.
 - **Keys:** `/etc/hazync/backup/r2.keys`, `root:root 0600`, one line `<key id> <secret> <endpoint>`. It is a
   Cloudflare *account* API token with Object Read & Write on `hazync-proofs` and `hazync-ledger` only.
   Listing all buckets or opening any other bucket returns `AccessDenied`.
@@ -460,6 +460,68 @@ in `hazync-offsite-keys.service`. The secret key never goes on the box or into R
   `gpg --quick-set-expire 777FE81F… 2y '*'` on the operator's machine, then re-export the public key over
   `/etc/hazync/backup/sponsor-keys.pub.asc`.
 - **Copy the keys by hand:** `/usr/local/sbin/hazync-offsite-proofs keys --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --pubkey /etc/hazync/backup/sponsor-keys.pub.asc --recipient 777FE81F8CC077FD3D08055E852C2B3190F5B928`
+
+### Second copies in Backblaze B2 (since 2026-09-15)
+
+Everything in R2 has a second copy at another provider, in the B2 bucket `hazync-backup` (region
+`us-east-005`: private, default encryption on, Object Lock enabled with no default retention). A leaked or
+revoked Cloudflare token, or a closed Cloudflare account, must not take every off-box copy with it. The same
+script writes both; only the keys file and bucket differ.
+
+| What | How | Where in B2 | How far behind |
+|---|---|---|---|
+| Proof receipts | `hazync-offsite-proofs-b2.timer`, hourly at :53 UTC: `copy`, then `check` | `hazync-backup/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
+| The spine | `hazync-offsite-spine-b2.timer`, every 10 min (:08): `spine --verify /usr/local/bin/hazync-verify` | `hazync-backup/spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}` | up to ~10 min |
+| Sponsor signing identities, **encrypted** | `hazync-offsite-keys-b2.timer`, hourly at :07 UTC: `keys` | `hazync-backup/sponsor-keys/identities-<hash>.tar.gpg` | up to ~1 h |
+| Ledger | `hazync-offsite-ledger-b2.timer`, daily 04:47 UTC: `ledger` (SQLite online backup, `integrity_check`, gzip) | `hazync-backup/ledger/coordinator-<UTC stamp>.db.gz`, one per run, never overwritten | up to ~1 day |
+
+- **Every unit pages the phone on failure** through `OnFailure=`, exactly like its R2 twin.
+- **The daily summary adds B2 lines**: receipts in B2 vs disk, the B2 mirror's 24 h, the spine copy verified,
+  the sponsor keys copy, and a **restore drill of the newest ledger copy**: downloaded, unpacked,
+  integrity-checked and compared with the live ledger; a problem once it is older than
+  `OFFSITE_B2_LEDGER_LAG_SECS` (26 h). `OFFSITE_B2_KEYS=` (empty) turns the B2 lines off; a configured keys
+  file that is missing is a problem, not a skip.
+- **Nothing in B2 is ever deleted by these scripts.** The ledger adds one gzipped copy a day (37.5 MB on
+  2026-09-15, from a 113 MB ledger), about 14 GB a year at that size.
+- **Keys:** `/etc/hazync/backup/b2.keys`, `root:root 0600`, one line
+  `<keyID> <applicationKey> https://s3.us-east-005.backblazeb2.com hazync-backup`. A B2 application key
+  restricted to `hazync-backup`, Read and Write.
+
+**Install** (coordinator, root, from a checkout at the merged commit):
+
+```bash
+cd coordinator/deploy
+install -m 755 hazync-offsite-proofs.py /usr/local/sbin/hazync-offsite-proofs
+install -m 755 hazync-offsite-watch.py /usr/local/sbin/hazync-offsite-watch
+install -m 644 hazync-offsite-{proofs,spine,keys,ledger}-b2.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl start hazync-offsite-ledger-b2.service hazync-offsite-spine-b2.service hazync-offsite-keys-b2.service
+systemctl enable --now hazync-offsite-{proofs,spine,keys,ledger}-b2.timer
+```
+
+The first receipt copy is large (24.4 GB / 106,691 receipts on 2026-09-15); run it by hand, then enable the
+hourly timer, so the hourly unit's 45 min limit does not kill it:
+`hazync-offsite-proofs copy --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --threads 32 --bwlimit-mbit 100`.
+
+**Restore the ledger from B2** (into a scratch path, never over the live file):
+
+```bash
+install -d -m 700 /var/lib/hazync/restore-test
+python3 - <<'EOF'
+import boto3, gzip, shutil
+kid, secret, endpoint, bucket = open("/etc/hazync/backup/b2.keys").read().split()
+s3 = boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=kid, aws_secret_access_key=secret)
+keys = sorted(o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix="ledger/")
+              for o in page.get("Contents", []))
+print("newest:", keys[-1])
+with gzip.GzipFile(fileobj=s3.get_object(Bucket=bucket, Key=keys[-1])["Body"]) as g, \
+        open("/var/lib/hazync/restore-test/coordinator.db", "wb") as f:
+    shutil.copyfileobj(g, f)
+EOF
+sqlite3 /var/lib/hazync/restore-test/coordinator.db 'PRAGMA integrity_check'
+```
+
+The spine and the sponsor keys restore exactly as from R2 (above), from the same paths in `hazync-backup`.
 
 > ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of
 > the two schedulers below and confirm a snapshot actually lands (`ls $HZ_HOME/backups`). Until then the
