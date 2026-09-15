@@ -15,6 +15,7 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 | [`EXPLAINER.md`](EXPLAINER.md) | what this is, in plain terms |
 | [`GOALS.md`](GOALS.md) | what it is for, and what it is not |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | contributing GPU time to the board |
+| [`PROVER_OPERATIONS.md`](PROVER_OPERATIONS.md) | running provers for days: modes, claims, stopping, systemd, upgrades, watching, disk, troubleshooting |
 | [`SPONSORSHIP.md`](SPONSORSHIP.md) | sponsoring blocks |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | every release, newest first |
 | [`GLOSSARY.md`](GLOSSARY.md) | the terms this repository uses, each tied to the code |

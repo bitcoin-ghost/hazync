@@ -176,6 +176,10 @@ name. Each problem is pushed at most once an hour (`HAZYNC_NTFY_REPEAT`). `run-w
 5 failures in a row (`NOTIFY_FAIL_STREAK`), again when the worker recovers, and when it refuses to start; a
 board with nothing free to claim is not a failure. A push that cannot be sent never stops the work.
 
+**Running workers for days?** [`docs/PROVER_OPERATIONS.md`](docs/PROVER_OPERATIONS.md) is the operator's
+manual: which modes to run, how claims work, stopping without stranding a block, a systemd unit, upgrading,
+watching the board, disk use, and a table of what goes wrong.
+
 Prove as many blocks as you like — just run it again.
 
 **Any height the bridge has reached is provable, not only ones near the frontier.** The coordinator
