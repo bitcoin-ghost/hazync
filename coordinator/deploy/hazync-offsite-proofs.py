@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Mirror the coordinator's proof receipts to S3-compatible storage (Cloudflare R2, Backblaze B2), append-only.
+"""Mirror the coordinator's proofs to S3-compatible storage (Cloudflare R2, Backblaze B2), append-only.
 
-    hazync-offsite-proofs.py copy  --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
-    hazync-offsite-proofs.py check --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
+    hazync-offsite-proofs.py copy    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
+    hazync-offsite-proofs.py check   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
+    hazync-offsite-proofs.py spine   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify
+    hazync-offsite-proofs.py archive --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --src DIR_OR_FILE --prefix archive/NAME/
 
 A receipt is immutable once written, so the mirror only ever ADDS: a file already present remotely is
 never re-uploaded or deleted. Keys are namespaced by guest id (`proofs-<first 8 of METHOD_ID>/`),
@@ -12,6 +14,17 @@ the same layout backup.sh uses, because file names repeat across re-baselines wi
 exits 1 if any upload failed. `check` compares names and sizes and exits 1 if any proof older than
 --min-age is missing or differs, so a timer can alert on it.
 
+`spine` copies the genesis-anchored spine (`spine.bin` + `spine.json`), which the coordinator rewrites
+every ~15-30 s and which is the one proof that cannot be rebuilt cheaply. Each copy is kept under its
+own height, `spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}`, and never overwritten. A copy is
+uploaded only if spine.bin matches the sha256 and size in spine.json (the two files are replaced one
+after the other, so a read can land between them) and, with --verify, hazync-verify accepts it. The
+.bin goes up before the .json, so a .json in R2 means its pair is complete. Exits 1 on any failure.
+
+`archive` copies a file, or every file under a directory, to --prefix as it is: for the retired
+guests' proofs, spines and ledgers, which exist nowhere else. Append-only like `copy`, and it exits 1
+unless everything is in R2 at the right size afterwards.
+
 Why not rclone: Ubuntu 24.04's rclone 1.60 reports every upload to R2 as `501 NotImplemented` (the
 PUT succeeds; the HEAD it sends afterwards is refused), and with that worked around it still never
 queued a transfer against the flat ~97,000-file proofs directory (measured 2026-09-15).
@@ -19,11 +32,19 @@ queued a transfer against the flat ~97,000-file proofs directory (measured 2026-
 Keys file: one line, "<access key id> <secret> <endpoint> [bucket]", readable by root only.
 """
 import argparse
+import hashlib
+import io
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+SPINE_READ_TRIES = 5
+SPINE_READ_PAUSE = 1.0
 
 
 def log(msg):
@@ -73,12 +94,65 @@ def list_local(proofs, min_age, now):
     return local, young
 
 
+def list_tree(src):
+    """{relative name: size} for a file, or for every regular file under a directory (symlinks skipped)."""
+    if os.path.isfile(src):
+        return {os.path.basename(src): os.path.getsize(src)}
+    out = {}
+    for root, _, files in os.walk(src):
+        for n in files:
+            p = os.path.join(root, n)
+            if os.path.isfile(p) and not os.path.islink(p):
+                out[os.path.relpath(p, src).replace(os.sep, "/")] = os.path.getsize(p)
+    return out
+
+
 def list_remote(s3, bucket, prefix):
     remote = {}
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
         for o in page.get("Contents", []):
             remote[o["Key"][len(prefix):]] = o["Size"]
     return remote
+
+
+def read_spine(spine_dir, tries=None, pause=None):
+    """(spine.bin bytes, spine.json bytes, meta, None) for a pair that agrees, or (None, None, None, why).
+    The coordinator replaces spine.bin and then spine.json, so a read between the two is retried."""
+    tries = SPINE_READ_TRIES if tries is None else tries
+    pause = SPINE_READ_PAUSE if pause is None else pause
+    why = "no spine"
+    for i in range(max(1, tries)):
+        try:
+            with open(os.path.join(spine_dir, "spine.json"), "rb") as f:
+                js = f.read()
+            with open(os.path.join(spine_dir, "spine.bin"), "rb") as f:
+                data = f.read()
+            meta = json.loads(js)
+            if hashlib.sha256(data).hexdigest() == meta.get("sha256") and len(data) == meta.get("bytes"):
+                return data, js, meta, None
+            why = "spine.bin does not match the sha256 and size in spine.json"
+        except (OSError, ValueError) as e:
+            why = f"cannot read the spine: {e!r}"
+        if i + 1 < tries:
+            time.sleep(pause)
+    return None, None, None, why
+
+
+def spine_name(meta):
+    return f"spine_{int(meta['lo'])}-{int(meta['hi'])}"
+
+
+def verify_spine(verify, data):
+    """(ok, first line of hazync-verify's output). ok only when it exits 0 on these exact bytes."""
+    with tempfile.NamedTemporaryFile(suffix=".hzk") as f:
+        f.write(data)
+        f.flush()
+        try:
+            p = subprocess.run([verify, f.name], capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"could not run {verify}: {e!r}"
+    lines = [ln for ln in ((p.stdout or "") + (p.stderr or "")).splitlines() if ln.strip()]
+    return p.returncode == 0, ((lines[0].strip() if lines else f"exit {p.returncode}")[:300])
 
 
 class RateLimit:
@@ -101,12 +175,88 @@ class RateLimit:
             time.sleep(min(wait, 1.0))
 
 
+def upload_all(s3, bucket, prefix, root, names, sizes, threads, bwlimit_mbit):
+    """Upload root/<name> to prefix+name for each name. (done, failed, bytes sent)."""
+    rl = RateLimit(bwlimit_mbit * 1e6 / 8)
+    done = failed = sent = 0
+    last = t1 = time.monotonic()
+
+    def up(name):
+        size = sizes[name]
+        rl.take(size)
+        with open(os.path.join(root, name), "rb") as f:
+            s3.put_object(Bucket=bucket, Key=prefix + name, Body=f, ContentType="application/octet-stream")
+        return size
+
+    with ThreadPoolExecutor(max(1, threads)) as ex:
+        futs = {ex.submit(up, n): n for n in names}
+        for fut in as_completed(futs):
+            try:
+                sent += fut.result()
+                done += 1
+            except Exception as e:                  # counted, reported, and the run exits 1
+                failed += 1
+                if failed <= 10:
+                    log(f"FAILED {futs[fut]}: {e!r}")
+            if time.monotonic() - last >= 30:
+                last = time.monotonic()
+                el = last - t1
+                rate = done / el if el else 0
+                eta = (len(names) - done - failed) / rate if rate else 0
+                log(f"progress: {done}/{len(names)} uploaded, {failed} failed, {sent / 1e9:.2f} GB, "
+                    f"{rate:.1f} files/s, {sent * 8 / 1e6 / el:.0f} Mbit/s, ETA {eta / 60:.0f} min")
+    log(f"done: {done} uploaded, {failed} failed, {sent / 1e9:.2f} GB in {(time.monotonic() - t1) / 60:.1f} min")
+    return done, failed, sent
+
+
+def spine_copy(s3, bucket, prefix, spine_dir, verify):
+    data, js, meta, why = read_spine(spine_dir)
+    if data is None:
+        log(f"spine: NOT uploaded, {why}")
+        return 1
+    name = spine_name(meta)
+    if verify:
+        ok, detail = verify_spine(verify, data)
+        if not ok:
+            log(f"spine: NOT uploaded, hazync-verify rejected {name}: {detail}")
+            return 1
+        log(f"spine: {detail}")
+    else:
+        log("spine: WARNING, no --verify given, so this copy is uploaded without being verified")
+    pair = [(name + ".bin", data), (name + ".json", js)]     # .bin first: a .json in R2 means a complete pair
+    remote = list_remote(s3, bucket, prefix)
+    uploaded = 0
+    for key, body in pair:
+        if key in remote:
+            if remote[key] != len(body):
+                log(f"spine: WARNING, {prefix}{key} is {remote[key]} bytes in R2, not {len(body)}; NOT overwritten")
+            continue
+        try:
+            s3.put_object(Bucket=bucket, Key=prefix + key, Body=io.BytesIO(body),
+                          ContentType="application/json" if key.endswith(".json") else "application/octet-stream")
+            uploaded += 1
+        except Exception as e:
+            log(f"spine: FAILED {prefix}{key}: {e!r}")
+            return 1
+    remote = list_remote(s3, bucket, prefix)
+    ok = all(remote.get(k) == len(b) for k, b in pair)
+    copies = sum(1 for k in remote if k.endswith(".json"))
+    state = "uploaded" if uploaded else "already in R2"
+    log(f"spine: {prefix}{name} [{int(meta['lo']):,}..{int(meta['hi']):,}] {state}, "
+        f"{'complete' if ok else 'INCOMPLETE'} in R2; {copies:,} spine copies there")
+    return 0 if ok else 1
+
+
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check"])
+    ap.add_argument("mode", choices=["copy", "check", "spine", "archive"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
+    ap.add_argument("--spine", default=os.environ.get("COORD_SPINE", "/var/lib/hazync/spine"))
+    ap.add_argument("--verify", help="spine: hazync-verify binary; a copy it rejects is not uploaded")
+    ap.add_argument("--src", help="archive: a file, or a directory whose files are copied as they are")
+    ap.add_argument("--prefix", help="archive: key prefix in the bucket, e.g. archive/proofs.4722cec8/")
     ap.add_argument("--repo", default=os.environ.get("HZ_REPO", "/opt/hazync"))
     ap.add_argument("--min-age", type=float, default=120, help="skip proofs modified in the last N seconds")
     ap.add_argument("--threads", type=int, default=16)
@@ -122,8 +272,27 @@ def main(argv=None, client=None):
     if not bucket:
         raise SystemExit("no bucket: pass --bucket or put it 4th in the keys file")
     s3 = client if client is not None else make_client(kid, secret, endpoint, a.threads)
-    prefix = f"proofs-{method_prefix(a.repo)}/"
 
+    if a.mode == "spine":
+        return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify)
+
+    if a.mode == "archive":
+        if not a.src or not a.prefix:
+            raise SystemExit("archive needs --src and --prefix")
+        prefix = a.prefix if a.prefix.endswith("/") else a.prefix + "/"
+        root = a.src if os.path.isdir(a.src) else os.path.dirname(os.path.abspath(a.src))
+        local = list_tree(a.src)
+        missing, differ = plan(local, list_remote(s3, bucket, prefix))
+        log(f"archive: {a.src} -> {bucket}/{prefix}: {len(local)} files, {len(missing)} to upload "
+            f"({sum(local[n] for n in missing) / 1e9:.2f} GB), {len(differ)} differ in size (NOT overwritten)")
+        upload_all(s3, bucket, prefix, root, missing, local, a.threads, a.bwlimit_mbit)
+        missing, differ = plan(local, list_remote(s3, bucket, prefix))
+        log(f"archive check: missing {len(missing)}, size differs {len(differ)}")
+        for n in (missing + differ)[:10]:
+            log(f"  {'missing' if n in missing else 'differs'}: {n}")
+        return 1 if (missing or differ) else 0
+
+    prefix = f"proofs-{method_prefix(a.repo)}/"
     t0 = time.monotonic()
     remote = list_remote(s3, bucket, prefix)
     local, young = list_local(a.proofs, a.min_age, time.time())
@@ -144,35 +313,7 @@ def main(argv=None, client=None):
     todo = missing[: a.limit] if a.limit else missing
     total = sum(local[n] for n in todo)
     log(f"copy: {len(todo)} to upload ({total / 1e9:.2f} GB), {a.threads} threads, cap {a.bwlimit_mbit:g} Mbit/s")
-    rl = RateLimit(a.bwlimit_mbit * 1e6 / 8)
-    done = failed = sent = 0
-    last = t1 = time.monotonic()
-
-    def up(name):
-        size = local[name]
-        rl.take(size)
-        with open(os.path.join(a.proofs, name), "rb") as f:
-            s3.put_object(Bucket=bucket, Key=prefix + name, Body=f, ContentType="application/octet-stream")
-        return size
-
-    with ThreadPoolExecutor(max(1, a.threads)) as ex:
-        futs = {ex.submit(up, n): n for n in todo}
-        for fut in as_completed(futs):
-            try:
-                sent += fut.result()
-                done += 1
-            except Exception as e:                  # counted, reported, and the run exits 1
-                failed += 1
-                if failed <= 10:
-                    log(f"FAILED {futs[fut]}: {e!r}")
-            if time.monotonic() - last >= 30:
-                last = time.monotonic()
-                el = last - t1
-                rate = done / el if el else 0
-                eta = (len(todo) - done - failed) / rate if rate else 0
-                log(f"progress: {done}/{len(todo)} uploaded, {failed} failed, {sent / 1e9:.2f} GB, "
-                    f"{rate:.1f} files/s, {sent * 8 / 1e6 / el:.0f} Mbit/s, ETA {eta / 60:.0f} min")
-    log(f"done: {done} uploaded, {failed} failed, {sent / 1e9:.2f} GB in {(time.monotonic() - t1) / 60:.1f} min")
+    _, failed, _ = upload_all(s3, bucket, prefix, a.proofs, todo, local, a.threads, a.bwlimit_mbit)
     return 1 if failed else 0
 
 
