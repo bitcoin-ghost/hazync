@@ -1489,6 +1489,10 @@ def fold_claim(body):
 
 
 FRONTIER_TTL = float(os.environ.get("FRONTIER_CACHE_TTL", "2"))
+# #339: how long before a frontier snapshot a verified cover must have been recorded for claim() and state() to read
+# "it covers frontier+1 and the frontier is not past it" as a cover that cannot seam. A younger one may seam and simply
+# not be in the snapshot yet. The slack also covers a submit that stamps vranges.ts a moment before it commits.
+FRONTIER_SETTLE = float(os.environ.get("FRONTIER_SETTLE", "30"))
 # #324: how far past its TTL a background-refreshed entry may still be served. Beyond this the caller
 # rebuilds in line, so a refresh that keeps failing surfaces as an error instead of an ever-older board.
 CACHE_MAX_STALE = float(os.environ.get("CACHE_MAX_STALE", "60"))
@@ -1560,17 +1564,35 @@ def _single_flight(key, ttl, fn, background=False):
             ev.set()
 
 
+def _frontier_snapshot():
+    """#339: the cached frontier walk as (taken_at, chain), `taken_at` being when its read of vranges BEGAN.
+
+    A cached frontier can be behind the database, and a caller that sets it against something it reads fresh has to
+    know by how much. claim() and state() both made that comparison without knowing, so a block verified after the
+    snapshot looked like a cover that cannot seam. See _cover_settled."""
+    return _single_flight("frontier_chain", FRONTIER_TTL, lambda: (time.time(), _frontier_chain()))
+
+
 def _frontier_chain_cached():
     """#265: the frontier walk for DISPLAY and pre-flight callers only (frontier_hi -> /api/meta, which every
     worker hits; frontier_proof -> state). It loads all of vranges, so it is single-flight with a short TTL,
     and invalidated whenever this server writes vranges. `_frontier_chain` itself stays uncached: it is the
     S1/F1/H9 trust boundary that seam_fuzz drives directly, and a cache there would answer for other data."""
-    return _single_flight("frontier_chain", FRONTIER_TTL, _frontier_chain)
+    return _frontier_snapshot()[1]
 
 
 def _frontier_invalidate():
     with _sf_lock:
         _sf.pop("frontier_chain", None)
+
+
+def _cover_settled(c, n, taken_at):
+    """#339: had the frontier snapshot taken at `taken_at` already seen every verified range covering block `n`?
+
+    Only then does "a verified range covers frontier+1 and the frontier is not past it" mean the cover cannot seam
+    (#281). A cover recorded later may seam perfectly and just not be in the snapshot yet."""
+    return c.execute("SELECT 1 FROM vranges WHERE lo <= ? AND hi >= ? AND COALESCE(ts, 0) > ? LIMIT 1",
+                     (n, n, taken_at - FRONTIER_SETTLE)).fetchone() is None
 
 
 def _frontier_chain():
@@ -2426,7 +2448,8 @@ def state(slim=False):
     folded = folded_count()   # blocks inside a range made by FOLDING -- see fold_spans
     blk = blocked_pubkeys()   # moderation takedown list — hide these pubkeys from the public board
     # board window: all verified + claimed, then a few open around the frontier
-    fr = frontier_hi()
+    _fr_taken, _fr_chain = _frontier_snapshot()   # #339: the blocker judgement below needs to know its age
+    fr = _fr_chain[0]
     # rolling window around the frontier: a little behind, then open blocks ahead (synthesised so the
     # board shows what's next to prove even before those range rows exist).
     start = max(0, (fr // RANGE_SIZE) - 1) * RANGE_SIZE
@@ -2567,7 +2590,12 @@ def state(slim=False):
     _st = blocker["status"] if blocker else "open"
     _att = (blocker["attempts"] if blocker else 0) or 0
     _hold = next(iter(_sponsor_holds(c, nb, nb)), None)
-    if _st == "verified":
+    if _st == "verified" and not _cover_settled(c, nb, _fr_taken):
+        # #339: verified after the frontier above was read, so it may seam perfectly; this snapshot cannot say. On
+        # 2026-09-15 the live board called 69,737 unseamable 20 s after it was proven, on a clean chain.
+        _attn, _attn_why = False, ("a range covering this block was verified moments ago; "
+                                   "the frontier has not caught up with it yet")
+    elif _st == "verified":
         _attn, _attn_why = True, ("a verified range covers this block but cannot seam onto the frontier; "
                                   "it will never advance until the block is re-proved")
     elif _att >= MAX_ATTEMPTS:
@@ -2759,7 +2787,8 @@ def claim(body):
     elif CLAIM_REQUIRE_SIG and not _CONTROL_CLAIMS_UNSIGNED:
         return 403, {"error": "this coordinator accepts only signed claims: update your worker"}
     now = time.time()
-    _blocker = frontier_hi() + 1        # read OUTSIDE the lock — see the note at its use below
+    _fr_taken, _fr_chain = _frontier_snapshot()   # read OUTSIDE the lock — see the note at its use below
+    _blocker = _fr_chain[0] + 1
     with _lock:
         c = db()
         # #268: a claim whose RESPONSE was lost (client or proxy timeout, a dropped connection) is
@@ -2841,10 +2870,17 @@ def claim(body):
         #
         # `_blocker` is read BEFORE the lock, deliberately: _frontier_chain scans every vrange on a
         # cache miss (41k rows on the live board) and holding the global write lock across that would
-        # jam every claim, beat and submit — the #265 failure. A stale frontier here is harmless; the
-        # worst case is re-offering a block that has just been seamed, which `held` already bounds.
+        # jam every claim, beat and submit — the #265 failure.
+        #
+        # ⛔ #339: that stale frontier is NOT harmless. `proven` is read under the lock, so a submit for
+        # frontier+1 committing between the two reads makes the block look covered-but-unseamable. It was
+        # re-offered, and the INSERT OR REPLACE below turned its VERIFIED row back into a claim, losing
+        # receipt_sha and verified_at: nine rows on the live board, 2026-09-13/14, each claimed within a
+        # second of its proof landing. The overwrite itself has to stay (submit() refuses a verified row, so
+        # a #281 re-proof could never land), so the judgement is what changes: re-offer only a cover the
+        # frontier snapshot had already seen. A real #281 blocker waits FRONTIER_SETTLE longer, no more.
         if (_blocker < _ceiling and _blocker in proven and _blocker not in held
-                and witness_available(_blocker)):
+                and witness_available(_blocker) and _cover_settled(c, _blocker, _fr_taken)):
             h = _blocker
         else:
             h = 1

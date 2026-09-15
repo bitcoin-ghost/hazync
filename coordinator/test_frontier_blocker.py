@@ -94,11 +94,15 @@ def seed_fork_at(bad):
     server._frontier_invalidate()
 
 
+_REAL_SNAPSHOT = server._frontier_snapshot     # the #339 section needs the real frontier even under --control
+
 if CONTROL:
     # Put back exactly what was there before: claim() scanning coverage from block 1 with no notion of
     # the frontier, and stalled_for exempting a verified row. If the assertions still pass with this
     # in place, they are not testing anything.
-    server.frontier_hi = lambda: -1            # claim(): _blocker can never match, so coverage wins
+    server._frontier_snapshot = lambda: (time.time(), (-1, server.GENESIS_TIP, 0, 0))  # _blocker never matches
+    server.frontier_hi = lambda: -1
+    server.FRONTIER_SETTLE = float("-inf")     # #339: no settle check, so every cover counts as already seen
     _real_state = server.state
 
     def _old_state():
@@ -246,6 +250,51 @@ blk = (server.state().get("blocked") or {})
 check(blk.get("needs_attention") is True,
       f"a VERIFIED range over the blocker needs attention (why={blk.get('why')!r})")
 check("seam" in (blk.get("why") or ""), "...and says why, in terms of the seam that cannot form")
+
+print("== #339: a block proven after the frontier was read is not re-offered, and keeps its verified row ==")
+# The live shape: a claim reads the frontier (5), a submit for block 6 commits, then the claim takes the lock and
+# finds 6 covered. Before #339 that looked exactly like the fork above -- covered, frontier not past it -- so block 6
+# was handed out again and claim()'s INSERT OR REPLACE overwrote its verified row. Nine rows on the live board.
+c = server.db()
+c.execute("DELETE FROM vranges"); c.execute("DELETE FROM ranges")
+prev_tip, prev_b = server.GENESIS_TIP, "b0"
+for h in range(1, 6):
+    c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status) VALUES(?,?,?,'verified')", (str(h), h, h))
+    c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,"
+              "range_work,in_bhash,out_bhash) VALUES(?,?,?,?,?,'','t',0,0,'1',?,?)",
+              (str(h), h, h, prev_tip, f"t{h}", prev_b, f"b{h}"))
+    prev_tip, prev_b = f"t{h}", f"b{h}"
+c.commit(); c.close()
+server._frontier_invalidate()
+_before = _REAL_SNAPSHOT()                     # the claim's read, just before the submit took the lock
+check(_before[1][0] == 5, f"the frontier read before the submit is 5 (read {_before[1][0]})")
+c = server.db()
+_now = time.time()
+c.execute("INSERT OR REPLACE INTO ranges(id,lo,hi,status,assignee,handle,receipt_sha,verified_at) "
+          "VALUES('6',6,6,'verified',?,'prover',?,?)", ("a" * 64, "5e" * 32, _now))
+c.execute("INSERT OR REPLACE INTO vranges(id,lo,hi,in_tip,out_tip,pubkey,handle,ts,out_leaves,"
+          "range_work,in_bhash,out_bhash) VALUES('6',6,6,?,'t6',?,'prover',?,0,'1',?,'b6')",
+          (prev_tip, "a" * 64, _now, prev_b))
+c.commit(); c.close()
+check(server._frontier_chain()[0] == 6, "block 6 seams: the real frontier is already 6")
+
+_saved = server._frontier_snapshot
+server._frontier_snapshot = lambda: _before
+try:
+    code, got = server.claim({"pubkey": "r" * 64, "handle": "racer", "nonce": "n339"})
+    blk = server.state().get("blocked") or {}
+finally:
+    server._frontier_snapshot = _saved
+check(got.get("range") == "7",
+      f"claim() skips block 6, proven after the frontier it read, and offers 7 (offered {got.get('range')})")
+c = server.db()
+row = c.execute("SELECT status, receipt_sha, handle FROM ranges WHERE id='6'").fetchone()
+c.close()
+check(row["status"] == "verified" and row["receipt_sha"] == "5e" * 32 and row["handle"] == "prover",
+      f"block 6 keeps its verified row, receipt hash and prover (status={row['status']}, handle={row['handle']})")
+check(blk.get("block") == 6 and blk.get("needs_attention") is False,
+      f"the board does not call block 6 unseamable while the frontier catches up (why={blk.get('why')!r})")
+check("moments ago" in (blk.get("why") or ""), "...and says it was verified moments ago")
 
 print()
 if CONTROL:

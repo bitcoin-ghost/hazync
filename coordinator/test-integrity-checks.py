@@ -400,6 +400,74 @@ rc, out = run([sys.executable, PROOFS, "--db", db, "--proofs", d, "--host", FAKE
 check(rc == 0 and "checking 0 stored proofs" in out, "files younger than --min-age (600 s) are left for the next night",
       out)
 
+# ── repair-reclaimed-ranges.py (#339) ───────────────────────────────────────────────────────────────────────────────
+print("== repair-reclaimed-ranges.py ==")
+REPAIR = os.path.join(HERE, "repair-reclaimed-ranges.py")
+
+
+def reclaimed_fixture():
+    """Blocks 1..3 on the chain and block 5 off it, all verified by key pA; then four rows overwritten by a claim the
+    way #339 did it. Row 2 is the clean case. Rows 1, 3 and 5 each plant one reason the repair must leave a row alone."""
+    db, rows = db_fixture(extra_lo=5)
+    d, mp = proofs_fixture(rows)
+    c = sqlite3.connect(db)
+    for col in ("assignee TEXT", "handle TEXT", "claimed_at REAL", "verified_at REAL", "last_beat REAL",
+                "claim_nonce TEXT", "claim_signed INTEGER"):
+        c.execute(f"ALTER TABLE ranges ADD COLUMN {col}")
+    c.execute("CREATE TABLE submissions(id INTEGER PRIMARY KEY AUTOINCREMENT, range_id TEXT, pubkey TEXT, handle TEXT,"
+              " receipt_sha TEXT, sig TEXT, verified INTEGER, note TEXT, ts REAL)")
+    c.execute("UPDATE vranges SET pubkey='pA', handle='prover-a', ts=1000")
+    c.execute("UPDATE ranges SET assignee='pA', handle='prover-a', verified_at=1000")
+    for rid in rows:
+        c.execute("INSERT INTO submissions(range_id,pubkey,handle,receipt_sha,sig,verified,note,ts)"
+                  " VALUES(?,'pA','prover-a',?,'',1,'VERIFIED',1000)",
+                  (rid, hashlib.sha256(f"proof-{rid}".encode()).hexdigest()))
+    now = time.time()
+    for rid, age in (("1", 86400), ("2", 86400), ("3", 60), ("5", 86400)):   # 3: claimed a minute ago
+        c.execute("UPDATE ranges SET status='claimed', assignee='pB', handle='racer', receipt_sha=NULL,"
+                  " verified_at=NULL, claimed_at=?, claim_nonce='n' WHERE id=?", (now - age, rid))
+    c.commit()
+    c.close()
+    with open(os.path.join(d, "proof_1.bin"), "wb") as f:                     # 1: no longer what was accepted
+        f.write(b"proof-1 with a flipped bit")
+    return db, d, mp                                                          # 5: above the frontier (3)
+
+
+def ranges_row(db, rid):
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    r = dict(c.execute("SELECT * FROM ranges WHERE id=?", (rid,)).fetchone())
+    c.close()
+    return r
+
+
+db, d, mp = reclaimed_fixture()
+rc, out = run([sys.executable, PROOFS, "--db", db, "--proofs", d, "--host", FAKE_HOST, "--min-age", "0"],
+              {"FAKE_HOST_MAP": mp})
+check(rc == 1 and "proof_2.bin: has no verified record" in out, "check-proofs reports the overwritten row", out)
+rc, out = run([sys.executable, REPAIR, "--db", db, "--proofs", d, "--frontier", "3"])
+check(rc == 0 and "would restore 2" in out and ranges_row(db, "2")["status"] == "claimed",
+      "a dry run names row 2 and changes nothing", out)
+rc, out = run([sys.executable, REPAIR, "--db", db, "--proofs", d, "--frontier", "3", "--apply"])
+r2 = ranges_row(db, "2")
+check(rc == 0 and r2["status"] == "verified" and r2["receipt_sha"] == hashlib.sha256(b"proof-2").hexdigest()
+      and r2["verified_at"] == 1000 and r2["assignee"] == "pA" and r2["handle"] == "prover-a"
+      and r2["claim_nonce"] is None, "--apply restores row 2 from its verified submission: status, hash, time, prover", out)
+check(ranges_row(db, "1")["status"] == "claimed" and "leave   1:" in out and "does not hash" in out,
+      "a row whose proof file no longer matches is left alone", out)
+check(ranges_row(db, "3")["status"] == "claimed" and "leave   3:" in out and "may still be live" in out,
+      "a row claimed a minute ago is left alone", out)
+check(ranges_row(db, "5")["status"] == "claimed" and "leave   5:" in out and "above the frontier" in out,
+      "a row above the frontier (possibly a #281 re-offer) is left alone", out)
+rc, out = run([sys.executable, PROOFS, "--db", db, "--proofs", d, "--host", FAKE_HOST, "--min-age", "0"],
+              {"FAKE_HOST_MAP": mp})
+check("proof_2.bin" not in out and "proof_3.bin: has no verified record" in out,
+      "after the repair check-proofs no longer reports row 2, and still reports the rows left alone", out)
+rc, out = run([sys.executable, REPAIR, "--db", db, "--proofs", d, "--frontier", "3", "--apply"])
+check(rc == 0 and "restore 2" not in out and "0 row(s) restored" in out, "running it again restores nothing more", out)
+rc, out = run([sys.executable, REPAIR, "--db", os.path.join(T, "no.db"), "--proofs", d, "--frontier", "3"])
+check(rc == 2 and "COULD NOT RUN" in out, "no database is COULD NOT RUN, never 'nothing to do'", out)
+
 # ── hazync-run-check.sh ─────────────────────────────────────────────────────────────────────────────────────────────
 print("== hazync-run-check.sh ==")
 STATE = os.path.join(T, "state")

@@ -207,6 +207,8 @@ ENV = {
     "server:ROTATE_MAX_SKEW": "Allowed distance in seconds between a rotation's `ts` and server time.",
     "server:COORD_ALLOW_MOCK": "Required for `VERIFY_MODE=mock` to accept anything.",
     "server:FRONTIER_CACHE_TTL": "Seconds the frontier chain is cached (single-flight).",
+    "server:FRONTIER_SETTLE": "Seconds a verified cover of frontier+1 must predate the frontier snapshot before "
+                              "`claim()` re-offers it and `/api/state` calls it unseamable (#339).",
     "server:SPONSOR_OPEN": "`1` opens `POST /api/sponsor`.",
     "server:SPONSOR_MAX_BLOCKS": "Largest span one sponsorship may cover.",
     "server:SPONSOR_PRICE_BANDS": "JSON `[[lo, hi, usd_per_block], ...]`; set but invalid means unpriced.",
