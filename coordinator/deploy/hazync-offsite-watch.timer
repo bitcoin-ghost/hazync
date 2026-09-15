@@ -1,0 +1,9 @@
+[Unit]
+Description=Every 10 minutes: check the offsite ledger copy and push problems to the phone
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=Hazync: mirror new proof receipts to Cloudflare R2 (append-only), then check nothing is missing
+After=network-online.target hazync-coordinator.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# Root only for reading the root-only key file; the proofs directory is world-readable.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs copy --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --threads 8 --bwlimit-mbit 64
+# The check fails the unit (and so alerts) if any proof older than the grace period is still not in R2.
+# 30 min grace: a proof written just after the copy listed the directory is caught by the next hourly run.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs check --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --min-age 1800
+# A normal hourly run uploads a few thousand ~230 KB files. The cap ensures a stalled run becomes a failed
+# unit before the next firing, not a silently stuck one (hazync#123).
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/hazync/proofs /opt/hazync

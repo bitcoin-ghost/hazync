@@ -157,6 +157,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_vranges_cache.py --control
+      - name: Offsite receipt mirror is append-only and its check can fail (R2, 2026-09-15)
+        run: cd coordinator && python3 test_offsite_proofs.py
+      - name: Offsite mirror POSITIVE CONTROL (re-uploads everything — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_offsite_proofs.py --control
+      - name: Backup notifications push once, recover once, and the daily summary tells the truth
+        run: cd coordinator && python3 test_offsite_watch.py
+      - name: Backup notifications POSITIVE CONTROL (watcher blind, every check ok — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_offsite_watch.py --control
       - name: Block map API (blockstatus, block detail, sponsorship, weak ETags)
         run: cd coordinator && python3 test_block_api.py
       - name: Block map API POSITIVE CONTROL (strong-only ETag, unpaid sponsor names — must FAIL)
