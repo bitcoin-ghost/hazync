@@ -20,7 +20,7 @@ arbitrary far-future block (past the served window) is not something a fresh con
 can prove yet.
 
 Config (env):
-  COORD_URL   coordinator base URL   (default https://bitcoinghost.org/hazync — the public party)
+  COORD_URL   coordinator base URL   (default https://api.hazync.org — the public party)
   HAZYNC_HOST path to the prover `host` binary. Optional: if unset, the binary is looked for beside
               this script, in ~/.hazync/bin, in the current directory, then on PATH (CUDA preferred).
   BUNDLE_DIR  where fetched archive bundles live (default $HAZYNC_HOME/bundles)
@@ -61,7 +61,7 @@ NTFY_STATE = HOME / "ntfy-sent.json"    # when each kind of alert was last pushe
 # own — they downloaded a release and want to contribute — and localhost sends them to a connection
 # error that reads like the project is broken. `run-workers.sh` already defaulted this way; the two
 # disagreeing meant the answer depended on which entry point you happened to use.
-DEFAULT_COORD = "https://bitcoinghost.org/hazync"
+DEFAULT_COORD = "https://api.hazync.org"
 COORD   = os.environ.get("COORD_URL", DEFAULT_COORD).rstrip("/")
 
 # The release this CLI came from, reported to the coordinator on every request (#293).

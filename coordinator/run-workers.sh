@@ -17,7 +17,7 @@
 #
 # Env:
 #   HAZYNC_HOST   path to the prover binary            (required)
-#   COORD_URL     coordinator base URL                 (default https://bitcoinghost.org/hazync)
+#   COORD_URL     coordinator base URL                 (default https://api.hazync.org)
 #   HAZYNC_BASE   Core/secp source root                (default $HOME/hazync-build)
 #   LOG_DIR       per-worker logs                      (default $HOME/hazync-workers)
 #   MODE          prove | fold | mixed                  (default prove)
@@ -44,7 +44,7 @@ set -uo pipefail
 
 N="${1:-4}"
 STOP="${2:-}"
-COORD_URL="${COORD_URL:-https://bitcoinghost.org/hazync}"
+COORD_URL="${COORD_URL:-https://api.hazync.org}"
 LOG_DIR="${LOG_DIR:-$HOME/hazync-workers}"
 MODE="${MODE:-prove}"
 case "$MODE" in

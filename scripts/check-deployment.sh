@@ -17,11 +17,11 @@
 #   ./scripts/check-deployment.sh                       # remote checks only (public API)
 #   ./scripts/check-deployment.sh --local               # run ON the coordinator: units, binaries, bundles
 #
-# Env: COORD_URL (default https://bitcoinghost.org/hazync)
+# Env: COORD_URL (default https://api.hazync.org)
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
-COORD_URL="${COORD_URL:-https://bitcoinghost.org/hazync}"
+COORD_URL="${COORD_URL:-https://api.hazync.org}"
 LOCAL=0; [ "${1:-}" = "--local" ] && LOCAL=1
 fail=0; skipped=0
 bad()  { printf 'FAIL %s\n' "$*"; fail=1; }
