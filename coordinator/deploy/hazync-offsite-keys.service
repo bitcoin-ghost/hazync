@@ -1,0 +1,20 @@
+[Unit]
+Description=Hazync: encrypted copy of the sponsor signing identities to Cloudflare R2 (append-only, one copy per state)
+After=network-online.target
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# Each sponsorship proves under its own ed25519 key (sponsor_bot.identity); lose one and that sponsor's blocks
+# can never be signed for again. The identities are encrypted HERE to the operator's GPG encryption subkey.
+# Only the PUBLIC key is on this box (pinned by fingerprint), so neither this box nor R2 can decrypt a copy;
+# the operator's secret key restores it. Root only for reading the root-only R2 keys and the 0700 identities.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs keys --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --identities /var/lib/hazync/sponsor-bot/identities --pubkey /etc/hazync/backup/sponsor-keys.pub.asc --recipient 777FE81F8CC077FD3D08055E852C2B3190F5B928
+TimeoutStartSec=5min
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/hazync/sponsor-bot/identities

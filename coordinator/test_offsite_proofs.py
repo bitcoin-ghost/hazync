@@ -203,6 +203,84 @@ rc, out = run(spf, "spine", "--spine", SPINE, "--verify", VERIFY)
 check(rc == 1 and "FAILED" in out and not any(k.endswith(".json") for (_, k) in spf.objects),
       f"a failed upload fails the run and leaves no .json claiming a complete pair (rc={rc})")
 
+# 7. sponsor keys: one encrypted copy per state of identities/, readable only with the recipient's SECRET key.
+#    Real gpg with a throwaway key (gpg is required here, not optional: a missing gpg fails these checks).
+import shutil
+import subprocess
+import tarfile
+GH = tempfile.mkdtemp(prefix="gk")          # short path: gpg-agent's socket path has a length limit
+
+
+def g(*args, data=None):
+    return subprocess.run(["gpg", "--batch", "--no-tty", "--homedir", GH, "--pinentry-mode", "loopback",
+                           "--passphrase", ""] + list(args), input=data, capture_output=True)
+
+
+def new_key(uid, encrypt=True):
+    g("--quick-gen-key", uid, "ed25519", "sign", "1d")
+    fprs = [ln.split(":")[9] for ln in g("--with-colons", "--list-keys", uid).stdout.decode().splitlines()
+            if ln.startswith("fpr")]
+    fpr = fprs[0] if fprs else "0" * 40
+    if encrypt:
+        g("--quick-add-key", fpr, "cv25519", "encr", "1d")
+    pub = os.path.join(tmp, fpr[-8:] + ".pub.asc")
+    with open(pub, "wb") as f:
+        f.write(g("--armor", "--export", fpr).stdout)
+    return fpr, pub
+
+
+FPR, PUB = new_key("hazync backup test <backup@test.invalid>")
+FPR_SO, PUB_SO = new_key("hazync sign-only test <signonly@test.invalid>", encrypt=False)
+check(len(FPR) == 40 and FPR != "0" * 40 and b"BEGIN PGP PUBLIC KEY BLOCK" in open(PUB, "rb").read(),
+      "a throwaway gpg test key was generated")
+IDS = os.path.join(tmp, "identities")
+os.makedirs(os.path.join(IDS, "trial"))
+SECRET = "ab" * 32
+for rel, body in (("trial/key.hex", SECRET), ("trial/handle", "SPONSOR: Hazync trial\n")):
+    with open(os.path.join(IDS, rel), "w") as f:
+        f.write(body)
+K = "sponsor-keys/"
+KARGS = ["--identities", IDS, "--pubkey", PUB, "--recipient", FPR]
+ks = FakeS3()
+rc, out = run(ks, "keys", *KARGS)
+objs = sorted(k for (_, k) in ks.objects if k.startswith(K))
+check(rc == 0 and len(objs) == 1 and objs[0].startswith(K + "identities-") and objs[0].endswith(".tar.gpg"),
+      f"keys uploads one encrypted copy under {K} (rc={rc}, {objs})")
+cipher = ks.objects[("b", objs[0])] if objs else b""
+check(bool(cipher) and SECRET.encode() not in cipher and b"identities/" not in cipher,
+      "the copy in R2 holds no plaintext key and no plaintext file names")
+plain = g("--decrypt", data=cipher)
+got = {}
+if plain.returncode == 0:
+    with tarfile.open(fileobj=io.BytesIO(plain.stdout)) as t:
+        got = {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+check(got.get("identities/trial/key.hex") == SECRET.encode() and "identities/trial/handle" in got,
+      "the recipient's secret key decrypts it back to the exact identities")
+ks.puts.clear()
+rc, out = run(ks, "keys", *KARGS)
+check(rc == 0 and ks.puts == [] and "already in R2" in out, "unchanged identities upload nothing")
+os.makedirs(os.path.join(IDS, "12"))
+with open(os.path.join(IDS, "12", "key.hex"), "w") as f:
+    f.write("cd" * 32)
+rc, out = run(ks, "keys", *KARGS)
+check(rc == 0 and len(ks.puts) == 1 and sum(1 for (_, k) in ks.objects if k.startswith(K)) == 2,
+      f"a new identity is a new encrypted copy, and the older copy stays (rc={rc})")
+ks.puts.clear()
+rc, out = run(ks, "keys", "--identities", IDS, "--pubkey", PUB_SO, "--recipient", FPR)
+check(rc == 1 and ks.puts == [] and "is not in" in out,
+      f"a public key file that is not the pinned fingerprint is refused, nothing uploaded (rc={rc})")
+rc, out = run(ks, "keys", "--identities", IDS, "--pubkey", PUB_SO, "--recipient", FPR_SO)
+check(rc == 1 and ks.puts == [] and "no usable encryption subkey" in out,
+      f"a key that cannot encrypt is refused, nothing uploaded (rc={rc})")
+with open(os.path.join(IDS, "12", "handle"), "w") as f:
+    f.write("SPONSOR: someone\n")
+_, _, kname = off.identities_object(IDS)
+kf = FakeS3(fail_names={kname})
+rc, out = run(kf, "keys", *KARGS)
+check(rc == 1 and "FAILED" in out, f"a failed upload fails the run (rc={rc})")
+subprocess.run(["gpgconf", "--homedir", GH, "--kill", "all"], capture_output=True)
+shutil.rmtree(GH, ignore_errors=True)
+
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)
