@@ -142,6 +142,12 @@ try:
 except Exception as e:
     check(False, f"the board (/api/state) shows live fold claims: state() raised {e!r}")
 
+code, bd = server.block_detail(3)
+fcb = (bd or {}).get("fold_claim") or {}
+check(code == 200 and fcb.get("result") == "3-4" and fcb.get("handle") == "alice" and fcb.get("expires_in", 0) > 0,
+      "a block inside a claimed pair reports it as fold_claim on /api/block/<n>, for its page")
+check((server.block_detail(9)[1] or {}).get("fold_claim") is None, "a block in no claimed pair has no fold_claim")
+
 server._fold_claims["1-2"]["at"] -= server.FOLD_CLAIM_TTL + 1
 check("1-2" in offered(), "an expired claim puts its pair back on offer")
 check(fclaim(SK_B, PK_B, "1-2", handle="bob")[0] == 200, "...and another key can then claim it")

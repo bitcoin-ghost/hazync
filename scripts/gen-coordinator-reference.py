@@ -54,7 +54,7 @@ ROUTES = {
         "`?prover=<handle>` keeps only ranges that prover proved; `404` for an unknown handle. `ETag`/`304`.",
     "GET /api/block/<height>":
         "Everything about one block: proofs covering it, who anchored it, a live claim, a public sponsor. "
-        "`400` unless the segment is 1-9 digits; `404` above the chain tip.",
+        "`400` unless the segment is 1-9 digits; `404` above the chain tip. A live fold claim covering the block is `fold_claim` (#333).",
     "GET /api/sponsor":
         "Sponsorship settings: `open`, `max_blocks`, `payments` (always `false`), `priced`, `bands`, "
         "`btc_usd`, `name_max`. See `docs/SPONSORSHIP.md`.",

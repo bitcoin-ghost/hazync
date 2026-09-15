@@ -2213,8 +2213,15 @@ def block_detail(n):
     if 0 < n <= spine_hi:
         seg = next((sg for sg in spine_segments_cached() if sg["lo"] <= n <= sg["hi"]), None)
         anchored_by = seg["handle"] if seg else None
+    # #333: a live fold claim covering this block, so its page can say it is being folded right now. Read fresh here
+    # because a fold claim lasts a minute and the site refreshes /api/state only about once a minute.
+    fc = next(({"result": k, "lo": v["lo"], "hi": v["hi"], "elapsed": int(now - v["at"]),
+                "expires_in": max(0, int(FOLD_CLAIM_TTL - (now - v["at"]))),
+                "handle": v["handle"] if (v["pubkey"] or "").lower() not in blk else "[removed]"}
+               for k, v in sorted(live_fold_claims(now).items(), key=lambda kv: kv[1]["hi"] - kv[1]["lo"])
+               if v["lo"] <= n <= v["hi"]), None)
     return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
-                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
+                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "fold_claim": fc, "anchored_by": anchored_by,
                  "sponsor": sponsor,
                  # A paid sponsorship keeps this block for the sponsor bot: normal workers are never offered it.
                  "held": ({"sponsorship": hold[0]["id"], "since": int(now - (hold[0]["paid_at"] or now))}
