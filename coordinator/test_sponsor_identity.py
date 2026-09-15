@@ -22,6 +22,7 @@ import time
 CONTROL = "--control" in sys.argv
 
 os.environ["COORD_DB"] = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+os.environ["ROTATE_ENABLED"] = "1"      # #311: rotation is off by default; the handle rule on rotate is tested with it on
 os.environ["COORD_SPINE"] = tempfile.mkdtemp(prefix="spine_")
 os.environ["COORD_PROOFS"] = tempfile.mkdtemp(prefix="proofs_")
 os.environ["VERIFY_MODE"] = "mock"

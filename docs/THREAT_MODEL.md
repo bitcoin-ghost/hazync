@@ -145,13 +145,13 @@ All untrusted.
   model"). Cost: latency.
 - **Whoever controls a rented host** can read `$HAZYNC_HOME/key.hex` (mode 600 guards it from other users,
   not from root). With that key they can submit and fold as the contributor, beat the contributor's claims,
-  and **rotate the key to one they hold**
+  and, on a coordinator that turns rotation on, **rotate the key to one they hold**
   ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). `rotate()` requires signatures from the old
   and the new key over `rotate_message(old, new, ts)` within `ROTATE_MAX_SKEW`, and the thief can make both.
-  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated",
-  and nothing removes or overrides a rotation: no revocation path, no `DELETE FROM rotations`. Attribution
-  moves for good, short of an operator editing the database by hand. Proofs and their verification are
-  unaffected.
+  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated", and
+  nothing removes a rotation. So since #311 `/api/rotate` answers `410` unless the operator sets
+  `ROTATE_ENABLED=1`; nobody had rotated on the public board. A stolen key can no longer move attribution. It
+  can still submit and fold under the owner's name. Proofs and their verification are unaffected.
 - **Sponsor bot pods** receive a per-sponsorship key (`SPONSOR_BOT.md`, "Identities"), and SSH to them runs
   with `StrictHostKeyChecking=no` because pods reuse addresses with new host keys. An on-path attacker could
   impersonate a pod. Blast radius: spend within the bot's caps, and attribution of sponsored blocks; every
@@ -394,9 +394,9 @@ Each verified against the tree or GitHub on 2026-09-14.
    and counted apart, so unsigned claims under a key cannot use up its signed cap or re-take wait; unsigned claims
    stay accepted until `CLAIM_REQUIRE_SIG=1`, which needs a worker release that signs. Many fresh keys are not
    limited, and there is no per-address cap behind the web box (§5). The effect on the board is not measured.
-8. **Key rotation cannot be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311). One
-   rotation per old key, a second is `409`, and nothing removes one, so a stolen `key.hex` moves attribution
-   permanently (§4).
+8. ✅ **Fixed: a stolen key could move attribution for good** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311).
+   Key rotation is off unless `ROTATE_ENABLED=1`, so a stolen `key.hex` cannot move anyone's blocks. Turning
+   rotation on brings the risk back, since a rotation still cannot be undone (§4).
 9. ✅ **Fixed: the worker searched the current directory for a prover** —
    [#312](https://github.com/bitcoin-ghost/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
    beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, and takes the bare name `host` only beside the

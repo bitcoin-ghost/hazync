@@ -93,18 +93,11 @@ an identity whose key died with a deleted machine, and nothing can recover them.
 
 ### Moved to a new box, or rebuilt one?
 
-If you still have the old `key.hex`, move its blocks onto the new machine's identity:
+Copy your old `~/.hazync` folder (`key.hex` and `handle`) onto the new machine. The same identity can
+prove from several boxes at once, and your blocks stay with that key.
 
-```
-./hazync rotate /path/to/old/key.hex
-```
-
-Both keys sign one message, so this can neither take someone else's blocks nor push yours onto them.
-The old secret is read locally to produce that signature and is never transmitted; the coordinator only
-ever sees two public keys and two signatures. Your totals merge and the leaderboard shows one row.
-
-The old key is not retired. If you forgot a box somewhere and it is still proving, its work resolves
-onto your current identity rather than being lost.
+`hazync rotate`, which moved one key's blocks onto another, is switched off on the public coordinator
+(#311): anyone holding a copy of your `key.hex` could have used it to move your blocks to a key of their own.
 
 **Before you prove, run a pre-flight:**
 

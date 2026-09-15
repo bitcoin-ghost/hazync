@@ -995,6 +995,11 @@ def verify_sig(pubkey_hex, sig_hex, message: bytes) -> bool:
 ROTATE_MSG_VERSION = "hazync-rotate-v1"
 ROTATE_MAX_SKEW    = float(os.environ.get("ROTATE_MAX_SKEW", "300"))  # seconds either side of our clock
 ROTATE_MAX_DEPTH   = 32   # cycle/runaway guard; a real contributor rotates a handful of times at most
+# #311: rotation is OFF unless the operator turns it on. Whoever holds a copy of key.hex can sign both halves of a
+# rotation, so an open endpoint let a stolen key move a contributor's attribution for good. Nobody had ever rotated
+# on the public board (0 rows on 2026-09-15), proving from a new box is copying key.hex, and a lost key could never
+# rotate anyway because the old key must sign.
+ROTATE_ENABLED     = os.environ.get("ROTATE_ENABLED", "0") == "1"
 
 def rotate_message(old_pk: str, new_pk: str, ts) -> bytes:
     """The exact bytes both keys sign. Lowercased and integer-truncated so the client and the server
@@ -1188,6 +1193,9 @@ def rotate(body):
     The old key is NOT retired. A still-running box that nobody has stopped keeps submitting happily
     and its work resolves forward to the head, which is the failure-free outcome; retiring it would
     turn a forgotten worker into silent data loss."""
+    if not ROTATE_ENABLED:
+        return 410, {"error": "key rotation is switched off on this coordinator (#311). To prove from a new box, "
+                              "copy your key.hex there; your blocks stay with that key."}
     old  = (body.get("old_pubkey") or "").strip().lower()
     new  = (body.get("new_pubkey") or "").strip().lower()
     s_old, s_new = body.get("sig_old", ""), body.get("sig_new", "")
