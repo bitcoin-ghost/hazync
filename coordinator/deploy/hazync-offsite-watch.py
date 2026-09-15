@@ -46,7 +46,11 @@ DRILL_USER = os.environ.get("OFFSITE_DRILL_USER", "hazync")
 LAG_ALERT = int(os.environ.get("OFFSITE_LAG_ALERT_SECS", "900"))
 REALERT = int(os.environ.get("OFFSITE_REALERT_SECS", "21600"))
 LOG_REALERT = int(os.environ.get("OFFSITE_LOG_REALERT_SECS", "3600"))
-GRACE = int(os.environ.get("OFFSITE_PROOF_GRACE_SECS", "1800"))
+# A receipt counts as missing only after it has missed a whole hourly mirror cycle. `copy` skips
+# receipts younger than 120 s, so one written just before or during a run waits up to an hour for the
+# next; at 1800 the 07:00 UTC summary (~23 min before the :23 run) flagged those almost every morning
+# (2026-09-15: 68 "missing", every one uploaded by the next run).
+GRACE = int(os.environ.get("OFFSITE_PROOF_GRACE_SECS", "7200"))
 
 TITLES = {
     "litestream-down": "Litestream is not running",

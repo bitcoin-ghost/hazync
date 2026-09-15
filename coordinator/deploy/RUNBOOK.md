@@ -375,7 +375,7 @@ Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contribu
 | Litestream crashes | high | `dropins/litestream-alert.conf` |
 | Litestream is not running; the newest ledger change in R2 is over 15 min old; R2 cannot be listed | high, re-sent every 6 h, one low RECOVERED | `hazync-offsite-watch.timer` (every 10 min) |
 | Litestream logs WARN/ERROR lines | default, at most one push an hour | `hazync-offsite-watch.timer` |
-| Daily at 08:00 UK time: receipts in R2 vs disk, the mirror's 24 h, ledger lag, and a **restore drill** | low if all good, high if not | `hazync-offsite-summary.timer` |
+| Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, and a **restore drill** | low if all good, high if not | `hazync-offsite-summary.timer` |
 
 The restore drill restores the ledger from R2 into `/var/lib/hazync/restore-drill`, checks integrity,
 compares it with the live ledger, and deletes it. Priorities come from `ALERT_PRIORITY` / `ALERT_TAGS`
