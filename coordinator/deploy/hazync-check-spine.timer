@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the Hazync genesis proof against Bitcoin every 10 minutes
+
+[Timer]
+OnCalendar=*:02/10
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

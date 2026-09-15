@@ -1,0 +1,21 @@
+# Integrity check 1 from the WEB box: the genesis proof the public is served at api.hazync.org verifies, and its tip
+# is Bitcoin's block at that height according to an explorer. Shares no machine with the coordinator, so it still
+# speaks if the coordinator box is compromised or dead. Explorers publish no chainwork: the coordinator's own check
+# compares that against our archive node.
+[Unit]
+Description=Hazync integrity (off-box): the public genesis proof verifies and matches Bitcoin
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HAZYNC_VERIFY=/usr/local/bin/hazync-verify
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-spine-remote /usr/local/sbin/hazync-check-spine --url https://api.hazync.org --reference https://mempool.space/api --reference https://blockstream.info/api
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=600
