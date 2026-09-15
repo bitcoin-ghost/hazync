@@ -127,7 +127,8 @@ ROUTES = {
         "`BEAT_SKEW`. Only the assignee of a live claim may beat it, and not past `CLAIM_MAX`. Rejected "
         "beats are logged (`log_beat_rejection`).",
     "POST /api/rotate":
-        "Key rotation (#113): both `old_pubkey` and `new_pubkey` sign `hazync-rotate-v1:<old>:<new>:<ts>` "
+        "Off by default: `410` unless `ROTATE_ENABLED=1` (#311). Key rotation (#113): both `old_pubkey` and "
+        "`new_pubkey` sign `hazync-rotate-v1:<old>:<new>:<ts>` "
         "(`rotate_message`), `ts` within `ROTATE_MAX_SKEW`. Refuses keys on the moderation list, an old key "
         "that already rotated (`409`) and cycles. Records an edge in `rotations`; `vranges` and "
         "`submissions` are not rewritten, the old key keeps working, and its work resolves to the head. "
@@ -205,6 +206,8 @@ ENV = {
     "server:COORD_ALLOW_UNSIGNED": "If set and no ed25519 library is present, `verify_sig` accepts "
                                    "everything. Development only.",
     "server:ROTATE_MAX_SKEW": "Allowed distance in seconds between a rotation's `ts` and server time.",
+    "server:ROTATE_ENABLED": "`1` turns on `POST /api/rotate`. Default `0`: rotation answers `410`, because a stolen "
+                             "`key.hex` can sign both halves of a rotation (#311).",
     "server:COORD_ALLOW_MOCK": "Required for `VERIFY_MODE=mock` to accept anything.",
     "server:FRONTIER_CACHE_TTL": "Seconds the frontier chain is cached (single-flight).",
     "server:FRONTIER_SETTLE": "Seconds a verified cover of frontier+1 must predate the frontier snapshot before "

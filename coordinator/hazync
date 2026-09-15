@@ -3,7 +3,7 @@
 hazync — Proof Party contributor CLI.
 
   hazync id                 # create/show your signing identity (ed25519)
-  hazync rotate <key.hex>   # move an older key's blocks onto this box's identity (both keys sign)
+  hazync rotate <key.hex>   # move an older key's blocks onto this box's identity (both keys sign; off unless the coordinator sets ROTATE_ENABLED=1, #311)
   hazync pick               # show the board frontier (does not claim anything)
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification

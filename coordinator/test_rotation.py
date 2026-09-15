@@ -20,6 +20,7 @@ os.environ["COORD_DB"] = _tmp.name
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
 _modf = tempfile.NamedTemporaryFile(prefix="modblock_", suffix=".txt", delete=False); _modf.close()
 os.environ["MOD_BLOCK_FILE"] = _modf.name
+os.environ["ROTATE_ENABLED"] = "1"      # #311: off by default; these checks are about rotation when it is on
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server
 
@@ -210,6 +211,24 @@ with open(_modf.name, "w") as f:
     f.write(a.pk + "\n")
 code, _ = do_rotate(a, b)
 check(code == 403, f"a blocked key cannot rotate away from a takedown (got {code})")
+
+# ---------------------------------------------------------------- switched off by default (#311) --
+# A stolen key.hex can sign both halves of a rotation, so the endpoint refuses unless ROTATE_ENABLED=1.
+reset()
+a, b = Key(), Key()
+add_range(a.pk, 0, 99)
+server.ROTATE_ENABLED = False
+code, body = do_rotate(a, b)
+server.ROTATE_ENABLED = True
+check(code == 410, f"with rotation off, a correctly signed rotation is refused with 410 (got {code})")
+check("switched off" in (body or {}).get("error", ""), "...and the refusal says rotation is switched off")
+check(server.resolve_pubkey(a.pk) == a.pk and not server.rotation_map(), "...and nothing is recorded")
+import subprocess
+_env = {k: v for k, v in os.environ.items() if k != "ROTATE_ENABLED"}
+_p = subprocess.run([sys.executable, "-c", "import server; print('ROTATE_ENABLED', server.ROTATE_ENABLED)"],
+                    cwd=os.path.dirname(os.path.abspath(__file__)), env=_env, capture_output=True, text=True, timeout=60)
+check("ROTATE_ENABLED False" in _p.stdout,
+      f"rotation is OFF when ROTATE_ENABLED is unset (got {_p.stdout.strip()[-60:]!r} {_p.stderr.strip()[-200:]!r})")
 
 # ---------------------------------------------------------------- teardown ------------------------
 for _f in (_tmp.name, _modf.name):
