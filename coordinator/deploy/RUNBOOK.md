@@ -342,6 +342,7 @@ ledger only (`BACKUP_REMOTE_DB_ONLY=1`) to the web box. These now run beside it:
 |---|---|---|---|
 | Proof receipts, singles and folds (`proof_*.bin`) | `hazync-offsite-proofs.timer`, hourly: `hazync-offsite-proofs.py copy`, then `check` | `hazync-proofs/proofs-<first 8 of METHOD_ID>/` | up to ~1 h |
 | The spine (`spine.bin` + `spine.json`) | `hazync-offsite-spine.timer`, every 10 min: `hazync-offsite-proofs.py spine --verify /usr/local/bin/hazync-verify` | `hazync-proofs/spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}`, one pair per height, never overwritten | up to ~10 min |
+| Sponsor signing identities (`/var/lib/hazync/sponsor-bot/identities/`), **encrypted** | `hazync-offsite-keys.timer`, hourly: `hazync-offsite-proofs.py keys --pubkey /etc/hazync/backup/sponsor-keys.pub.asc --recipient 777FE81F…` | `hazync-proofs/sponsor-keys/identities-<sha256 of the tar, 16 hex>.tar.gpg`, one per state, never overwritten | up to ~1 h |
 | Ledger | Litestream (`litestream.service` + `dropins/litestream-*.conf`, config from `litestream.yml.example`) | `hazync-ledger/coordinator/` | ~1 s |
 
 - **The spine is the one proof that cannot be rebuilt cheaply**: losing it means re-absorbing every block from
@@ -384,7 +385,8 @@ Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contribu
 | Litestream is not running; the newest ledger change in R2 is over 15 min old; R2 cannot be listed | high, re-sent every 6 h, one low RECOVERED | `hazync-offsite-watch.timer` (every 10 min) |
 | Litestream logs WARN/ERROR lines | default, at most one push an hour | `hazync-offsite-watch.timer` |
 | The spine copy fails: `spine.bin` and `spine.json` still disagree after 5 reads, `hazync-verify` rejects it, or the upload fails | high | `hazync-offsite-spine.service` `OnFailure=` |
-| Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, a **restore drill**, and the newest **spine copy** downloaded, checked against its sha256, verified with `hazync-verify`, and compared with the live spine (a problem over `OFFSITE_SPINE_LAG_SECS`, 1 h, behind) | low if all good, high if not | `hazync-offsite-summary.timer` |
+| The sponsor keys copy fails: the public key file is not the pinned fingerprint or cannot encrypt, encryption fails, the ciphertext is not to that key, or the upload fails | high | `hazync-offsite-keys.service` `OnFailure=` |
+| Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, a **restore drill**, and the newest **spine copy** downloaded, checked against its sha256, verified with `hazync-verify`, and compared with the live spine (a problem over `OFFSITE_SPINE_LAG_SECS`, 1 h, behind), and whether the current **sponsor identities** have a copy in R2 encrypted to the pinned key (a problem once unchanged for `OFFSITE_KEYS_GRACE_SECS`, 2 h, with no copy; or when the key expires within `OFFSITE_KEY_EXPIRY_WARN_DAYS`, 60) | low if all good, high if not | `hazync-offsite-summary.timer` |
 
 The restore drill restores the ledger from R2 into `/var/lib/hazync/restore-drill`, checks integrity,
 compares it with the live ledger, and deletes it. Priorities come from `ALERT_PRIORITY` / `ALERT_TAGS`
@@ -405,6 +407,23 @@ install -o hazync -g hazync -m 644 spine_1-<hi>.json /var/lib/hazync/spine/spine
 ```
 
 The spine workers then absorb forward from `hi`; the receipts they need are in R2 too.
+
+**Sponsor keys: encrypted, and only the operator can decrypt them.** The coordinator holds only the operator's
+PUBLIC key (`/etc/hazync/backup/sponsor-keys.pub.asc`, `gpg --armor --export 777FE81F…`), pinned by fingerprint
+in `hazync-offsite-keys.service`. The secret key never goes on the box or into R2.
+
+- **Restore** (on the machine that holds the operator's secret key), newest object under `sponsor-keys/`:
+  ```bash
+  gpg --decrypt identities-<hash>.tar.gpg > identities.tar
+  tar -tvf identities.tar                       # identities/<sponsorship>/key.hex and handle
+  # on the coordinator, with the sponsor bot stopped:
+  tar -xf identities.tar -C /var/lib/hazync/sponsor-bot/ && chown -R hazync:hazync /var/lib/hazync/sponsor-bot/identities
+  find /var/lib/hazync/sponsor-bot/identities -type d -exec chmod 700 {} + -o -type f -exec chmod 600 {} +
+  ```
+- **Before the key expires** (the daily summary warns 60 days ahead): `gpg --quick-set-expire 777FE81F… 2y` and
+  `gpg --quick-set-expire 777FE81F… 2y '*'` on the operator's machine, then re-export the public key over
+  `/etc/hazync/backup/sponsor-keys.pub.asc`.
+- **Copy the keys by hand:** `/usr/local/sbin/hazync-offsite-proofs keys --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --pubkey /etc/hazync/backup/sponsor-keys.pub.asc --recipient 777FE81F8CC077FD3D08055E852C2B3190F5B928`
 
 > ⚠️ **`backup.sh` does nothing until it is scheduled.** Shipping the script is not a backup — pick one of
 > the two schedulers below and confirm a snapshot actually lands (`ls $HZ_HOME/backups`). Until then the

@@ -4,6 +4,7 @@
     hazync-offsite-proofs.py copy    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
     hazync-offsite-proofs.py check   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs
     hazync-offsite-proofs.py spine   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify
+    hazync-offsite-proofs.py keys    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --pubkey KEY.asc --recipient FINGERPRINT
 
 A receipt is immutable once written, so the mirror only ever ADDS: a file already present remotely is
 never re-uploaded or deleted. Keys are namespaced by guest id (`proofs-<first 8 of METHOD_ID>/`),
@@ -20,6 +21,14 @@ uploaded only if spine.bin matches the sha256 and size in spine.json (the two fi
 after the other, so a read can land between them) and, with --verify, hazync-verify accepts it. The
 .bin goes up before the .json, so a .json in R2 means its pair is complete. Exits 1 on any failure.
 
+`keys` copies the sponsor bot's signing identities (`identities/<sponsorship>/key.hex` + `handle`), ENCRYPTED.
+Each sponsorship proves under its own ed25519 key; lose one and that sponsor's blocks can never be signed
+for again. The directory is packed into a tar that is byte-identical for identical contents, encrypted
+with gpg to the encryption subkey of --recipient, and uploaded as `sponsor-keys/identities-<sha256 of the
+tar, 16 hex>.tar.gpg`, never overwritten. Only the PUBLIC key is on the box: --pubkey is imported into a
+scratch keyring each run and refused unless its primary fingerprint is --recipient, and the ciphertext is
+refused unless its packets name that key's encryption subkey. Neither this box nor R2 can decrypt a copy.
+
 Why not rclone: Ubuntu 24.04's rclone 1.60 reports every upload to R2 as `501 NotImplemented` (the
 PUT succeeds; the HEAD it sends afterwards is refused), and with that worked around it still never
 queued a transfer against the flat ~97,000-file proofs directory (measured 2026-09-15).
@@ -31,8 +40,11 @@ import hashlib
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -229,14 +241,132 @@ def spine_copy(s3, bucket, prefix, spine_dir, verify):
     return 0 if ok else 1
 
 
+def identities_tar(src):
+    """(tar bytes, file count) of every regular file under src as identities/<relative path>. Sorted, with
+    mtime and owner zeroed, so identical contents give identical bytes and the sha256 names the state."""
+    names = []
+    for root, _, files in os.walk(src):
+        for n in files:
+            p = os.path.join(root, n)
+            if os.path.isfile(p) and not os.path.islink(p):
+                names.append(os.path.relpath(p, src).replace(os.sep, "/"))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for rel in sorted(names):
+            with open(os.path.join(src, rel), "rb") as f:
+                data = f.read()
+            ti = tarfile.TarInfo("identities/" + rel)
+            ti.size, ti.mtime, ti.mode, ti.uid, ti.gid, ti.uname, ti.gname = len(data), 0, 0o600, 0, 0, "", ""
+            tar.addfile(ti, io.BytesIO(data))
+    return buf.getvalue(), len(names)
+
+
+def identities_object(src):
+    tar, count = identities_tar(src)
+    return tar, count, f"identities-{hashlib.sha256(tar).hexdigest()[:16]}.tar.gpg"
+
+
+def gpg(home, args, data=None):
+    p = subprocess.run(["gpg", "--batch", "--no-tty", "--homedir", home] + list(args), input=data,
+                       capture_output=True, timeout=120)
+    return p.returncode, p.stdout, p.stderr.decode(errors="replace")
+
+
+def gpg_stop(home):
+    subprocess.run(["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True, timeout=30)
+
+
+def recipient_keys(home, pubkey, fpr):
+    """Import pubkey into the scratch keyring `home`. ([usable encryption subkey ids], expiry, None), or
+    ([], None, why). The primary fingerprint must be fpr: a swapped public key file is refused."""
+    rc, _, err = gpg(home, ["--import", pubkey])
+    if rc != 0:
+        return [], None, f"cannot import {pubkey}: {err.strip()[-200:]}"
+    rc, out, _ = gpg(home, ["--with-colons", "--list-keys", fpr])
+    if rc != 0:
+        return [], None, f"{fpr} is not in {pubkey}"
+    primary, primary_exp, subs, last = [], None, [], None
+    for line in out.decode(errors="replace").splitlines():
+        f = line.split(":")
+        if f[0] == "pub":
+            last, primary_exp = "pub", (int(f[6]) if f[6] else None)
+        elif f[0] == "sub":
+            last = "sub"
+            if "e" in f[11] and f[1] not in ("e", "r"):           # validity: e = expired, r = revoked
+                subs.append((f[4], int(f[6]) if f[6] else None))
+        elif f[0] == "fpr" and last == "pub":
+            primary.append(f[9].upper())
+    if fpr.upper() not in primary:
+        return [], None, f"{fpr} is not in {pubkey}"
+    if not subs:
+        return [], None, f"{fpr} has no usable encryption subkey"
+    sub_exp = None if any(e is None for _, e in subs) else max(e for _, e in subs)
+    ends = [e for e in (primary_exp, sub_exp) if e]
+    return [k.upper() for k, _ in subs], (min(ends) if ends else None), None
+
+
+def packet_keyids(home, cipher):
+    """The key ids a gpg ciphertext is encrypted to, read from its packets (no secret key needed)."""
+    with tempfile.NamedTemporaryFile(suffix=".gpg") as f:
+        f.write(cipher)
+        f.flush()
+        _, out, err = gpg(home, ["--list-packets", f.name])
+    text = out.decode(errors="replace") + err
+    return sorted(set(k.upper() for k in re.findall(r"pubkey enc packet: version \d+, algo \d+, keyid ([0-9A-Fa-f]{16})", text)))
+
+
+def keys_copy(s3, bucket, prefix, src, pubkey, fpr):
+    if not os.path.isdir(src):
+        log(f"keys: NOT uploaded, no identities directory at {src}")
+        return 1
+    tar, count, name = identities_object(src)
+    home = tempfile.mkdtemp(prefix="hzk-")
+    try:
+        subs, _, why = recipient_keys(home, pubkey, fpr)
+        if why:
+            log(f"keys: NOT uploaded, {why}")
+            return 1
+        remote = list_remote(s3, bucket, prefix)
+        copies = sum(1 for k in remote if k.endswith(".tar.gpg"))
+        if name in remote:
+            log(f"keys: {prefix}{name} ({count} files) already in R2; {copies} encrypted copies there")
+            return 0
+        rc, cipher, err = gpg(home, ["--trust-model", "always", "--recipient", fpr, "--encrypt"], data=tar)
+        if rc != 0 or not cipher:
+            log(f"keys: NOT uploaded, gpg --encrypt failed: {err.strip()[-300:]}")
+            return 1
+        if not set(packet_keyids(home, cipher)) & set(subs):
+            log(f"keys: NOT uploaded, the ciphertext is not encrypted to an encryption subkey of {fpr}")
+            return 1
+        if b"identities/" in cipher:
+            log("keys: NOT uploaded, the ciphertext contains plaintext file names")
+            return 1
+        try:
+            s3.put_object(Bucket=bucket, Key=prefix + name, Body=io.BytesIO(cipher),
+                          ContentType="application/pgp-encrypted")
+        except Exception as e:
+            log(f"keys: FAILED {prefix}{name}: {e!r}")
+            return 1
+        ok = list_remote(s3, bucket, prefix).get(name) == len(cipher)
+        log(f"keys: {prefix}{name} ({count} files, encrypted to {', '.join(subs)}) uploaded, "
+            f"{'complete' if ok else 'INCOMPLETE'} in R2; {copies + 1} encrypted copies there")
+        return 0 if ok else 1
+    finally:
+        gpg_stop(home)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check", "spine"])
+    ap.add_argument("mode", choices=["copy", "check", "spine", "keys"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
     ap.add_argument("--spine", default=os.environ.get("COORD_SPINE", "/var/lib/hazync/spine"))
     ap.add_argument("--verify", help="spine: hazync-verify binary; a copy it rejects is not uploaded")
+    ap.add_argument("--identities", default=os.environ.get("SPONSOR_IDENTITIES", "/var/lib/hazync/sponsor-bot/identities"))
+    ap.add_argument("--pubkey", help="keys: the recipient's armored PUBLIC key file")
+    ap.add_argument("--recipient", help="keys: the recipient's primary key fingerprint (pinned)")
     ap.add_argument("--repo", default=os.environ.get("HZ_REPO", "/opt/hazync"))
     ap.add_argument("--min-age", type=float, default=120, help="skip proofs modified in the last N seconds")
     ap.add_argument("--threads", type=int, default=16)
@@ -255,6 +385,11 @@ def main(argv=None, client=None):
 
     if a.mode == "spine":
         return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify)
+
+    if a.mode == "keys":
+        if not a.pubkey or not a.recipient:
+            raise SystemExit("keys needs --pubkey and --recipient")
+        return keys_copy(s3, bucket, "sponsor-keys/", a.identities, a.pubkey, a.recipient)
 
     prefix = f"proofs-{method_prefix(a.repo)}/"
     t0 = time.monotonic()

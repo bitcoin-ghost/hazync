@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly: encrypted copy of the Hazync sponsor signing identities to Cloudflare R2
+
+[Timer]
+OnCalendar=*-*-* *:37:00 UTC
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

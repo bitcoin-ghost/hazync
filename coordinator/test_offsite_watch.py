@@ -77,6 +77,49 @@ with open(os.path.join(W.SPINE, "spine.bin"), "wb") as f:
 with open(os.path.join(W.SPINE, "spine.json"), "wb") as f:
     f.write(SPINE_JSON)
 GOOD_SPINE = {"spine-37987b85/spine_1-1000.bin": SPINE_BYTES, "spine-37987b85/spine_1-1000.json": SPINE_JSON}
+
+# sponsor identities and a throwaway operator key (real gpg: a missing gpg fails the checks, never skips them)
+import subprocess
+GH = tempfile.mkdtemp(prefix="gw")          # short path: gpg-agent's socket path has a length limit
+
+
+def g(*args, data=None):
+    return subprocess.run(["gpg", "--batch", "--no-tty", "--homedir", GH, "--pinentry-mode", "loopback",
+                           "--passphrase", ""] + list(args), input=data, capture_output=True)
+
+
+def new_key(uid):
+    g("--quick-gen-key", uid, "ed25519", "sign", "1d")
+    fprs = [ln.split(":")[9] for ln in g("--with-colons", "--list-keys", uid).stdout.decode().splitlines()
+            if ln.startswith("fpr")]
+    fpr = fprs[0] if fprs else "0" * 40
+    g("--quick-add-key", fpr, "cv25519", "encr", "1d")
+    pub = os.path.join(tmp, fpr[-8:] + ".pub.asc")
+    with open(pub, "wb") as f:
+        f.write(g("--armor", "--export", fpr).stdout)
+    return fpr, pub
+
+
+FPR, PUB = new_key("hazync backup test <backup@test.invalid>")
+FPR2, PUB2 = new_key("someone else <other@test.invalid>")
+W.SPONSOR_IDENTITIES = os.path.join(tmp, "identities")
+os.makedirs(os.path.join(W.SPONSOR_IDENTITIES, "trial"))
+HOURS_AGO = time.time() - 3 * 3600
+for rel, body in (("trial/key.hex", "ab" * 32), ("trial/handle", "SPONSOR: Hazync trial\n")):
+    p = os.path.join(W.SPONSOR_IDENTITIES, rel)
+    with open(p, "w") as f:
+        f.write(body)
+    os.utime(p, (HOURS_AGO, HOURS_AGO))
+W.SPONSOR_PUBKEY, W.SPONSOR_RECIPIENT, W.KEYS_GRACE, W.KEY_EXPIRY_WARN_DAYS = PUB, FPR, 7200, 0
+ID_TAR, _, _kname = M.identities_object(W.SPONSOR_IDENTITIES)
+KEYS_NAME = "sponsor-keys/" + _kname
+
+
+def encrypt_to(fpr):
+    return g("--trust-model", "always", "--recipient", fpr, "--encrypt", data=ID_TAR).stdout
+
+
+GOOD_KEYS = {KEYS_NAME: encrypt_to(FPR)}
 os.makedirs(W.PROOFS)
 os.makedirs(os.path.join(W.REPO, "reproduce"))
 with open(os.path.join(W.REPO, "reproduce", "METHOD_ID"), "w") as f:
@@ -90,6 +133,7 @@ if CONTROL:
     W.restore_drill = lambda run, now: (True, "Restore drill: ok")
     W.mirror_section = lambda run: (True, "Hourly mirror: ok")
     W.spine_section = lambda now, client=None, mirror=None: (True, "Spine in R2: ok")
+    W.keys_section = lambda now, client=None, mirror=None: (True, "Sponsor keys in R2: ok")
     print("CONTROL: the watcher sees no problems and every summary check says ok -- the checks below MUST fail")
 
 NOW = time.time()
@@ -228,8 +272,9 @@ for n in ("proof_1.bin", "proof_2.bin"):
 
 
 class FakeS3:
-    def __init__(self, names, spine=None):
+    def __init__(self, names, spine=None, keys=None):
         self.data = dict(GOOD_SPINE if spine is None else spine)
+        self.data.update(GOOD_KEYS if keys is None else keys)
         self.objects = {f"proofs-37987b85/{n}": len(b"receipt " + n.encode()) for n in names}
         self.objects.update({k: len(v) for k, v in self.data.items()})
 
@@ -319,6 +364,30 @@ real_verify, W.VERIFY = W.VERIFY, os.path.join(tmp, "no-such-verify")
 t, prio, body = daily(FakeS3(ALL))
 check(prio == "high" and "cannot verify it" in body, f"no hazync-verify on the box is a problem, not a silent pass ({t})")
 W.VERIFY = real_verify
+
+# 8. the sponsor keys: the current identities have a copy in R2, encrypted to the pinned operator key
+t, prio, body = daily(FakeS3(ALL))
+check(t == "Hazync backups: all good" and "Sponsor keys in R2: 2 identity file(s), current copy in R2" in body,
+      f"a current copy encrypted to the operator's key is all good ({t})")
+t, prio, body = daily(FakeS3(ALL, keys={}))
+check(prio == "high" and "have no copy in R2" in body, f"identities unchanged for hours with no copy in R2 are a problem ({t})")
+fresh = os.path.join(W.SPONSOR_IDENTITIES, "trial", "handle")
+os.utime(fresh, None)
+t, prio, body = daily(FakeS3(ALL, keys={}))
+check(t == "Hazync backups: all good" and "goes in the next hourly run" in body,
+      f"identities changed minutes ago are waiting for the next hourly run, not missing ({t})")
+os.utime(fresh, (HOURS_AGO, HOURS_AGO))
+t, prio, body = daily(FakeS3(ALL, keys={KEYS_NAME: encrypt_to(FPR2)}))
+check(prio == "high" and "not encrypted to" in body, f"a copy encrypted to some other key is a problem ({t})")
+W.SPONSOR_PUBKEY = PUB2
+t, prio, body = daily(FakeS3(ALL))
+check(prio == "high" and "is not in" in body, f"a public key file that is not the pinned fingerprint is a problem ({t})")
+W.SPONSOR_PUBKEY, W.KEY_EXPIRY_WARN_DAYS = PUB, 60
+t, prio, body = daily(FakeS3(ALL))
+check(prio == "high" and "expires in" in body, f"an encryption key expiring within 60 days is a problem ({t})")
+W.KEY_EXPIRY_WARN_DAYS = 0
+subprocess.run(["gpgconf", "--homedir", GH, "--kill", "all"], capture_output=True)
+shutil.rmtree(GH, ignore_errors=True)
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:

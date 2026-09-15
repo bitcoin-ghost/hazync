@@ -16,7 +16,9 @@ it clears. The hourly receipt mirror pages through its own OnFailure=, so it is 
 the ledger copy is, and a RESTORE DRILL: the ledger is restored from R2 into a scratch file,
 integrity-checked, compared with the live ledger, and deleted. A copy nobody has restored is a hope.
 It also downloads the newest SPINE copy from R2, checks its bytes against its sha256, runs
-hazync-verify on it, and says how far it is behind the live spine.
+hazync-verify on it, and says how far it is behind the live spine. And it checks that the current sponsor
+identities have an encrypted copy in R2, encrypted to the pinned operator key, and that key is not about to
+expire.
 All good -> low priority; anything wrong -> high.
 
 Messages go out through hazync-alert.sh with ALERT_PRIORITY / ALERT_TAGS.
@@ -32,9 +34,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
-ALERT = os.environ.get("HAZYNC_ALERT", "/usr/local/bin/hazync-alert.sh")
+ALERT =os.environ.get("HAZYNC_ALERT", "/usr/local/bin/hazync-alert.sh")
 STATE_DIR = os.environ.get("OFFSITE_STATE_DIR", "/var/lib/hazync-offsite")
 LS_CONFIG = os.environ.get("LITESTREAM_CONFIG", "/etc/litestream.yml")
 DB = os.environ.get("COORD_DB", "/var/lib/hazync/coordinator.db")
@@ -58,6 +61,12 @@ SPINE = os.environ.get("COORD_SPINE", "/var/lib/hazync/spine")
 VERIFY = os.environ.get("HAZYNC_VERIFY", "/usr/local/bin/hazync-verify")
 # The spine is copied every 10 min, so a newest copy an hour older than the live spine means the copy stopped.
 SPINE_LAG_ALERT = int(os.environ.get("OFFSITE_SPINE_LAG_SECS", "3600"))
+SPONSOR_IDENTITIES = os.environ.get("SPONSOR_IDENTITIES", "/var/lib/hazync/sponsor-bot/identities")
+SPONSOR_PUBKEY = os.environ.get("OFFSITE_KEYS_PUBKEY", "/etc/hazync/backup/sponsor-keys.pub.asc")
+SPONSOR_RECIPIENT = os.environ.get("OFFSITE_KEYS_RECIPIENT", "777FE81F8CC077FD3D08055E852C2B3190F5B928")
+# The keys copy runs hourly, so identities that changed in the last two hours may simply be waiting for it.
+KEYS_GRACE = int(os.environ.get("OFFSITE_KEYS_GRACE_SECS", "7200"))
+KEY_EXPIRY_WARN_DAYS = int(os.environ.get("OFFSITE_KEY_EXPIRY_WARN_DAYS", "60"))
 
 TITLES = {
     "litestream-down": "Litestream is not running",
@@ -317,13 +326,57 @@ def spine_section(now, client=None, mirror=None):
     return not problems, line
 
 
+def keys_section(now, client=None, mirror=None):
+    """The current sponsor identities have a copy in R2, encrypted to the pinned operator key, and that
+    key is not about to expire. The box cannot decrypt the copy, so it checks the recipient in its packets."""
+    m = mirror or load_mirror()
+    parts = open(KEYS).read().split()
+    s3 = client if client is not None else m.make_client(parts[0], parts[1], parts[2], 8)
+    prefix = "sponsor-keys/"
+    remote = m.list_remote(s3, BUCKET, prefix)
+    copies = sum(1 for k in remote if k.endswith(".tar.gpg"))
+    _, count, name = m.identities_object(SPONSOR_IDENTITIES)
+    newest = max((os.stat(os.path.join(r, f)).st_mtime for r, _, fs in os.walk(SPONSOR_IDENTITIES) for f in fs),
+                 default=0)
+    problems, expires = [], None
+    home = tempfile.mkdtemp(prefix="hzk-")
+    try:
+        subs, expires, why = m.recipient_keys(home, SPONSOR_PUBKEY, SPONSOR_RECIPIENT)
+        if why:
+            problems.append(why)
+        if name in remote:
+            state = "current copy in R2"
+            ids = m.packet_keyids(home, s3.get_object(Bucket=BUCKET, Key=prefix + name)["Body"].read())
+            if subs and not set(ids) & set(subs):
+                problems.append(f"the current copy is not encrypted to {SPONSOR_RECIPIENT} "
+                                f"(it is encrypted to {', '.join(ids) or 'nothing readable'})")
+        elif now - newest < KEYS_GRACE:
+            state = f"changed {ago(now - newest)} ago, goes in the next hourly run"
+        else:
+            state = "current identities NOT in R2"
+            problems.append(f"the current identities ({count} files, unchanged for {ago(now - newest)}) "
+                            f"have no copy in R2")
+        if expires is not None and expires - now < KEY_EXPIRY_WARN_DAYS * 86400:
+            problems.append(f"the encryption key expires in {ago(max(0, expires - now))}: extend it "
+                            f"(gpg --quick-set-expire) and re-export the public key to {SPONSOR_PUBKEY}")
+    finally:
+        m.gpg_stop(home)
+        shutil.rmtree(home, ignore_errors=True)
+    exp = f", key expires in {ago(expires - now)}" if expires else ""
+    line = f"Sponsor keys in R2: {count} identity file(s), {state}, {copies} encrypted copies{exp}"
+    for p in problems:
+        line += f"\n  ⚠ {p}"
+    return not problems, line
+
+
 def summary(run=run, send=send, now=None, client=None, mirror=None):
     now = time.time() if now is None else now
     checks = (("proofs", lambda: proofs_section(now, client, mirror)),
               ("hourly mirror", lambda: mirror_section(run)),
               ("ledger", lambda: ledger_section(run, now)),
               ("restore drill", lambda: restore_drill(run, now)),
-              ("spine", lambda: spine_section(now, client, mirror)))
+              ("spine", lambda: spine_section(now, client, mirror)),
+              ("sponsor keys", lambda: keys_section(now, client, mirror)))
     sections = []
     for name, fn in checks:
         try:
