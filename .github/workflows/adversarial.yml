@@ -112,6 +112,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_spine_fold.py --control
+      - name: Fold claims (#333)
+        # POST /api/foldclaim grants, conflicts, caps, expires and releases; /api/foldable offers 32 and hides claimed
+        # pairs; only keys with proven work may claim; a valid fold is accepted from anyone; the board shows the
+        # claims; and the worker folds unclaimed whenever it cannot get a claim.
+        run: cd coordinator && python3 test_fold_claims.py
+      - name: Fold claims POSITIVE CONTROL (claims ignored, as before #333 — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_fold_claims.py --control
       - name: A lost claim response orphans no block (#268)
         # The real worker against the real handler, with the first claim's response dropped after the
         # server committed it. The retry must get the same block back, not orphan it for an hour.

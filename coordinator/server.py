@@ -212,6 +212,15 @@ CLAIM_REQUIRE_SIG = os.environ.get("CLAIM_REQUIRE_SIG", "0") == "1"
 # test_claim_signed.py --control sets this to show its checks can fail: every claim is then unsigned, as before
 # #310. Never set it otherwise.
 _CONTROL_CLAIMS_UNSIGNED = False
+# #333: folding stays unallocated underneath (submit accepts a valid fold from anyone), but a folder may reserve the
+# pair it is about to fold for FOLD_CLAIM_TTL seconds, so the other folders are not offered it. Measured before this
+# (2026-09-15): three folders drawing at random from the same 8 candidates threw away 1,809 valid folds in 14 h,
+# 10-25% of each folder's work, at ~14 s of GPU a fold (p50 on an A40).
+FOLDABLE_DEFAULT = 32                                          # candidates offered when ?limit= is absent (was 8)
+FOLD_CLAIM_TTL = int(os.environ.get("FOLD_CLAIM_TTL", "60"))   # ~4x a measured fold, covering fetches and submit
+FOLD_CLAIM_CAP = int(os.environ.get("FOLD_CLAIM_CAP", "2"))    # live fold claims one key may hold at once
+# Set only by test_fold_claims.py --control: fold claims are granted but ignored, as before #333.
+_CONTROL_FOLD_CLAIMS_IGNORED = False
 # A claim is LIVE (it holds its block) while it beats within CLAIM_TTL, or has never beaten and is inside
 # CLAIM_GRACE, and is younger than CLAIM_MAX. One definition, for the blocks that are held and for the cap.
 LIVE_CLAIM_SQL = ("status='claimed' AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
@@ -1313,7 +1322,7 @@ def _tree_node(lo, hi):
     w = hi - lo + 1
     return w > 0 and (w & (w - 1)) == 0 and (lo - 1) % w == 0
 
-def foldable(limit=8):
+def foldable(limit=FOLDABLE_DEFAULT):
     """Sibling pairs of the canonical fold tree whose parent does not exist yet (#37).
 
     THIS USED TO OFFER ANY ADJACENT PAIR, AND THAT DOES NOT CONVERGE. Every fold produces a range that
@@ -1343,6 +1352,7 @@ def foldable(limit=8):
         floor = int(head.get("hi", 0)) if head else 0
     except (TypeError, ValueError, AttributeError):
         floor = 0
+    claimed = live_fold_claims()          # #333: pairs another folder holds for the next minute
     with _lock:
         c = db()
         rows = c.execute("SELECT id, lo, hi FROM vranges ORDER BY lo").fetchall()
@@ -1366,11 +1376,117 @@ def foldable(limit=8):
                 continue                  # siblings must be the same width
             if (lo, s["hi"]) in have:
                 continue                  # parent already exists
-            out.append({"left": r["id"], "right": s["id"], "lo": lo, "hi": s["hi"],
-                        "result": (str(lo) if lo == s["hi"] else f"{lo}-{s['hi']}")})
+            res = str(lo) if lo == s["hi"] else f"{lo}-{s['hi']}"
+            if res in claimed:
+                continue                  # #333: another folder holds this pair; it is offered again when that lapses
+            out.append({"left": r["id"], "right": s["id"], "lo": lo, "hi": s["hi"], "result": res})
             if len(out) >= limit:
                 return out
     return out
+
+_fold_lock = threading.Lock()
+_fold_claims = {}       # #333: result id -> {"pubkey", "handle", "nonce", "lo", "hi", "at"}. In memory on purpose.
+_proven_keys = set()    # keys seen with verified work. Only ever grows, so a hit never needs the database again.
+
+
+def _prune_fold_claims(now):
+    """Drop fold claims older than FOLD_CLAIM_TTL. Caller holds _fold_lock."""
+    for k in [k for k, v in _fold_claims.items() if now - v["at"] >= FOLD_CLAIM_TTL]:
+        del _fold_claims[k]
+
+
+def live_fold_claims(now=None):
+    """{result: claim} for fold claims inside FOLD_CLAIM_TTL.
+
+    Kept in memory, not in the database: a claim lives for a minute, and a restart that forgets them only means a
+    minute of the old behaviour (folders may pick the same pair), never a wrong board. Empty under the --control
+    switch, so the tests can show that hiding claimed pairs is what they measure."""
+    now = time.time() if now is None else now
+    with _fold_lock:
+        _prune_fold_claims(now)
+        return {} if _CONTROL_FOLD_CLAIMS_IGNORED else dict(_fold_claims)
+
+
+def release_fold_claim(rid):
+    """A verified fold ends its claim at once, so the board does not show it for the rest of the minute."""
+    with _fold_lock:
+        _fold_claims.pop(rid, None)
+
+
+def key_has_proven_work(pk):
+    """True if `pk` has at least one verified submission: a proof, a fold or a spine step.
+
+    #333: only such a key may hold fold claims. Keys cost nothing to make and a claim hides a pair from every other
+    folder, so without this a handful of throwaway keys could claim every candidate once a minute and starve
+    folding. A real proof per key is the price of that. A key without one still folds exactly as before, unclaimed.
+    A key that has just rotated (#113) counts from its own first verified work, not its old key's."""
+    if pk in _proven_keys:
+        return True
+    c = db()
+    try:
+        hit = c.execute("SELECT 1 FROM submissions WHERE pubkey=? AND verified=1 LIMIT 1", (pk,)).fetchone()
+    finally:
+        c.close()
+    if hit:
+        _proven_keys.add(pk)
+    return bool(hit)
+
+
+def fold_claim(body):
+    """Reserve one foldable pair for FOLD_CLAIM_TTL seconds (#333). Advisory, like a block claim.
+
+    `submit` still accepts a valid fold from anyone, claimed or not, so a bug here can waste effort but never refuse
+    good work. What a claim does is hide the pair from `GET /api/foldable`, so the other folders pick something else
+    instead of folding the same pair and losing the race at submit.
+
+    Signed by its key over `foldclaim:<result>:<nonce>:<ts>`, and only a key with proven work may hold one
+    (key_has_proven_work), at most FOLD_CLAIM_CAP at a time. The holder asking again, such as a retry after a lost
+    response (#268), gets its claim back with the time it has left; a claim is never extended."""
+    pk = str(body.get("pubkey", ""))
+    rid = str(body.get("result", ""))
+    handle = clean_handle(body.get("handle"), handle_cap(pk))
+    if handle_refused(handle, pk): return 400, {"error": "that handle is reserved — please pick another"}
+    if HAVE_ED and not is_hex(pk, 32): return 400, {"error": "pubkey must be 32-byte hex (ed25519)"}
+    nonce = str(body.get("nonce") or "")[:64]
+    if not nonce:
+        return 400, {"error": "a fold claim needs a nonce"}
+    try:
+        ts = int(body.get("ts"))
+    except (TypeError, ValueError):
+        return 400, {"error": "a fold claim needs an integer ts (unix seconds)"}
+    now = time.time()
+    if abs(now - ts) > BEAT_SKEW:
+        return 400, {"error": f"fold claim timestamp outside +/-{BEAT_SKEW}s — check your clock"}
+    rng = parse_any_range(rid)
+    if not rng or rng[1] <= rng[0] or not _tree_node(rng[0], rng[1]):
+        return 400, {"error": "result must be the fold of two sibling ranges, as offered by /api/foldable"}
+    if not verify_sig(pk, str(body.get("sig") or ""), f"foldclaim:{rid}:{nonce}:{ts}".encode()):
+        return 403, {"error": "the fold claim signature does not match that pubkey"}
+    if not key_has_proven_work(pk):
+        return 403, {"error": "fold claims are for keys with proven work on the board: fold unclaimed, or prove a "
+                              "block first", "unproven": True}
+    with _lock:
+        c = db()
+        r = c.execute("SELECT status FROM ranges WHERE id=?", (rid,)).fetchone()
+        c.close()
+    if r and r["status"] == "verified":
+        return 409, {"error": "already proven", "result": rid}
+    with _fold_lock:
+        _prune_fold_claims(now)
+        cur = _fold_claims.get(rid)
+        if cur and cur["pubkey"] == pk:
+            left = max(0, int(FOLD_CLAIM_TTL - (now - cur["at"])))
+            return 200, {"ok": True, "result": rid, "ttl": FOLD_CLAIM_TTL, "expires_in": left}
+        if cur and not _CONTROL_FOLD_CLAIMS_IGNORED:
+            return 409, {"error": "another worker is folding this pair", "result": rid,
+                         "expires_in": max(0, int(FOLD_CLAIM_TTL - (now - cur["at"])))}
+        held = sum(1 for v in _fold_claims.values() if v["pubkey"] == pk)
+        if FOLD_CLAIM_CAP > 0 and held >= FOLD_CLAIM_CAP and not _CONTROL_FOLD_CLAIMS_IGNORED:
+            return 429, {"error": f"this key already holds {held} fold claims (at most {FOLD_CLAIM_CAP}): finish one, "
+                                  f"or fold this pair unclaimed", "open_fold_claims": held, "max": FOLD_CLAIM_CAP}
+        _fold_claims[rid] = {"pubkey": pk, "handle": handle, "nonce": nonce, "lo": rng[0], "hi": rng[1], "at": now}
+    return 200, {"ok": True, "result": rid, "ttl": FOLD_CLAIM_TTL, "expires_in": FOLD_CLAIM_TTL}
+
 
 FRONTIER_TTL = float(os.environ.get("FRONTIER_CACHE_TTL", "2"))
 # #324: how far past its TTL a background-refreshed entry may still be served. Beyond this the caller
@@ -2097,8 +2213,15 @@ def block_detail(n):
     if 0 < n <= spine_hi:
         seg = next((sg for sg in spine_segments_cached() if sg["lo"] <= n <= sg["hi"]), None)
         anchored_by = seg["handle"] if seg else None
+    # #333: a live fold claim covering this block, so its page can say it is being folded right now. Read fresh here
+    # because a fold claim lasts a minute and the site refreshes /api/state only about once a minute.
+    fc = next(({"result": k, "lo": v["lo"], "hi": v["hi"], "elapsed": int(now - v["at"]),
+                "expires_in": max(0, int(FOLD_CLAIM_TTL - (now - v["at"]))),
+                "handle": v["handle"] if (v["pubkey"] or "").lower() not in blk else "[removed]"}
+               for k, v in sorted(live_fold_claims(now).items(), key=lambda kv: kv[1]["hi"] - kv[1]["lo"])
+               if v["lo"] <= n <= v["hi"]), None)
     return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
-                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "anchored_by": anchored_by,
+                 "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "fold_claim": fc, "anchored_by": anchored_by,
                  "sponsor": sponsor,
                  # A paid sponsorship keeps this block for the sponsor bot: normal workers are never offered it.
                  "held": ({"sponsorship": hold[0]["id"], "since": int(now - (hold[0]["paid_at"] or now))}
@@ -2375,6 +2498,11 @@ def state(slim=False):
         claims.append(dict(lo=r["lo"], hi=r["hi"],
                            handle=(r["handle"] if (r["assignee"] or "").lower() not in blk else "[removed]"),
                            elapsed=int(now - (r["claimed_at"] or now)), stale=beat > CLAIM_TTL))
+    # #333: pairs a folder has reserved for the next minute, so the board can show folding in progress.
+    fold_claims = [dict(result=k, lo=v["lo"], hi=v["hi"],
+                        handle=(v["handle"] if (v["pubkey"] or "").lower() not in blk else "[removed]"),
+                        elapsed=int(now - v["at"]), expires_in=max(0, int(FOLD_CLAIM_TTL - (now - v["at"]))))
+                   for k, v in sorted(live_fold_claims(now).items(), key=lambda kv: kv[1]["lo"])]
     # Blocks parked after MAX_ATTEMPTS, plus how long the frontier has been stuck. Without this a stall
     # is invisible: the frontier is the lowest unproven block, so ONE bad block pins it while every other
     # signal stays green — `proven` keeps climbing as workers prove ahead of the gap, which is exactly
@@ -2543,7 +2671,7 @@ def state(slim=False):
                     "stalled_for": stalled_for,
                     "needs_attention": _attn, "why": _attn_why},
         "board": board, "leaderboard": leaders, "recent": recent,
-        "vranges": vranges, "claims": claims, "range_size": RANGE_SIZE,
+        "vranges": vranges, "claims": claims, "fold_claims": fold_claims, "range_size": RANGE_SIZE,
         "frontier_proof": frontier_proof(),
         "timeline": timeline(fr),
         "signatures": "ed25519" if HAVE_ED else "dev (no signature lib installed)",
@@ -3074,6 +3202,8 @@ def submit(body):
             _sponsor_mark_proven(c, v_lo, v_hi)           # a sponsorship now fully covered ends its hold
         c.commit(); c.close()
         _frontier_invalidate()        # #265: a new verified range can move the frontier
+        if ok:
+            release_fold_claim(rid)   # #333: a verified fold ends its claim now, not when the minute is up
     # `"ok": true` means the receipt verified and was accepted for THIS range — it does NOT mean the
     # range is genesis-anchored, and a client that reads it as "this proves the chain from genesis"
     # is wrong for every mid-chain receipt (which is most of them). Report the distinction instead of
@@ -3164,8 +3294,8 @@ class H(BaseHTTPRequestHandler):
                                     "reproduce": "reproduce/METHOD_ID",
                                     "source_sha256": source_sha256()})
         if p == "/api/foldable":                           # adjacent pairs whose fold does not exist yet
-            try: n = max(1, min(32, int(parse_qs(urlparse(self.path).query).get("limit", ["8"])[0])))
-            except Exception: n = 8
+            try: n = max(1, min(32, int(parse_qs(urlparse(self.path).query).get("limit", [str(FOLDABLE_DEFAULT)])[0])))
+            except Exception: n = FOLDABLE_DEFAULT
             pairs = foldable(n)
             return self._send(200, {"pairs": pairs, "count": len(pairs)})
         if p == "/api/spine":                              # the headline artifact: genesis -> N in one receipt
@@ -3282,7 +3412,7 @@ class H(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
-        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate", "/api/sponsor"):
+        if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate", "/api/sponsor", "/api/foldclaim"):
             return self._send(404, {"error": "not found"})
         if not rate_ok(self._client_ip()):
             return self._send(429, {"error": "rate limit — slow down"})
@@ -3296,7 +3426,8 @@ class H(BaseHTTPRequestHandler):
         if isinstance(body, dict) and ua.startswith("hazync-worker/"):
             body["_client_version"] = ua[len("hazync-worker/"):][:32]
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
-              "/api/beat": beat, "/api/rotate": rotate, "/api/sponsor": sponsor_request}[p]
+              "/api/beat": beat, "/api/rotate": rotate, "/api/sponsor": sponsor_request,
+              "/api/foldclaim": fold_claim}[p]
         code, obj = fn(body)
         if p == "/api/beat" and code != 200:
             try:
