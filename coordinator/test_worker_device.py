@@ -125,6 +125,46 @@ check("gpu smoke       : ok" in r.stdout, "run-workers: a host that proves block
 subprocess.run(["bash", os.path.join(rw, "run-workers.sh"), "1", "--stop"], env=dict(env, HAZYNC_HOST=good),
                capture_output=True, text=True, timeout=60)
 
+# 3. #312: with HAZYNC_HOST unset, the prover is looked for only where the contributor or the release put
+#    it. A worker started in a directory someone else can write to must not run what was planted there, and
+#    the bare name `host` is taken only beside the CLI. A planted binary can print the canonical guest id,
+#    so selftest and run-workers.sh cannot catch it later; the search itself has to refuse.
+if CONTROL:
+    hz._CONTROL_HOST_SEARCH_CWD = True
+    print("CONTROL: the pre-#312 host search (current directory, bare `host` anywhere) -- the #312 checks MUST fail")
+
+
+def planted_exe(path):
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\necho planted\n")
+    os.chmod(path, 0o755)
+    return str(path)
+
+
+saved_host, saved_path, saved_cwd = os.environ.pop("HAZYNC_HOST", None), os.environ["PATH"], os.getcwd()
+os.environ["PATH"] = tempfile.mkdtemp(prefix="hz_path_")      # nothing hazync-named on PATH
+planted = tempfile.mkdtemp(prefix="hz_cwd_")
+for n in ("hazync-host-x86_64-linux-gnu-cuda", "host"):
+    planted_exe(os.path.join(planted, n))
+os.chdir(planted)
+try:
+    got = hz._find_host()
+    check(got == "", f"#312: a prover planted in the current directory is not run (got {got!r})")
+    home_host = planted_exe(hz.HOME / "host")
+    got = hz._find_host()
+    check(got == "", f"#312: the bare name `host` is not taken from $HAZYNC_HOME (got {got!r})")
+    os.remove(home_host)
+    (hz.HOME / "bin").mkdir(parents=True, exist_ok=True)
+    wanted = planted_exe(hz.HOME / "bin" / "hazync-host-cuda")
+    got = hz._find_host()
+    check(got == wanted, f"#312: a hazync-named prover in $HAZYNC_HOME/bin is still found (got {got!r})")
+finally:
+    os.chdir(saved_cwd)
+    os.environ["PATH"] = saved_path
+    if saved_host is not None:
+        os.environ["HAZYNC_HOST"] = saved_host
+    hz._CONTROL_HOST_SEARCH_CWD = False
+
 # #281 follow-up: the coordinator half of the same failure this file is about. A claim black hole and
 # a frontier frozen behind an unseamable cover both end as "the board stops and every signal stays
 # green"; this file already owns the worker side, so the coordinator side runs from here and the two

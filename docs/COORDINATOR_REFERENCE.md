@@ -163,7 +163,7 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 |---|---|---|---|
 | `HAZYNC_HOME` | `os.path.expanduser('~/.hazync')` | constant `HOME` | Identity (`key.hex`, `handle`) and receipts. A different directory is a different contributor. |
 | `COORD_URL` | `DEFAULT_COORD` | constant `COORD` | Coordinator base URL. |
-| `HAZYNC_HOST` | `''` | `_find_host()` | Prover binary. Unset: looked for beside the CLI, in `$HAZYNC_HOME/bin`, `$HAZYNC_HOME`, the working directory, then `hazync-*` names on `PATH`. |
+| `HAZYNC_HOST` | `''` | `_find_host()` | Prover binary. Unset: looked for beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, then `hazync-*` names on `PATH`. Never the working directory, and the bare name `host` only beside the CLI (#312). |
 | `WITNESS_DIR` | `str(HOME / 'witnesses')` | constant `WITNESS` | Legacy per-block witnesses for the replay path. |
 | `BUNDLE_DIR` | `str(HOME / 'bundles')` | constant `BUNDLES` | Bundles fetched from the coordinator for the bridge path. |
 | `HAZYNC_ALLOW_DEV_WRITES` | — | `_guard_dev_writes()` | `1`, `true` or `yes` lets a source checkout (`VERSION = "dev"`) POST to the default public coordinator. |

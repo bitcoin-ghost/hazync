@@ -82,6 +82,9 @@ VERSION = "dev"
 UA      = f"hazync-worker/{VERSION}"
 
 
+_CONTROL_HOST_SEARCH_CWD = False    # test-only: the pre-#312 search (cwd, bare `host` anywhere), so a control can fail
+
+
 def _find_host():
     """Locate the prover binary without making the contributor state a path.
 
@@ -99,8 +102,16 @@ def _find_host():
     names = ["hazync-host-x86_64-linux-gnu-cuda", "hazync-host-cuda",
              "hazync-host-x86_64-linux-gnu", "hazync-host", "host"]
     here = pathlib.Path(__file__).resolve().parent
-    for d in (here, HOME / "bin", HOME, pathlib.Path.cwd()):
+    # Only where the contributor or the release put it: beside the CLI, $HAZYNC_HOME/bin, $HAZYNC_HOME.
+    # NOT the current directory (#312): a worker started from a directory someone else can write to
+    # would run whatever sat there under one of these names, and a planted binary can print the
+    # canonical guest id, so no later check catches it. The bare name `host` is taken only beside the
+    # CLI; anywhere else it is too generic to trust (on PATH it is BIND's lookup tool, below).
+    dirs = [here, HOME / "bin", HOME] + ([pathlib.Path.cwd()] if _CONTROL_HOST_SEARCH_CWD else [])
+    for d in dirs:
         for n in names:
+            if n == "host" and d != here and not _CONTROL_HOST_SEARCH_CWD:
+                continue
             p = d / n
             if p.is_file() and os.access(p, os.X_OK):
                 return str(p)
