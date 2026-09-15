@@ -272,7 +272,10 @@ def site(proof=PROOF, head_sha=None, ref=TIP, ref2=TIP, ref_code=200, ref2_code=
 
 
 def spine_remote(refs=("/ref1", "/ref2")):
-    args = [sys.executable, SPINE, "--url", BASE, "--verify", FAKE_VERIFY]
+    # Pin the fixture's guest id, as spine_local does. Without it check-spine.py falls back to --repo's default,
+    # /opt/hazync, so on any machine with a real checkout there (a coordinator) the real canonical id is compared
+    # with the fixture's and four of these checks fail (measured on the proof-party server, 2026-09-15).
+    args = [sys.executable, SPINE, "--url", BASE, "--verify", FAKE_VERIFY, "--method-id", MID]
     for r in refs:
         args += ["--reference", BASE + r]
     return run(args, {"FAKE_VERIFY_OUT": verify_out()})
