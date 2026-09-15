@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-verify every stored Hazync proof nightly
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

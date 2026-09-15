@@ -1,0 +1,24 @@
+# Integrity check 1 on the coordinator: the genesis proof verifies and ends on Bitcoin's real chain (block hash and
+# chainwork from our archive node), and has not stalled. Root, because bitcoind's datadir and cookie are root-only.
+# hazync-run-check pushes once, hourly while it lasts, and on recovery; OnFailure= only fires if that push fails.
+[Unit]
+Description=Hazync integrity: the genesis proof verifies and ends on Bitcoin's real chain
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HZ_REPO=/opt/hazync
+Environment=COORD_SPINE=/var/lib/hazync/spine
+Environment=COORD_DB=/var/lib/hazync/coordinator.db
+Environment=HAZYNC_VERIFY=/usr/local/bin/hazync-verify
+Environment=HAZYNC_BITCOIN_DATADIR=/root/.bitcoin
+# Two runs (20 min) before the first push: a head read mid-write or a node restart clears on its own.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-spine /usr/local/sbin/hazync-check-spine
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=600

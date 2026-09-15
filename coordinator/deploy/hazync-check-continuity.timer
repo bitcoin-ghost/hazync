@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the continuity of Hazync block records every 10 minutes
+
+[Timer]
+OnCalendar=*:07/10
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

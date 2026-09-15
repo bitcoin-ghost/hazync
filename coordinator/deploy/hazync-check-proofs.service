@@ -1,0 +1,21 @@
+# Integrity check 2: every stored proof still hashes to the receipt that was accepted and still verifies to its
+# record. About 90 CPU-minutes for 103,992 files (measured 2026-09-15), so it runs at night, 4 workers, at the lowest
+# CPU and I/O priority, after the G1 retention check (03:47 UTC).
+[Unit]
+Description=Hazync integrity: stored proofs still hash and verify to their records
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=COORD_DB=/var/lib/hazync/coordinator.db
+Environment=COORD_PROOFS=/var/lib/hazync/proofs
+Environment=HAZYNC_HOST=/usr/local/bin/hazync-host
+Environment=CHECK_PROOFS_WORKERS=4
+Environment=CHECK_FAILS_BEFORE_ALERT=1
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-proofs /usr/local/sbin/hazync-check-proofs
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=4h

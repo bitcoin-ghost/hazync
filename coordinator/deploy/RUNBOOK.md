@@ -327,6 +327,42 @@ sudo systemctl daemon-reload && sudo systemctl enable --now hazync-watchdog.time
 `ExecStart=/bin/false` + `OnFailure=hazync-alert@%n.service` proves the systemd wiring end to end.
 `coordinator/deploy/test-alerting.sh` (CI) covers the scripts only.
 
+## Integrity checks
+
+Every proof and spine step is verified once, when it is submitted. These re-check what the board claims, and push to
+the phone once when a check starts failing, at most hourly while it lasts, and once when it recovers
+(`hazync-run-check.sh`). Exit codes: 0 holds, 1 integrity failure, 2 could not check. Both 1 and 2 push.
+
+| Check | Where | When | Fails when |
+|---|---|---|---|
+| `check-spine.py` | coordinator | every 10 min | the genesis proof does not verify, is not from the canonical guest, disagrees with its head record, ends on a block hash or chainwork our archive node does not have at that height, or has not advanced for 2 h while block hi+1 is proven |
+| `check-spine.py --url` | web box | every 10 min | the copy `api.hazync.org` serves does not verify, or its tip is not mempool.space's block at that height (blockstream.info as fallback). Explorers publish no chainwork |
+| `check-continuity.py` | coordinator | every 10 min | a block from 1 to the spine's tip has no record of its own, a seam does not link (tip hash or boundary digest), block 1 does not start at genesis, or the last block does not end on the spine's tip |
+| `check-proofs.py` | coordinator | nightly 04:17 UTC | a stored proof no longer hashes to the receipt that was accepted, no longer verifies, or verifies to a different range than its record |
+
+Measured before switching them on (2026-09-15): the genesis proof verifies in 50 ms and its tip hash and chainwork
+matched our node at block 41,539; the continuity walk took 0.24 s over 41,539 blocks with no gaps; one stored proof
+verifies in 34-54 ms, so the nightly pass over 103,992 files is about 90 CPU-minutes.
+
+```bash
+# coordinator (root), from a checkout at the merged commit. Uses hazync-alert.sh and alert.env from "Alerts".
+install -m 755 coordinator/check-spine.py            /usr/local/sbin/hazync-check-spine
+install -m 755 coordinator/check-continuity.py       /usr/local/sbin/hazync-check-continuity
+install -m 755 coordinator/check-proofs.py           /usr/local/sbin/hazync-check-proofs
+install -m 755 coordinator/deploy/hazync-run-check.sh /usr/local/sbin/hazync-run-check
+install -m 644 coordinator/deploy/hazync-check-{spine,continuity,proofs}.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl start hazync-check-spine.service hazync-check-continuity.service   # first runs: read them in the journal
+systemctl enable --now hazync-check-spine.timer hazync-check-continuity.timer hazync-check-proofs.timer
+
+# web box (root). hazync-verify from a signed release: check SHA256SUMS.txt.asc and the file's sha256 first.
+install -m 755 check-spine.py      /usr/local/sbin/hazync-check-spine
+install -m 755 hazync-run-check.sh /usr/local/sbin/hazync-run-check
+install -m 644 hazync-check-spine-remote.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl start hazync-check-spine-remote.service
+systemctl enable --now hazync-check-spine-remote.timer
+```
+
 ## Backup & restore
 
 The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (the re-verifiable STARK

@@ -1,0 +1,17 @@
+# Integrity check 3: every block from 1 to the spine's tip has its own record, and the records link up (tip hash and
+# boundary digest), ending on the genesis proof's tip. Reads the database read-only.
+[Unit]
+Description=Hazync integrity: blocks 1 to the spine's tip link up, one by one
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=COORD_DB=/var/lib/hazync/coordinator.db
+Environment=COORD_SPINE=/var/lib/hazync/spine
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-continuity /usr/local/sbin/hazync-check-continuity
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=600

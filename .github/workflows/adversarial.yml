@@ -257,6 +257,11 @@ jobs:
         # production retention: that needs the coordinator's real DB and proof store, which CI has
         # not got and should not have. Its job is to prove the gate can still fail.
         run: ./coordinator/test-check-retention.sh
+      - name: Integrity checks detect a bad genesis proof, a broken seam, a corrupt proof, and alert once (positive controls)
+        # check-spine.py, check-continuity.py and check-proofs.py run unattended on the coordinator and the web box and
+        # push to a phone. Each must pass a good fixture and FAIL every planted fault; the alert wrapper must push once,
+        # hourly while a failure lasts, and on recovery. Fake verifier, node and host: real proofs are not in CI.
+        run: python3 coordinator/test-integrity-checks.py
       - name: A wide range must be a fold, the genesis seed included (#281)
         # Was not in CI, so nothing would have noticed it breaking. The [0..hi] genesis seed used to be
         # exempt from the fold rule, the one way left to put coverage on the board with no per-block
