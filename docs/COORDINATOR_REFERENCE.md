@@ -27,7 +27,7 @@ Applies to every route, from `H` in `server.py`:
 
 | path | query | handler | status codes | purpose |
 |---|---|---|---|---|
-| `/api/state` | `slim` | `state_cached()` | 200 | Board snapshot: `progress`, `blocked` (the frontier's next block and why), the board window, `leaderboard`, `recent` submissions, `claims`, `frontier_proof`, `timeline`, `signatures`, `verify_mode`. `?slim=1` omits `vranges`. Coalesced for `STATE_CACHE_TTL` (`state_cached`). |
+| `/api/state` | `slim` | `state_cached()` | 200 | Board snapshot: `progress`, `blocked` (the frontier's next block and why), the board window, `leaderboard`, `recent` submissions, `claims`, `fold_claims` (#333), `frontier_proof`, `timeline`, `signatures`, `verify_mode`. `?slim=1` omits `vranges`. Coalesced for `STATE_CACHE_TTL` (`state_cached`). |
 | `/api/vranges` | — | `vranges_cached()` | 200, 304 | The full verified-range index (`lo`, `hi`, `handle`, `fold`, `proof` link), built by `build_vranges`. Single-flight cache for `VRANGES_CACHE_TTL`; weak `ETag`, `304` on `If-None-Match`. |
 | `/api/blockstatus` | `prover` | `known_handles_cached()`, `block_status_cached()` | 200, 304, 404 | Every block's furthest state as runs `[lo, hi, status]` (3 proven, 4 folded, 5 anchored). `?prover=<handle>` keeps only ranges that prover proved; `404` for an unknown handle. `ETag`/`304`. |
 | `/api/block/<height>` | — | `block_detail()` | 200, 400, 404 | Everything about one block: proofs covering it, who anchored it, a live claim, a public sponsor. `400` unless the segment is 1-9 digits; `404` above the chain tip. |
@@ -37,7 +37,7 @@ Applies to every route, from `H` in `server.py`:
 | `/api/sponsors` | — | `sponsors_public()` | 200 | Public table of sponsorships whose status is paid, proving or proven and whose settled amount covers the minimum (`SPONSOR_PUBLIC_SQL`). |
 | `/api/pick` | — | `pick()` | 200, 404 | Advice only, claims nothing: the first block after the frontier that is not proven here or at a peer, not held, not (on the first pass) being proven at a peer, and has a witness. `404` if none. |
 | `/api/meta` | — | `expected_method_id()`, `frontier_hi()`, `source_sha256()` | 200 | Pre-flight: `method_id` (the `method-id` output of `HAZYNC_HOST`), `frontier`, `reproduce` (`reproduce/METHOD_ID`) and `source_sha256` of the running `server.py`. |
-| `/api/foldable` | `limit` | `foldable()` | 200 | Sibling pairs of the canonical fold tree whose parent is not yet verified. `?limit=` clamped to 1-32, default 8. |
+| `/api/foldable` | `limit` | `foldable()` | 200 | Sibling pairs of the canonical fold tree whose parent is not yet verified. `?limit=` clamped to 1-32, default 32 (`FOLDABLE_DEFAULT`; 8 before #333). A pair under a live fold claim is left out. |
 | `/api/spine` | — | `spine_head()` | 200, 404 | Spine head metadata (`lo`, `hi`, `out_tip`, `out_leaves`, `range_work`, `sha256`, `bytes`, `handle`, `pubkey`, `ts`); `404` before the first spine. |
 | `/api/spine/segments` | — | `spine_segments()`, `spine_head()` | 200 | Who absorbed each block into the spine, as runs keyed on pubkey (#244). Cached for `VRANGES_CACHE_TTL`. |
 | `/api/spine/proof` | — | `spine_head()` | 200, 404 | The spine receipt bytes, served as `hazync-spine-1-<hi>.hzk`. Check with `hazync-verify`. |
@@ -56,6 +56,7 @@ Applies to every route, from `H` in `server.py`:
 | `/api/beat` | `range`, `pubkey`, `sig`, `ts` | `beat()` | `pk` over `f'{rid}:{ts}'.encode()` | 200, 400, 401, 403, 409 | Keep the caller's own claim alive. Signed over `<range>:<ts>` with `ts` as integer seconds within `BEAT_SKEW`. Only the assignee of a live claim may beat it, and not past `CLAIM_MAX`. Rejected beats are logged (`log_beat_rejection`). |
 | `/api/rotate` | `sig_old`, `sig_new`, `ts`, `handle`, `old_pubkey`, `new_pubkey` | `rotate()` | `old` over `msg`; `new` over `msg` | 200, 400, 403, 409 | Key rotation (#113): both `old_pubkey` and `new_pubkey` sign `hazync-rotate-v1:<old>:<new>:<ts>` (`rotate_message`), `ts` within `ROTATE_MAX_SKEW`. Refuses keys on the moderation list, an old key that already rotated (`409`) and cycles. Records an edge in `rotations`; `vranges` and `submissions` are not rewritten, the old key keeps working, and its work resolves to the head. Used by `hazync rotate`. |
 | `/api/sponsor` | `amount_sats`, `lo`, `hi`, `name` | `sponsor_request()` | **none** | 202, 400, 503 | Record a sponsorship request `{lo, hi, name, amount_sats}`. `503` unless `SPONSOR_OPEN=1`; `amount_sats` must reach the span's minimum. Charges nothing. Returns `202` with the private status token once; only its sha256 is stored. |
+| `/api/foldclaim` | `pubkey`, `result`, `handle`, `ts`, `nonce`, `sig` | `fold_claim()` | `pk` over `f'foldclaim:{rid}:{nonce}:{ts}'.encode()` | 200, 400, 403, 409, 429 | Reserve one pair offered by `/api/foldable` for `FOLD_CLAIM_TTL` seconds, so other folders are not offered it (#333). Signed by its key over `foldclaim:<result>:<nonce>:<ts>` within `BEAT_SKEW`. Only a key with a verified submission may hold one (`403` with `unproven` otherwise), at most `FOLD_CLAIM_CAP` at a time (`429`); `409` if another key holds the pair or it is already proven. The holder asking again gets its claim back, never extended. Held in memory. Advisory: `submit` accepts a valid fold from anyone, and a verified fold releases its claim. |
 
 `OPTIONS` on any path: CORS pre-flight: `204` with `Access-Control-Allow-Origin: *`.
 
@@ -94,6 +95,8 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `CLAIM_OPEN_MAX` | `'4'` | constant `CLAIM_OPEN_MAX` | Live claims one key may hold at once; a further claim is refused with 429 until one is proven or lapses. `0` means no limit. |
 | `CLAIM_RETAKE_WAIT` | `'3600'` | constant `CLAIM_RETAKE_WAIT` | Seconds before a key may re-take a block its own claim let lapse without a heartbeat; other keys are offered it at once. `0` means straight away. |
 | `CLAIM_REQUIRE_SIG` | `'0'` | constant `CLAIM_REQUIRE_SIG` | `1` refuses claims that are not signed by their key (#310). Off by default: workers up to v0.21.4 do not sign claims. |
+| `FOLD_CLAIM_TTL` | `'60'` | constant `FOLD_CLAIM_TTL` | Seconds a fold claim (`POST /api/foldclaim`) holds its pair. Held in memory, so a restart forgets them (#333). |
+| `FOLD_CLAIM_CAP` | `'2'` | constant `FOLD_CLAIM_CAP` | Live fold claims one key may hold at once; a further one is refused with 429 (#333). |
 | `BEAT_SKEW` | `'120'` | constant `BEAT_SKEW` | Allowed distance in seconds between a beat's signed `ts` and server time. |
 | `MAX_ATTEMPTS` | `'3'` | constant `MAX_ATTEMPTS` | Failure count at which `/api/state` flags the frontier blocker as needing attention. |
 | `MAX_ENV_FAILURES` | `'12'` | constant `MAX_ENV_FAILURES` | Intended cap for environmental failures. ⚠ Read into a constant that nothing in the file uses. |

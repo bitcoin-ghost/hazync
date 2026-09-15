@@ -1291,6 +1291,44 @@ def cmd_run(args):
     cmd_prove([rng], claimed=not args, submit_leaves=bool(args) and _hi2 > _lo2)
     cmd_submit([rng])
 
+_FOLD_CLAIMS_UNSUPPORTED = False   # set once a coordinator that predates #333 answers /api/foldclaim with 404
+
+
+def claim_fold_pair(pairs, sk, pub, handle, post_fn=None):
+    """Pick a candidate at random and reserve it with POST /api/foldclaim (#333). -> the pair to fold, or None.
+
+    None only when every candidate is held by another folder or already folded, so the caller asks for a fresh list.
+    A fold claim is advisory, like a block claim, so whatever stops us getting one (a key with no proven work yet,
+    the per-key cap, a coordinator that predates fold claims, a proxy error) means folding UNCLAIMED, exactly as
+    before. A claim can make folding cheaper; it can never stop it. `post_fn` is injectable for the tests."""
+    global _FOLD_CLAIMS_UNSUPPORTED
+    post_fn = post_fn or post
+    left = list(pairs)
+    while left:
+        p = random.choice(left)
+        if _FOLD_CLAIMS_UNSUPPORTED:
+            return p
+        nonce, ts = os.urandom(16).hex(), int(time.time())
+        body = {"pubkey": pub, "handle": handle, "result": p["result"], "nonce": nonce, "ts": ts,
+                "sig": sk.sign(f"foldclaim:{p['result']}:{nonce}:{ts}".encode()).hex()}
+        try:
+            res = post_fn("/api/foldclaim", body)
+        except SystemExit:
+            return p                               # unreachable or a proxy error page: fold unclaimed
+        err = str(res.get("error", "")) if isinstance(res, dict) else ""
+        if isinstance(res, dict) and res.get("ok"):
+            return p
+        if err.strip().lower() in ("not found", "404"):
+            _FOLD_CLAIMS_UNSUPPORTED = True        # this coordinator predates #333: fold as before and stop asking
+            return p
+        if "another worker is folding" in err or "already proven" in err:
+            print(f"  {p['result']} is taken ({err}) — picking another pair", flush=True)
+            left.remove(p)
+            continue
+        return p                                   # unproven key, cap, clock skew, anything else: fold unclaimed
+    return None
+
+
 def cmd_fold(args):
     """Fold adjacent proven ranges into wider ones — a task in its own right, not a side effect (#37).
 
@@ -1329,9 +1367,13 @@ def cmd_fold(args):
             if not pairs:
                 print("nothing to fold — every adjacent pair on the board is already folded.")
                 break
-            # Choose among the candidates rather than always taking the first, so concurrent workers
-            # spread out without anything being allocated to them.
-            p = random.choice(pairs)
+            # Choose among the candidates at random, then reserve the pick for a minute so the other folders are
+            # not offered it (#333). Before this, three folders drawing from the same 8 candidates threw away
+            # 10-25% of their folds as "already proven".
+            p = claim_fold_pair(pairs, sk, pub, handle)
+            if p is None:
+                time.sleep(2)             # every candidate was taken by someone else: ask for a fresh list
+                continue
             lp, rp, res = p["left"], p["right"], p["result"]
             lf, rf = work / f"l_{lp}.bin", work / f"r_{rp}.bin"
             try:

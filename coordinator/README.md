@@ -111,9 +111,17 @@ into one with `fold-range`. You need no node of your own and no local witness da
   `hazync fold`. Not any adjacent pair: that does not converge, and on this board it once produced 581
   folds covering 96 blocks where a tree needs 95. Nothing starting at or below the spine's head is
   offered: the spine can never absorb it, so folding starts just above the spine and runs ahead of it.
-  Advisory and stateless: several candidates are returned so concurrent workers spread out without
-  anything being leased. A duplicate fold is wasteful, not incorrect — the loser's submission is
-  discarded as already proven, and folding is far cheaper than proving.
+  Up to 32 candidates are returned (8 before #333) so concurrent workers spread out, and a pair under a
+  live fold claim is left out. A duplicate fold is wasteful, not incorrect — the loser's submission is
+  discarded as already proven.
+- `POST /api/foldclaim` — reserve one offered pair for `FOLD_CLAIM_TTL` (60 s), signed over
+  `foldclaim:<result>:<nonce>:<ts>` (#333). Measured before it: three folders drawing from the same 8
+  candidates threw away 10-25% of their folds. Only a key with proven work may hold a fold claim, at most
+  `FOLD_CLAIM_CAP` (2) at a time, so throwaway keys cannot claim every pair and starve folding; `409` if
+  another key holds the pair. Advisory like a block claim: `submit` still accepts a valid fold from
+  anyone, a verified fold releases its claim at once, and live claims appear in `/api/state` as
+  `fold_claims`. Held in memory; a restart forgets them. The worker folds unclaimed whenever it cannot
+  get a claim.
 - `GET /api/spine` — metadata for the **genesis-anchored head**: how far it reaches, its out-tip,
   work, size and who last advanced it.
 - `GET /api/spine/proof` — the head receipt itself. This is the headline artifact: one file attesting

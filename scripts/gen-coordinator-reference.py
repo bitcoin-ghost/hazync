@@ -43,7 +43,7 @@ SOURCES = {
 ROUTES = {
     "GET /api/state":
         "Board snapshot: `progress`, `blocked` (the frontier's next block and why), the board window, "
-        "`leaderboard`, `recent` submissions, `claims`, `frontier_proof`, `timeline`, `signatures`, "
+        "`leaderboard`, `recent` submissions, `claims`, `fold_claims` (#333), `frontier_proof`, `timeline`, `signatures`, "
         "`verify_mode`. `?slim=1` omits `vranges`. Coalesced for `STATE_CACHE_TTL` (`state_cached`).",
     "GET /api/vranges":
         "The full verified-range index (`lo`, `hi`, `handle`, `fold`, `proof` link), built by "
@@ -75,7 +75,7 @@ ROUTES = {
         "(`reproduce/METHOD_ID`) and `source_sha256` of the running `server.py`.",
     "GET /api/foldable":
         "Sibling pairs of the canonical fold tree whose parent is not yet verified. `?limit=` clamped to "
-        "1-32, default 8.",
+        "1-32, default 32 (`FOLDABLE_DEFAULT`; 8 before #333). A pair under a live fold claim is left out.",
     "GET /api/spine":
         "Spine head metadata (`lo`, `hi`, `out_tip`, `out_leaves`, `range_work`, `sha256`, `bytes`, "
         "`handle`, `pubkey`, `ts`); `404` before the first spine.",
@@ -115,6 +115,13 @@ ROUTES = {
         "Submit a new spine head, signed over the receipt. `host verify-range` must pass (full genesis "
         "pin), then `verify-any` supplies `lo`/`hi`; `lo` must be 1 and `hi` must exceed the current head "
         "(`409` otherwise). Recorded as a `spine:1-<hi>` submission.",
+    "POST /api/foldclaim":
+        "Reserve one pair offered by `/api/foldable` for `FOLD_CLAIM_TTL` seconds, so other folders are not "
+        "offered it (#333). Signed by its key over `foldclaim:<result>:<nonce>:<ts>` within `BEAT_SKEW`. Only a key "
+        "with a verified submission may hold one (`403` with `unproven` otherwise), at most `FOLD_CLAIM_CAP` at a "
+        "time (`429`); `409` if another key holds the pair or it is already proven. The holder asking again gets its "
+        "claim back, never extended. Held in memory. Advisory: `submit` accepts a valid fold from anyone, and a "
+        "verified fold releases its claim.",
     "POST /api/beat":
         "Keep the caller's own claim alive. Signed over `<range>:<ts>` with `ts` as integer seconds within "
         "`BEAT_SKEW`. Only the assignee of a live claim may beat it, and not past `CLAIM_MAX`. Rejected "
@@ -166,6 +173,9 @@ ENV = {
                                 "up to v0.21.4 do not sign claims.",
     "server:CLAIM_RETAKE_WAIT": "Seconds before a key may re-take a block its own claim let lapse without a heartbeat; "
                                 "other keys are offered it at once. `0` means straight away.",
+    "server:FOLD_CLAIM_TTL": "Seconds a fold claim (`POST /api/foldclaim`) holds its pair. Held in memory, so a "
+                             "restart forgets them (#333).",
+    "server:FOLD_CLAIM_CAP": "Live fold claims one key may hold at once; a further one is refused with 429 (#333).",
     "server:BEAT_SKEW": "Allowed distance in seconds between a beat's signed `ts` and server time.",
     "server:MAX_ATTEMPTS": "Failure count at which `/api/state` flags the frontier blocker as needing "
                            "attention.",
