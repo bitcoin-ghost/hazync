@@ -360,7 +360,7 @@ a reorg below the proven height (`history/ROADMAP.md`); `m_chain_tx_count` is a 
   `coordinator/deploy/nginx-hazync.conf` (§5). `coordinator/web/index.html` is the coordinator's own static
   page (`COORD_WEB`), where handles pass `clean_handle` and every render sink escapes
   (`history/SECURITY_AUDIT_LOG.md`, round 6).
-- `https://hazync.org` is built from `bitcoin-ghost/hazync-web`, a private repository. It serves its own
+- `https://hazync.org` is built from `hazync/hazync-web`, a private repository. It serves its own
   copy of the browser verifier, pinned by sha256 in `deploy/deploy.sh` and `tools/check.py`, and proxies
   `/api` to the coordinator.
 
