@@ -1,0 +1,21 @@
+[Unit]
+Description=Hazync: copy the genesis-anchored spine to Backblaze B2 (second copy, append-only, one copy per height)
+After=network-online.target hazync-coordinator.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# The spine is the one proof that cannot be rebuilt cheaply: losing it means re-absorbing every block from
+# genesis. It is rewritten every ~15-30 s, so it gets its own 10-minute copy rather than the hourly receipt
+# mirror. A copy is uploaded only when spine.bin matches the sha256 in spine.json and hazync-verify accepts
+# it as genesis-anchored; either failing, or an upload failing, fails the unit (and so alerts).
+# Root only for reading the root-only key file; the spine directory is world-readable.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs spine --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --verify /usr/local/bin/hazync-verify
+TimeoutStartSec=5min
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/hazync/spine /opt/hazync

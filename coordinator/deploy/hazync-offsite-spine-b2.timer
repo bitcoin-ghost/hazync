@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 10 minutes: copy the Hazync spine to Backblaze B2 (second copy)
+
+[Timer]
+OnCalendar=*:08/10
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

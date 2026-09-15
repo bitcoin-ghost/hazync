@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly: encrypted copy of the Hazync sponsor signing identities to Backblaze B2 (second copy)
+
+[Timer]
+OnCalendar=*-*-* *:07:00 UTC
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

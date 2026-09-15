@@ -12,7 +12,11 @@ deploy/hazync-offsite-watch.py pushes to the phone about the offsite copies in R
   5. the daily summary says "all good" at low priority only when receipts are all in R2, the hourly
      mirror ran clean, the ledger copy is fresh and a real restore of it passes; a missing receipt,
      a restore that yields garbage, a failed restore, or a failed mirror each make it high priority
-     and name the problem.
+     and name the problem;
+  6-8. the grace period, the spine copy and the sponsor keys copy each tell the truth;
+  9. with B2 configured every check repeats against B2, and the daily ledger copy there is restored and
+     compared with live; no copy, a stale copy, a copy that does not unpack, and a missing keys file are
+     each a problem.
 
 Runs with a fake box (systemctl / journalctl / litestream answers), a fake R2 listing and real
 SQLite files. No network, no boto3, no root.
@@ -55,6 +59,7 @@ W.DB = os.path.join(tmp, "live.db")
 W.PROOFS = os.path.join(tmp, "proofs")
 W.REPO = os.path.join(tmp, "repo")
 W.KEYS = os.path.join(tmp, "keys")
+W.B2_KEYS = ""                       # B2 is off until section 9
 W.LAG_ALERT, W.REALERT, W.LOG_REALERT, W.GRACE = 900, 21600, 3600, 1800
 W.SPINE, W.SPINE_LAG_ALERT = os.path.join(tmp, "spine"), 3600
 W.VERIFY = os.path.join(tmp, "fake-verify")
@@ -129,11 +134,12 @@ with open(W.KEYS, "w") as f:
 
 if CONTROL:
     W.watch_problems = lambda run, now: {}
-    W.proofs_section = lambda now, client=None, mirror=None: (True, "Proofs in R2: ok")
+    W.proofs_section = lambda now, client=None, mirror=None, **kw: (True, "Proofs in R2: ok")
     W.restore_drill = lambda run, now: (True, "Restore drill: ok")
-    W.mirror_section = lambda run: (True, "Hourly mirror: ok")
-    W.spine_section = lambda now, client=None, mirror=None: (True, "Spine in R2: ok")
-    W.keys_section = lambda now, client=None, mirror=None: (True, "Sponsor keys in R2: ok")
+    W.mirror_section = lambda run, *a: (True, "Hourly mirror: ok")
+    W.spine_section = lambda now, client=None, mirror=None, **kw: (True, "Spine in R2: ok")
+    W.keys_section = lambda now, client=None, mirror=None, **kw: (True, "Sponsor keys in R2: ok")
+    W.ledger_copy_section = lambda now, client=None, mirror=None, **kw: (True, "Ledger in B2: ok")
     print("CONTROL: the watcher sees no problems and every summary check says ok -- the checks below MUST fail")
 
 NOW = time.time()
@@ -277,6 +283,7 @@ class FakeS3:
         self.data.update(GOOD_KEYS if keys is None else keys)
         self.objects = {f"proofs-37987b85/{n}": len(b"receipt " + n.encode()) for n in names}
         self.objects.update({k: len(v) for k, v in self.data.items()})
+        self.listed = []                      # (bucket, prefix) of every listing, so a check can't read the wrong store
 
     def get_object(self, Bucket, Key):
         return {"Body": io.BytesIO(self.data[Key])}
@@ -286,6 +293,7 @@ class FakeS3:
 
         class P:
             def paginate(self, Bucket, Prefix):
+                s3.listed.append((Bucket, Prefix))
                 yield {"Contents": [{"Key": k, "Size": v} for k, v in s3.objects.items() if k.startswith(Prefix)]}
         return P()
 
@@ -388,6 +396,74 @@ check(prio == "high" and "expires in" in body, f"an encryption key expiring with
 W.KEY_EXPIRY_WARN_DAYS = 0
 subprocess.run(["gpgconf", "--homedir", GH, "--kill", "all"], capture_output=True)
 shutil.rmtree(GH, ignore_errors=True)
+
+# 9. the second copy in Backblaze B2: every check repeated against the B2 bucket, plus the daily ledger copy
+#    (B2 has no Litestream), downloaded, unpacked, integrity-checked and compared with the live ledger
+import gzip
+W.B2_KEYS, W.B2_BUCKET = os.path.join(tmp, "b2.keys"), "hazync-backup"
+with open(W.B2_KEYS, "w") as f:
+    f.write("kid secret https://s3.us-east-005.backblazeb2.com hazync-backup\n")
+with open(W.DB, "rb") as f:
+    LEDGER_GZ = gzip.compress(f.read())
+
+
+def ledger_copy(age, blob=None):
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() - age))
+    return {f"ledger/coordinator-{stamp}.db.gz": LEDGER_GZ if blob is None else blob}
+
+
+def with_ledger(s3, objs):
+    s3.data.update(objs)
+    s3.objects.update({k: len(v) for k, v in objs.items()})
+    return s3
+
+
+s3 = with_ledger(FakeS3(ALL), ledger_copy(3 * 3600))
+t, prio, body = daily(s3)
+b2_listed = {prefix for bucket, prefix in s3.listed if bucket == "hazync-backup"}
+check(b2_listed >= {"proofs-37987b85/", "spine-37987b85/", "sponsor-keys/", "ledger/"},
+      f"the B2 lines list the B2 bucket, not the R2 one (B2 prefixes listed: {sorted(b2_listed)})")
+check(t == "Hazync backups: all good" and "Proofs in B2: 4 of 4" in body and "Hourly mirror to B2:" in body
+      and "Spine in B2: [1..1,000]" in body and "Sponsor keys in B2: 2 identity file(s), current copy in B2" in body,
+      f"with B2 on, the checks repeat against B2 and all is good ({t})")
+check("Ledger in B2: newest daily copy 3.0 h old, 1 copies · restore ok, integrity ok, "
+      "50 submissions / 40 verified ranges (live 50 / 40)" in body,
+      "...and the newest ledger copy in B2 is restored and compared with the live ledger")
+t, prio, body = daily(FakeS3(ALL))
+check(prio == "high" and "Ledger in B2: NO daily copy" in body, f"no ledger copy in B2 is a problem ({t})")
+t, prio, body = daily(with_ledger(FakeS3(ALL), ledger_copy(30 * 3600)))
+check(prio == "high" and "the newest copy is 30.0 h old" in body,
+      f"a ledger copy 30 h old means the daily copy stopped: a problem ({t})")
+t, prio, body = daily(with_ledger(FakeS3(ALL), ledger_copy(3 * 3600, blob=b"not gzip at all")))
+check(prio == "high" and "not a usable ledger" in body, f"a ledger copy that does not unpack is a problem ({t})")
+t, prio, body = daily(with_ledger(FakeS3(ALL), ledger_copy(3 * 3600, blob=gzip.compress(b"not a database " * 300))))
+check(prio == "high" and "not a usable ledger" in body, f"a copy that unpacks to something other than a ledger is a problem ({t})")
+# a copy that opens and answers queries but fails integrity_check: an index whose schema no longer matches
+# its contents (rewritten through writable_schema), on a table nobody queries
+bad = os.path.join(tmp, "corrupt.db")
+shutil.copy(W.DB, bad)
+c = sqlite3.connect(bad)
+c.execute("CREATE TABLE extra(x TEXT, y TEXT)")
+c.executemany("INSERT INTO extra VALUES (?, ?)", [(f"x{i:06d}", f"y{(i * 7919) % 3000:06d}") for i in range(3000)])
+c.execute("CREATE INDEX extra_i ON extra(x)")
+c.commit()
+c.execute("PRAGMA writable_schema = ON")
+c.execute("UPDATE sqlite_master SET sql = 'CREATE INDEX extra_i ON extra(y)' WHERE name = 'extra_i'")
+c.commit()
+c.close()
+c = sqlite3.connect(bad)
+pre = (c.execute("PRAGMA integrity_check").fetchone()[0],
+       c.execute("SELECT (SELECT COUNT(*) FROM submissions), (SELECT COUNT(*) FROM vranges)").fetchone())
+c.close()
+check(pre[0] != "ok" and pre[1] == (50, 40), f"(the corrupted fixture answers queries but fails integrity_check: {pre})")
+with open(bad, "rb") as f:
+    CORRUPT_GZ = gzip.compress(f.read())
+t, prio, body = daily(with_ledger(FakeS3(ALL), ledger_copy(3 * 3600, blob=CORRUPT_GZ)))
+check(prio == "high" and "fails integrity_check" in body, f"a copy that fails integrity_check is a problem, even though it reads ({t})")
+check(not os.path.exists(W.DRILL_DIR), "the B2 ledger drill leaves no copy of the ledger behind")
+os.remove(W.B2_KEYS)
+t, prio, body = daily(with_ledger(FakeS3(ALL), ledger_copy(3 * 3600)))
+check(prio == "high" and "B2: no keys file" in body, f"B2 configured but its keys file missing is a problem, not a skip ({t})")
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
