@@ -86,9 +86,10 @@ check(claim(OTHER) == first, f"every other key is offered block {first} as soon 
 print("== the frontier re-offer (#281) ==")
 reset()
 # Block 1 is covered by a proof that does not seam, so claim() re-offers it before any other block.
-q("INSERT INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES('bad-1', 1, 1, 'x', 'x', ?)", (NOW,))
-real_frontier = server.frontier_hi
-server.frontier_hi = lambda: 0
+# It has been there an hour: #339 re-offers only a cover the frontier snapshot had already seen.
+q("INSERT INTO vranges(id, lo, hi, pubkey, handle, ts) VALUES('bad-1', 1, 1, 'x', 'x', ?)", (NOW - 3600,))
+real_frontier = server._frontier_snapshot
+server._frontier_snapshot = lambda: (time.time(), (0, server.GENESIS_TIP, 0, 0))
 try:
     blocker = claim(HOG)
     check(blocker == "1", f"the frontier block is offered first ({blocker})")
@@ -98,7 +99,7 @@ try:
     got = claim(OTHER)
     check(got == "1", f"another key is ({got})")
 finally:
-    server.frontier_hi = real_frontier
+    server._frontier_snapshot = real_frontier
 
 print("== what the wait does not cover ==")
 reset()

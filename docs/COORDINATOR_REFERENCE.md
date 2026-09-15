@@ -123,6 +123,7 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `ROTATE_MAX_SKEW` | `'300'` | constant `ROTATE_MAX_SKEW` | Allowed distance in seconds between a rotation's `ts` and server time. |
 | `COORD_ALLOW_MOCK` | — | `__main__`, `verify_receipt()`, `verify_spine()` | Required for `VERIFY_MODE=mock` to accept anything. |
 | `FRONTIER_CACHE_TTL` | `'2'` | constant `FRONTIER_TTL` | Seconds the frontier chain is cached (single-flight). |
+| `FRONTIER_SETTLE` | `'30'` | constant `FRONTIER_SETTLE` | Seconds a verified cover of frontier+1 must predate the frontier snapshot before `claim()` re-offers it and `/api/state` calls it unseamable (#339). |
 | `CACHE_MAX_STALE` | `'60'` | constant `CACHE_MAX_STALE` | Seconds past its TTL that `/api/state` and `/api/blockstatus` may still be served while they rebuild in the background; beyond it the caller rebuilds. |
 | `SPONSOR_OPEN` | `'0'` | constant `SPONSOR_OPEN` | `1` opens `POST /api/sponsor`. |
 | `SPONSOR_MAX_BLOCKS` | `'1000'` | constant `SPONSOR_MAX_BLOCKS` | Largest span one sponsorship may cover. |
