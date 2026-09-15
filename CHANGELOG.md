@@ -9,6 +9,14 @@ Maintenance: add the new entry here in the same change that publishes the releas
 id history, with the commit that produced each id, is [`reproduce/LINEAGE.tsv`](reproduce/LINEAGE.tsv).
 Copies of recent release bodies are kept in [`docs/history/releases/`](docs/history/releases/).
 
+## v0.21.6 — 2026-09-15
+Workers move to api.hazync.org, and folders stop colliding. The worker's default coordinator is
+`https://api.hazync.org` (#332); folders get 32 candidates and 60 s fold claims for keys with proven work
+(#334); a claim can no longer overwrite a just-proven block (#340); the worker no longer runs a prover from the
+current directory (#337); the spine and sponsor keys are copied off the box, with a second copy of everything
+in B2, and the chain is re-verified on a schedule (#331, #335, #336, #338). Not a re-baseline.
+<https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.6>
+
 ## v0.21.5 — 2026-09-15
 Claims that belong to their key, and workers that tell you when they stop. The worker signs its claims
 (#323) and pushes to the prover's phone when it stops or cannot work (#326); the coordinator's claim grace,
