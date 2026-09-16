@@ -3523,9 +3523,30 @@ struct BridgeState {
 fn bridge_load_state(dir: &str) -> Option<BridgeState> {
     std::fs::read(format!("{dir}/state.bin")).ok().and_then(|b| bincode::deserialize(&b).ok())
 }
+/// Stream the checkpoint to disk instead of building it in RAM first.
+///
+/// `bincode::serialize` returns a `Vec<u8>` holding the WHOLE checkpoint, and it is alive at the same
+/// time as every structure it was built from. Measured on the proof-party server at 19,640,166 coins:
+/// the walk itself sits flat at 5.80 GiB, then anon ramps to 7.84 GiB over eleven seconds with no file
+/// on disk yet, a 1.91 GB `state.bin.tmp` appears at once, and it drops straight back — so the bridge's
+/// peak was never the walk, it was this buffer. It recurs at every checkpoint (the bridge runs
+/// `HAZYNC_BRIDGE_CKPT=2000`, roughly every six minutes), and at the tip's ~165M coins the buffer is
+/// ~18 GiB, which is what takes a tip bridge past a 62.8 GiB box.
+///
+/// `serialize_into` emits the same bytes: both paths use `DefaultOptions` with `with_fixint_encoding`,
+/// and `allow_trailing_bytes` (the only difference) affects deserialisation only. Verified byte-for-byte
+/// on a struct with these field types. That matters because a changed encoding would make every existing
+/// `state.bin` fail to load, and the resume path treats that as "rebuild from genesis" — silently.
 fn bridge_save_state(dir: &str, st: &BridgeStateRef) {
     let tmp = format!("{dir}/state.bin.tmp");
-    std::fs::write(&tmp, bincode::serialize(st).unwrap()).expect("write checkpoint");
+    {
+        let f = std::fs::File::create(&tmp).expect("create checkpoint");
+        let mut w = std::io::BufWriter::new(f);
+        bincode::serialize_into(&mut w, st).expect("write checkpoint");
+        // into_inner() flushes AND surfaces the error. Dropping a BufWriter discards a failed flush,
+        // which would rename a truncated checkpoint into place below and look like a clean save.
+        w.into_inner().expect("flush checkpoint");
+    }
     std::fs::rename(&tmp, format!("{dir}/state.bin")).expect("commit checkpoint"); // atomic: never a torn state.bin
 }
 
