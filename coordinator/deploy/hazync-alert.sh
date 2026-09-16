@@ -84,6 +84,19 @@ esac
 TAGS="$(printf '%s' "${ALERT_TAGS:-rotating_light}" | tr -cd 'a-z0-9_,-')"
 [ -n "$TAGS" ] || TAGS=rotating_light
 
+# The title must say good-or-bad at a glance, before any text: a phone shows the title and little else,
+# and until now EVERY push carried rotating_light because that is the default tag — so "check-spine
+# RECOVERED" arrived looking identical to a failure. Classify from the tags the caller already sets
+# (hazync-offsite-watch.py has passed white_check_mark for "all good" and RECOVERED since it was
+# written); --unit and --crash are always bad and never reach here with a good tag.
+# printf interprets \u only in its FORMAT string, not in a variable it expands, so the escape must be
+# the format itself — otherwise the title literally begins "\U0001F6A8".
+case ",$TAGS," in
+    *,white_check_mark,*|*,heavy_check_mark,*|*,tada,*|*,+1,*) MARK="$(printf '\xe2\x9c\x85')" ;;          # green tick
+    *)                                                        MARK="$(printf '\xf0\x9f\x9a\xa8')" ;;      # red siren
+esac
+title="$MARK $title"
+
 if [ "${HAZYNC_ALERT_DRYRUN:-0}" = "1" ]; then
     printf 'DRYRUN url=%s\nTitle: %s\nPriority: %s\nTags: %s\n\n%s\n' "${NTFY_URL:-<unset>}" "$title" "$PRIO" "$TAGS" "$body"
     [ -n "${NTFY_URL:-}" ] || { echo "[hazync-alert] FATAL: NTFY_URL is not set" >&2; exit 3; }
