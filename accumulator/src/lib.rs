@@ -410,38 +410,89 @@ pub struct Forest {
     /// that case at all: identical bytes need an identical txid, which needs an identical transaction,
     /// which is in-block duplication that `bip30_ok` already forbids.
     ///
-    /// The Vec stays because it is the behaviour-preserving choice — a `Forest` is an oracle whose
-    /// job is to match the `Stump` exactly, and narrowing an index to "can't happen" is how an
-    /// invariant becomes a silent wrong answer if it ever stops holding. Flagged by external audit #2
-    /// (N-1) as a stale rationale that would mislead the next reviewer.
-    index: std::collections::HashMap<Hash, Vec<usize>>,
+    /// Duplicates are still fully supported — see `dups` — because narrowing an index to "can't
+    /// happen" is how an invariant becomes a silent wrong answer if it ever stops holding. Flagged by
+    /// external audit #2 (N-1) as a stale rationale that would mislead the next reviewer.
+    ///
+    /// WHY THIS IS NO LONGER `HashMap<Hash, Vec<usize>>`. A `Vec` per entry is a separate allocation
+    /// per live coin. Measured on the proof-party server at 12.7M coins, the bridge held 352 bytes per
+    /// coin of which `leaves` and `internals` account for only ~64 — this index was the majority, and
+    /// projected to 32–38 GiB at the tip's 165,212,120 coins, against ~4.9 GiB each for the other two.
+    /// Storing the first position inline removes that allocation for every leaf that is not duplicated,
+    /// which in practice is all of them.
+    index: std::collections::HashMap<Hash, u32>,
+
+    /// The remaining positions for a duplicated leaf, ascending, excluding the first (which lives in
+    /// `index`). Empty in practice: a Hazync leaf commits `height` and `mtp`, so even the grandfathered
+    /// duplicate-coinbase blocks (91842/91812, 91880/91722) produce DISTINCT leaves. It exists so that
+    /// `find` keeps `leaves.iter().position(...)` semantics exactly if that ever stops being true,
+    /// rather than quietly returning the wrong position.
+    dups: std::collections::HashMap<Hash, Vec<u32>>,
 }
 
 impl Forest {
     pub fn new() -> Self {
-        Forest { leaves: Vec::new(), internals: Vec::new(), index: Default::default() }
+        Forest { leaves: Vec::new(), internals: Vec::new(), index: Default::default(), dups: Default::default() }
     }
 
     /// Smallest position holding `leaf`, or `None`. Exactly `leaves.iter().position(|x| *x == leaf)`,
     /// which is what the bridge called and what the duplicate-leaf (BIP30) case depends on.
+    /// `index` holds the smallest position, so this never consults `dups`.
     pub fn find(&self, leaf: &Hash) -> Option<usize> {
-        self.index.get(leaf).and_then(|v| v.first().copied())
+        self.index.get(leaf).map(|&p| p as usize)
     }
 
     fn index_insert(&mut self, leaf: Hash, pos: usize) {
-        let v = self.index.entry(leaf).or_default();
-        let at = v.partition_point(|&p| p < pos);
-        v.insert(at, pos);
+        let pos = pos as u32;
+        match self.index.get(&leaf).copied() {
+            None => {
+                self.index.insert(leaf, pos);
+            }
+            Some(first) if pos < first => {
+                // The new position becomes the first; the old first joins the rest, still ascending.
+                self.index.insert(leaf, pos);
+                let v = self.dups.entry(leaf).or_default();
+                let at = v.partition_point(|&p| p < first);
+                v.insert(at, first);
+            }
+            Some(_) => {
+                let v = self.dups.entry(leaf).or_default();
+                let at = v.partition_point(|&p| p < pos);
+                v.insert(at, pos);
+            }
+        }
     }
 
     fn index_remove(&mut self, leaf: &Hash, pos: usize) {
-        if let Some(v) = self.index.get_mut(leaf) {
-            if let Ok(at) = v.binary_search(&pos) {
-                v.remove(at);
+        let pos = pos as u32;
+        match self.index.get(leaf).copied() {
+            Some(first) if first == pos => {
+                // Promote the next-smallest copy, if this leaf has one; otherwise the leaf is gone.
+                match self.dups.get_mut(leaf) {
+                    Some(v) if !v.is_empty() => {
+                        let next = v.remove(0);
+                        if v.is_empty() {
+                            self.dups.remove(leaf);
+                        }
+                        self.index.insert(*leaf, next);
+                    }
+                    _ => {
+                        self.dups.remove(leaf);
+                        self.index.remove(leaf);
+                    }
+                }
             }
-            if v.is_empty() {
-                self.index.remove(leaf);
+            Some(_) => {
+                if let Some(v) = self.dups.get_mut(leaf) {
+                    if let Ok(at) = v.binary_search(&pos) {
+                        v.remove(at);
+                    }
+                    if v.is_empty() {
+                        self.dups.remove(leaf);
+                    }
+                }
             }
+            None => {}
         }
     }
 
@@ -468,12 +519,22 @@ impl Forest {
                 below = internals.last().unwrap();
             }
         }
-        let mut index: std::collections::HashMap<Hash, Vec<usize>> =
+        // Ascending by construction, so the first sighting of a leaf is its smallest position and any
+        // later one belongs in `dups` — no sorting, and `dups` stays empty unless a leaf repeats.
+        let mut index: std::collections::HashMap<Hash, u32> =
             std::collections::HashMap::with_capacity(leaves.len());
+        let mut dups: std::collections::HashMap<Hash, Vec<u32>> = std::collections::HashMap::new();
         for (i, l) in leaves.iter().enumerate() {
-            index.entry(*l).or_default().push(i);   // ascending by construction
+            match index.entry(*l) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(i as u32);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    dups.entry(*l).or_default().push(i as u32);
+                }
+            }
         }
-        Forest { leaves, internals, index }
+        Forest { leaves, internals, index, dups }
     }
 
     /// Tree level `k`: level 0 is the leaves, level `k > 0` is `internals[k - 1]`.
@@ -486,8 +547,9 @@ impl Forest {
     }
 
     pub fn add(&mut self, leaf: Hash) {
-        // appended at the end, so its position is larger than every existing one for this key
-        self.index.entry(leaf).or_default().push(self.leaves.len());
+        // appended at the end, so its position is larger than every existing one for this key —
+        // `index_insert` therefore keeps the existing first position and files this one under `dups`
+        self.index_insert(leaf, self.leaves.len());
         self.leaves.push(leaf);
         // Completing a pair at level k creates exactly one parent, which may in turn complete a pair
         // one level up. Amortised O(1): a leaf whose index has t trailing ones carries t levels.
