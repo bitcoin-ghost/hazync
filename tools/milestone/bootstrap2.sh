@@ -7,7 +7,7 @@ for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; don
 ldconfig 2>/dev/null
 BIN=$W/hazync-host-cuda
 [ -x "$BIN" ] || { curl -fsSL -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda && chmod +x "$BIN"; }
-[ -f $W/block_966280.json ] || { curl -fsSLO https://bitcoinghost.org/hazync/repro/block_966280.json.gz && gunzip -f block_966280.json.gz; }
+[ -f $W/block_966280.json ] || { curl -fsSLO https://hazync.org/repro/block_966280.json.gz && gunzip -f block_966280.json.gz; }
 BSHA=$(sha256sum $W/block_966280.json | cut -d' ' -f1)
 [ "$BSHA" = "9f2124553d5a18f994ec2b95d91dfd251d59c0e9abc61f18be26564a132538be" ] || { echo "BLOCK SHA MISMATCH $BSHA"; exit 1; }
 MID=$($BIN method-id 2>&1 | grep -oE '[0-9a-f]{64}' | head -1)
