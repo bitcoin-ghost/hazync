@@ -188,7 +188,7 @@ if [ "$fail" -ne 0 ]; then
     echo "       verify it against the signed SHA256SUMS.txt.asc before copying it anywhere"
     echo "  2. back up the live module under its OLD guest id, then install the new one:"
     echo "       sudo install -o www-data -g www-data -m 644 /tmp/v.wasm \\"
-    echo "            /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm"
+    echo "            /var/www/hazync/verify/hazync-verify.wasm"
     echo "  3. re-run this script — it checks over the wire, so it is the only proof the deploy landed"
     exit 1
 fi

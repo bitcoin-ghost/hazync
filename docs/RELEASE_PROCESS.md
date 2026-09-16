@@ -73,7 +73,7 @@ guest id only at startup (#99).
 
 ## 3. The browser verifier, on both sites
 
-Two sites serve their own copy: `https://hazync.org/verify/` and `https://hazync.org/verify/`
+Served at `https://hazync.org/verify/`
 (the second from `bitcoin-ghost/hazync-web`). A copy that does not match the release is caught only by
 calling it: a stale module has the same size and exports as a correct one. Do this after every release whose
 `hazync-verify.wasm` differs from the deployed one, and in the **same cutover** as the coordinator's binary
@@ -99,14 +99,14 @@ gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt && sha256sum -c --ignore-missing 
 3. `deploy/deploy.sh` (a dry run; it refuses if the wasm hash differs, and runs `tools/check.py`), then
    `deploy/deploy.sh --go`.
 
-**bitcoinghost.org** (the web box): back up the live module under its old guest id or tag, then install the
-new one:
+**hazync.org** (the web box, `152.53.86.216`): back up the live module under its old guest id or tag, then
+install the new one:
 
 ```bash
-sudo cp -p /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm \
-           /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm.<old id or tag>
+sudo cp -p /var/www/hazync/verify/hazync-verify.wasm \
+           /var/www/hazync/verify/hazync-verify.wasm.<old id or tag>
 sudo install -o www-data -g www-data -m 644 hazync-verify.wasm \
-           /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm
+           /var/www/hazync/verify/hazync-verify.wasm
 ```
 
 `check-deployed-verifier.sh` also requires `hazync-verify.js` there to equal `verifier-wasm/hazync-verify.js`;
@@ -116,8 +116,7 @@ served URL, not read from a deploy script).
 **Then check both, over the wire:**
 
 ```bash
-./scripts/check-deployed-verifier.sh                             # bitcoinghost.org (HAZYNC_SITE unset)
-HAZYNC_SITE=https://hazync.org ./scripts/check-deployed-verifier.sh
+./scripts/check-deployed-verifier.sh                             # hazync.org (HAZYNC_SITE default)
 ```
 
 Each run requires: the served loader byte-identical to `verifier-wasm/hazync-verify.js`; the served wasm size
@@ -303,7 +302,8 @@ before printing its closing checklist. Until it is fixed, confirm the bare line 
 (`grep -nE '^[0-9a-f]{64}$' reproduce/METHOD_ID`) and work through that checklist from the end of the script:
 write the supersession note, regenerate the SNARK fixtures, run `check-versions.sh`, `check-utreexo.sh` and
 `check-spec.sh`, cut the release, deploy the wasm, and run `check-deployed-verifier.sh`. Its deploy step
-names only bitcoinghost.org; hazync.org needs [§3](#3-the-browser-verifier-on-both-sites) as well.
+names hazync.org, which is the only site serving the verifier since bitcoinghost.org/hazync was retired
+on 2026-09-16.
 
 If `check-versions` names a site the script missed, **add it to the script** rather than hand-editing.
 That is the whole point: the gate finding something should be rare and should teach the script.

@@ -148,9 +148,8 @@ containing it. `--force` discards it (after the backup) and should be the rare c
 
 ## 2. Wire the single domain (on the WEB box)
 
-Paste `coordinator/deploy/nginx-hazync.conf` into the `bitcoinghost.org` `server { }` block in
-`/etc/nginx/sites-enabled/bitcoinghost` (set `proxy_pass` to the coordinator's IP if it's a separate
-box), then:
+Paste `coordinator/deploy/nginx-hazync.conf` into the `hazync.org` `server { }` block in
+`/etc/nginx/sites-enabled/hazync.org` on the web box (set `proxy_pass` to the coordinator's IP), then:
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx

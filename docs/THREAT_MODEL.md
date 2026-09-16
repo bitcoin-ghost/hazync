@@ -301,13 +301,12 @@ aarch64 verifier it builds embeds it.
 `not_anchored`.
 
 **The risk is what gets served, not what gets built.** A reader who clicks "verify" trusts the site serving
-`hazync-verify.js` and `hazync-verify.wasm`. Two sites serve a copy: `hazync.org/verify/` and
-`hazync.org/verify/` (both measured 200, 1,064,517 bytes, on 2026-09-14). On 2026-08-11 the bitcoinghost.org
+`hazync-verify.js` and `hazync-verify.wasm`. Served at `hazync.org/verify/` (both measured 200, 1,064,517 bytes, on 2026-09-14). On 2026-08-11 the bitcoinghost.org
 module was two re-baselines behind and told readers the live spine was forged. A stale module has the same
 size and exports and returns HTTP 200, so only calling it reveals the difference (header of
 `scripts/check-deployed-verifier.sh`).
 
-**Enforced by** `scripts/check-deployed-verifier.sh`, per site (`HAZYNC_SITE`, default bitcoinghost.org). It
+**Enforced by** `scripts/check-deployed-verifier.sh`, per site (`HAZYNC_SITE`, default hazync.org). It
 requires the served loader to be byte-identical to `verifier-wasm/hazync-verify.js`, the served wasm size to
 match the release asset and `verifier-wasm/README.md`, and `methodId()` to equal `reproduce/METHOD_ID`. It
 also runs the live spine and a one-bit-flipped copy through the served module, and fails if the flipped copy

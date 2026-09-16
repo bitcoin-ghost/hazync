@@ -17,7 +17,7 @@ skip(){ printf '  ⚠  %s\n' "$*"; SKIP=$((SKIP+1)); }
 hdr(){  printf '\n=== %s ===\n' "$*"; }
 
 REPO=${REPO:-bitcoin-ghost/hazync}
-SITE=${SITE:-https://bitcoinghost.org}
+SITE=${SITE:-https://hazync.org}
 REL="https://github.com/$REPO/releases/latest/download"
 
 if [ "${LOCAL:-0}" != 1 ] && [ -z "${IN_CONTAINER:-}" ]; then

@@ -153,7 +153,7 @@ echo "  5. cut the release, then DEPLOY the new hazync-verify.wasm to the web bo
 echo "     verifier is pinned to the guest and a re-baseline silently invalidates the deployed copy."
 echo "     Verify the release asset against SHA256SUMS.txt.asc first, then:"
 echo "       sudo install -o www-data -g www-data -m 644 hazync-verify.wasm \\"
-echo "            /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm"
+echo "            /var/www/hazync/verify/hazync-verify.wasm"
 echo "  6. ./scripts/check-deployed-verifier.sh   <- the only step that proves a reader can still"
 echo "     check a proof. Skipping 5 leaves the site telling visitors the spine is FORGED, and the"
 echo "     stale and correct modules are byte-for-byte the SAME SIZE, so nothing else notices."

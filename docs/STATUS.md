@@ -31,8 +31,8 @@ Live: [`/api/state?slim=1`](https://api.hazync.org/api/state?slim=1) ·
 [`/api/meta`](https://api.hazync.org/api/meta) ·
 [`/api/spine`](https://api.hazync.org/api/spine) ·
 [`/api/spine/proof`](https://api.hazync.org/api/spine/proof) (check with `hazync-verify`). Every
-route: [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md). `api.hazync.org/api` still proxies
-to the same coordinator for older workers.
+route: [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md). `api.hazync.org/api` is the endpoint workers use; `bitcoinghost.org/hazync/api` was retired
+on 2026-09-16 (no worker had used it since 15 Sep).
 
 Snapshot at **2026-09-15 16:58 UTC**:
 
