@@ -203,7 +203,7 @@ broken" if the verifier moves before the board does.
 
 ⚠ The rows above previously read `3f52baff` throughout, which was TWO re-baselines stale
 (`3f52baff` → … → `1d6c3792` → `3867611d`). Re-measure this table at each cutover rather than
-trusting it; the commands are `curl -s api.hazync.org/api/meta` and grepping the served
+trusting it; the commands are `curl -s bitcoinghost.org/hazync/api/meta` and grepping the served
 `.wasm` for the id.
 
 Also expiring at the re-baseline: the **220,000 bundles** on the coordinator (the witness format is
