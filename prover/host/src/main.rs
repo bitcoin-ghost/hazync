@@ -3316,8 +3316,17 @@ fn snapshot_emit_cmd(dir: &str, out: &str) {
     // the only thing linking them.
     let mut by_leaf: std::collections::HashMap<[u8; 32], (&([u8; 32], u32), &(u64, Vec<u8>, u32, bool))> =
         std::collections::HashMap::with_capacity(st.utxo.len());
+    // MTP comes from the checkpoint, not from the node. `block_mtp` is indexed by absolute height and
+    // already holds MTP(h-1) for every height the bridge walked, and `snapshot_verify_cmd` below reads it
+    // exactly this way. `mtp_at` instead asks bitcoind, and its own comment admits the cost: 22 RPC
+    // round-trips per cache miss, each one a `bitcoin-cli` process. Measured on the proof-party server at
+    // height 250,000: ~450 spawns a second, still running after 14 minutes, and it fails outright unless
+    // the caller happens to have the node's datadir in HAZYNC_BITCOIN_DATADIR. The data was in hand the
+    // whole time — `bridge_load_state` loaded it on the line above.
     for (op, meta) in st.utxo.iter() {
-        let mtp = mtp_at(meta.2);
+        let mtp = *st.block_mtp.get(meta.2 as usize).unwrap_or_else(||
+            panic!("no block_mtp for coin height {} (checkpoint has {} entries) — the checkpoint does not \
+                    cover this coin, so its leaf cannot be reproduced", meta.2, st.block_mtp.len()));
         let leaf = coin_leaf(&op.0, op.1, meta.0, &meta.1, meta.2, meta.3, mtp);
         by_leaf.insert(leaf, (op, meta));
     }
