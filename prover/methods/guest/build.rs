@@ -67,6 +67,19 @@ fn lib_dir(gcc: &str, query: &[&str]) -> String {
 }
 
 fn main() {
+    // #358: every env var this script READS must also be declared, or cargo cannot know the guest
+    // depends on it. These three choose the consensus source root and the riscv toolchain — the two
+    // things the image is built FROM — and none of them were declared, while ten build knobs below
+    // were. Switching HAZYNC_BASE to a differently-patched tree therefore rebuilt nothing: cargo was
+    // still watching the previous base's files (the `rerun-if-changed={core}/{tu}` lines below are
+    // emitted with whichever base was in use at the time), saw them unchanged, and reused the cached
+    // guest. Measured: the same commit built against an unpatched and then a patched tree produced a
+    // byte-identical method.bin, and only `cargo clean -p methods` made the switch take effect. The
+    // failure is silent — `method-id` reports the stale image confidently.
+    println!("cargo:rerun-if-env-changed=HAZYNC_BASE");
+    println!("cargo:rerun-if-env-changed=RISC0_HOME");
+    println!("cargo:rerun-if-env-changed=HAZYNC_RISCV_BIN");
+
     // Consensus source root: Bitcoin Core + secp256k1 + the coreshim, laid out by provision-vps.sh.
     // Set HAZYNC_BASE to point at it; the default matches provision's WORK dir ($HOME/hazync-build).
     let base = std::env::var("HAZYNC_BASE").unwrap_or_else(|_| {
