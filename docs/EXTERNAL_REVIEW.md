@@ -31,7 +31,7 @@ rather than from our description of it.
 ```sh
 curl -fsLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl -f https://bitcoinghost.org/hazync/api/spine/proof -o spine.snark
+curl -f https://api.hazync.org/api/spine/proof -o spine.snark
 ./hazync-verify-x86_64-linux-gnu --json spine.snark
 ```
 

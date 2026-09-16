@@ -182,7 +182,7 @@ risc0 accelerator) is the precedent (`docs/history/CORE_VS_GHOST.md` §1). Earli
 
 - **proof party** — the public effort to prove the chain from genesis (`CONTRIBUTING.md`,
   `coordinator/README.md`).
-- **board** — the public coordinator at https://bitcoinghost.org/hazync and its dashboard; also the
+- **board** — the public coordinator at https://hazync.org/ and its dashboard; also the
   `board` list of ranges in `/api/state` (`state()`, `coordinator/server.py`).
 - **contributor** — an ed25519 public key (`contributors` table). `hazync id` creates it under
   `$HAZYNC_HOME` (default `~/.hazync`, `key.hex`). `POST /api/rotate` (`rotate()`) moves attribution to

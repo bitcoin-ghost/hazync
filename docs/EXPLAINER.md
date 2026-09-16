@@ -100,7 +100,7 @@ We are allergic to hype, so here's the straight version.
   proven every piece works — but because making the certificate for fifteen years of history takes a
   **lot** of computing power (lots of graphics cards, for a while). We have the method; we don't yet
   have all the machines. That's the honest bottleneck. The run is happening in public: the
-  [live board](https://bitcoinghost.org/hazync.html) shows how far the proven chain reaches right now,
+  [live board](https://hazync.org/) shows how far the proven chain reaches right now,
   and `CONTRIBUTING.md` explains how to add a graphics card to it.
 - A professional security audit. We've audited our own work hard and fixed what we found, and two
   outside reviews — by people outside the project, working with AI tools — read the whole source and
@@ -133,7 +133,7 @@ kind of thing you want to exist, here's how you can move it forward — pick wha
   the kind of job that splits into thousands of independent pieces. Many people each proving a small
   chunk, then stitching the results, gets it done far faster than any single group. If you have
   graphics cards (a gaming PC counts) or cloud credits, you can prove a slice — `CONTRIBUTING.md` walks
-  through it, and the [live board](https://bitcoinghost.org/hazync.html) shows your work landing. Think
+  through it, and the [live board](https://hazync.org/) shows your work landing. Think
   of it as a community barn-raising for Bitcoin's history.
 - **Donate.** Renting the graphics cards to complete the full run costs real money. Funding buys
   compute time directly. Small amounts add up; a handful of committed cards can keep the tip current

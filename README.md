@@ -1,9 +1,9 @@
 # Hazync
 
-[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
-[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
-[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://bitcoinghost.org/hazync)
-[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbitcoinghost.org%2Fhazync%2Fapi%2Fstate&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
+[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
 [![verify it yourself](https://img.shields.io/badge/verify%20it%20yourself-30%20seconds-3fb950?style=flat-square)](#check-one-yourself-it-takes-about-thirty-seconds)
 
 **Bitcoin's consensus rules, proven with Bitcoin Core's own code, inside a zero-knowledge VM.**
@@ -82,7 +82,7 @@ being the constraint — it exists to price that trade honestly, not to replace 
 ```bash
 curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
-curl -fLOJ https://bitcoinghost.org/hazync/api/spine/proof  # -J: lands as hazync-spine-1-<hi>.hzk
+curl -fLOJ https://api.hazync.org/api/spine/proof  # -J: lands as hazync-spine-1-<hi>.hzk
 ./hazync-verify-x86_64-linux-gnu hazync-spine-1-*.hzk
 ```
 
@@ -92,7 +92,7 @@ curl -fLOJ https://bitcoinghost.org/hazync/api/spine/proof  # -J: lands as hazyn
 
 A **1.7 MB** binary, and a proof that every block from genesis to N is valid under Core's real
 consensus rules, checked in **milliseconds** on a laptop, with no node, no peers, no chain data and
-nothing to trust. [Or do it in your browser](https://bitcoinghost.org/hazync/verify/), where the
+nothing to trust. [Or do it in your browser](https://hazync.org/verify/), where the
 verifier is a WebAssembly module served in **~295 KB** gzipped (1,064,517 bytes raw) that peaks at
 **1.9 MiB of memory**, small enough for a phone.
 
@@ -139,7 +139,7 @@ verify under the new one.
 
 The board is open and anyone can join. Whatever figure it shows is not seventeen years of
 accumulated work; it is what has been re-proved since that re-baseline.
-[The live board](https://bitcoinghost.org/hazync.html) is the only place a current figure belongs,
+[The live board](https://hazync.org/) is the only place a current figure belongs,
 and a genesis-anchored proof is downloadable there whether or not anyone is proving today. Proving
 Bitcoin's real cryptography is deliberately expensive, and that cost *is* the security argument.
 
@@ -155,7 +155,7 @@ from-genesis prover at block 91841, roughly 10% in. Blocks 91842 and 91880 dupli
 were still unspent, which is the reason BIP30 exists, and the new non-membership check had no
 exception for them. Fixed in v0.15.0, with the real blocks now in the fixture set.
 
-[**Watch the board**](https://bitcoinghost.org/hazync) · [**Join in**](CONTRIBUTING.md) ·
+[**Watch the board**](https://hazync.org/) · [**Join in**](CONTRIBUTING.md) ·
 [**Read the spec**](docs/SPEC.md)
 
 ---

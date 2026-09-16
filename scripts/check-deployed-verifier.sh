@@ -24,11 +24,11 @@
 # So this check drives the deployed module the way a reader's browser does, and asserts the whole
 # journey rather than any one file's hash. Run it after any web deploy and after every re-baseline.
 #
-# Env: HAZYNC_SITE (default https://bitcoinghost.org/hazync) to point at a staging host.
+# Env: HAZYNC_SITE (default https://hazync.org/) to point at a staging host.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-SITE="${HAZYNC_SITE:-https://bitcoinghost.org/hazync}"
+SITE="${HAZYNC_SITE:-https://hazync.org/}"
 CANON_FILE=reproduce/METHOD_ID
 fail=0
 note() { printf '  %s\n' "$*"; }

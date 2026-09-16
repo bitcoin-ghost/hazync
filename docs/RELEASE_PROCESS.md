@@ -73,7 +73,7 @@ guest id only at startup (#99).
 
 ## 3. The browser verifier, on both sites
 
-Two sites serve their own copy: `https://bitcoinghost.org/hazync/verify/` and `https://hazync.org/verify/`
+Two sites serve their own copy: `https://hazync.org/verify/` and `https://hazync.org/verify/`
 (the second from `bitcoin-ghost/hazync-web`). A copy that does not match the release is caught only by
 calling it: a stale module has the same size and exports as a correct one. Do this after every release whose
 `hazync-verify.wasm` differs from the deployed one, and in the **same cutover** as the coordinator's binary

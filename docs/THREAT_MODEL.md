@@ -159,7 +159,7 @@ All untrusted.
 
 ## 5. Coordinator
 
-`coordinator/server.py`, public at `https://bitcoinghost.org/hazync/api/`.
+`coordinator/server.py`, public at `https://api.hazync.org/api/`.
 
 **Trusted for:** liveness and allocation hints; attribution (who proved, folded, anchored); the figures on
 the board; retaining receipts; serving witness bundles.
@@ -301,7 +301,7 @@ aarch64 verifier it builds embeds it.
 `not_anchored`.
 
 **The risk is what gets served, not what gets built.** A reader who clicks "verify" trusts the site serving
-`hazync-verify.js` and `hazync-verify.wasm`. Two sites serve a copy: `bitcoinghost.org/hazync/verify/` and
+`hazync-verify.js` and `hazync-verify.wasm`. Two sites serve a copy: `hazync.org/verify/` and
 `hazync.org/verify/` (both measured 200, 1,064,517 bytes, on 2026-09-14). On 2026-08-11 the bitcoinghost.org
 module was two re-baselines behind and told readers the live spine was forged. A stale module has the same
 size and exports and returns HTTP 200, so only calling it reveals the difference (header of
@@ -356,7 +356,7 @@ a reorg below the proven height (`history/ROADMAP.md`); `m_chain_tx_count` is a 
 
 ## 11. Websites
 
-- `https://bitcoinghost.org/hazync` serves the board, a browser verifier (§8), and the API proxied by
+- `https://hazync.org/` serves the board, a browser verifier (§8), and the API proxied by
   `coordinator/deploy/nginx-hazync.conf` (§5). `coordinator/web/index.html` is the coordinator's own static
   page (`COORD_WEB`), where handles pass `clean_handle` and every render sink escapes
   (`history/SECURITY_AUDIT_LOG.md`, round 6).

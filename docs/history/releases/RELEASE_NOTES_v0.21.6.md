@@ -27,7 +27,7 @@ re-verify the chain against Bitcoin.
 ## Workers use api.hazync.org (#332)
 
 - `DEFAULT_COORD` is `https://api.hazync.org`, served by the Hazync web box, which forwards to the coordinator.
-- **`bitcoinghost.org/hazync` keeps working** as a proxy, never a redirect, so workers that do not upgrade are
+- **`hazync.org` keeps working** as a proxy, never a redirect, so workers that do not upgrade are
   unaffected.
 - Before this change shipped, the coordinator was set to trust the web box as a proxy (so workers behind it are
   rate-limited one by one, not as a single client), and all three board pods ran on `api.hazync.org` for a

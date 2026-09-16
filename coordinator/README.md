@@ -161,14 +161,14 @@ Deployed **co-located with the archive bridge and a full `bitcoind`** on one box
 bridge (`hazync-bridge.service`), which writes bundles the coordinator serves via `HAZYNC_BRIDGE_OUT` (a
 local read — no cross-box copy); the coordinator verifies receipts on CPU with the canonical `host`
 binary (no GPU required to *verify*). Put it behind a reverse proxy (nginx) with TLS; the public
-`bitcoinghost.org/hazync` page points its board at this API (CORS is open by default). Units + cutover:
+`hazync.org` page points its board at this API (CORS is open by default). Units + cutover:
 `deploy/hazync-bridge.service`, `deploy/hazync-coordinator.service`, `deploy/migrate-coordinator.sh` —
 see `deploy/RUNBOOK.md`.
 
 ## Status — honest
 
 > **This section is the MVP record (2026-07) and is kept as written.** The board has since gone
-> public at https://bitcoinghost.org/hazync, so "before a public push" below is history, not a plan.
+> public at https://hazync.org/, so "before a public push" below is history, not a plan.
 > For what the live board shows now, read `/api/state?slim=1`.
 
 MVP. Single-file, SQLite, single-process, **verify-only (CPU, no GPU)**. Verified end-to-end with real

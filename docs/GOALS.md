@@ -56,7 +56,7 @@ verifier with no node and no chain data.
 No board figure is written here any more. Every one that has been has gone stale within days, usually
 because a re-baseline reset the board rather than because the number moved — and a stale figure in a
 goals document reads as a claim rather than as a snapshot. The
-[live board](https://bitcoinghost.org/hazync.html) is the only honest source, and `/api/state` is the
+[live board](https://hazync.org/) is the only honest source, and `/api/state` is the
 same numbers as JSON.
 
 > **Re-baselines reset the board to genesis**, because receipts made against a superseded guest do not
@@ -183,7 +183,7 @@ portable that way, which is precisely why the aarch64 binary could not answer th
 zero imports, MVP-only features and a 1.9 MiB ceiling runs in any spec-compliant WASM runtime — which
 every current browser is — and 1.9 MiB is below any plausible device ceiling.
 
-Deployed at <https://bitcoinghost.org/hazync/verify/> and linked from the Proof Party page.
+Deployed at <https://hazync.org/verify/> and linked from the Proof Party page.
 
 **Demonstrated (2026-08-01).** The operator confirmed the page working in a browser, and the
 deployed module was independently checked: it is byte-identical to the signed release asset, imports
