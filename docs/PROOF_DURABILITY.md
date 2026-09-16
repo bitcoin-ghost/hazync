@@ -53,12 +53,16 @@ deletion on a shallow clone is a gate that gets switched off.
 
 Gates: `scripts/lineage.sh --check` and `scripts/test-lineage.sh` (+ `--control`), both in CI.
 
-## 2. Accepting more than one method id — **an open decision, not pending code**
+## 2. Accepting more than one method id — **decided: no** (#244, closed 2026-09-16)
 
-> ⚖ The position we would take, and the two constraints that make it defensible, are in
+> ⚖ **Operator decision, 2026-09-16: Hazync will not keep an accepted-set of method ids.** A verifier
+> pins the canonical id. The two findings below are why, and they did not change: honouring older ids
+> re-admits proofs from guests with narrower rule coverage, and it would not even buy foldability,
+> because composition is homogeneous inside the circuit.
+>
+> If a re-baseline ever forces the question, the starting point is in
 > [`METHOD_ID_DURABILITY.md`](METHOD_ID_DURABILITY.md): a set that **starts at the id we are moving
-> to** and **only ever tightens**. That is not scheduled work — it is what would ride along the day
-> something forces a new guest id, since the back catalogue is written off that day regardless.
+> to** and **only ever tightens** — never one that reaches backwards.
 
 The shape suggested in #244 is `(method_id, risc0_version, valid_from, valid_to)`, append-only, with
 a verifier accepting any listed entry rather than only the current one. Layer 1 supplies the first

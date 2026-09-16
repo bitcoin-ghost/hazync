@@ -66,7 +66,6 @@ From GitHub on 2026-09-16.
 
 | # | title |
 |---|---|
-| [#244](https://github.com/bitcoin-ghost/hazync/issues/244) | Proof durability: layer 1 (lineage) shipped; layer 2 (accepted set of method ids) needs a decision |
 | [#252](https://github.com/bitcoin-ghost/hazync/issues/252) | Aggregate assembly is latency, not work; two of three levers shipped, the measurement has not run |
 | [#253](https://github.com/bitcoin-ghost/hazync/issues/253) | Measure #236 (streaming `seg-serve` execute), which shipped unmeasured in v0.21.1 |
 | [#277](https://github.com/bitcoin-ghost/hazync/issues/277) | Anchor warp: prove backwards from the anchor in the tip cluster's idle time |
@@ -81,7 +80,6 @@ Each verified on 2026-09-14; detail in [`THREAT_MODEL.md`](THREAT_MODEL.md#open-
 
 - **When to set `CLAIM_REQUIRE_SIG=1`**: once contributors run v0.21.5 or later (the leaderboard's release
   column shows it).
-- **#244 layer 2**: which method ids a verifier accepts.
 - **Field-backend gate 4**: run the corrupt-signature negative control on the CORE guest
   ([`FIELD_BIGINT2_BACKEND.md`](FIELD_BIGINT2_BACKEND.md) §5b records it not run).
 - **The accumulator reference fuzz control**: rerun it (`audit-fuzz/FINDINGS.md` marks it "NEEDS A RERUN"

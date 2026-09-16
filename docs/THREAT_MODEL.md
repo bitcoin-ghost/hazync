@@ -95,7 +95,8 @@ from the changed guest do not verify against the canonical id. The attack theref
 re-baseline, which is public: a new row in `reproduce/LINEAGE.tsv`, derived from git history and gated by
 `scripts/lineage.sh --check`, and an id anyone can rebuild (`reproduce/Dockerfile`, CI job
 `reproducible-image-id`). That protects a verifier that pins the id. It does nothing for one that accepts
-whatever id it is handed — which is what the undecided accepted-set layer of #244 would have to get right.
+whatever id it is handed. That is what an accepted-set of ids would have to get right, and one reason #244
+was closed on 2026-09-16 without one: verifiers pin the canonical id.
 
 ## 2. risc0 zkVM, recursion and the vendored crates
 
@@ -384,9 +385,11 @@ Each verified against the tree or GitHub on 2026-09-14.
 3. **CORE fleet figures rest on few measurements.** `GOALS.md` G2 gives CORE **44–73 L40S card-years**,
    INFERRED from one near-tip block (966,108, ~0.77 card-s per input). `BUILDS.md` computes 10 cards from
    block 962,000 proved serially, and its 8 × L40S fleet check on 966,108 puts a sub-10-minute block at ~13.
-4. **#244 layer 2, the accepted set of method ids, needs a decision.** The issue's 2026-09-13 status: 10 of
-   17 lineage ids predate at least one consensus rule, so "accept any historical id" re-admits proofs from
-   narrower guests (§1).
+4. ✅ **Decided: no accepted set of method ids** — [#244](https://github.com/bitcoin-ghost/hazync/issues/244),
+   closed 2026-09-16. 10 of 17 lineage ids predate at least one consensus rule, so "accept any historical id"
+   would re-admit proofs from narrower guests (§1); and composition is homogeneous inside the circuit, so
+   widening only the top-level verifier would leave old proofs checkable but never foldable. Layer 1
+   (append-only lineage) stands and lifting remains the upgrade path if a re-baseline ever forces one.
 5. **The worker reads coordinator responses without a bound** (`get()` in `coordinator/hazync`; §6).
 6. **No commissioned external audit** (`SECURITY.md`). The accumulator, the recursion binding and ghostd
    adoption are the named priorities.
