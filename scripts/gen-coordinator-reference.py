@@ -134,9 +134,11 @@ ROUTES = {
         "`submissions` are not rewritten, the old key keeps working, and its work resolves to the head. "
         "Used by `hazync rotate`.",
     "POST /api/sponsor":
-        "Record a sponsorship request `{lo, hi, name, amount_sats}`. `503` unless `SPONSOR_OPEN=1`; "
-        "`amount_sats` must reach the span's minimum. Charges nothing. Returns `202` with the private status "
-        "token once; only its sha256 is stored.",
+        "Sponsorship request `{lo, hi, name, amount_sats}`. `503` unless `SPONSOR_OPEN=1`; "
+        "`amount_sats` must reach the span's minimum. Returns `202` with the private status token once; only "
+        "its sha256 is stored. Without payments connected it only records the request. With BTCPay connected "
+        "it opens an invoice for the pledge in sats (status `invoiced`, `checkout_url` in the answer) that holds "
+        "the blocks while it is open; `503` if BTCPay fails (nothing recorded), `429` over the unpaid-hold caps.",
 }
 
 # Keyed "<source key>:<NAME>".
@@ -215,10 +217,27 @@ ENV = {
     "server:SPONSOR_OPEN": "`1` opens `POST /api/sponsor`.",
     "server:SPONSOR_MAX_BLOCKS": "Largest span one sponsorship may cover.",
     "server:SPONSOR_PRICE_BANDS": "JSON `[[lo, hi, usd_per_block], ...]`; set but invalid means unpriced.",
-    "server:SPONSOR_BTC_USD": "Dollars per bitcoin for converting minimums to sats; unset means no sats "
-                              "minimum, so nothing can be sponsored.",
+    "server:SPONSOR_BTC_USD": "Dollars per bitcoin for converting minimums to sats when payments are not "
+                              "connected (with BTCPay, its store rate is used); unset means no sats minimum.",
     "server:SPONSOR_HOLD_ALERT": "Age in seconds after which a hold on the frontier's next block is "
                                  "reported in `/api/state`.",
+    "server:BTCPAY_URL": "BTCPay Server base URL, e.g. `https://donate.hazync.org`. Payments are connected only "
+                         "with this, `BTCPAY_STORE_ID` and a readable `BTCPAY_API_KEY_FILE`.",
+    "server:BTCPAY_STORE_ID": "The BTCPay store sponsorship invoices are opened in.",
+    "server:BTCPAY_API_KEY_FILE": "File holding a Greenfield API key for that store only (create and view "
+                                  "invoices, view store settings). Kept in a file so the unit never shows it.",
+    "server:BTCPAY_TIMEOUT": "Seconds a call to BTCPay may take.",
+    "server:SPONSOR_INVOICE_MINUTES": "Minutes a sponsorship invoice stays payable, and holds its blocks.",
+    "server:SPONSOR_INVOICE_WATCH": "Seconds after expiry the poller keeps asking BTCPay about an invoice, so a "
+                                    "late payment is credited.",
+    "server:SPONSOR_POLL_S": "Seconds between payment polls.",
+    "server:SPONSOR_CONFIRMING_HOLD": "Seconds a payment BTCPay has seen but not confirmed keeps an unpaid hold, "
+                                      "re-armed each poll.",
+    "server:SPONSOR_UNPAID_HOLD_MAX": "Most blocks all unpaid invoices together may hold.",
+    "server:SPONSOR_OPEN_INVOICES_PER_IP": "Most unpaid invoices one address may have open.",
+    "server:SPONSOR_RETURN_URL": "Where the checkout sends a sponsor back to; `#t=<token>` is appended.",
+    "server:SPONSOR_RATE_TTL": "Seconds BTCPay's bitcoin price is cached.",
+    "server:SPONSOR_RATE_STALE": "Seconds the last good BTCPay price is still used when BTCPay stops answering.",
     "server:BEAT_LOG_WINDOW": "Seconds identical beat rejections are collapsed into one log line.",
     "server:COORD_ALLOW_PUBLIC_INSECURE": "Allows a non-loopback bind in an insecure mode. Not for "
                                           "production.",

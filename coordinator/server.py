@@ -21,6 +21,7 @@ import os, sys, json, sqlite3, hashlib, subprocess, base64, time, threading, tar
 from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
+import urllib.error
 from urllib.parse import urlparse, parse_qs
 
 PORT       = int(os.environ.get("COORD_PORT", "8899"))
@@ -543,6 +544,19 @@ def init_db():
         if col not in have:
             c.execute(f"ALTER TABLE sponsorships ADD COLUMN {col} {decl}")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sponsorships_token ON sponsorships(token_hash)")
+    # Payments through BTCPay (docs/SPONSORSHIP.md, "Payments"). checkout_url is where the sponsor pays;
+    # hold_until is how long an UNPAID invoice keeps its blocks from other sponsors and from claims (the invoice's
+    # expiry, pushed out while a payment is still confirming); watch_until is how long the poller keeps asking
+    # BTCPay about it, so a payment that arrives after expiry is still credited.
+    for col, decl in (("checkout_url", "TEXT"), ("invoice_expires_at", "REAL"), ("hold_until", "REAL"),
+                      ("watch_until", "REAL"), ("invoice_status", "TEXT")):
+        if col not in have:
+            c.execute(f"ALTER TABLE sponsorships ADD COLUMN {col} {decl}")
+    # One row per payment BTCPay reports against a sponsorship's invoice: the on-chain txid-vout or the Lightning
+    # payment hash, in sats. The accounts ledger (a txid per entry) is built from these.
+    c.execute("CREATE TABLE IF NOT EXISTS sponsor_payments(sponsorship_id INTEGER NOT NULL, payment_id TEXT NOT NULL,"
+              " method TEXT, sats INTEGER NOT NULL, status TEXT NOT NULL, received_at REAL, seen_at REAL NOT NULL,"
+              " PRIMARY KEY(sponsorship_id, payment_id))")
     # claim() counts one key's live claims under the global lock (CLAIM_OPEN_MAX): an index, not a table scan.
     c.execute("CREATE INDEX IF NOT EXISTS ranges_assignee_status ON ranges(assignee, status)")
     c.commit(); c.close()
@@ -929,6 +943,10 @@ def coverage_and_held(c, now):
     # path that hands out blocks: claim()'s scan, its frontier-blocker re-offer (#284), and pick(). The
     # sponsor bot does not claim; it proves its blocks with `hazync-worker run <n>`.
     for sp in _sponsor_holds(c):
+        held.update(range(sp["lo"], sp["hi"] + 1))
+    # An unpaid invoice holds its blocks here too, for its payment window, so nobody proves them while the
+    # sponsor is paying.
+    for sp in _sponsor_pending(c, now):
         held.update(range(sp["lo"], sp["hi"] + 1))
     return proven, held
 
@@ -2105,6 +2123,100 @@ SPONSOR_HOLD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL"
                     " AND min_sats IS NOT NULL AND paid_sats >= min_sats")
 SPONSOR_HOLD_ALERT = int(os.environ.get("SPONSOR_HOLD_ALERT", str(6 * 3600)))
 
+# Payments (docs/SPONSORSHIP.md, "Payments"). Connected only when all three are set and the key file can be read:
+# the key is a Greenfield API key limited to one store (create and view invoices, view store settings for the
+# rate), kept in a root-only file and never in the unit's environment, where `systemctl show` would print it.
+BTCPAY_URL = os.environ.get("BTCPAY_URL", "").rstrip("/")
+BTCPAY_STORE_ID = os.environ.get("BTCPAY_STORE_ID", "")
+BTCPAY_API_KEY_FILE = os.environ.get("BTCPAY_API_KEY_FILE", "")
+BTCPAY_TIMEOUT = float(os.environ.get("BTCPAY_TIMEOUT", "15"))
+SPONSOR_INVOICE_MINUTES = int(os.environ.get("SPONSOR_INVOICE_MINUTES", "30"))
+# BTCPay keeps watching an expired invoice for its monitoring window, and a payment it sees then is still a
+# payment: the operator decided (2026-09-17) that a late payment is CREDITED. The poller asks for this long.
+SPONSOR_INVOICE_WATCH = int(os.environ.get("SPONSOR_INVOICE_WATCH", str(3 * 86400)))
+SPONSOR_POLL_S = int(os.environ.get("SPONSOR_POLL_S", "30"))
+# A payment BTCPay has seen but not yet confirmed keeps the unpaid hold this much longer, re-armed on every poll.
+SPONSOR_CONFIRMING_HOLD = int(os.environ.get("SPONSOR_CONFIRMING_HOLD", str(2 * 3600)))
+# An unpaid invoice costs nothing to open, so unpaid holds are capped: in total, and per requesting address.
+SPONSOR_UNPAID_HOLD_MAX = int(os.environ.get("SPONSOR_UNPAID_HOLD_MAX", "5000"))
+SPONSOR_OPEN_INVOICES_PER_IP = int(os.environ.get("SPONSOR_OPEN_INVOICES_PER_IP", "3"))
+SPONSOR_RETURN_URL = os.environ.get("SPONSOR_RETURN_URL", "https://hazync.org/sponsors/")
+SPONSOR_RATE_TTL = int(os.environ.get("SPONSOR_RATE_TTL", "60"))
+SPONSOR_RATE_STALE = int(os.environ.get("SPONSOR_RATE_STALE", "600"))   # the last good rate is used this long
+
+class BTCPayError(Exception):
+    pass
+
+def _btcpay_key():
+    if not BTCPAY_API_KEY_FILE:
+        return None
+    try:
+        with open(BTCPAY_API_KEY_FILE) as f:
+            k = f.read().strip()
+    except OSError:
+        return None
+    return k or None
+
+def payments_enabled():
+    return bool(BTCPAY_URL and BTCPAY_STORE_ID and _btcpay_key())
+
+def _btcpay(method, path, body=None):
+    """One Greenfield call; the parsed JSON, or BTCPayError. The error never carries the key."""
+    key = _btcpay_key()
+    if not (BTCPAY_URL and BTCPAY_STORE_ID and key):
+        raise BTCPayError("payments are not configured")
+    req = urllib.request.Request(f"{BTCPAY_URL}/api/v1/stores/{BTCPAY_STORE_ID}{path}", method=method,
+                                 data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Authorization": f"token {key}", "Content-Type": "application/json",
+                                          "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=BTCPAY_TIMEOUT) as r:
+            return json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        raise BTCPayError(f"BTCPay answered {e.code} to {method} {path}") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise BTCPayError(f"BTCPay unreachable for {method} {path}: {type(e).__name__}") from None
+
+_rate_cache = {"at": 0.0, "ok_at": 0.0, "rate": None}
+_rate_lock = threading.Lock()
+
+def sponsor_btc_usd():
+    """Dollars per bitcoin. With payments connected it is BTCPay's store rate, the same source that prices the
+    invoice, cached SPONSOR_RATE_TTL and served stale for at most SPONSOR_RATE_STALE if BTCPay stops answering.
+    Without payments it is SPONSOR_BTC_USD, as before."""
+    if not payments_enabled():
+        return SPONSOR_BTC_USD
+    now = time.time()
+    with _rate_lock:
+        if now - _rate_cache["at"] >= SPONSOR_RATE_TTL:
+            _rate_cache["at"] = now
+            try:
+                rows = _btcpay("GET", "/rates?currencyPair=BTC_USD")
+                row = next((r for r in rows or [] if r.get("currencyPair") == "BTC_USD"), None)
+                v = _parse_btc_usd((row or {}).get("rate"))
+                if v is not None:
+                    _rate_cache.update(rate=v, ok_at=now)
+            except BTCPayError as e:
+                print(f"[sponsor] rate: {e}", flush=True)
+        if _rate_cache["rate"] is not None and now - _rate_cache["ok_at"] <= SPONSOR_RATE_STALE:
+            return _rate_cache["rate"]
+    return None
+
+# An UNPAID hold: an open invoice keeps its blocks from other sponsors and from claims while the sponsor pays.
+# It is SOFT: submit() still accepts a proof of them from anyone (_hold_refusal reads paid holds only), because an
+# unpaid invoice is free to open and must not be able to lock provers out.
+SPONSOR_PENDING_SQL = "status='invoiced' AND hold_until IS NOT NULL AND hold_until > ?"
+
+def _sponsor_pending(c, now, lo=None, hi=None):
+    """Sponsorships holding their blocks on an unpaid invoice, oldest first; only those overlapping lo..hi."""
+    q, args = "SELECT id,lo,hi,created_at,hold_until FROM sponsorships WHERE " + SPONSOR_PENDING_SQL, (now,)
+    if lo is not None:
+        q, args = q + " AND lo<=? AND hi>=?", args + (hi, lo)
+    try:
+        return c.execute(q + " ORDER BY created_at ASC, id ASC", args).fetchall()
+    except sqlite3.OperationalError:          # a database from before the columns; init_db adds them on start
+        return []
+
 def _sponsor_holds(c, lo=None, hi=None):
     """Held sponsorships, oldest payment first; only those overlapping lo..hi when given."""
     q, args = "SELECT id,lo,hi,status,paid_at FROM sponsorships WHERE " + SPONSOR_HOLD_SQL, ()
@@ -2179,12 +2291,14 @@ def sponsor_min_usd(lo, hi):
             covered += b - a + 1
     return total if covered == hi - lo + 1 else None
 
-def sponsor_min_sats(min_usd):
-    """A dollar minimum in sats at SPONSOR_BTC_USD, rounded UP so it never falls short; None without both.
-    Exact arithmetic: a float division would turn exactly 1,000 sats into 1,000.0000000001 and round up."""
-    if min_usd is None or SPONSOR_BTC_USD is None:
+def sponsor_min_sats(min_usd, btc_usd=None):
+    """A dollar minimum in sats at `btc_usd` (sponsor_btc_usd() when not given), rounded UP so it never falls
+    short; None without both. Exact arithmetic: a float division would turn exactly 1,000 sats into
+    1,000.0000000001 and round up."""
+    rate = sponsor_btc_usd() if btc_usd is None else btc_usd
+    if min_usd is None or rate is None:
         return None
-    return math.ceil(Fraction(min_usd * 100_000_000) / Fraction(str(SPONSOR_BTC_USD)))
+    return math.ceil(Fraction(min_usd * 100_000_000) / Fraction(str(rate)))
 
 def _public_sponsor(c, n):
     """The sponsor shown on block n, if any. Only a sponsorship PAID AT LEAST ITS MINIMUM is shown: an
@@ -2279,9 +2393,9 @@ def _clean_sponsor_name(v):
     return t
 
 def sponsor_info():
-    return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": False,
+    return {"open": SPONSOR_OPEN, "max_blocks": SPONSOR_MAX_BLOCKS, "payments": payments_enabled(),
             "priced": bool(SPONSOR_PRICE_BANDS), "bands": [list(b) for b in SPONSOR_PRICE_BANDS or []],
-            "btc_usd": SPONSOR_BTC_USD, "name_max": SPONSOR_NAME_MAX}
+            "btc_usd": sponsor_btc_usd(), "name_max": SPONSOR_NAME_MAX}
 
 def _sponsor_span(lo, hi):
     """Validate a span to sponsor: (code, error) on a bad one, else (None, (lo, hi)). Shared by the quote
@@ -2313,6 +2427,7 @@ def _sponsor_span(lo, hi):
                        " AND (last_beat IS NOT NULL OR claimed_at > ?) ORDER BY lo LIMIT 1",
                        (hi, lo, now - CLAIM_TTL, now - CLAIM_MAX, now - CLAIM_GRACE)).fetchone()
         sp = _sponsor_holds(c, lo, hi)
+        pend = _sponsor_pending(c, now, lo, hi)
     finally:
         c.close()
     if pr:
@@ -2321,6 +2436,9 @@ def _sponsor_span(lo, hi):
         return 409, {"error": f"block {cl['lo']:,} is being proven right now, so it cannot be sponsored"}
     if sp:
         return 409, {"error": f"block {max(sp[0]['lo'], lo):,} is already sponsored, so it cannot be sponsored again"}
+    if pend:
+        return 409, {"error": f"block {max(pend[0]['lo'], lo):,} is waiting for another sponsor's payment; "
+                              f"try again in a few minutes"}
     return None, (lo, hi)
 
 def sponsor_quote(lo, hi):
@@ -2334,14 +2452,21 @@ def sponsor_quote(lo, hi):
     # Blocks with nothing to prove from yet (no bridge bundle or witness): a sponsorship holds them until the
     # bridge builds them, and the form says so before anyone pays.
     waiting = sum(1 for h in range(lo, hi + 1) if bundle_path(h) is None)
-    return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_usd": usd, "min_sats": sponsor_min_sats(usd),
-                 "btc_usd": SPONSOR_BTC_USD, "priced": usd is not None, "waiting": waiting}
+    rate = sponsor_btc_usd()
+    return 200, {"lo": lo, "hi": hi, "blocks": hi - lo + 1, "min_usd": usd, "min_sats": sponsor_min_sats(usd, rate),
+                 "btc_usd": rate, "priced": usd is not None, "waiting": waiting}
+
+_sponsor_request_lock = threading.Lock()
+_open_invoices_by_ip = {}                # address -> [(sponsorship id, hold_until)], for SPONSOR_OPEN_INVOICES_PER_IP
 
 def sponsor_request(body):
-    """POST /api/sponsor {lo, hi, name, amount_sats}. Closed unless SPONSOR_OPEN=1, and even open it only
-    RECORDS a request: payments are not connected, so nothing is charged, queued or proven
-    (docs/SPONSORSHIP.md). The pledge must be at least the span's minimum. The answer carries the private
-    status link's token, once: only its sha256 is kept."""
+    """POST /api/sponsor {lo, hi, name, amount_sats}. Closed unless SPONSOR_OPEN=1. The pledge must be at least
+    the span's minimum. The answer carries the private status link's token, once: only its sha256 is kept.
+
+    Without payments connected it only RECORDS a request: nothing is charged, queued or proven. With payments
+    connected (payments_enabled) it opens a BTCPay invoice for the pledge in sats and answers with its
+    checkout link; the invoice holds the blocks while it is open, and the poller (sponsor_payments_poll) moves
+    the sponsorship on as BTCPay reports payment (docs/SPONSORSHIP.md, "Payments")."""
     if not SPONSOR_OPEN:
         return 503, {"error": "Sponsorship is not open yet.", "open": False}
     if not isinstance(body, dict):
@@ -2366,6 +2491,8 @@ def sponsor_request(body):
         return 400, {"error": f"the minimum for these blocks is ${min_usd}, {min_sats} sats", "min_sats": min_sats,
                      "min_usd": min_usd}
     token = secrets.token_urlsafe(24)
+    if payments_enabled():
+        return _sponsor_request_invoice(body, lo, hi, name, min_usd, min_sats, amount, token)
     c = db()
     try:
         cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,token_hash)"
@@ -2379,6 +2506,161 @@ def sponsor_request(body):
                  "name": name, "min_usd": min_usd, "min_sats": min_sats, "pledged_sats": amount,
                  "message": "Recorded. Payments are not connected yet, so nothing has been charged and nothing"
                             " is queued. Keep your status link: it is the only way back to this sponsorship."}
+
+def _sponsor_request_invoice(body, lo, hi, name, min_usd, min_sats, amount, token):
+    """The payments half of sponsor_request: open an invoice, and hold the blocks while it is open.
+
+    Serialised by _sponsor_request_lock, span check and all, so two sponsors paying for the same block at the same
+    moment cannot both be given an invoice for it. BTCPay is called inside the lock; requests are rare and the
+    call is bounded by BTCPAY_TIMEOUT."""
+    ip = str(body.get("_client_ip") or "")
+    now = time.time()
+    with _sponsor_request_lock:
+        code, v = _sponsor_span(lo, hi)                     # again, under the lock: the check that matters
+        if code:
+            return code, v
+        for k in [k for k, v in _open_invoices_by_ip.items() if all(t <= now for _, t in v)]:
+            del _open_invoices_by_ip[k]
+        mine = [(sid, t) for sid, t in _open_invoices_by_ip.get(ip, []) if t > now]
+        if ip and SPONSOR_OPEN_INVOICES_PER_IP > 0 and len(mine) >= SPONSOR_OPEN_INVOICES_PER_IP:
+            return 429, {"error": "you already have unpaid invoices open; pay one or let it expire first"}
+        c = db()
+        try:
+            unpaid = sum(r["hi"] - r["lo"] + 1 for r in _sponsor_pending(c, now))
+            if unpaid + (hi - lo + 1) > SPONSOR_UNPAID_HOLD_MAX:
+                return 429, {"error": "too many blocks are waiting on unpaid invoices right now; try again shortly"}
+            cur = c.execute("INSERT INTO sponsorships(lo,hi,name,status,created_at,min_usd,min_sats,pledged_sats,"
+                            "token_hash) VALUES(?,?,?,'requested',?,?,?,?,?)",
+                            (lo, hi, name, now, min_usd, min_sats, amount, hashlib.sha256(token.encode()).hexdigest()))
+            c.commit()
+            sid = cur.lastrowid
+        finally:
+            c.close()
+        # Priced in SATS, the unit the minimum and the public rule are kept in, so what settles compares with
+        # min_sats exactly. The rate that set min_sats is BTCPay's own (sponsor_btc_usd).
+        req = {"amount": str(amount), "currency": "SATS",
+               "metadata": {"orderId": f"hazync-sponsorship-{sid}",
+                            "itemDesc": f"Hazync: prove block{'' if lo == hi else 's'} "
+                                        f"{lo:,}{'' if lo == hi else f' to {hi:,}'}"},
+               "checkout": {"expirationMinutes": SPONSOR_INVOICE_MINUTES,
+                            "monitoringMinutes": max(1, SPONSOR_INVOICE_WATCH // 60),
+                            "redirectURL": f"{SPONSOR_RETURN_URL}#t={token}"}}
+        try:
+            inv = _btcpay("POST", "/invoices", req)
+            inv_id, link = str(inv["id"]), str(inv["checkoutLink"])
+            expires = float(inv.get("expirationTime") or (now + SPONSOR_INVOICE_MINUTES * 60))
+        except (BTCPayError, KeyError, TypeError, ValueError) as e:
+            print(f"[sponsor] invoice for sponsorship #{sid} failed: {e}", flush=True)
+            c = db()
+            try:
+                c.execute("DELETE FROM sponsorships WHERE id=? AND status='requested'", (sid,))
+                c.commit()
+            finally:
+                c.close()
+            return 503, {"error": "Payments are unavailable right now, so nothing was recorded or charged. "
+                                  "Please try again later."}
+        c = db()
+        try:
+            c.execute("UPDATE sponsorships SET status='invoiced', invoice_id=?, checkout_url=?, invoice_expires_at=?,"
+                      " hold_until=?, watch_until=?, invoice_status='New' WHERE id=?",
+                      (inv_id, link, expires, expires, expires + SPONSOR_INVOICE_WATCH, sid))
+            c.commit()
+        finally:
+            c.close()
+        if ip:
+            _open_invoices_by_ip[ip] = mine + [(sid, expires)]
+    return 202, {"id": sid, "token": token, "status": "invoiced", "lo": lo, "hi": hi, "blocks": hi - lo + 1,
+                 "name": name, "min_usd": min_usd, "min_sats": min_sats, "pledged_sats": amount,
+                 "checkout_url": link, "invoice_expires_at": expires,
+                 "message": "Pay the invoice to sponsor these blocks; they are kept for you until it expires. Keep "
+                            "your status link: it is the only way back to this sponsorship."}
+
+def _sats(v):
+    """A Greenfield decimal amount in BTC, as whole sats (rounded down: never credit a fraction nobody paid)."""
+    from decimal import Decimal, InvalidOperation
+    try:
+        return int(Decimal(str(v)) * 100_000_000)
+    except (InvalidOperation, ValueError, TypeError):
+        return 0
+
+def sponsor_payments_poll(now=None):
+    """Ask BTCPay about every sponsorship whose invoice is still worth asking about, and move each one on.
+
+      settled >= min_sats             -> paid, whenever it arrives: a late payment is credited (2026-09-17)
+      a payment still confirming      -> stays invoiced, and its hold is pushed out SPONSOR_CONFIRMING_HOLD
+      expired or invalid, some settled -> underpaid (kept as a donation; becomes paid if the rest arrives)
+      expired or invalid, nothing      -> expired (becomes paid if a payment arrives while it is watched)
+
+    Only payments BTCPay calls Settled count. Every transition is guarded by the status it moves from, so a
+    repeated poll changes nothing. Returns {sponsorship id: new status} for what moved."""
+    if not payments_enabled():
+        return {}
+    now = time.time() if now is None else now
+    c = db()
+    try:
+        rows = c.execute("SELECT id,lo,hi,status,min_sats,invoice_id,hold_until FROM sponsorships"
+                         " WHERE status IN ('invoiced','expired','underpaid') AND invoice_id IS NOT NULL"
+                         " AND COALESCE(watch_until, 0) > ?", (now,)).fetchall()
+    finally:
+        c.close()
+    moved = {}
+    for r in rows:
+        try:
+            inv = _btcpay("GET", f"/invoices/{r['invoice_id']}")
+            methods = _btcpay("GET", f"/invoices/{r['invoice_id']}/payment-methods")
+        except BTCPayError as e:
+            print(f"[sponsor] poll #{r['id']}: {e}", flush=True)
+            continue
+        pays = []
+        for m in methods or []:
+            for p in m.get("payments") or []:
+                pays.append((str(p.get("id")), str(m.get("paymentMethodId") or ""), _sats(p.get("value")),
+                             str(p.get("status") or ""), p.get("receivedDate")))
+        settled = sum(v for _, _, v, st, _ in pays if st == "Settled")
+        confirming = any(st == "Processing" for _, _, _, st, _ in pays)
+        inv_status = str((inv or {}).get("status") or "")
+        new, hold = r["status"], r["hold_until"]
+        if str((inv or {}).get("additionalStatus") or "") == "Marked":
+            # Someone changed the invoice by hand in BTCPay. That is an operator's decision about THIS sponsorship,
+            # and the operator sets its status here too; the poller does not guess which way it went.
+            print(f"[sponsor] poll #{r['id']}: invoice {r['invoice_id']} was marked {inv_status} by hand; "
+                  f"left as {r['status']}", flush=True)
+            continue
+        if settled >= (r["min_sats"] or 0) and settled > 0:
+            new = "paid"
+        elif confirming or inv_status == "Processing":
+            if r["status"] == "invoiced":
+                hold = max(hold or 0, now + SPONSOR_CONFIRMING_HOLD)
+        elif inv_status in ("Expired", "Invalid", "Settled"):
+            new = "underpaid" if settled > 0 else ("expired" if r["status"] == "invoiced" else r["status"])
+        c = db()
+        try:
+            for pid, meth, sats, st, rec in pays:
+                c.execute("INSERT INTO sponsor_payments(sponsorship_id,payment_id,method,sats,status,received_at,seen_at)"
+                          " VALUES(?,?,?,?,?,?,?) ON CONFLICT(sponsorship_id,payment_id) DO UPDATE SET"
+                          " sats=excluded.sats, status=excluded.status, seen_at=excluded.seen_at",
+                          (r["id"], pid, meth, sats, st, rec, now))
+            if new == "paid":
+                cur = c.execute("UPDATE sponsorships SET status='paid', paid_sats=?, paid_at=?, invoice_status=?"
+                                " WHERE id=? AND status=?", (settled, now, inv_status, r["id"], r["status"]))
+                if cur.rowcount:
+                    moved[r["id"]] = "paid"
+                    # Paid late, after other provers finished the span: the hold ends at once.
+                    _sponsor_mark_proven(c, r["lo"], r["hi"], now)
+            elif new != r["status"]:
+                cur = c.execute("UPDATE sponsorships SET status=?, paid_sats=?, invoice_status=? WHERE id=? AND status=?",
+                                (new, settled or None, inv_status, r["id"], r["status"]))
+                if cur.rowcount:
+                    moved[r["id"]] = new
+            else:
+                c.execute("UPDATE sponsorships SET hold_until=?, invoice_status=?, paid_sats=? WHERE id=? AND status=?",
+                          (hold, inv_status, settled or None, r["id"], r["status"]))
+            c.commit()
+        finally:
+            c.close()
+    for sid, st in moved.items():
+        print(f"[sponsor] sponsorship #{sid} -> {st}", flush=True)
+    return moved
 
 def _status_runs():
     """The block map's runs, from the same cache /api/blockstatus serves, with their upper ends for bisect."""
@@ -2426,6 +2708,14 @@ def sponsor_status(token):
                              "created_at", "paid_at", "proven_at")}
     out.update(blocks=r["hi"] - r["lo"] + 1, proven_blocks=_proven_in(r["lo"], r["hi"], _status_runs()),
                queue_ahead=ahead, public=_is_public_sponsorship(r))
+    # The way back to paying, for whoever holds the private link, while the invoice can still be paid.
+    if r["status"] == "invoiced":
+        c = db()
+        try:
+            inv = c.execute("SELECT checkout_url, invoice_expires_at FROM sponsorships WHERE id=?", (r["id"],)).fetchone()
+        finally:
+            c.close()
+        out.update(checkout_url=inv["checkout_url"], invoice_expires_at=inv["invoice_expires_at"])
     return 200, out
 
 def sponsors_public():
@@ -2601,6 +2891,7 @@ def state(slim=False):
     _st = blocker["status"] if blocker else "open"
     _att = (blocker["attempts"] if blocker else 0) or 0
     _hold = next(iter(_sponsor_holds(c, nb, nb)), None)
+    _pending = None if _hold else next(iter(_sponsor_pending(c, now, nb, nb)), None)
     if _st == "verified" and not _cover_settled(c, nb, _fr_taken):
         # #339: verified after the frontier above was read, so it may seam perfectly; this snapshot cannot say. On
         # 2026-09-15 the live board called 69,737 unseamable 20 s after it was proven, on a clean chain.
@@ -2690,6 +2981,10 @@ def state(slim=False):
                                       f"so only the sponsor bot can move the frontier, and it has not")
         else:
             _attn, _attn_why = False, f"held for sponsorship #{_hold['id']}; the sponsor bot proves it"
+    elif _pending:
+        # Bounded by the invoice: it expires (or its payment confirms) within SPONSOR_INVOICE_MINUTES, or
+        # SPONSOR_CONFIRMING_HOLD while a payment confirms.
+        _attn, _attn_why = False, f"waiting for sponsorship #{_pending['id']} to be paid"
     elif stalled_for > CLAIM_TTL:
         _attn, _attn_why = True, (f"nobody has held this block for {stalled_for}s, longer than a claim "
                                   f"cycle (CLAIM_TTL={CLAIM_TTL})")
@@ -3488,6 +3783,8 @@ class H(BaseHTTPRequestHandler):
         ua = self.headers.get("User-Agent") or ""
         if isinstance(body, dict) and ua.startswith("hazync-worker/"):
             body["_client_version"] = ua[len("hazync-worker/"):][:32]
+        if isinstance(body, dict) and p == "/api/sponsor":
+            body["_client_ip"] = self._client_ip()        # set here, always: a client cannot choose it
         fn = {"/api/submit": submit, "/api/claim": claim, "/api/spine": submit_spine,
               "/api/beat": beat, "/api/rotate": rotate, "/api/sponsor": sponsor_request,
               "/api/foldclaim": fold_claim}[p]
@@ -3559,5 +3856,19 @@ if __name__ == "__main__":
 
         threading.Thread(target=_peer_sync_loop, daemon=True, name="peer-sync").start()
         print(f"  peer-sync  every {PEER_SYNC_INTERVAL}s from {len(PEERS)} peer(s): {', '.join(PEERS)}")
+
+    if payments_enabled():
+        def _sponsor_poll_loop():
+            while True:
+                try:
+                    sponsor_payments_poll()
+                except Exception as e:                      # noqa: BLE001 -- never let this thread die
+                    print(f"[sponsor] poll pass failed, will retry: {e}", flush=True)
+                time.sleep(SPONSOR_POLL_S)
+
+        threading.Thread(target=_sponsor_poll_loop, daemon=True, name="sponsor-poll").start()
+        print(f"  payments   BTCPay {BTCPAY_URL}, store {BTCPAY_STORE_ID}, polled every {SPONSOR_POLL_S}s")
+    elif BTCPAY_URL or BTCPAY_STORE_ID or BTCPAY_API_KEY_FILE:
+        print("  payments   NOT connected: BTCPAY_URL, BTCPAY_STORE_ID and a readable BTCPAY_API_KEY_FILE are all needed")
 
     ThreadingHTTPServer((BIND, PORT), H).serve_forever()

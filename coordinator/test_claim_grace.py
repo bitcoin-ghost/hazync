@@ -126,6 +126,14 @@ _holds = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.ab
                         + (["--control"] if CONTROL else []))
 if not CONTROL:
     check(_holds.returncode == 0, "sponsor holds keep blocks from normal workers (test_sponsor_holds.py)")
+# An unpaid invoice holds blocks through this claim path too, so the payments test runs from here (and its control).
+_pay = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_payments.py")]
+                      + (["--control"] if CONTROL else []))
+if not CONTROL:
+    check(_pay.returncode == 0, "BTCPay invoices hold their blocks and settle into paid sponsorships (test_sponsor_payments.py)")
+elif _pay.returncode != 0:
+    print("CONTROL FAILED — test_sponsor_payments.py --control passed with payments disconnected.")
+    sys.exit(1)
 # The per-key claim cap uses the same liveness as the grace, so it runs from here too (and its control).
 _cap = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_claim_cap.py")]
                       + (["--control"] if CONTROL else []))

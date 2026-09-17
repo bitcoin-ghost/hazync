@@ -1,8 +1,9 @@
 # Sponsoring blocks
 
-Status: **the records, the minimum, the private link, the public list, the API and the site's form exist;
-payments and the proving bot do not.** Sponsorship is closed on the live coordinator (`SPONSOR_OPEN`
-unset) and has no bitcoin price (`SPONSOR_BTC_USD` unset), so the site's form says so and nothing is recorded.
+Status: **the records, the minimum, the private link, the public list, the API, the site's form and the
+BTCPay payments code exist; the proving bot cannot run live yet** ([#351](https://github.com/bitcoin-ghost/hazync/issues/351)).
+Sponsorship is closed on the live coordinator (`SPONSOR_OPEN` unset) and payments are not connected there, so the
+site's form says so and nothing is recorded. Payments must stay unconnected until the bot can prove what is paid for.
 
 ## What it is for
 
@@ -22,12 +23,12 @@ requested -> invoiced -> paid -> proving -> proven
 | Status | Set by | Built |
 |--------|--------|-------|
 | `requested` | `POST /api/sponsor` | yes, when `SPONSOR_OPEN=1` and the span is priced |
-| `invoiced` | payment integration (BTCPay: Lightning and on-chain) | no |
-| `paid` | payment integration, on settlement of **at least** `min_sats` | no |
-| `underpaid` | payment integration, on settlement **below** `min_sats`; the payment is kept as a donation | status only |
+| `invoiced` | `POST /api/sponsor` with payments connected: a BTCPay invoice is open | yes |
+| `paid` | the payment poller, on settlement of **at least** `min_sats`, **late or not** | yes |
+| `underpaid` | the payment poller, when the invoice ends with **less** than `min_sats` settled; kept as a donation | yes |
 | `proving` | sponsor bot, when it starts pods | no |
 | `proven` | `submit()`, when every block of the span is covered by verified ranges | yes |
-| `expired` | payment integration, invoice not paid in time | no |
+| `expired` | the payment poller, invoice ended with nothing paid | yes |
 | `cancelled`, `refunded` | operator | no |
 
 A sponsor's name is published **only** when both hold: the status is `paid`, `proving` or `proven`, **and**
@@ -80,7 +81,7 @@ withhold the sponsor's name. Paying at least the minimum is what earns the name;
 - `SPONSOR_BTC_USD`, dollars per bitcoin. **There is no default**: a price written into the code would be
   wrong within the day. Without it a quote gives the dollar minimum and no sats, and a request is refused
   (`503`). The rate goes stale as the market moves, so it has to be kept current by whoever runs the
-  coordinator; when payments are built, invoicing in dollars through BTCPay can supply the rate instead.
+  coordinator. **With payments connected it is not used**: the rate is BTCPay's store rate (see Payments).
 - The minimum in sats is `ceil(min_usd x 100,000,000 / SPONSOR_BTC_USD)`, rounded up so it never falls
   short. Both `min_usd` and `min_sats` are stored with each request, so a later price or rate change does not
   move the minimum a sponsor was quoted, and the public rule compares what settled against `min_sats`.
@@ -113,9 +114,48 @@ A sponsorship **holds** its blocks from the moment it is paid at least its minim
   (`"sponsorship": id`) when the frontier's next block is held, and is calm about it until the hold is older
   than `SPONSOR_HOLD_ALERT` (default 6 hours), when it sets `needs_attention`. `/api/block/<n>` carries
   `"held": {"sponsorship": id, "since": seconds}`.
-- ⚠ **Open with payments (step 3):** a hold should start when the invoice is created, for the invoice's
-  payment window, so nobody proves or sponsors the blocks while the sponsor is paying. Until payments
-  exist only a paid status holds.
+- **An open invoice holds its blocks too**, for its payment window, so nobody is offered them and no other sponsor
+  can take them while the sponsor pays (see Payments). That hold is **soft**: `submit()` still accepts a proof of
+  them from any prover, because an unpaid invoice costs nothing to open and must not be able to lock provers out.
+
+## Payments
+
+BTCPay Server (`donate.hazync.org`, [hazync-admin `infrastructure/btcpay-box.md`](https://github.com/hazync/hazync-admin/blob/main/infrastructure/btcpay-box.md))
+takes the payment; the coordinator opens invoices and asks BTCPay what was paid. Connected only when
+`BTCPAY_URL`, `BTCPAY_STORE_ID` and a readable `BTCPAY_API_KEY_FILE` are all set (`payments_enabled()`).
+
+- **The key** is a Greenfield API key for the one store, with only *create invoices*, *view invoices* and *view store
+  settings* (the rate). It lives in a root-only file named by `BTCPAY_API_KEY_FILE`, never in the unit's
+  environment, where `systemctl show` would print it.
+- **The rate** is BTCPay's store rate (`GET /api/v1/stores/<store>/rates?currencyPair=BTC_USD`), the same source that
+  prices invoices, cached `SPONSOR_RATE_TTL` (60 s). If BTCPay stops answering the last good rate is used for
+  `SPONSOR_RATE_STALE` (10 minutes), then there is no rate and requests are refused.
+- **The invoice** is for the pledge, in **SATS**, the unit `min_sats` and the public rule are kept in, so what settles
+  compares with the minimum exactly. It is payable for `SPONSOR_INVOICE_MINUTES` (30), BTCPay watches it for
+  `SPONSOR_INVOICE_WATCH` (3 days) after that, and its checkout sends the sponsor back to their private link.
+  `POST /api/sponsor` answers `202` with `checkout_url`; if BTCPay fails, `503` and nothing is recorded.
+- **Requests are serialised** (`_sponsor_request_lock`), span check included, so two sponsors cannot both be given an
+  invoice for the same block.
+- **Unpaid holds are capped**, because an invoice is free to open: at most `SPONSOR_UNPAID_HOLD_MAX` (5,000) blocks
+  under unpaid invoices in total, and `SPONSOR_OPEN_INVOICES_PER_IP` (3) open invoices per address; over either,
+  `429`. The address is set by the request handler, never taken from the body.
+- **The poller** (`sponsor_payments_poll`, a thread every `SPONSOR_POLL_S`, 30 s) asks BTCPay about every sponsorship
+  that is `invoiced`, `expired` or `underpaid` and still inside its watch window. Only payments BTCPay calls
+  *Settled* count:
+
+  | What BTCPay reports | Becomes |
+  |---|---|
+  | settled at least `min_sats`, at any time | `paid` (late payments are **credited**, decided 2026-09-17) |
+  | a payment seen but not confirmed | stays `invoiced`; its hold is pushed out `SPONSOR_CONFIRMING_HOLD` (2 h), re-armed each poll |
+  | invoice expired or invalid, something settled below `min_sats` | `underpaid`; becomes `paid` if the rest arrives while watched |
+  | invoice expired or invalid, nothing settled | `expired`; becomes `paid` if a payment arrives while watched |
+  | invoice marked by hand in BTCPay | left alone and logged: the operator sets the status |
+
+  A sponsorship paid late for a span other provers finished meanwhile goes straight to `proven`. Every transition
+  is guarded by the status it moves from, so a repeated poll changes nothing. Each payment is recorded in
+  `sponsor_payments` (on-chain `txid-vout` or Lightning payment hash, sats, status) for the accounts ledger.
+- **Not built:** refunds, a webhook (polling every 30 s is fast enough for this and needs nothing reachable on the
+  coordinator), and the public accounts ledger itself.
 
 ## The private link and the public list
 
@@ -132,10 +172,10 @@ A sponsorship **holds** its blocks from the moment it is paid at least its minim
 
 | Call | What it does |
 |------|--------------|
-| `GET /api/sponsor` | `{"open": bool, "max_blocks": n, "payments": false, "priced": bool, "bands": [[lo, hi, usd], ...], "btc_usd": n or null, "name_max": 40}` |
+| `GET /api/sponsor` | `{"open": bool, "max_blocks": n, "payments": bool, "priced": bool, "bands": [[lo, hi, usd], ...], "btc_usd": n or null, "name_max": 40}` |
 | `GET /api/sponsor/quote?lo=&hi=` | `{"lo", "hi", "blocks", "min_usd": n or null, "min_sats": n or null, "btc_usd": n or null, "priced": bool, "waiting": n}`; `waiting` counts blocks with no bundle yet; answers while closed too |
-| `POST /api/sponsor` `{"lo", "hi", "name", "amount_sats"}` | `503` while closed, unpriced, or with no bitcoin price. `400` (with `min_sats` and `min_usd`) below the minimum. Open: records a `requested` row, `202` with `id, token, status, lo, hi, blocks, name, min_usd, min_sats, pledged_sats, message` |
-| `GET /api/sponsor/status/<token>` | one sponsorship: `id, lo, hi, blocks, name, status, min_usd, min_sats, pledged_sats, paid_sats, created_at, paid_at, proven_at, proven_blocks, queue_ahead, public`; `404` for an unknown link |
+| `POST /api/sponsor` `{"lo", "hi", "name", "amount_sats"}` | `503` while closed, unpriced, or with no bitcoin price. `400` (with `min_sats` and `min_usd`) below the minimum. Open without payments: records a `requested` row, `202` with `id, token, status, lo, hi, blocks, name, min_usd, min_sats, pledged_sats, message`. With payments: the same plus `checkout_url` and `invoice_expires_at`, status `invoiced`; `503` if BTCPay fails (nothing recorded), `429` over the unpaid-hold caps, `409` if a block is waiting for another sponsor's payment |
+| `GET /api/sponsor/status/<token>` | one sponsorship: `id, lo, hi, blocks, name, status, min_usd, min_sats, pledged_sats, paid_sats, created_at, paid_at, proven_at, proven_blocks, queue_ahead, public`, plus `checkout_url` and `invoice_expires_at` while `invoiced`; `404` for an unknown link |
 | `GET /api/sponsors` | `{"sponsorships": [{id, name, lo, hi, blocks, status, paid_sats, min_usd, min_sats, paid_at, proven_at, proven_blocks, queue_ahead}], "open", "priced"}`, public rows only |
 | `GET /api/block/<n>` | includes `sponsor` (id, name, span, status) for a public sponsorship covering the block, else `null` |
 
@@ -157,8 +197,8 @@ as `/api/blockstatus`.
    230,000 only. Once the bridge builds bundles in a band, run a trial there and compare what its blocks cost,
    overhead included, with their price. Prices stay at about **twice** the estimated cost: rented GPU prices
    move, and a sponsorship that pays its minimum must be enough to prove its blocks.
-2. **Payments.** BTCPay invoices, settlement moving a row to `paid` (or `underpaid`, kept as a donation),
-   expiry, and refunds.
+2. ~~**Payments.**~~ Built (see Payments), except refunds and the public accounts ledger. Not connected live until
+   the bot can run (#351).
 3. **The bot** (`coordinator/sponsor_bot.py` is a dry-run skeleton): RunPod pods, a spending limit, the
    normal worker under the bot's key, `proving` and `proven` updates.
 4. ~~**Priority.**~~ Built as **holds** (above): paid spans are kept for the bot, and nobody else is offered them.
