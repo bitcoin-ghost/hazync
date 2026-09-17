@@ -24,7 +24,7 @@
 >
 > That failure is silent in the worst way: `run-workers.sh` only checks the id at STARTUP
 > (hazync#99), so a mismatched worker proves indefinitely into nothing. To contribute to
-> bitcoinghost.org use the **release binary** or the reproducible build.
+> hazync.org use the **release binary** or the reproducible build.
 >
 > ⚠ Promoting a channel is never just a flag. It is a new `METHOD_ID`, a full cutover, and **every
 > existing proof invalidated** — v0.21.0 spends the WHOLE board to do it. The speed is not free.

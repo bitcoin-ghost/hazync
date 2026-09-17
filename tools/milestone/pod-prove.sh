@@ -21,7 +21,7 @@ if [ ! -x "$BIN" ]; then
   curl -fsSL -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda || exit 1
   chmod +x "$BIN"
 fi
-[ -f "/workspace/$BLOCK" ] || { curl -fsSLO "https://bitcoinghost.org/hazync/repro/${BLOCK}.gz" && gunzip -f "${BLOCK}.gz"; }
+[ -f "/workspace/$BLOCK" ] || { curl -fsSLO "https://hazync.org/repro/${BLOCK}.gz" && gunzip -f "${BLOCK}.gz"; }
 
 # ---- static facts -------------------------------------------------------------------------------
 read -r GNAME GUUID GDRV GMEM GPWR GSM GMM < <(nvidia-smi --query-gpu=name,uuid,driver_version,memory.total,power.limit,clocks.max.sm,clocks.max.mem --format=csv,noheader,nounits | tr -d ',')

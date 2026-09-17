@@ -1,6 +1,6 @@
 # Join the Hazync Proof Party
 
-You prove one block of Bitcoin's history on your own machine, sign it, and submit it. Your name goes on the board at https://bitcoinghost.org/hazync, and the proof is public for anyone to download and check. This guide takes you from nothing to your first proof.
+You prove one block of Bitcoin's history on your own machine, sign it, and submit it. Your name goes on the board at https://hazync.org/, and the proof is public for anyone to download and check. This guide takes you from nothing to your first proof.
 
 ## What you need
 
@@ -136,7 +136,7 @@ takes no claim at all. Either way the claim is only about who is offered what: t
 a valid proof at any height from anyone, and a lapsed claim cancels nothing, so a worker that dies
 mid-block costs at most a delay before the block is offered again.
 
-`run` fetches the witness it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://bitcoinghost.org/hazync. Prove as many as you like — just run it again.
+`run` fetches the witness it needs, proves it on your machine, signs the receipt, and submits it. The coordinator re-verifies your proof, and when the tool prints a `✓`, your name is on the board at https://hazync.org/. Prove as many as you like — just run it again.
 
 **Leaving it running, or running several at once?** One `run` proves one block and exits, so use the
 supplied loop — it keeps N workers going and, importantly, refuses to start if your guest id doesn't

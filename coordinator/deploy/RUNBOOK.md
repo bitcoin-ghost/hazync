@@ -1,12 +1,12 @@
 # Hazync Proof Party — coordinator deploy runbook
 
 Stand up the coordinator **co-located with the archive-node bridge and a full `bitcoind`** on one box, and
-wire it under **one domain** (`bitcoinghost.org/hazync`) through an nginx proxy — the box is invisible
+wire it under **one domain** (`hazync.org`) through an nginx proxy — the box is invisible
 backend infrastructure, like the existing `/api/pool/vmN/` proxies.
 
 ```
-  bitcoinghost.org/hazync          the page (story + live board), served from the web root
-  bitcoinghost.org/hazync/api/…    proxied to the bridge box (state / claim / submit / witness)
+  hazync.org          the page (story + live board), served from the web root
+  api.hazync.org/api/…    proxied to the bridge box (state / claim / submit / witness)
         one URL for people · one box for data
 ```
 
@@ -148,13 +148,12 @@ containing it. `--force` discards it (after the backup) and should be the rare c
 
 ## 2. Wire the single domain (on the WEB box)
 
-Paste `coordinator/deploy/nginx-hazync.conf` into the `bitcoinghost.org` `server { }` block in
-`/etc/nginx/sites-enabled/bitcoinghost` (set `proxy_pass` to the coordinator's IP if it's a separate
-box), then:
+Paste `coordinator/deploy/nginx-hazync.conf` into the `hazync.org` `server { }` block in
+`/etc/nginx/sites-enabled/hazync.org` on the web box (set `proxy_pass` to the coordinator's IP), then:
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
-curl -s https://bitcoinghost.org/hazync/api/state | head -c 300   # now reachable via the domain
+curl -s https://api.hazync.org/api/state | head -c 300   # now reachable via the domain
 ```
 
 ## 3. Go-live page (one page) — DONE
@@ -170,7 +169,7 @@ live data automatically. Nothing to do here except stand up steps 1–2.
 On any box (the coordinator itself can prove the tiny early blocks on CPU — no GPU needed to seed):
 
 ```bash
-export COORD_URL=https://bitcoinghost.org/hazync
+export COORD_URL=https://hazync.org/
 export HAZYNC_HOST=/path/to/host WITNESS_DIR=/tmp/w
 ./coordinator/hazync id yourname
 ./coordinator/hazync run 1          # claim → fetch witness → prove → sign → submit → verify

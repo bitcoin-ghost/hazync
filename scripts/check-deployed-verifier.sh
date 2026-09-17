@@ -24,11 +24,11 @@
 # So this check drives the deployed module the way a reader's browser does, and asserts the whole
 # journey rather than any one file's hash. Run it after any web deploy and after every re-baseline.
 #
-# Env: HAZYNC_SITE (default https://bitcoinghost.org/hazync) to point at a staging host.
+# Env: HAZYNC_SITE (default https://hazync.org/) to point at a staging host.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-SITE="${HAZYNC_SITE:-https://bitcoinghost.org/hazync}"
+SITE="${HAZYNC_SITE:-https://hazync.org/}"
 CANON_FILE=reproduce/METHOD_ID
 fail=0
 note() { printf '  %s\n' "$*"; }
@@ -188,7 +188,7 @@ if [ "$fail" -ne 0 ]; then
     echo "       verify it against the signed SHA256SUMS.txt.asc before copying it anywhere"
     echo "  2. back up the live module under its OLD guest id, then install the new one:"
     echo "       sudo install -o www-data -g www-data -m 644 /tmp/v.wasm \\"
-    echo "            /var/www/bitcoinghost/hazync/verify/hazync-verify.wasm"
+    echo "            /var/www/hazync/verify/hazync-verify.wasm"
     echo "  3. re-run this script — it checks over the wire, so it is the only proof the deploy landed"
     exit 1
 fi

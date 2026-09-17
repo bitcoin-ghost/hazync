@@ -17,7 +17,7 @@
 #   HAZYNC_ALERT                  the alert command (default /usr/local/bin/hazync-alert.sh)
 set -uo pipefail
 
-TARGETS="${WATCHDOG_TARGETS:-coordinator=http://152.53.93.164:8899/api/meta public=https://bitcoinghost.org/hazync/api/meta}"
+TARGETS="${WATCHDOG_TARGETS:-coordinator=http://159.195.207.224:8899/api/meta public=https://bitcoinghost.org/hazync/api/meta api=https://api.hazync.org/api/meta}"
 FAILS_BEFORE_ALERT="${WATCHDOG_FAILS_BEFORE_ALERT:-2}"
 REALERT_SECS="${WATCHDOG_REALERT_SECS:-3600}"
 STATE="${WATCHDOG_STATE_DIR:-/var/lib/hazync-watchdog}"

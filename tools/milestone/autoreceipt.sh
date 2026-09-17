@@ -31,7 +31,7 @@ say "gathered $N receipts"
 
 timeout 120 ssh -n -o ConnectTimeout=20 -i $K -p "$SPORT" root@"$SIP"  'for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done; ldconfig 2>/dev/null
   mkdir -p /workspace/agg3 && cd /workspace && ([ -x hazync-host-cuda ] || curl -fsSL -o hazync-host-cuda https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda) && chmod +x hazync-host-cuda
-  ([ -f block_966256.json ] || { curl -fsSLO https://bitcoinghost.org/hazync/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; })
+  ([ -f block_966256.json ] || { curl -fsSLO https://hazync.org/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; })
   cp hazync-host-cuda block_966256.json agg3/ && echo ready' >/dev/null 2>&1
 for f in $D/receipts/chunk_*.bin $D/receipts/chunk_*.hzk; do
   ( b=$(basename $f)

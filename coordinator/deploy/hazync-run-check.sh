@@ -39,7 +39,7 @@ now=$(date +%s)
 
 if [ "$rc" -eq 0 ]; then
     if [ "$last" -gt 0 ]; then
-        if ! "$ALERT" "Hazync: $name RECOVERED on $HOST" \
+        if ! ALERT_TAGS=white_check_mark ALERT_PRIORITY=low "$ALERT" "Hazync: $name RECOVERED on $HOST" \
                 "$(printf '%s holds again after %s failed run(s).\n\n%s' "$name" "$fails" "$(printf '%s\n' "$out" | tail -n 4)")"; then
             echo "[check] could not send the recovery push for $name" >&2
         fi

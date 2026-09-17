@@ -164,7 +164,7 @@ itself (exit 78), so a missed upgrade shows up as stopped workers, not as silent
 
 ## Watching it
 
-**The board.** <https://bitcoinghost.org/hazync>, or from a shell:
+**The board.** <https://hazync.org/>, or from a shell:
 
 ```
 curl -s 'https://api.hazync.org/api/state?slim=1' | python3 -c '
