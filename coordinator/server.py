@@ -221,6 +221,9 @@ FOLD_CLAIM_TTL = int(os.environ.get("FOLD_CLAIM_TTL", "60"))   # ~4x a measured 
 FOLD_CLAIM_CAP = int(os.environ.get("FOLD_CLAIM_CAP", "2"))    # live fold claims one key may hold at once
 # Set only by test_fold_claims.py --control: fold claims are granted but ignored, as before #333.
 _CONTROL_FOLD_CLAIMS_IGNORED = False
+# Set only by test_blocker_message.py --control: restores the latching `_continuous` test (#360), which
+# compared this claim's age to the whole stall and so could never be true again after one hand-over.
+_CONTROL_BLOCKER_CONTINUOUS = False
 # A claim is LIVE (it holds its block) while it beats within CLAIM_TTL, or has never beaten and is inside
 # CLAIM_GRACE, and is younger than CLAIM_MAX. One definition, for the blocks that are held and for the cap.
 LIVE_CLAIM_SQL = ("status='claimed' AND COALESCE(last_beat, claimed_at) > ? AND claimed_at > ?"
@@ -2632,30 +2635,46 @@ def state(slim=False):
         # beating until 6 s before its only submission, verified 9,830 s after the claim — and was
         # flagged "may be failing on a bug already fixed" while running the latest release.
         #
-        # What separates them is already in the row. `claim()` does INSERT OR REPLACE with
-        # claimed_at=now, so a worker stuck in 39,413's kill-retry-reclaim loop carries a claim far
-        # YOUNGER than the stall. A worker grinding through a big block carries one about as old as the
-        # stall itself: it took the block at most one claim cycle after the frontier stopped. And the
-        # worker only beats when a segment finishes (#256), so a HUNG prover's beat goes stale and its
-        # claim lapses after CLAIM_TTL; a fresh beat means work is still landing. CLAIM_MAX still caps a
-        # continuous hold outright. So a continuous claim with a live beat is waiting, not stuck.
+        # ⛔ The first attempt at that test compared this claim's age to the STALL's:
+        #     _continuous = _claim_age >= stalled_for - CLAIM_TTL
+        # `claim()` does INSERT OR REPLACE with claimed_at=now, so every hand-over resets _claim_age
+        # while stalled_for keeps growing. Once a block has changed hands even ONCE, the expression can
+        # never be true again for the rest of that block's life: the exemption it guards became
+        # unreachable, and the current holder was accused however healthily it was proving. Block 74,928
+        # on 2026-09-17 — 814 inputs, held 2h37m, beating every ~50 s, by a prover with four completed
+        # blocks of 2.3-3.3 h behind it — was reported as "may be failing on a bug already fixed".
+        #
+        # What actually separates them is how long THIS claim has survived. 39,413 was a
+        # kill-retry-reclaim loop (#286: a 757 s assembly against a 600 s silence timeout), so no single
+        # claim there ever lived a full cycle. A worker grinding a big block holds one that outlives a
+        # cycle and keeps beating. So SETTLED (this claim is older than one claim cycle) AND LIVE (it has
+        # beaten within one) is waiting, not stuck — judged on the current claim, never on the history.
+        # CLAIM_MAX still caps a hold outright.
         _claim_age = int(now - (blocker["claimed_at"] or now))
         _beat_age = int(now - (blocker["last_beat"] or blocker["claimed_at"] or now))
-        _continuous = _claim_age >= stalled_for - CLAIM_TTL
+        _settled = _claim_age >= CLAIM_TTL
+        if _CONTROL_BLOCKER_CONTINUOUS:                 # test_blocker_message.py --control
+            _settled = _claim_age >= stalled_for - CLAIM_TTL
         _live = _beat_age <= CLAIM_TTL
-        if stalled_for > 2 * CLAIM_TTL and not (_continuous and _live):
+        if stalled_for > 2 * CLAIM_TTL and not (_settled and _live):
             _attn = True
-            if not _continuous:
-                _attn_why = (f"{_who} has re-taken this block over {stalled_for}s — over two claim cycles — "
-                             f"without ever submitting it (this claim is {_claim_age}s old); their worker "
-                             f"is running hazync-worker/{_ver} and may be failing on a bug already fixed")
-            else:
+            if not _live:
                 _attn_why = (f"{_who} has held this block for {_claim_age}s but its last heartbeat was "
                              f"{_beat_age}s ago, so no proving progress is landing "
                              f"(hazync-worker/{_ver})")
+            else:
+                # The block has been re-taken repeatedly — but say that about the BLOCK, not about
+                # whoever happens to hold it now. "{who} has re-taken this block" was the misleading
+                # half: on a hand-over the current holder inherits an accusation it has not earned,
+                # which is what #360 was filed for.
+                _attn_why = (f"this block has been re-taken repeatedly and claims keep turning over: "
+                             f"the frontier has sat for {stalled_for}s and no single claim has lasted "
+                             f"a full cycle (CLAIM_TTL={CLAIM_TTL}). {_who} took it {_claim_age}s ago "
+                             f"and is beating (hazync-worker/{_ver}), so a worker is retrying rather "
+                             f"than finishing")
         elif stalled_for > 2 * CLAIM_TTL:
             _attn = False
-            _attn_why = (f"{_who} has held this block continuously for {_claim_age // 3600}h "
+            _attn_why = (f"{_who} has held this block for {_claim_age // 3600}h "
                          f"{_claim_age % 3600 // 60}m and is still heartbeating ({_beat_age}s ago, "
                          f"hazync-worker/{_ver}) — a large block, not a stall")
         else:
