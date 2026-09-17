@@ -3316,8 +3316,17 @@ fn snapshot_emit_cmd(dir: &str, out: &str) {
     // the only thing linking them.
     let mut by_leaf: std::collections::HashMap<[u8; 32], (&([u8; 32], u32), &(u64, Vec<u8>, u32, bool))> =
         std::collections::HashMap::with_capacity(st.utxo.len());
+    // MTP comes from the checkpoint, not from the node. `block_mtp` is indexed by absolute height and
+    // already holds MTP(h-1) for every height the bridge walked, and `snapshot_verify_cmd` below reads it
+    // exactly this way. `mtp_at` instead asks bitcoind, and its own comment admits the cost: 22 RPC
+    // round-trips per cache miss, each one a `bitcoin-cli` process. Measured on the proof-party server at
+    // height 250,000: ~450 spawns a second, still running after 14 minutes, and it fails outright unless
+    // the caller happens to have the node's datadir in HAZYNC_BITCOIN_DATADIR. The data was in hand the
+    // whole time — `bridge_load_state` loaded it on the line above.
     for (op, meta) in st.utxo.iter() {
-        let mtp = mtp_at(meta.2);
+        let mtp = *st.block_mtp.get(meta.2 as usize).unwrap_or_else(||
+            panic!("no block_mtp for coin height {} (checkpoint has {} entries) — the checkpoint does not \
+                    cover this coin, so its leaf cannot be reproduced", meta.2, st.block_mtp.len()));
         let leaf = coin_leaf(&op.0, op.1, meta.0, &meta.1, meta.2, meta.3, mtp);
         by_leaf.insert(leaf, (op, meta));
     }
@@ -3514,9 +3523,30 @@ struct BridgeState {
 fn bridge_load_state(dir: &str) -> Option<BridgeState> {
     std::fs::read(format!("{dir}/state.bin")).ok().and_then(|b| bincode::deserialize(&b).ok())
 }
+/// Stream the checkpoint to disk instead of building it in RAM first.
+///
+/// `bincode::serialize` returns a `Vec<u8>` holding the WHOLE checkpoint, and it is alive at the same
+/// time as every structure it was built from. Measured on the proof-party server at 19,640,166 coins:
+/// the walk itself sits flat at 5.80 GiB, then anon ramps to 7.84 GiB over eleven seconds with no file
+/// on disk yet, a 1.91 GB `state.bin.tmp` appears at once, and it drops straight back — so the bridge's
+/// peak was never the walk, it was this buffer. It recurs at every checkpoint (the bridge runs
+/// `HAZYNC_BRIDGE_CKPT=2000`, roughly every six minutes), and at the tip's ~165M coins the buffer is
+/// ~18 GiB, which is what takes a tip bridge past a 62.8 GiB box.
+///
+/// `serialize_into` emits the same bytes: both paths use `DefaultOptions` with `with_fixint_encoding`,
+/// and `allow_trailing_bytes` (the only difference) affects deserialisation only. Verified byte-for-byte
+/// on a struct with these field types. That matters because a changed encoding would make every existing
+/// `state.bin` fail to load, and the resume path treats that as "rebuild from genesis" — silently.
 fn bridge_save_state(dir: &str, st: &BridgeStateRef) {
     let tmp = format!("{dir}/state.bin.tmp");
-    std::fs::write(&tmp, bincode::serialize(st).unwrap()).expect("write checkpoint");
+    {
+        let f = std::fs::File::create(&tmp).expect("create checkpoint");
+        let mut w = std::io::BufWriter::new(f);
+        bincode::serialize_into(&mut w, st).expect("write checkpoint");
+        // into_inner() flushes AND surfaces the error. Dropping a BufWriter discards a failed flush,
+        // which would rename a truncated checkpoint into place below and look like a clean save.
+        w.into_inner().expect("flush checkpoint");
+    }
     std::fs::rename(&tmp, format!("{dir}/state.bin")).expect("commit checkpoint"); // atomic: never a torn state.bin
 }
 
@@ -3616,6 +3646,26 @@ fn cmd_bridge() {
     let poll: u64 = std::env::var("HAZYNC_BRIDGE_POLL").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
     let once = std::env::var("HAZYNC_BRIDGE_ONCE").is_ok();     // exit after catching up once (seeding / tests)
     let cap = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse::<u32>().ok()); // optional hard height cap
+    // Emit a bundle only at or above this height; below it the bridge advances STATE and writes nothing.
+    //
+    // Reaching tip state by walking writes a bundle per block on the way, and that is the binding
+    // constraint: measured 731 GB at height 381,318, and bytes/input x real input counts projects
+    // 5.70 TB to reach 700,000 and 11.82 TB to reach the tip, against 4.64 TB free. The walk runs out
+    // of disk around 620-650k — long before it runs out of time. Bundles for heights the board cannot
+    // reach for months are dead weight; set this to the tip height to catch up silently and then emit
+    // while tip-following. Default 0 keeps today's behaviour exactly.
+    //
+    // A skipped height is not inert on the coordinator: `bundle_path` returns None, so the bulk witness
+    // endpoint reports it as missing and a sponsorship counts it as `waiting` indefinitely. Keep this
+    // above anything the board can reach (highest proved height was 230,000 on 2026-09-16), and rebuild
+    // a skipped range the way #347 already describes — copy a checkpoint below it into a scratch
+    // HAZYNC_BRIDGE_OUT and replay with HAZYNC_BRIDGE_TO + HAZYNC_BRIDGE_ONCE.
+    let emit_from: u32 = std::env::var("HAZYNC_BRIDGE_EMIT_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    if emit_from > 0 {
+        // Say it out loud at startup: a silently empty bundle dir is indistinguishable from a broken
+        // bridge, and this is the one setting that makes the bridge do less than its name implies.
+        println!("bridge: EMIT_FROM={emit_from} — heights below it advance state only, NO bundle written");
+    }
 
     // Resume from the last checkpoint, or start fresh at genesis.
     // A checkpoint written before #54 has no `smt` field, so bincode refuses it and this falls through
@@ -3685,12 +3735,19 @@ fn cmd_bridge() {
                 w.in_smt_root = smt_root_in;
                 w.smt = smt_witness;
                 bridge_update_utxo(&mut utxo, &block, h);
-                let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
-                    in_nbits, in_time, in_epoch_start, in_recent, witness: w };
-                // atomic bundle write too — a prover polling the dir never reads a half-written bundle
-                let bp = format!("{out_dir}/bundle_{h}.json");
-                std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
-                std::fs::rename(format!("{bp}.tmp"), &bp).unwrap();
+                // Below EMIT_FROM the state still advances — forest, utxo, smt, mtp window are all
+                // updated above this point, and the checkpoint below still persists them. Only the
+                // per-block file is skipped, so a later run can emit any skipped height by replaying
+                // from a checkpoint below it. Building the Bundle is also skipped: serialising it is
+                // the expensive part (bundles average 8.3 MB at this height) and nothing else reads it.
+                if h >= emit_from {
+                    let bundle = Bundle { height: h, in_tip, in_roots: s.roots, in_leaves: s.num_leaves,
+                        in_nbits, in_time, in_epoch_start, in_recent, witness: w };
+                    // atomic bundle write too — a prover polling the dir never reads a half-written bundle
+                    let bp = format!("{out_dir}/bundle_{h}.json");
+                    std::fs::write(format!("{bp}.tmp"), serde_json::to_vec(&bundle).unwrap()).unwrap();
+                    std::fs::rename(format!("{bp}.tmp"), &bp).unwrap();
+                }
                 let bt = block.header.time; nbits = block.header.bits.to_consensus(); time = bt;
                 if h % 2016 == 0 { epoch_start = bt; }
                 done = h;
@@ -3701,7 +3758,12 @@ fn cmd_bridge() {
                     last_ckpt = done;
                     println!("bridge: checkpoint @ {done} ({} utxos, {} leaves)", utxo.len(), forest.leaves.len());
                 }
-                if h % 5000 == 0 { println!("bridge: emitted through {h}/{target}"); }
+                // "emitted" would be a lie below EMIT_FROM, and a progress line that misreports what the
+                // process is doing is how a silently empty bundle dir goes unnoticed for hours.
+                if h % 5000 == 0 {
+                    let what = if h >= emit_from { "emitted" } else { "advanced, no bundle," };
+                    println!("bridge: {what} through {h}/{target}");
+                }
             }
             // checkpoint on catch-up so a one-shot run and each tip-follow cycle persist their progress
             if done > last_ckpt {

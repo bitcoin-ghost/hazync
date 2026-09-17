@@ -186,7 +186,8 @@ risc0 accelerator) is the precedent (`docs/history/CORE_VS_GHOST.md` §1). Earli
   `board` list of ranges in `/api/state` (`state()`, `coordinator/server.py`).
 - **contributor** — an ed25519 public key (`contributors` table). `hazync id` creates it under
   `$HAZYNC_HOME` (default `~/.hazync`, `key.hex`). `POST /api/rotate` (`rotate()`) moves attribution to
-  a new key; both keys must sign, and history is not rewritten (#113).
+  a new key; both keys must sign, and history is not rewritten (#113). It is off unless the coordinator sets
+  `ROTATE_ENABLED=1` (#311).
 - **handle** — the display label for a key, capped at `MAX_HANDLE` (default `48`) and HTML-stripped
   (`clean_handle`). The default is `ghost:<first 6 hex of pubkey>` (`identity()`, `coordinator/hazync`).
 - **sponsor** — someone paying for a span to be proven (`docs/SPONSORSHIP.md`; `/api/sponsor*` routes).

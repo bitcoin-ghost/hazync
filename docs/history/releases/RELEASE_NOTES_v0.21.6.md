@@ -92,7 +92,7 @@ and the bare name `host` is accepted only beside the CLI. `HAZYNC_HOST` still wi
 - **#310:** unsigned claims are still accepted until the coordinator sets `CLAIM_REQUIRE_SIG=1`, after
   contributors move to v0.21.5 or later.
 - **#311:** key rotation cannot be revoked.
-- **#341:** `test_sponsor_bot` fails about 3% of CI runs (a test-harness race, not a coordinator bug).
+- **#341** is fixed in this release by #342 (it was listed here as open by mistake): `test_sponsor_bot` failed about 3% of CI runs from a test-harness race, not a coordinator bug.
 - Still open from before: #277 (anchor warp), #253 and #252 (unmeasured aggregate work), #244 (layer 2 of proof
   durability), #209.
 

@@ -71,10 +71,9 @@ Not automated, and still required (the script says so at the end): smoke-test th
 (`method-id`, `regress`, `prove-block`), and repoint running provers, because `run-workers.sh` checks the
 guest id only at startup (#99).
 
-## 3. The browser verifier, on both sites
+## 3. The browser verifier
 
-Served at `https://hazync.org/verify/`
-(the second from `bitcoin-ghost/hazync-web`). A copy that does not match the release is caught only by
+Served at `https://hazync.org/verify/` (from `bitcoin-ghost/hazync-web`). A copy that does not match the release is caught only by
 calling it: a stale module has the same size and exports as a correct one. Do this after every release whose
 `hazync-verify.wasm` differs from the deployed one, and in the **same cutover** as the coordinator's binary
 swap on a re-baseline (§5).
@@ -88,7 +87,7 @@ curl -fLO https://github.com/bitcoin-ghost/hazync/releases/download/vX.Y.Z/SHA25
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt && sha256sum -c --ignore-missing SHA256SUMS.txt
 ```
 
-**hazync.org** (`bitcoin-ghost/hazync-web`; its `README.md` lists the pins):
+**hazync.org** (`hazync/hazync-web`; its `README.md` lists the pins):
 
 1. Copy the verified wasm to `verify/hazync-verify.wasm`, and `verifier-wasm/hazync-verify.js` from this
    repository at the tag to `verify/hazync-verify.js` if it changed.

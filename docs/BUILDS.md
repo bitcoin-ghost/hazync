@@ -184,6 +184,10 @@ everything else*.
 
 ### 3.1 · Ghost's next build — hazync#209
 
+> ⚖ **#209 was closed on 2026-09-16 as superseded.** Core ships and is what the board counts; a Ghost build
+> changes guest source, so it carries a different `METHOD_ID` and proves into rejections (top of this file).
+> The levers below stay as the record of what was sized and why. They become shippable only on a re-baseline.
+
 Ghost measured **5 cards** on block 962,000 (§1); a fourth needs a straggler ≤ 1.35. The refit above
 meets that, but **the card count was not re-derived** at 1.189 — read it as "the straggler target is
 met", not as four cards.
@@ -192,7 +196,7 @@ met", not as four cards.
   42 inputs and 42 EC verifies and differ only in bytes (765,282 vs 37,933). They measured 1.293x apart
   against a modelled 1.574x, because the byte term then in force (6 per byte) was ~2x the measured 3.13
   cycles/byte. Both fits now use 2.
-- **Remaining levers**, as #209 lists them now that Ghost is defined as "fastest wins": MSM batch
+- **Remaining levers**, as #209 listed them once Ghost was defined as "fastest wins": MSM batch
   verification (rejected before on fidelity, sized at one card; `docs/history/MSM_BATCH_VERIFY.md`);
   wholesale bigint2, which needs measuring from scratch because the recorded "15% faster" was never
   produced by a run (nothing called `hazync_ecdsa_verify_full` until `patches/0014`, `9b767b5`); and

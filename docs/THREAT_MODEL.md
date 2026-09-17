@@ -95,7 +95,8 @@ from the changed guest do not verify against the canonical id. The attack theref
 re-baseline, which is public: a new row in `reproduce/LINEAGE.tsv`, derived from git history and gated by
 `scripts/lineage.sh --check`, and an id anyone can rebuild (`reproduce/Dockerfile`, CI job
 `reproducible-image-id`). That protects a verifier that pins the id. It does nothing for one that accepts
-whatever id it is handed — which is what the undecided accepted-set layer of #244 would have to get right.
+whatever id it is handed. That is what an accepted-set of ids would have to get right, and one reason #244
+was closed on 2026-09-16 without one: verifiers pin the canonical id.
 
 ## 2. risc0 zkVM, recursion and the vendored crates
 
@@ -145,13 +146,13 @@ All untrusted.
   model"). Cost: latency.
 - **Whoever controls a rented host** can read `$HAZYNC_HOME/key.hex` (mode 600 guards it from other users,
   not from root). With that key they can submit and fold as the contributor, beat the contributor's claims,
-  and **rotate the key to one they hold**
+  and, on a coordinator that turns rotation on, **rotate the key to one they hold**
   ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). `rotate()` requires signatures from the old
   and the new key over `rotate_message(old, new, ts)` within `ROTATE_MAX_SKEW`, and the thief can make both.
-  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated",
-  and nothing removes or overrides a rotation: no revocation path, no `DELETE FROM rotations`. Attribution
-  moves for good, short of an operator editing the database by hand. Proofs and their verification are
-  unaffected.
+  It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated", and
+  nothing removes a rotation. So since #311 `/api/rotate` answers `410` unless the operator sets
+  `ROTATE_ENABLED=1`; nobody had rotated on the public board. A stolen key can no longer move attribution. It
+  can still submit and fold under the owner's name. Proofs and their verification are unaffected.
 - **Sponsor bot pods** receive a per-sponsorship key (`SPONSOR_BOT.md`, "Identities"), and SSH to them runs
   with `StrictHostKeyChecking=no` because pods reuse addresses with new host keys. An on-path attacker could
   impersonate a pod. Blast radius: spend within the bot's caps, and attribution of sponsored blocks; every
@@ -359,7 +360,7 @@ a reorg below the proven height (`history/ROADMAP.md`); `m_chain_tx_count` is a 
   `coordinator/deploy/nginx-hazync.conf` (§5). `coordinator/web/index.html` is the coordinator's own static
   page (`COORD_WEB`), where handles pass `clean_handle` and every render sink escapes
   (`history/SECURITY_AUDIT_LOG.md`, round 6).
-- `https://hazync.org` is built from `bitcoin-ghost/hazync-web`, a private repository. It serves its own
+- `https://hazync.org` is built from `hazync/hazync-web`, a private repository. It serves its own
   copy of the browser verifier, pinned by sha256 in `deploy/deploy.sh` and `tools/check.py`, and proxies
   `/api` to the coordinator.
 
@@ -383,9 +384,11 @@ Each verified against the tree or GitHub on 2026-09-14.
 3. **CORE fleet figures rest on few measurements.** `GOALS.md` G2 gives CORE **44–73 L40S card-years**,
    INFERRED from one near-tip block (966,108, ~0.77 card-s per input). `BUILDS.md` computes 10 cards from
    block 962,000 proved serially, and its 8 × L40S fleet check on 966,108 puts a sub-10-minute block at ~13.
-4. **#244 layer 2, the accepted set of method ids, needs a decision.** The issue's 2026-09-13 status: 10 of
-   17 lineage ids predate at least one consensus rule, so "accept any historical id" re-admits proofs from
-   narrower guests (§1).
+4. ✅ **Decided: no accepted set of method ids** — [#244](https://github.com/bitcoin-ghost/hazync/issues/244),
+   closed 2026-09-16. 10 of 17 lineage ids predate at least one consensus rule, so "accept any historical id"
+   would re-admit proofs from narrower guests (§1); and composition is homogeneous inside the circuit, so
+   widening only the top-level verifier would leave old proofs checkable but never foldable. Layer 1
+   (append-only lineage) stands and lifting remains the upgrade path if a re-baseline ever forces one.
 5. **The worker reads coordinator responses without a bound** (`get()` in `coordinator/hazync`; §6).
 6. **No commissioned external audit** (`SECURITY.md`). The accumulator, the recursion binding and ghostd
    adoption are the named priorities.
@@ -393,9 +396,9 @@ Each verified against the tree or GitHub on 2026-09-14.
    and counted apart, so unsigned claims under a key cannot use up its signed cap or re-take wait; unsigned claims
    stay accepted until `CLAIM_REQUIRE_SIG=1`, which needs a worker release that signs. Many fresh keys are not
    limited, and there is no per-address cap behind the web box (§5). The effect on the board is not measured.
-8. **Key rotation cannot be revoked** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311). One
-   rotation per old key, a second is `409`, and nothing removes one, so a stolen `key.hex` moves attribution
-   permanently (§4).
+8. ✅ **Fixed: a stolen key could move attribution for good** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311).
+   Key rotation is off unless `ROTATE_ENABLED=1`, so a stolen `key.hex` cannot move anyone's blocks. Turning
+   rotation on brings the risk back, since a rotation still cannot be undone (§4).
 9. ✅ **Fixed: the worker searched the current directory for a prover** —
    [#312](https://github.com/bitcoin-ghost/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
    beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, and takes the bare name `host` only beside the
