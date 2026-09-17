@@ -34,10 +34,16 @@ else
     bad "failed, but without saying the alert was lost"; cat "$TMP/o"
 fi
 
+# Every title now opens with a MARK: a green tick for good news, a red siren for bad (2026-09-16).
+# Built from the same UTF-8 bytes hazync-alert.sh emits rather than pasted emoji, so these greps do
+# not depend on this file's encoding surviving an editor or on the runner's locale.
+TICK="$(printf '\xe2\x9c\x85')"
+SIREN="$(printf '\xf0\x9f\x9a\xa8')"
+
 echo "== 2. --unit names the failed unit in the title =="
 if NTFY_URL=https://ntfy.invalid/t HAZYNC_ALERT_DRYRUN=1 "$ALERT" --unit hazync-retention-check.service >"$TMP/o" 2>&1 \
-   && grep -q "^Title: Hazync: hazync-retention-check.service FAILED on " "$TMP/o"; then
-    note "ok   --unit -> 'Hazync: <unit> FAILED on <host>'"
+   && grep -q "^Title: $SIREN Hazync: hazync-retention-check.service FAILED on " "$TMP/o"; then
+    note "ok   --unit -> '<siren> Hazync: <unit> FAILED on <host>'"
 else
     bad "--unit did not produce the expected title"; cat "$TMP/o"
 fi
@@ -48,7 +54,7 @@ out=$(SERVICE_RESULT=success "$ALERT" --crash hazync-coordinator.service 2>&1)
 if [ -z "$out" ]; then note "ok   SERVICE_RESULT=success (a restart/deploy) sends nothing"
 else bad "a clean stop produced output — every deploy would page someone"; echo "$out"; fi
 out=$(SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 "$ALERT" --crash hazync-coordinator.service 2>&1)
-if printf '%s' "$out" | grep -q "^Title: Hazync: hazync-coordinator.service CRASHED on "; then
+if printf '%s' "$out" | grep -q "^Title: $SIREN Hazync: hazync-coordinator.service CRASHED on "; then
     note "ok   SERVICE_RESULT=exit-code -> CRASHED alert"
 else bad "a crash did not alert — OnFailure= alone never fires under Restart=always"; echo "$out"; fi
 out=$(SERVICE_RESULT=exit-code "$ALERT" --crash hazync-coordinator.service 2>&1)
@@ -56,7 +62,7 @@ if printf '%s' "$out" | grep -q "suppressed" && ! printf '%s' "$out" | grep -q "
     note "ok   a second crash inside the window is suppressed, not re-sent"
 else bad "a crash loop would send one push per restart"; echo "$out"; fi
 out=$(SERVICE_RESULT=signal "$ALERT" --crash hazync-bridge.service 2>&1)
-if printf '%s' "$out" | grep -q "^Title: Hazync: hazync-bridge.service CRASHED"; then
+if printf '%s' "$out" | grep -q "^Title: $SIREN Hazync: hazync-bridge.service CRASHED"; then
     note "ok   ...and the window is per unit: another unit's crash still alerts"
 else bad "one unit's crash suppressed another's"; echo "$out"; fi
 unset HAZYNC_ALERT_DRYRUN NTFY_URL
@@ -82,8 +88,13 @@ PY
 SRV_PID=$!
 for _ in $(seq 1 50); do [ -s "$TMP/port" ] && break; sleep 0.1; done
 URL="http://127.0.0.1:$(cat "$TMP/port")/topic"
+# ⚠ The stand-in server reads the Title header with http.client, which decodes headers as latin-1 per
+# RFC 7230, so a UTF-8 mark arrives here as mojibake ("Ã°ÂÂ¨") even though the bytes on the wire are
+# correct and the phone renders it. Compare against the latin-1 reading of the same bytes rather than
+# against the mark itself, or this asserts the harness's decoding instead of the alert's behaviour.
+SIREN_L1="$(printf '\xf0\x9f\x9a\xa8' | iconv -f latin1 -t utf-8 2>/dev/null || printf '\xf0\x9f\x9a\xa8')"
 if NTFY_URL="$URL" "$ALERT" "Hazync: test" "hello from the test" >"$TMP/o" 2>&1 \
-   && grep -q "^TITLE=Hazync: test" "$TMP/posted1" 2>/dev/null && grep -q "hello from the test" "$TMP/posted1"; then
+   && grep -q "^TITLE=$SIREN_L1 Hazync: test" "$TMP/posted1" 2>/dev/null && grep -q "hello from the test" "$TMP/posted1"; then
     note "ok   POSTed body + Title header to the ntfy URL"
 else
     bad "the alert did not arrive at the server"; cat "$TMP/o" "$TMP/posted1" 2>/dev/null
@@ -95,6 +106,17 @@ NTFY_URL="$URL" ALERT_PRIORITY=low ALERT_TAGS=white_check_mark,floppy_disk "$ALE
 grep -q "^PRIORITY=low$" "$TMP/posted2" 2>/dev/null && grep -q "^TAGS=white_check_mark,floppy_disk$" "$TMP/posted2" \
     && note "ok   ALERT_PRIORITY / ALERT_TAGS reach ntfy (a daily summary does not ring like a failure)" \
     || { bad "ALERT_PRIORITY/ALERT_TAGS were not sent"; cat "$TMP/o" "$TMP/posted2" 2>/dev/null; }
+
+# The mark is chosen from the TAGS, and until now nothing tested that choice — the point of the change
+# is that you can tell good news from bad at a glance on a phone, without reading the title. Same
+# latin-1 caveat as above, so compare against the header's decoded form.
+TICK_L1="$(printf '\xe2\x9c\x85' | iconv -f latin1 -t utf-8 2>/dev/null || printf '\xe2\x9c\x85')"
+if grep -q "^TITLE=$TICK_L1 Hazync backups: all good" "$TMP/posted2" 2>/dev/null; then
+    note "ok   a good tag (white_check_mark) opens the title with a green tick, not a siren"
+else
+    bad "good news did not get a green tick — it is indistinguishable from a failure on the phone"
+    cat "$TMP/posted2" 2>/dev/null
+fi
 NTFY_URL="$URL" ALERT_PRIORITY=$'high\r\nX-Evil: 1' ALERT_TAGS='a b;c' "$ALERT" "Hazync: odd" "odd" >"$TMP/o" 2>&1
 grep -q "^PRIORITY=high$" "$TMP/posted3" 2>/dev/null && grep -q "^TAGS=abc$" "$TMP/posted3" \
     && note "ok   an unknown priority falls back to high and tags are reduced to safe characters" \
