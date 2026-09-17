@@ -133,6 +133,21 @@ ROUTES = {
         "that already rotated (`409`) and cycles. Records an edge in `rotations`; `vranges` and "
         "`submissions` are not rewritten, the old key keeps working, and its work resolves to the head. "
         "Used by `hazync rotate`.",
+    "GET /api/bot/<rest>":
+        "The sponsor bot's API (#351), read side: `/api/bot/queue` (sponsorships that hold, oldest payment first, "
+        "each with `todo`, the heights nobody has proven), `/api/bot/blocks?h=` (up to 2,000 heights: `covered`, "
+        "`proofs` by key and time, a live `claimed`, `held`), `/api/bot/sponsorship/<id>` (name, status, `held`). "
+        "Only a direct loopback connection with no `X-Forwarded-For`, signed with the key in "
+        "`SPONSOR_BOT_PUBKEY_FILE`: `X-Hazync-Bot-Ts`, `X-Hazync-Bot-Nonce`, `X-Hazync-Bot-Sig` over "
+        "`bot_message` (method, path with query, ts, nonce, body hash); a nonce is used once. `401` unsigned or "
+        "stale, `403` wrong key, replay or not loopback, `503` no key configured. Not rate limited.",
+    "POST /api/bot/<rest>":
+        "The sponsor bot's API (#351), write side, signed and loopback-only as above: `/api/bot/key` "
+        "`{pubkey, sponsorship_id, handle}` registers a key in `sponsor_keys` only for a sponsorship that holds and "
+        "only with the handle its name gives (the trial key, `sponsorship_id` null, only as `SPONSOR: Hazync "
+        "trial`), never for a second sponsorship (`409`); `/api/bot/proving` `{sponsorship_id}` moves `paid` to "
+        "`proving` only while it holds (`409` otherwise); `/api/bot/reconcile` marks proven every hold whose "
+        "span is covered.",
     "POST /api/sponsor":
         "Sponsorship request `{lo, hi, name, amount_sats}`. `503` unless `SPONSOR_OPEN=1`; "
         "`amount_sats` must reach the span's minimum. Returns `202` with the private status token once; only "
@@ -219,6 +234,9 @@ ENV = {
     "server:SPONSOR_PRICE_BANDS": "JSON `[[lo, hi, usd_per_block], ...]`; set but invalid means unpriced.",
     "server:SPONSOR_BTC_USD": "Dollars per bitcoin for converting minimums to sats when payments are not "
                               "connected (with BTCPay, its store rate is used); unset means no sats minimum.",
+    "server:SPONSOR_BOT_PUBKEY_FILE": "File holding the sponsor bot's ed25519 public key (hex). Unset or unreadable: "
+                                      "every `/api/bot/` request is refused `503`.",
+    "server:SPONSOR_BOT_SKEW": "Seconds a sponsor bot request's timestamp may be off; its nonce is remembered twice as long.",
     "server:SPONSOR_HOLD_ALERT": "Age in seconds after which a hold on the frontier's next block is "
                                  "reported in `/api/state`.",
     "server:BTCPAY_URL": "BTCPay Server base URL, e.g. `https://donate.hazync.org`. Payments are connected only "
@@ -510,6 +528,14 @@ def server_routes(path):
         routes.append({"method": "OPTIONS", "path": "*", "prefix": None, "handlers": [], "codes": codes,
                        "params": [], "auth": []})
 
+    # POST: a prefix handled before the allow-list (the sponsor bot's API, #351) is a route of its own.
+    for stmt in meth["do_POST"].body:
+        t = stmt.test if isinstance(stmt, ast.If) else None
+        if isinstance(t, ast.Call) and isinstance(t.func, ast.Attribute) and t.func.attr == "startswith" \
+                and _src(t.func.value) == "p" and isinstance(t.args[0], ast.Constant):
+            _, codes, _ = called(stmt.body)
+            routes.append({"method": "POST", "path": None, "prefix": t.args[0].value, "handlers": [],
+                           "codes": codes, "params": [], "auth": []})
     # POST: the allow-list tuple and the dispatch dict must agree.
     allowed, dispatch = [], {}
     for n in ast.walk(meth["do_POST"]):
@@ -735,8 +761,9 @@ def build(root):
         k = route_key(r)
         fields = ", ".join(f"`{x}`" for x in r.get("fields", [])) or "—"
         h = ", ".join(f"`{x}()`" for x in r["handlers"]) or "—"
-        auth = "; ".join(f"`{pk}` over `{msg}`" for pk, msg in r["auth"]) or "**none**"
-        w(f"| `{r['path']}` | {fields} | {h} | {_cell(auth)} | {_codes(r['codes'])} | {_cell(ROUTES.get(k, ''))} |")
+        auth = "; ".join(f"`{pk}` over `{msg}`" for pk, msg in r["auth"]) or \
+            ("sponsor bot key over `bot_message`" if r["prefix"] == "/api/bot/" else "**none**")
+        w(f"| `{k.split(' ', 1)[1]}` | {fields} | {h} | {_cell(auth)} | {_codes(r['codes'])} | {_cell(ROUTES.get(k, ''))} |")
     w("")
     for r in routes:
         if r["method"] == "OPTIONS":

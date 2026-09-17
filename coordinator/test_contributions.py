@@ -137,6 +137,13 @@ check(_sp.run([sys.executable, _si]).returncode == 0,
       "a SPONSOR handle is refused from any key the bot has not registered (test_sponsor_identity.py)")
 check(_sp.run([sys.executable, _si, "--control"]).returncode == 0,
       "that test's control fails under the old handle rules (test_sponsor_identity.py --control)")
+# The bot changes the board only through the coordinator's signed, loopback-only bot API (#351), so that API is
+# attacked here too: forged, tampered, replayed and proxied requests, and every transition it must refuse.
+_sa = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_sponsor_bot_api.py")
+check(_sp.run([sys.executable, _sa]).returncode == 0,
+      "the sponsor bot API accepts only the bot's key from the coordinator's box, and only checked changes (test_sponsor_bot_api.py)")
+check(_sp.run([sys.executable, _sa, "--control"]).returncode == 0,
+      "that test's control fails with authentication and the checks removed (test_sponsor_bot_api.py --control)")
 
 if fails:
     print(f"{len(fails)} failure(s).")

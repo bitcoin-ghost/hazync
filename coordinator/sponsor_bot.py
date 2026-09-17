@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Sponsor proving bot: proves paid sponsorships on rented RunPod GPUs, and measures what that costs.
 
-It runs on the coordinator box, next to the coordinator's database, and:
+It runs on the coordinator box as its own user, with NO access to the coordinator's database (#351): everything
+it needs from the board it asks the coordinator's signed, loopback-only bot API for (/api/bot/*), and the
+coordinator checks every change it makes. The bot's own cost log is a database of its own. It:
   * works the sponsorships that HOLD their blocks (paid at least the minimum, status `paid` or
     `proving`), oldest payment first, and moves each from `paid` to `proving` when it starts on it;
   * rents one-GPU pods the way the board fleet does (hazync-board-fleet/fleet.sh), boots each against the
@@ -26,12 +28,16 @@ it stalls, when its boot fails and when there is nothing left for it. See docs/S
   python3 sponsor_bot.py trial --blocks 100000,150000-150004 --live --max-pods 1 --max-usd 5 --max-usd-per-hour 1
   python3 sponsor_bot.py report             # measured cost per block, by height band
   python3 sponsor_bot.py stop-all           # terminate every hz-sponsor-* pod
+  python3 sponsor_bot.py bot-key            # create the bot's API key if needed; print its public half
+  python3 sponsor_bot.py import-log <db>    # copy sponsor_work and sponsor_pods from a coordinator.db copy
 """
 import argparse
+import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import signal
 import sqlite3
 import statistics
@@ -43,14 +49,17 @@ import time
 import urllib.error
 import urllib.request
 
-DB = os.environ.get("COORD_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "coordinator.db"))
+def bot_db_path():
+    """The bot's own database (the cost log): SPONSOR_BOT_DB, else bot.db in SPONSOR_BOT_HOME, else None."""
+    if os.environ.get("SPONSOR_BOT_DB"):
+        return os.environ["SPONSOR_BOT_DB"]
+    home = os.environ.get("SPONSOR_BOT_HOME")
+    return os.path.join(home, "bot.db") if home else None
 
-# The sponsorships whose blocks are HELD for the bot. This is the coordinator's hold rule: paid means paid
-# AT LEAST THE MINIMUM, the same test that decides whether a sponsor's name is public (SPONSOR_PUBLIC_SQL),
-# so an `underpaid` row, or a `paid` row below its minimum, is never proven on the sponsorship budget.
-HELD_SQL = ("status IN ('paid','proving') AND paid_sats IS NOT NULL AND min_sats IS NOT NULL"
-            " AND paid_sats >= min_sats")
-CLAIM_TTL = int(os.environ.get("CLAIM_TTL", "3600"))   # a claim taken or beaten this recently is live
+
+# Which sponsorships hold their blocks (paid AT LEAST the minimum, `paid` or `proving`) is the coordinator's rule
+# and is decided there: /api/bot/queue lists exactly those, so an `underpaid` row, or a `paid` row below its
+# minimum, is never proven on the sponsorship budget.
 POD_PREFIX = "hz-sponsor-"
 GRAPHQL_URL = "https://api.runpod.io/graphql"
 # RunPod's API sits behind Cloudflare, which refuses Python's default "Python-urllib/3.x" User-Agent with
@@ -84,10 +93,109 @@ _CONTROL_IGNORE_LANDED = False
 _CONTROL_IGNORE_BUNDLES = False
 
 
-# ---------- the database ----------
+# ---------- the coordinator's bot API ----------
+
+class CoordError(RuntimeError):
+    """The coordinator's bot API could not be reached, or refused a request."""
+
+
+COORD_ERRORS_MAX = 10     # ticks in a row the coordinator may fail before the run stops (every pod terminated)
+
+
+class Coord:
+    """The coordinator's sponsor bot API (/api/bot/*, server.py), signed with the bot's ed25519 key.
+
+    The signed message is server.bot_message, written out again here because the bot does not import the
+    coordinator; test_sponsor_bot.py checks the two agree."""
+
+    def __init__(self, url, key_hex, timeout=30):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        self.url, self.timeout = url.rstrip("/"), timeout
+        self.sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key_hex.strip()))
+
+    @staticmethod
+    def key_path():
+        if os.environ.get("SPONSOR_BOT_KEY_FILE"):
+            return os.environ["SPONSOR_BOT_KEY_FILE"]
+        home = os.environ.get("SPONSOR_BOT_HOME")
+        return os.path.join(home, "bot.key") if home else None
+
+    @classmethod
+    def from_env(cls):
+        path = cls.key_path()
+        if not path or not os.path.isfile(path):
+            raise SystemExit("sponsor_bot: no bot API key (SPONSOR_BOT_KEY_FILE, or bot.key in SPONSOR_BOT_HOME); "
+                             "create one with `sponsor_bot.py bot-key` and give its public half to the coordinator")
+        with open(path) as f:
+            return cls(os.environ.get("SPONSOR_BOT_COORD_URL", "http://127.0.0.1:8899"), f.read())
+
+    @staticmethod
+    def message(method, path, ts, nonce, raw):
+        return (f"hazync-sponsor-bot-v1\n{method}\n{path}\n{ts}\n{nonce}\n"
+                f"{hashlib.sha256(raw or b'').hexdigest()}").encode()
+
+    def _call(self, method, path, body=None):
+        raw = b"" if body is None else json.dumps(body).encode()
+        ts, nonce = str(int(time.time())), secrets.token_hex(16)
+        sig = self.sk.sign(self.message(method, path, ts, nonce, raw)).hex()
+        req = urllib.request.Request(self.url + path, data=raw if method == "POST" else None, method=method,
+                                     headers={"Content-Type": "application/json", "User-Agent": USER_AGENT,
+                                              "X-Hazync-Bot-Ts": ts, "X-Hazync-Bot-Nonce": nonce, "X-Hazync-Bot-Sig": sig})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            try:
+                detail = json.loads(e.read() or b"{}").get("error") or ""
+            except ValueError:
+                detail = ""
+            raise CoordError(f"the coordinator answered {e.code} to {method} {path.split('?')[0]}: {detail}") from None
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise CoordError(f"the coordinator could not be reached for {method} {path.split('?')[0]}: {e}") from None
+
+    def queue(self):
+        return self._call("GET", "/api/bot/queue")["sponsorships"]
+
+    def blocks(self, heights):
+        """{height: {"covered", "proofs": [{"pubkey", "ts"}], "claimed", "held"}}"""
+        hs, out = sorted({int(h) for h in heights}), {}
+        for i in range(0, len(hs), 1000):
+            got = self._call("GET", "/api/bot/blocks?h=" + ",".join(str(h) for h in hs[i:i + 1000]))["blocks"]
+            out.update({int(k): v for k, v in got.items()})
+        return out
+
+    def sponsorship(self, sid):
+        return self._call("GET", f"/api/bot/sponsorship/{int(sid)}")
+
+    def register_key(self, pubkey, sid, handle):
+        return self._call("POST", "/api/bot/key", {"pubkey": pubkey, "sponsorship_id": sid, "handle": handle})
+
+    def proving(self, sid):
+        return self._call("POST", "/api/bot/proving", {"sponsorship_id": int(sid)})
+
+    def reconcile(self):
+        return self._call("POST", "/api/bot/reconcile", {})["proven"]
+
+
+def bot_key(path):
+    """Create the bot's API key at `path` if it is missing (mode 600); return its public half in hex."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization as ser
+    if not os.path.isfile(path):
+        os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+        sk = Ed25519PrivateKey.generate()
+        _write_private(path, sk.private_bytes(ser.Encoding.Raw, ser.PrivateFormat.Raw, ser.NoEncryption()).hex())
+    with open(path) as f:
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(f.read().strip()))
+    return sk.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw).hex()
+
+
+# ---------- the bot's own database: the cost log ----------
 
 def connect(db_path=None, readonly=False):
-    path = db_path or DB
+    path = db_path or bot_db_path()
+    if not path:
+        raise SystemExit("sponsor_bot: set SPONSOR_BOT_DB, or SPONSOR_BOT_HOME (the cost log is bot.db there)")
     c = (sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30) if readonly
          else sqlite3.connect(path, timeout=30))
     c.row_factory = sqlite3.Row
@@ -113,8 +221,30 @@ def ensure_tables(c):
     c.commit()
 
 
-def has_sponsor_keys(c):
-    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sponsor_keys'").fetchone() is not None
+def import_log(src, c):
+    """Copy sponsor_work and sponsor_pods from a copy of the coordinator's database, where the bot kept its log
+    before #351, into the bot's own. Rows already present (by id and pod id) are left alone. Returns (work, pods)."""
+    ensure_tables(c)
+    s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
+    s.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in s.execute("PRAGMA table_info(sponsor_work)")}
+        wcols = [k for k in ("id", "sponsorship_id", "height", "pod_id", "gpu_type", "cost_per_hr", "assigned_at",
+                             "proven_at", "seconds", "usd_estimate", "outcome", "pubkey") if k in cols]
+        pcols = ["pod_id", "name", "gpu_type", "cost_per_hr", "created_at", "terminated_at", "usd_estimate", "note"]
+        w = p = 0
+        if wcols:
+            for r in s.execute(f"SELECT {','.join(wcols)} FROM sponsor_work"):
+                w += c.execute(f"INSERT OR IGNORE INTO sponsor_work({','.join(wcols)}) VALUES({','.join('?' * len(wcols))})",
+                               tuple(r)).rowcount
+        if s.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sponsor_pods'").fetchone():
+            for r in s.execute(f"SELECT {','.join(pcols)} FROM sponsor_pods"):
+                p += c.execute(f"INSERT OR IGNORE INTO sponsor_pods({','.join(pcols)}) VALUES({','.join('?' * len(pcols))})",
+                               tuple(r)).rowcount
+        c.commit()
+    finally:
+        s.close()
+    return w, p
 
 
 # ---------- identities ----------
@@ -159,24 +289,15 @@ def identity(home, sponsorship_id, name):
     return {"tag": tag, "home": d, "pubkey": pub, "handle": handle}
 
 
-def register_key(c, ident, sponsorship_id, now=None):
-    """Put a key in the coordinator's sponsor_keys, so it may use a "SPONSOR" handle. Idempotent."""
-    c.execute("INSERT OR IGNORE INTO sponsor_keys(pubkey, sponsorship_id, handle, created_at) VALUES(?,?,?,?)",
-              (ident["pubkey"], sponsorship_id, ident["handle"], time.time() if now is None else now))
-    c.commit()
+def register_key(coord, ident, sponsorship_id):
+    """Register a key with the coordinator (sponsor_keys), so it may use a "SPONSOR" handle. Idempotent. The
+    coordinator checks the handle against the sponsorship's name and that the sponsorship holds."""
+    coord.register_key(ident["pubkey"], sponsorship_id, ident["handle"])
 
 
-def queue(db_path=DB):
-    """Sponsorships that hold their blocks, oldest payment first. Read-only; no table means none."""
-    c = connect(db_path, readonly=True)
-    try:
-        return [dict(r) for r in c.execute(
-            "SELECT id,lo,hi,name,status,paid_at,paid_sats,min_sats FROM sponsorships WHERE "
-            + HELD_SQL + " ORDER BY paid_at ASC, id ASC")]
-    except sqlite3.OperationalError:
-        return []
-    finally:
-        c.close()
+def queue(coord):
+    """Sponsorships that hold their blocks, oldest payment first, as the coordinator decides."""
+    return coord.queue()
 
 
 def plan(rows):
@@ -193,48 +314,17 @@ def has_bundle(h):
     return any(os.path.exists(f) for f in files)
 
 
-def is_covered(c, h):
-    return c.execute("SELECT 1 FROM vranges WHERE lo<=? AND hi>=? LIMIT 1", (h, h)).fetchone() is not None
+def covered(coord, heights):
+    """The heights among `heights` covered by verified proofs, whoever made them."""
+    return {h for h, f in coord.blocks(heights).items() if f["covered"]} if heights else set()
 
 
-def covered_heights(c, lo, hi):
-    """Heights in lo..hi covered by the union of verified proofs, whoever made them."""
-    got = set()
-    for r in c.execute("SELECT lo, hi FROM vranges WHERE lo<=? AND hi>=?", (hi, lo)):
-        got.update(range(max(lo, r["lo"]), min(hi, r["hi"]) + 1))
-    return got
+def reconcile(coord):
+    """Ask the coordinator to move every held sponsorship whose whole span is covered to `proven`. Their ids."""
+    return coord.reconcile()
 
 
-def held_rows(c):
-    try:
-        return c.execute("SELECT id,lo,hi,name,status,paid_at FROM sponsorships WHERE " + HELD_SQL
-                         + " ORDER BY paid_at ASC, id ASC").fetchall()
-    except sqlite3.OperationalError:
-        return []
-
-
-def is_held(c, sid):
-    try:
-        return c.execute("SELECT 1 FROM sponsorships WHERE id=? AND " + HELD_SQL, (sid,)).fetchone() is not None
-    except sqlite3.OperationalError:
-        return False
-
-
-def reconcile(c, now=None):
-    """Move every held sponsorship whose whole span is covered to `proven`. Returns their ids."""
-    now = time.time() if now is None else now
-    done = []
-    for r in held_rows(c):
-        if len(covered_heights(c, r["lo"], r["hi"])) == r["hi"] - r["lo"] + 1:
-            cur = c.execute("UPDATE sponsorships SET status='proven', proven_at=? WHERE id=? AND " + HELD_SQL,
-                            (now, r["id"]))
-            if cur.rowcount:
-                done.append(r["id"])
-    c.commit()
-    return done
-
-
-def reconcile_work(c):
+def reconcile_work(c, coord):
     """Correct work rows logged `cancelled`, `failed` or `stalled` whose block was in fact proven under the row's
     own key while its pod was still alive. A proof can land after the bot's last look and before it stops the
     pod: trial 2's pod proved blocks 90000 and 90001 in the minute before the bot stopped on an error, and both
@@ -244,14 +334,24 @@ def reconcile_work(c):
     if _CONTROL_IGNORE_LANDED:
         return 0
     try:
-        rows = c.execute(
-            "SELECT w.id, w.height, w.pod_id, w.cost_per_hr, w.assigned_at, w.outcome, v.ts"
+        work = c.execute(
+            "SELECT w.id, w.height, w.pod_id, w.cost_per_hr, w.assigned_at, w.outcome, w.pubkey, p.terminated_at"
             " FROM sponsor_work w JOIN sponsor_pods p ON p.pod_id = w.pod_id"
-            " JOIN vranges v ON v.lo <= w.height AND v.hi >= w.height AND v.pubkey = w.pubkey"
-            " WHERE p.terminated_at IS NOT NULL AND v.ts >= w.assigned_at AND v.ts <= p.terminated_at"
-            " ORDER BY w.pod_id, v.ts").fetchall()
+            " WHERE p.terminated_at IS NOT NULL AND w.pubkey IS NOT NULL").fetchall()
     except sqlite3.OperationalError:
         return 0
+    # Only pods with a row that could need correcting; every row of such a pod still counts for its timeline.
+    pods = {w["pod_id"] for w in work if w["outcome"] in ("cancelled", "failed", "stalled")}
+    work = [w for w in work if w["pod_id"] in pods]
+    if not work:
+        return 0
+    facts = coord.blocks({w["height"] for w in work})
+    rows = sorted(({"id": w["id"], "height": w["height"], "pod_id": w["pod_id"], "cost_per_hr": w["cost_per_hr"],
+                    "assigned_at": w["assigned_at"], "outcome": w["outcome"], "ts": pr["ts"]}
+                   for w in work for pr in facts[w["height"]]["proofs"]
+                   if pr["pubkey"] == w["pubkey"] and pr["ts"] is not None
+                   and w["assigned_at"] <= pr["ts"] <= w["terminated_at"]),
+                  key=lambda r: (r["pod_id"], r["ts"]))
     fixed, last, seen = 0, {}, set()
     for r in rows:
         if r["id"] in seen:
@@ -272,19 +372,19 @@ def reconcile_work(c):
     return fixed
 
 
-def pending_work(c, busy=(), trial=None, need_bundle=True):
+def pending_work(coord, busy=(), trial=None, need_bundle=True):
     """[(sponsorship id, or None for a trial, height)] still to prove, in the order to prove them:
     held sponsorships oldest payment first, heights in order, skipping covered and busy heights, and heights
     with no bundle yet (unless need_bundle is False): no pod can prove those, so renting one would only spend."""
     busy = set(busy)
     ok = has_bundle if need_bundle else (lambda h: True)
     if trial is not None:
-        return [(None, h) for h in trial if h not in busy and not is_covered(c, h) and ok(h)]
+        cov = covered(coord, trial)
+        return [(None, h) for h in trial if h not in busy and h not in cov and ok(h)]
     out, seen = [], set()
-    for r in held_rows(c):
-        cov = covered_heights(c, r["lo"], r["hi"])
-        for h in range(r["lo"], r["hi"] + 1):
-            if h not in cov and h not in busy and h not in seen and ok(h):
+    for r in coord.queue():
+        for h in r["todo"]:                     # the coordinator's uncovered heights, in order
+            if h not in busy and h not in seen and ok(h):
                 seen.add(h)
                 out.append((r["id"], h))
     return out
@@ -315,33 +415,20 @@ def parse_blocks(spec):
     return out
 
 
-def trial_refusals(c, heights, now=None):
+def trial_refusals(coord, heights):
     """Why each trial block may not be proven by the bot: already proven, no bundle yet, claimed right now, or held."""
-    now = time.time() if now is None else now
+    facts = coord.blocks(heights) if heights else {}
     out = []
     for h in heights:
-        if is_covered(c, h):
+        f = facts[h]
+        if f["covered"]:
             out.append(f"block {h} is already proven")
-            continue
-        if not has_bundle(h):
+        elif not has_bundle(h):
             out.append(f"block {h} has no bundle yet, so no pod can prove it")
-            continue
-        try:
-            claimed = c.execute("SELECT 1 FROM ranges WHERE status='claimed' AND lo<=? AND hi>=?"
-                                " AND COALESCE(last_beat, claimed_at) > ? LIMIT 1",
-                                (h, h, now - CLAIM_TTL)).fetchone()
-        except sqlite3.OperationalError:
-            claimed = None
-        if claimed:
+        elif f["claimed"]:
             out.append(f"block {h} is claimed by a prover right now")
-            continue
-        try:
-            held = c.execute("SELECT id FROM sponsorships WHERE lo<=? AND hi>=? AND " + HELD_SQL + " LIMIT 1",
-                             (h, h)).fetchone()
-        except sqlite3.OperationalError:
-            held = None
-        if held:
-            out.append(f"block {h} is held for sponsorship #{held['id']}")
+        elif f["held"] is not None:
+            out.append(f"block {h} is held for sponsorship #{f['held']}")
     return out
 
 
@@ -695,13 +782,13 @@ class Bot:
     def __init__(self, db_path, api, runner, *, max_pods, max_usd, max_usd_per_hour, pod_price_ceiling=1.0,
                  stall_s=45 * 60, ssh_timeout_s=15 * 60, boot_timeout_s=30 * 60, fail_grace_s=300,
                  blocks_per_pod=25, sleep_s=30, budget_lead_s=180, capacity_backoff_s=300, confirm_wait_s=5.0,
-                 trial=None, identity_home=None, clock=time.time, sleep=time.sleep, log=None):
+                 trial=None, identity_home=None, coord=None, clock=time.time, sleep=time.sleep, log=None):
         for flag, v in (("--max-pods", max_pods), ("--max-usd", max_usd), ("--max-usd-per-hour", max_usd_per_hour)):
             if v is None or v <= 0:
                 raise BotRefused(f"live mode needs a positive {flag}")
         if pod_price_ceiling <= 0 or pod_price_ceiling > max_usd_per_hour:
             raise BotRefused("--pod-price-ceiling must be positive and no more than --max-usd-per-hour")
-        self.db_path, self.api, self.runner = db_path, api, runner
+        self.db_path, self.api, self.runner, self.coord = db_path, api, runner, coord
         self.max_pods, self.max_usd, self.max_usd_per_hour = int(max_pods), float(max_usd), float(max_usd_per_hour)
         self.ceiling = float(pod_price_ceiling)
         self.stall_s, self.ssh_timeout_s, self.boot_timeout_s = stall_s, ssh_timeout_s, boot_timeout_s
@@ -719,6 +806,7 @@ class Bot:
         self._n = 0
         self._capacity_at = 0.0
         self._refusals = 0
+        self._coord_errors = 0
 
     # --- money ---
     def _live(self):
@@ -738,48 +826,74 @@ class Bot:
     def run(self):
         if not self.identity_home:
             raise BotRefused("no identity home (SPONSOR_BOT_HOME): the bot keeps one key per sponsorship there")
+        if self.coord is None:
+            raise BotRefused("no coordinator API client: the bot reads and changes the board only through /api/bot/")
+        # Before a cent is spent: the coordinator must have the bot API and accept this bot's key. A coordinator
+        # without it would not keep held blocks for the bot or register its keys.
+        try:
+            self.coord.queue()
+        except CoordError as e:
+            raise BotRefused(f"the coordinator's sponsor bot API is not usable: {e}")
         c = connect(self.db_path)
-        if not has_sponsor_keys(c):
-            c.close()
-            raise BotRefused("the coordinator's database has no sponsor_keys table: deploy the coordinator with "
-                             "the sponsor handle rule first, or its submits would be refused or unguarded")
         ensure_tables(c)
-        fixed = reconcile_work(c)
-        if fixed:
-            self.log(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
-        if self.trial is None:
-            waiting = len(pending_work(c, need_bundle=False)) - len(pending_work(c))
-            if waiting:
-                self.log(f"{waiting} held block(s) have no bundle yet and wait for the bridge: no pod is rented for them")
-        if self.trial is not None:
-            bad = trial_refusals(c, self.trial, self.clock())
-            if bad:
-                c.close()
-                more = f" (and {len(bad) - 10} more)" if len(bad) > 10 else ""
-                raise BotRefused("; ".join(bad[:10]) + more)
+        try:
+            fixed = reconcile_work(c, self.coord)
+            if fixed:
+                self.log(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
+            if self.trial is None:
+                waiting = len(pending_work(self.coord, need_bundle=False)) - len(pending_work(self.coord))
+                if waiting:
+                    self.log(f"{waiting} held block(s) have no bundle yet and wait for the bridge: no pod is rented for them")
+            if self.trial is not None:
+                bad = trial_refusals(self.coord, self.trial)
+                if bad:
+                    more = f" (and {len(bad) - 10} more)" if len(bad) > 10 else ""
+                    raise BotRefused("; ".join(bad[:10]) + more)
+        except CoordError as e:
+            c.close()
+            raise BotRefused(f"the coordinator's sponsor bot API failed before anything was rented: {e}")
+        except BotRefused:
+            c.close()
+            raise
         failed = True
         try:
             while True:
                 now = self.clock()
-                if self.trial is None:
-                    for sid in reconcile(c, now):
-                        self.log(f"sponsorship #{sid} is proven")
-                self._observe(c, now)
+                # The coordinator going away for a moment (a restart) is not a reason to throw away every pod; one
+                # that stays away is. Money is checked every look regardless, from the bot's own figures.
+                try:
+                    if self.trial is None:
+                        for sid in reconcile(self.coord):
+                            self.log(f"sponsorship #{sid} is proven")
+                    self._observe(c, now)
+                    coord_ok = True
+                except CoordError as e:
+                    coord_ok = False
+                    self._coord_error(e)
+                if self.stop_reason == "coordinator":
+                    break
                 if self._over_budget(now):
                     self.stop_reason = "budget"
                     self.log(f"spend ${self.spend(now):.2f} has reached the ${self.max_usd:.2f} cap: stopping")
                     break
-                self._assign(c, now)
-                self._launch(c, now)
-                if self.stop_reason == "runpod":
-                    break
-                if not self._live() and not pending_work(c, (), self.trial):
-                    # The last blocks can land after this pass's reconcile, just before their pod is stopped.
-                    if self.trial is None:
-                        for sid in reconcile(c, self.clock()):
-                            self.log(f"sponsorship #{sid} is proven")
-                    self.stop_reason = self.stop_reason or "done"
-                    break
+                if coord_ok:
+                    try:
+                        self._assign(c, now)
+                        self._launch(c, now)
+                        if self.stop_reason == "runpod":
+                            break
+                        if not self._live() and not pending_work(self.coord, (), self.trial):
+                            # The last blocks can land after this pass's reconcile, just before their pod is stopped.
+                            if self.trial is None:
+                                for sid in reconcile(self.coord):
+                                    self.log(f"sponsorship #{sid} is proven")
+                            self.stop_reason = self.stop_reason or "done"
+                            break
+                        self._coord_errors = 0
+                    except CoordError as e:
+                        self._coord_error(e)
+                        if self.stop_reason == "coordinator":
+                            break
                 self.sleep(self.sleep_s)
             failed = False
         finally:
@@ -792,6 +906,14 @@ class Bot:
                     self._restore_signals(saved)
             c.close()
         return self.stop_reason
+
+    def _coord_error(self, e):
+        self._coord_errors += 1
+        if self._coord_errors >= COORD_ERRORS_MAX:
+            self.stop_reason = "coordinator"
+            self.log(f"the coordinator failed {self._coord_errors} looks in a row ({e}): stopping")
+        else:
+            self.log(f"the coordinator failed this look ({e}); trying again")
 
     def _observe(self, c, now):
         live = self._live()
@@ -829,10 +951,12 @@ class Bot:
             pod.boot_result = (False, f"{type(e).__name__}: {e}")
 
     def _progress(self, c, p, now):
-        done = [a for a in p.assigned if is_covered(c, a["height"])]
+        cov = covered(self.coord, [a["height"] for a in p.assigned])
+        done = [a for a in p.assigned if a["height"] in cov]
         if done:
             self._record_proven(c, p, done, now)
-        if any(a["sid"] is not None and not is_held(c, a["sid"]) for a in p.assigned):
+        sids = {a["sid"] for a in p.assigned if a["sid"] is not None}
+        if any(not self.coord.sponsorship(sid)["held"] for sid in sorted(sids)):
             self._terminate(c, p, "a sponsorship it was proving is no longer held")
             return
         if not p.assigned:
@@ -864,15 +988,12 @@ class Bot:
         p.assigned = [a for a in p.assigned if a not in done]
         p.segment_start = p.last_progress = now
 
-    def _identity(self, c, sid):
-        """The sponsorship's key, created on first use and registered before any pod gets it."""
+    def _identity(self, sid):
+        """The sponsorship's key, created on first use and registered with the coordinator before any pod gets it."""
         if sid not in self._identities:
-            name = None
-            if sid is not None:
-                row = c.execute("SELECT name FROM sponsorships WHERE id=?", (sid,)).fetchone()
-                name = row["name"] if row else f"#{sid}"
+            name = None if sid is None else self.coord.sponsorship(sid)["name"]
             ident = identity(self.identity_home, sid, name)
-            register_key(c, ident, sid)
+            register_key(self.coord, ident, sid)
             self._identities[sid] = ident
         return self._identities[sid]
 
@@ -881,21 +1002,24 @@ class Bot:
 
     def _assign(self, c, now):
         for p in [p for p in self._live() if p.state == "idle"]:
-            todo = pending_work(c, self._busy(), self.trial)
+            todo = pending_work(self.coord, self._busy(), self.trial)
             if not todo:
                 self._terminate(c, p, "nothing left to prove")
                 continue
             chunk = todo[:self.blocks_per_pod]
+            # Everything the coordinator must agree to comes first -- keys registered, sponsorships `proving` --
+            # so a refusal leaves nothing half-assigned in the log.
+            idents = {sid: self._identity(sid) for sid in {sid for sid, _ in chunk}}
+            for sid in sorted({sid for sid, _ in chunk if sid is not None}):
+                self.coord.proving(sid)
             items, work = [], []
             for sid, h in chunk:
-                ident = self._identity(c, sid)
+                ident = idents[sid]
                 cur = c.execute("INSERT INTO sponsor_work(sponsorship_id, height, pod_id, gpu_type, cost_per_hr,"
                                 " assigned_at, pubkey) VALUES(?,?,?,?,?,?,?)",
                                 (sid, h, p.id, p.gpu_type, p.rate(self.ceiling), now, ident["pubkey"]))
                 items.append({"sid": sid, "height": h, "row": cur.lastrowid})
                 work.append({"height": h, **ident})
-            for sid in sorted({sid for sid, _ in chunk if sid is not None}):
-                c.execute("UPDATE sponsorships SET status='proving' WHERE id=? AND status='paid'", (sid,))
             c.commit()
             p.assigned, p.state = items, "working"
             p.segment_start = p.last_progress = now
@@ -911,7 +1035,7 @@ class Bot:
 
     def _launch(self, c, now):
         waiting = [p for p in self._live() if p.state in ("waiting_ssh", "booting", "idle")]
-        todo = pending_work(c, self._busy(), self.trial)
+        todo = pending_work(self.coord, self._busy(), self.trial)
         want = math.ceil(len(todo) / self.blocks_per_pod) - len(waiting)
         while want > 0 and now >= self._capacity_at:
             if len(self._live()) >= self.max_pods:
@@ -953,8 +1077,16 @@ class Bot:
     def _terminate(self, c, p, note, outcome="cancelled"):
         if not p.live:
             return
-        # A block can land after the last look: count it as proven, not as `outcome`.
-        landed = [] if _CONTROL_IGNORE_LANDED else [a for a in p.assigned if is_covered(c, a["height"])]
+        # A block can land after the last look: count it as proven, not as `outcome`. Asking the coordinator must
+        # never stop a pod being terminated: if it cannot answer, the blocks are logged as `outcome` and
+        # reconcile_work corrects them on a later run.
+        landed = []
+        if not _CONTROL_IGNORE_LANDED and p.assigned:
+            try:
+                cov = covered(self.coord, [a["height"] for a in p.assigned])
+                landed = [a for a in p.assigned if a["height"] in cov]
+            except CoordError as e:
+                self.log(f"could not ask the coordinator which of {p.name}'s blocks landed ({e})")
         if landed:
             self._record_proven(c, p, landed, self.clock())
         if p.assigned:
@@ -1061,24 +1193,26 @@ def format_report(r):
     return "\n".join(lines)
 
 
-def plan_text(db_path=DB, trial=None):
-    rows = queue(db_path)
+def plan_text(coord, db_path=None, trial=None):
+    rows = queue(coord)
     lines = plan(rows)
+    todo = pending_work(coord, (), trial)
+    if trial is not None:
+        bad = trial_refusals(coord, trial)
+        lines.append(f"trial: {len(trial)} block(s), {len(bad)} refused" + ("" if not bad else ": " + "; ".join(bad[:5])))
+    elif not rows:
+        lines.append("no held sponsorships in the queue")
+    lines.append(f"{len(todo)} block(s) still to prove")
+    waiting = len(pending_work(coord, (), trial, need_bundle=False)) - len(todo)
+    if waiting:
+        lines.append(f"{waiting} more block(s) wait for bundles: no pod can prove them until the bridge builds them")
+    path = db_path or bot_db_path()
+    if not path or not os.path.exists(path):
+        if todo:
+            lines.append("projected cost: NOT MEASURED (no cost log yet; run `trial` first)")
+        return lines
+    c = connect(path, readonly=True)
     try:
-        c = connect(db_path, readonly=True)
-    except sqlite3.OperationalError:
-        return lines or ["no held sponsorships in the queue"]
-    try:
-        todo = pending_work(c, (), trial)
-        if trial is not None:
-            bad = trial_refusals(c, trial)
-            lines.append(f"trial: {len(trial)} block(s), {len(bad)} refused" + ("" if not bad else ": " + "; ".join(bad[:5])))
-        elif not rows:
-            lines.append("no held sponsorships in the queue")
-        lines.append(f"{len(todo)} block(s) still to prove")
-        waiting = len(pending_work(c, (), trial, need_bundle=False)) - len(todo)
-        if waiting:
-            lines.append(f"{waiting} more block(s) wait for bundles: no pod can prove them until the bridge builds them")
         bands = report(c)["bands"]
         if todo and bands:
             est = 0.0
@@ -1096,6 +1230,13 @@ def plan_text(db_path=DB, trial=None):
 
 
 # ---------- the command line ----------
+
+def connect_path():
+    path = bot_db_path()
+    if not path:
+        raise SystemExit("sponsor_bot: set SPONSOR_BOT_DB, or SPONSOR_BOT_HOME (the cost log is bot.db there)")
+    return path
+
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -1120,16 +1261,42 @@ def main(argv=None):
     live_opts(t)
     sub.add_parser("report", help="measured cost per block")
     sub.add_parser("stop-all", help="terminate every hz-sponsor-* pod")
+    sub.add_parser("bot-key", help="create the bot's API key if needed and print its public half")
+    il = sub.add_parser("import-log", help="copy the cost log from a copy of the coordinator's database")
+    il.add_argument("source")
     a = ap.parse_args(argv)
     cmd = a.cmd or "plan"
 
+    if cmd == "bot-key":
+        path = Coord.key_path()
+        if not path:
+            raise SystemExit("sponsor_bot: set SPONSOR_BOT_KEY_FILE or SPONSOR_BOT_HOME")
+        print(bot_key(path))
+        return 0
+    if cmd == "import-log":
+        c = connect()
+        try:
+            w, p = import_log(a.source, c)
+        finally:
+            c.close()
+        print(f"imported {w} work row(s) and {p} pod(s)")
+        return 0
     if cmd == "plan":
-        print("\n".join(plan_text()))
+        try:
+            print("\n".join(plan_text(Coord.from_env())))
+        except CoordError as e:
+            raise SystemExit(f"sponsor_bot: {e}")
         return 0
     if cmd == "report":
-        c = connect(DB, readonly=not os.path.exists(DB))
+        c = connect()
         try:
-            fixed = reconcile_work(c)
+            ensure_tables(c)
+            # The report is the bot's own figures; checking them against the coordinator is a bonus, not a need.
+            try:
+                fixed = reconcile_work(c, Coord.from_env())
+            except (CoordError, SystemExit) as e:
+                fixed = 0
+                print(f"could not check the log against the coordinator, so nothing was corrected: {e}")
             if fixed:
                 print(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
             print(format_report(report(c)))
@@ -1150,8 +1317,12 @@ def main(argv=None):
             trial = parse_blocks(a.blocks)
         except ValueError as e:
             raise SystemExit(f"sponsor_bot: {e}")
+    coord = Coord.from_env()
     if not a.live:
-        print("\n".join(plan_text(DB, trial)))
+        try:
+            print("\n".join(plan_text(coord, None, trial)))
+        except CoordError as e:
+            raise SystemExit(f"sponsor_bot: {e}")
         print("sponsor_bot: dry run; add --live with --max-pods, --max-usd and --max-usd-per-hour to rent GPUs",
               file=sys.stderr)
         return 2
@@ -1160,7 +1331,7 @@ def main(argv=None):
     if missing:
         raise SystemExit("sponsor_bot: live mode refuses to start without " + ", ".join(missing))
     try:
-        bot = Bot(DB, None, None, max_pods=a.max_pods, max_usd=a.max_usd, max_usd_per_hour=a.max_usd_per_hour,
+        bot = Bot(connect_path(), None, None, coord=coord, max_pods=a.max_pods, max_usd=a.max_usd, max_usd_per_hour=a.max_usd_per_hour,
                   pod_price_ceiling=a.pod_price_ceiling, stall_s=a.stall_min * 60, blocks_per_pod=a.blocks_per_pod,
                   sleep_s=a.tick, trial=trial)
     except BotRefused as e:
@@ -1173,7 +1344,7 @@ def main(argv=None):
         reason = bot.run()
     except BotRefused as e:
         raise SystemExit(f"sponsor_bot: {e}")
-    c = connect(DB, readonly=True)
+    c = connect(bot.db_path, readonly=True)
     try:
         print(format_report(report(c)))
     finally:
@@ -1182,6 +1353,8 @@ def main(argv=None):
         return 4
     if reason == "runpod":
         return 5
+    if reason == "coordinator":
+        return 6
     return 3 if reason == "budget" else 0
 
 

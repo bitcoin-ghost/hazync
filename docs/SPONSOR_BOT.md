@@ -4,8 +4,36 @@ Status: **built and tested against fakes; never run live.** Nothing in this docu
 RunPod yet. `trial` exists to measure it.
 
 `coordinator/sponsor_bot.py` proves paid sponsorships on rented RunPod GPUs and logs what each block cost.
-It runs on the coordinator box, next to the coordinator's database. See `docs/SPONSORSHIP.md` for the
-sponsorship flow itself.
+It runs on the coordinator box as its own user, **with no access to the coordinator's database** (#351): it
+reads and changes the board only through the coordinator's signed, loopback-only bot API, and keeps its cost
+log in a database of its own. See `docs/SPONSORSHIP.md` for the sponsorship flow itself.
+
+## The coordinator's bot API (#351)
+
+The bot rents GPUs with real money and runs pod-handling code against a third-party API, so it is the part most
+likely to be compromised. It used to write `coordinator.db` directly, which meant a compromised bot could rewrite
+the board's record. Now:
+
+- **Routes** (`/api/bot/`, `docs/COORDINATOR_REFERENCE.md`):
+  - `GET queue`: sponsorships that hold, oldest payment first, each with `todo` (heights nobody has proven)
+  - `GET blocks?h=`: per height, `covered`, `proofs` (key and time), a live `claimed`, `held`
+  - `GET sponsorship/<id>`: name, status, whether it holds
+  - `POST key`: register a sponsorship's key
+  - `POST proving`: `paid` to `proving`
+  - `POST reconcile`: mark proven every hold whose span is covered
+- **The coordinator decides every change.** A key is registered only for a sponsorship that holds, only with the
+  handle its name gives, and never for a second sponsorship; `proving` only while the sponsorship holds. The bot
+  never supplies a status or a row.
+- **Authentication:** the bot's own ed25519 key (`SPONSOR_BOT_KEY_FILE`, default `bot.key` in
+  `SPONSOR_BOT_HOME`), whose public half the coordinator reads from `SPONSOR_BOT_PUBKEY_FILE`. Each request is
+  signed over the method, path with query, timestamp, a nonce and the body's hash; the timestamp must be within
+  `SPONSOR_BOT_SKEW` (120 s) and a nonce is accepted once.
+- **Loopback only:** the routes answer only a direct connection from `127.0.0.1` or `::1` with no
+  `X-Forwarded-For`. The public proxies cannot reach them, signed or not.
+- **A coordinator restart is ridden out.** A look where the coordinator fails is logged and retried; after
+  10 failed looks in a row (`COORD_ERRORS_MAX`) the run stops, terminates every pod and exits with code 6. Spend
+  is checked every look regardless, from the bot's own figures, and a pod is terminated even when the
+  coordinator cannot say which of its blocks landed (the log is corrected on a later run).
 
 ## What it relies on
 
@@ -22,13 +50,12 @@ a sponsorship `proven` at submit when its whole span is covered.
 The bot:
 
 - **Works the holds.** Oldest payment first, heights in order, skipping heights that are already covered
-  or that a live pod already has. Several pods can split one sponsorship.
+  or that a live pod already has. Several pods can split one sponsorship. The queue is the coordinator's.
 - **Moves `paid` to `proving`** when it gives a pod the first of a sponsorship's blocks.
 - **Reconciles.** Every loop it marks `proven` any held sponsorship whose span is covered by verified proofs
-  from anyone, because blocks can arrive by paths other than submit.
-- **Never claims.** `/api/claim` is unsigned, so a privilege keyed on the bot's public key could be
-  spoofed. The bot picks blocks from the database and each pod proves them with the released worker's
-  explicit mode, `hazync-worker run <n>`, which submits without claiming.
+  from anyone, because blocks can arrive by paths other than submit (`POST /api/bot/reconcile`).
+- **Never claims.** The bot picks blocks from the coordinator's queue and each pod proves them with the
+  released worker's explicit mode, `hazync-worker run <n>`, which submits without claiming.
 
 ## Identities: one key per sponsorship
 
@@ -52,8 +79,8 @@ sponsor was proven last.
 ### Registration, and the reserved prefix
 
 - **`sponsor_keys`** (in the coordinator's schema: `pubkey`, `sponsorship_id`, NULL for the trial key,
-  `handle`, `created_at`) lists the bot's keys. The bot inserts a key before any pod is given it, and
-  refuses to run on a database without the table: that coordinator would not enforce the rule below.
+  `handle`, `created_at`) lists the bot's keys. The bot registers a key through `POST /api/bot/key` before any
+  pod is given it, and refuses to run against a coordinator whose bot API does not accept its key.
 - **The coordinator refuses any handle whose folded form starts with `sponsor` from a key that is not in
   `sponsor_keys`**, with the same message as a reserved handle, in `submit`, spine submit, `rotate` (for
   the new key) and `claim`. Folded means NFKC, lowercase, letters and digits only, with `0` read as `o` and
@@ -111,9 +138,12 @@ The same recipe as the board fleet (`hazync-board-fleet/fleet.sh`):
   - run a GPU smoke prove (`prove-block`, because a card can pass boot with no usable CUDA device, #261)
   - check the program ID against the coordinator's `/api/meta`
 - **Work:** the assigned heights run one after another with `hazync-worker run <n>`. Progress is read from
-  the database, not the pod.
+  the coordinator's API, not the pod.
 
 ## The cost log
+
+The bot's own SQLite database, `SPONSOR_BOT_DB` (default `bot.db` in `SPONSOR_BOT_HOME`). The coordinator never
+read these tables, so they left its database with the bot (#351).
 
 - **`sponsor_work`:** one row per assigned block, with the sponsorship (NULL for a trial), height, pod, GPU
   type, price, assigned and proven times, seconds, estimated dollars and outcome (`proven`, `stalled`,
@@ -131,9 +161,9 @@ The same recipe as the board fleet (`hazync-board-fleet/fleet.sh`):
 
 ## Setup on the coordinator box
 
-The bot runs as the coordinator's user, `hazync`, which has **no home directory**. Nothing the bot does
-reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under `SPONSOR_BOT_HOME`, set to
-`/var/lib/hazync/sponsor-bot` (owned by `hazync`, mode 700).
+The bot runs as its own user, `hazync-sponsor`, which has **no home directory** and **no access to
+`coordinator.db`**. Nothing the bot does reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under
+`SPONSOR_BOT_HOME`, set to `/var/lib/hazync/sponsor-bot` (owned by `hazync-sponsor`, mode 700).
 
 ```
 /var/lib/hazync/sponsor-bot/
@@ -143,6 +173,8 @@ reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under `SPONSOR_BOT_HOME`
   known_hosts                                   written by ssh; pods' host keys are not checked
   gnupg/                                        keyring holding the maintainer's release key
   runpod.key                                    the RunPod API key, mode 600 (RUNPOD_API_KEY_FILE defaults here)
+  bot.key                                       the bot's API key, mode 600 (`sponsor_bot.py bot-key` creates it)
+  bot.db                                        the cost log (SPONSOR_BOT_DB defaults here)
   work/run-*/                                   the release manifest, boot script and work lists per run
 ```
 
@@ -159,7 +191,9 @@ reads `$HOME`, `~/.ssh` or `~/.gnupg`: everything lives under `SPONSOR_BOT_HOME`
   fallback to a home directory, and the key is never printed.
 - **Optional:** `SPONSOR_BOT_RELEASE` to pin a release tag (default: GitHub Latest), and
   `SPONSOR_BOT_META_URL` (default `http://127.0.0.1:8899/api/meta`).
-- **`COORD_DB`:** the coordinator's database, as for the coordinator.
+- **The coordinator:** `SPONSOR_BOT_COORD_URL` (default `http://127.0.0.1:8899`, a direct loopback address;
+  never a proxy). On the coordinator's unit, `SPONSOR_BOT_PUBKEY_FILE` names a file holding the output of
+  `sponsor_bot.py bot-key`.
 - **`HAZYNC_BRIDGE_OUT`** (and `WITNESS_DIR`, if the coordinator sets it): the same values as the
   coordinator's unit, `/var/lib/hazync/bridge_bundles` on the box. Without `HAZYNC_BRIDGE_OUT` the bot sees only
   the legacy witnesses, so it rents nothing for any block above them.
@@ -174,6 +208,8 @@ python3 sponsor_bot.py run --live --max-pods 2 --max-usd 20 --max-usd-per-hour 2
 python3 sponsor_bot.py trial --blocks 100000,150000-150004 --live --max-pods 1 --max-usd 5 --max-usd-per-hour 1
 python3 sponsor_bot.py report             # measured cost per block, by height band
 python3 sponsor_bot.py stop-all
+python3 sponsor_bot.py bot-key            # create bot.key if missing; print its public half for the coordinator
+python3 sponsor_bot.py import-log <db>    # copy sponsor_work and sponsor_pods from a copy of coordinator.db
 ```
 
 - **Tuning options:** `--pod-price-ceiling`, `--stall-min`, `--blocks-per-pod` (default 25) and `--tick`
@@ -183,17 +219,35 @@ python3 sponsor_bot.py stop-all
   trusted. It refuses any block already proven, without a bundle, claimed by a prover within the last hour,
   or held for a sponsorship, and at most 1,000 blocks.
 
+## Moving an existing box to the API (#351)
+
+1. Deploy the coordinator with the bot API. It does nothing until `SPONSOR_BOT_PUBKEY_FILE` is set.
+2. As `hazync-sponsor`: `sponsor_bot.py bot-key`. Put the printed public key in a root-owned file, for example
+   `/etc/hazync/sponsor-bot.pub`, set `SPONSOR_BOT_PUBKEY_FILE` to it on the coordinator's unit, and restart it.
+3. As root, copy the old log out: `sqlite3 /var/lib/hazync/coordinator.db ".backup /tmp/coord-copy.db"`, give
+   the copy to `hazync-sponsor`, and run `sponsor_bot.py import-log /tmp/coord-copy.db` as that user. It copies
+   each row once; run it again and it copies nothing. Delete the copy.
+4. `sponsor_bot.py` (plan) as `hazync-sponsor` must list the queue. That is the check that the key, the loopback
+   address and the coordinator's file agree.
+
 ## What is tested, and what is not
 
 `coordinator/test_sponsor_bot.py` runs the bot's real RunPod client against a fake GraphQL server over
-HTTP, and a fake pod that proves blocks by writing verified proofs into a real coordinator database, with
-time running 3,600 times faster. It checks:
+HTTP, the real coordinator request handler over HTTP for the bot API, and a fake pod that proves blocks by
+writing verified proofs into a real coordinator database, with time running 3,600 times faster. It checks:
 
 - the caps, the GPU fallback and the price ceiling
 - every termination path: stall, failed boot, exception, SIGTERM, `stop-all`
 - the queue order, `proving` and `proven`, trial refusals, and the cost log and report
 - blocks with no bundle: never given to a pod, and a queue of only such blocks rents nothing
 - a block that lands before its pod is stopped, and the correction of older rows
+- the bot and the coordinator sign the same bytes, and `sponsor_bot.py` opens no coordinator table
+- a coordinator restart mid-run is ridden out; a coordinator that stays away stops the run with every pod terminated
+- `import-log` copies the old log once, and a coordinator that refuses the bot's key rents nothing
+
+`coordinator/test_sponsor_bot_api.py` attacks the API itself: unsigned, wrong-key, tampered body, path and query,
+replayed, stale, proxied and non-loopback requests, no key configured, and every transition the coordinator
+must refuse. Its `--control` removes authentication and the checks, and must fail.
 
 `--control` skips pod cleanup on an error, ignores proofs that land before a pod is stopped, and counts every
 block as having a bundle. It must fail.
