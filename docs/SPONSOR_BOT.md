@@ -229,6 +229,13 @@ python3 sponsor_bot.py import-log <db>    # copy sponsor_work and sponsor_pods f
    each row once; run it again and it copies nothing. Delete the copy.
 4. `sponsor_bot.py` (plan) as `hazync-sponsor` must list the queue. That is the check that the key, the loopback
    address and the coordinator's file agree.
+5. Take the ledger out of the bot's reach: `chmod 640` on `coordinator.db` and its `-wal`/`-shm`, plus
+   `UMask=0027` on the coordinator's unit — SQLite recreates those files on every checkpoint with the process
+   umask, so the chmod alone does not hold. Both drop-ins are in `coordinator/deploy/dropins/`. Writers are
+   unaffected (the coordinator and litestream run as `hazync`; the backup and integrity timers run as root).
+
+Done on server 1 on 2026-09-17: the bot's plan reads the queue over the API, and
+`sudo -u hazync-sponsor sqlite3 /var/lib/hazync/coordinator.db` is refused "unable to open database file".
 
 ## What is tested, and what is not
 
