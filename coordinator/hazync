@@ -633,10 +633,36 @@ def gpu_lock(what="prove"):
 # killed again, re-claimed, forever. Hosts that predate the heartbeat print nothing here, so the
 # silent-assembly budget in `_prove_watched` covers them; this pattern is what makes a NEW host's
 # assembly self-reporting, and then the ordinary progress window applies to it like any other phase.
-_PROGRESS_RE = re.compile(r"(segment \d+/\d+|executed, \d+ segments|assembling \d+ segment receipts)")
+#
+# ⛔ THE LAST TWO ALTERNATIVES ARE seg-serve's, AND THEY ARE NOT THE SAME SHAPE (#361/#364). A
+# DISTRIBUTED run (mode 6, `HAZYNC_RANGE=<n> host seg-serve`) prints
+#
+#     "     91/2352 segments  124s elapsed, ~3071s left"      <- number FIRST, noun PLURAL
+#     "     joins 25/2352"
+#
+# while a single-card prove prints "segment 91/2352" — number LAST, noun SINGULAR. That one word-order
+# difference is load-bearing: without these alternatives `st["n"]` never rises on a distributed run, so
+# the progress-gated beat below never fires, and a claim that has NEVER beaten is released after
+# CLAIM_GRACE (600 s, #296). A board block worth distributing takes an hour, so the operator lost the
+# claim ten minutes in and the coordinator handed their block to someone else mid-run. Measured on the
+# first mode-6 run: 2,353 segments, 3,694 s (docs/history/BENCH_MODE6_3xRTX4090_2026-09-17.md).
+#
+# Checked against the real logs from that run rather than against the format strings: the two patterns
+# match 115 lines of its coordinator log and ZERO lines of a single-card prove log, so the existing
+# path is untouched.
+_PROGRESS_RE = re.compile(r"(segment \d+/\d+|executed, \d+ segments|assembling \d+ segment receipts"
+                          r"|\d+/\d+ segments|joins \d+/\d+)")
 
 # Captures "segment 880/880" so the watchdog knows when the LAST segment lands — the moment the prove
 # stops producing progress lines through no fault of its own.
+#
+# ⛔ DELIBERATELY NOT WIDENED for seg-serve, and this is not an oversight. It is singular-and-number-last
+# ("segment 880/880"), so neither "2352/2352 segments" nor "joins 2352/2352" can match it, and a
+# distributed run therefore never sets `assembly_at` and never enters the silent-assembly budget. That is
+# CORRECT: seg-serve reports "joins N/N" every 25 joins for the whole assembly phase, so there is no
+# silent phase to budget for, and the ordinary progress window governs throughout. If joins ever did go
+# quiet, the HAZYNC_STALL_MIN floor (600 s) still catches it — which is what we want, and is the opposite
+# of the 39,318 failure where the budget existed precisely BECAUSE nothing was being printed.
 _SEG_N_RE = re.compile(r"segment (\d+)/(\d+)")
 
 

@@ -143,6 +143,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_beat.py --control
+      - name: A distributed (mode-6) prove beats its claim (#361/#364)
+        # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
+        # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
+        # rose on a distributed run, the progress-gated beat never fired, and a claim that has NEVER
+        # beaten is released after CLAIM_GRACE (600 s, #296). Block 74,928 took 3,694 s across three
+        # cards, so the operator lost the block ten minutes in. Scenario 3 is the #256 guard: a silent
+        # host must still beat NOTHING.
+        run: cd coordinator && python3 test_mode6_progress.py
+      - name: Mode-6 beat POSITIVE CONTROL (old single-card pattern restored — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_mode6_progress.py --control
       - name: A downloaded proof is named, with its own extension (#278)
         # `curl -O` names a file after the URL path, so /api/proof/1 landed as an extensionless "1".
         # Also pins the host<->worker filename contract: the worker does not pass HAZYNC_OUT, so it
