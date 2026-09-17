@@ -335,7 +335,7 @@ check(d55["sponsor"] is None and public_names() == [] and server.sponsor_status(
       "an underpaid one shows no name anywhere")
 set_row(sid, status="paid", paid_sats=20999)
 _, d55 = server.block_detail(55)
-check(d55["sponsor"] is None and public_names() == [] and sponsor_bot.queue(_tmpdb.name) == [],
+check(d55["sponsor"] is None and public_names() == [] and server.bot_queue()[1]["sponsorships"] == [],
       "a row marked paid but one sat short shows no name and is not in the bot's queue")
 set_row(sid, status="paid", paid_sats=21000)
 _, d55 = server.block_detail(55)
@@ -354,7 +354,7 @@ check(not ({"token_hash", "pledged_sats", "note", "invoice_id", "token"} & set(f
       f"the public list never carries the link, pledge, note or invoice (keys {sorted(first)})")
 check(lst["open"] is True and lst["priced"] is True, "the list says whether sponsorship is open and priced")
 check(server.sponsor_status(token)[1]["public"] is True, "the link says the sponsorship is now public")
-check(sponsor_bot.plan(sponsor_bot.queue(_tmpdb.name)) == [
+check(sponsor_bot.plan(server.bot_queue()[1]["sponsorships"]) == [
       "sponsorship #%d: would prove blocks 50 to 60 (11 blocks) for John Doe" % sid,
       "sponsorship #%d: would prove blocks 21 to 29 (9 blocks) for Big Giver" % sid2],
       "the bot's dry run reads the paid queue, oldest payment first")

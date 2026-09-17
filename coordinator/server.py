@@ -2741,6 +2741,191 @@ def sponsors_public():
                               "queue_ahead": ahead} for r, ahead in zip(rows, aheads)],
             "open": SPONSOR_OPEN, "priced": bool(SPONSOR_PRICE_BANDS)}
 
+# ---------- the sponsor bot's API (#351) ----------
+#
+# The sponsor bot rents GPUs with real money and runs pod-handling code against a third-party API, so it is the
+# part most likely to be compromised. It used to write coordinator.db directly; now it has no database access at
+# all and asks here instead. Every change it can make is one this code checks (a sponsorship moves from `paid`
+# to `proving` only while it holds; a key is registered only for a held sponsorship, with the handle its name
+# gives), never a status or a row the bot supplies. The bot's own cost log lives in the bot's own database.
+#
+# Authentication: the bot's ed25519 key, whose public half is in SPONSOR_BOT_PUBKEY_FILE. Every request carries
+#   X-Hazync-Bot-Ts     integer unix seconds, within SPONSOR_BOT_SKEW
+#   X-Hazync-Bot-Nonce  16 to 64 hex characters, never used twice within the window
+#   X-Hazync-Bot-Sig    ed25519 over bot_message(method, path with query, ts, nonce, body)
+# and the routes answer only a direct loopback connection with no X-Forwarded-For: the bot runs on the
+# coordinator's own box, and a proxied request, signed or not, is never the bot.
+SPONSOR_BOT_PUBKEY_FILE = os.environ.get("SPONSOR_BOT_PUBKEY_FILE", "")
+SPONSOR_BOT_SKEW = int(os.environ.get("SPONSOR_BOT_SKEW", "120"))
+SPONSOR_BOT_MAX_HEIGHTS = 2000
+_bot_nonces = {}
+_bot_nonce_lock = threading.Lock()
+
+def bot_message(method, path, ts, nonce, body):
+    return (f"hazync-sponsor-bot-v1\n{method}\n{path}\n{ts}\n{nonce}\n"
+            f"{hashlib.sha256(body or b'').hexdigest()}").encode()
+
+def _bot_pubkey():
+    if not SPONSOR_BOT_PUBKEY_FILE:
+        return None
+    try:
+        with open(SPONSOR_BOT_PUBKEY_FILE) as f:
+            k = f.read().strip().lower()
+    except OSError:
+        return None
+    return k if is_hex(k, 32) else None
+
+def bot_auth_refusal(peer, headers, method, path, body, now=None):
+    """None if this is the sponsor bot, else (code, body). `headers` is anything with .get()."""
+    if peer not in ("127.0.0.1", "::1") or headers.get("X-Forwarded-For"):
+        return 403, {"error": "the sponsor bot API answers only the coordinator's own box"}
+    pub = _bot_pubkey()
+    if not pub:
+        return 503, {"error": "the sponsor bot API is not configured (SPONSOR_BOT_PUBKEY_FILE)"}
+    ts, nonce, sig = headers.get("X-Hazync-Bot-Ts"), headers.get("X-Hazync-Bot-Nonce"), headers.get("X-Hazync-Bot-Sig")
+    now = time.time() if now is None else now
+    if not (ts and re.fullmatch(r"[0-9]{1,12}", ts) and nonce and re.fullmatch(r"[0-9a-f]{16,64}", nonce)
+            and sig and is_hex(sig, 64)):
+        return 401, {"error": "a bot request needs X-Hazync-Bot-Ts, X-Hazync-Bot-Nonce and X-Hazync-Bot-Sig"}
+    if abs(now - int(ts)) > SPONSOR_BOT_SKEW:
+        return 401, {"error": f"bot request timestamp outside +/-{SPONSOR_BOT_SKEW}s"}
+    if not verify_sig(pub, sig, bot_message(method, path, ts, nonce, body)):
+        return 403, {"error": "the bot request signature does not verify"}
+    with _bot_nonce_lock:
+        for k in [k for k, t in _bot_nonces.items() if t < now - 2 * SPONSOR_BOT_SKEW]:
+            del _bot_nonces[k]
+        if nonce in _bot_nonces:
+            return 403, {"error": "that bot request was already used"}
+        _bot_nonces[nonce] = now
+    return None
+
+def _covered_in(c, lo, hi):
+    got = set()
+    for r in c.execute("SELECT lo, hi FROM vranges WHERE lo<=? AND hi>=?", (hi, lo)):
+        got.update(range(max(lo, r["lo"]), min(hi, r["hi"]) + 1))
+    return got
+
+def bot_queue():
+    """GET /api/bot/queue: every sponsorship that holds its blocks, oldest payment first, with the heights in its
+    span nobody has proven yet (`todo`)."""
+    c = db()
+    try:
+        out = []
+        for h in _sponsor_holds(c):
+            r = c.execute("SELECT id,lo,hi,name,status,paid_at,paid_sats,min_sats FROM sponsorships WHERE id=?",
+                          (h["id"],)).fetchone()
+            cov = _covered_in(c, r["lo"], r["hi"])
+            out.append({**{k: r[k] for k in r.keys()}, "todo": [x for x in range(r["lo"], r["hi"] + 1) if x not in cov]})
+    finally:
+        c.close()
+    return 200, {"sponsorships": out}
+
+def bot_blocks(query):
+    """GET /api/bot/blocks?h=1,2,3: for each height, whether it is proven, every proof covering it (by key and
+    time), whether a live claim holds it, and which sponsorship holds it."""
+    raw = (parse_qs(query).get("h") or [""])[0]
+    try:
+        heights = sorted({int(x) for x in raw.split(",") if x.strip()})
+    except ValueError:
+        return 400, {"error": "h must be comma-separated block heights"}
+    if not heights or len(heights) > SPONSOR_BOT_MAX_HEIGHTS or heights[0] < 0:
+        return 400, {"error": f"between 1 and {SPONSOR_BOT_MAX_HEIGHTS} block heights"}
+    now = time.time()
+    c = db()
+    try:
+        out = {}
+        for h in heights:
+            proofs = [{"pubkey": r["pubkey"], "ts": r["ts"]} for r in c.execute(
+                "SELECT pubkey, ts FROM vranges WHERE lo<=? AND hi>=? ORDER BY ts", (h, h))]
+            claimed = c.execute("SELECT 1 FROM ranges WHERE status='claimed' AND lo<=? AND hi>=?"
+                                " AND COALESCE(last_beat, claimed_at) > ? LIMIT 1", (h, h, now - CLAIM_TTL)).fetchone()
+            hold = next(iter(_sponsor_holds(c, h, h)), None)
+            out[str(h)] = {"covered": bool(proofs), "proofs": proofs, "claimed": bool(claimed),
+                           "held": hold["id"] if hold else None}
+    finally:
+        c.close()
+    return 200, {"blocks": out}
+
+def bot_sponsorship(sid):
+    """GET /api/bot/sponsorship/<id>: its name and status, and whether it holds its blocks."""
+    c = db()
+    try:
+        r = c.execute("SELECT id,lo,hi,name,status FROM sponsorships WHERE id=?", (sid,)).fetchone()
+        held = bool(r) and c.execute("SELECT 1 FROM sponsorships WHERE id=? AND " + SPONSOR_HOLD_SQL, (sid,)).fetchone() is not None
+    finally:
+        c.close()
+    if not r:
+        return 404, {"error": "no such sponsorship"}
+    return 200, {**{k: r[k] for k in r.keys()}, "held": held}
+
+SPONSOR_TRIAL_NAME = "Hazync trial"
+
+def sponsor_handle_for(name):
+    """The board handle a sponsorship's key proves under: "SPONSOR: <name>", cleaned as every handle is."""
+    return clean_handle(SPONSOR_HANDLE_PREFIX + str(name or ""), len(SPONSOR_HANDLE_PREFIX) + SPONSOR_NAME_MAX)
+
+def bot_register_key(body):
+    """POST /api/bot/key {pubkey, sponsorship_id (null for the trial key), handle}. A key for a sponsorship only
+    while it holds, and only with the handle its name gives; the trial key only as "SPONSOR: Hazync trial". A
+    key already registered for a different sponsorship is refused. Idempotent."""
+    if not isinstance(body, dict):
+        return 400, {"error": "expected a JSON object"}
+    pub = str(body.get("pubkey") or "").lower()
+    if not is_hex(pub, 32):
+        return 400, {"error": "pubkey must be 32 bytes of hex"}
+    sid = body.get("sponsorship_id")
+    if sid is not None and (isinstance(sid, bool) or not isinstance(sid, int)):
+        return 400, {"error": "sponsorship_id must be a whole number or null"}
+    c = db()
+    try:
+        if sid is None:
+            want = sponsor_handle_for(SPONSOR_TRIAL_NAME)
+        else:
+            r = c.execute("SELECT name FROM sponsorships WHERE id=? AND " + SPONSOR_HOLD_SQL, (sid,)).fetchone()
+            if not r:
+                return 409, {"error": f"sponsorship #{sid} does not hold its blocks, so no key is registered for it"}
+            want = sponsor_handle_for(r["name"])
+        if body.get("handle") != want:
+            return 400, {"error": "that is not the handle this sponsorship proves under", "handle": want}
+        have = c.execute("SELECT sponsorship_id FROM sponsor_keys WHERE pubkey=?", (pub,)).fetchone()
+        if have is not None and have["sponsorship_id"] != sid:
+            return 409, {"error": "that key is already registered for another sponsorship"}
+        if have is None:
+            c.execute("INSERT INTO sponsor_keys(pubkey, sponsorship_id, handle, created_at) VALUES(?,?,?,?)",
+                      (pub, sid, want, time.time()))
+            c.commit()
+    finally:
+        c.close()
+    return 200, {"ok": True, "pubkey": pub, "sponsorship_id": sid, "handle": want}
+
+def bot_proving(body):
+    """POST /api/bot/proving {sponsorship_id}: `paid` -> `proving`, only while the sponsorship holds."""
+    sid = body.get("sponsorship_id") if isinstance(body, dict) else None
+    if isinstance(sid, bool) or not isinstance(sid, int):
+        return 400, {"error": "sponsorship_id must be a whole number"}
+    c = db()
+    try:
+        r = c.execute("SELECT status FROM sponsorships WHERE id=? AND " + SPONSOR_HOLD_SQL, (sid,)).fetchone()
+        if not r:
+            return 409, {"error": f"sponsorship #{sid} does not hold its blocks"}
+        c.execute("UPDATE sponsorships SET status='proving' WHERE id=? AND status='paid' AND " + SPONSOR_HOLD_SQL, (sid,))
+        c.commit()
+    finally:
+        c.close()
+    return 200, {"ok": True, "sponsorship_id": sid, "status": "proving"}
+
+def bot_reconcile():
+    """POST /api/bot/reconcile: every held sponsorship whose whole span is covered becomes `proven`, as submit()
+    does, for blocks that arrived by another path. Returns the ids moved."""
+    with _lock:
+        c = db()
+        try:
+            done = _sponsor_mark_proven(c, 1, SPONSOR_BAND_TOP)
+            c.commit()
+        finally:
+            c.close()
+    return 200, {"proven": done}
+
 def state(slim=False):
     now = time.time()
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
@@ -3604,6 +3789,10 @@ class H(BaseHTTPRequestHandler):
         except Exception: return {}
     def do_GET(self):
         p = urlparse(self.path).path
+        # The sponsor bot's API (#351): signed and loopback only, so it is not counted against a rate limit meant
+        # for the public; the bot polls it every tick.
+        if p.startswith("/api/bot/"):
+            return self._bot_request("GET", p)
         # Read rate limit on the API (defence-in-depth with the nginx limit_req; the box may also be hit
         # directly). Static assets are cheap and left unlimited.
         if p.startswith("/api/") and not rate_ok(self._client_ip(), "r", RATE_MAX_GET):
@@ -3766,8 +3955,41 @@ class H(BaseHTTPRequestHandler):
             ct = "text/html" if fp.endswith(".html") else "text/plain"
             return self._send(200, raw=open(fp, "rb").read(), ctype=ct)
         return self._send(404, {"error": "not found"})
+    def _bot_request(self, method, p):
+        raw = b""
+        if method == "POST":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except Exception:
+                n = 0
+            if n > MAX_BODY:
+                return self._send(413, {"error": "request body too large"})
+            raw = self.rfile.read(n) if n > 0 else b""
+        refused = bot_auth_refusal(self.client_address[0], self.headers, method, self.path, raw)
+        if refused:
+            return self._send(*refused)
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "the body is not JSON"})
+        m = re.fullmatch(r"/api/bot/sponsorship/([0-9]{1,12})", p)
+        if method == "GET" and p == "/api/bot/queue":
+            return self._send(*bot_queue())
+        if method == "GET" and p == "/api/bot/blocks":
+            return self._send(*bot_blocks(urlparse(self.path).query))
+        if method == "GET" and m:
+            return self._send(*bot_sponsorship(int(m.group(1))))
+        if method == "POST" and p == "/api/bot/key":
+            return self._send(*bot_register_key(body))
+        if method == "POST" and p == "/api/bot/proving":
+            return self._send(*bot_proving(body))
+        if method == "POST" and p == "/api/bot/reconcile":
+            return self._send(*bot_reconcile())
+        return self._send(404, {"error": "not found"})
     def do_POST(self):
         p = urlparse(self.path).path
+        if p.startswith("/api/bot/"):
+            return self._bot_request("POST", p)
         # Allocation endpoints are GONE (#37): no claim, no heartbeat, no release. Proving is
         # unallocated, so there is nothing to lease, keep alive, or hand back.
         if p not in ("/api/submit", "/api/claim", "/api/spine", "/api/beat", "/api/rotate", "/api/sponsor", "/api/foldclaim"):
