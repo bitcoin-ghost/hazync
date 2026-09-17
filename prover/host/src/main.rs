@@ -227,6 +227,76 @@ fn seg_po2() -> u32 {
         .unwrap_or(if cfg!(feature = "cuda") { 21 } else { 20 })
 }
 
+// ── the push transport's job deadline (hazync#365) ───────────────────────────────────────────
+//
+// A worker that accepts pushed work and then goes QUIET — without disconnecting — used to stall a run
+// for ever. Two failures were already handled: a bad receipt is requeued explicitly, and a dropped
+// connection returns what it owed. A peer that simply stops answering is neither, so nothing reclaimed
+// its jobs and the join tree waited on them until the run was killed by hand. This is not
+// malice-specific: a box that hard-freezes or loses power without the TCP connection tearing down
+// produces the identical symptom.
+//
+// ⛔ THE DEADLINE IS MEASURED DISPATCH-TO-RETURN, NOT ON COMPUTE. Measured on the first mode-6 run
+// (docs/history/BENCH_MODE6_3xRTX4090_2026-09-17.md): a join costs 0.38 s of GPU (p50, n=2,352) and
+// 46.7 s of round trip. A window fitted to compute would be ~7 s and would kill every healthy join.
+// The coordinator cannot see compute anyway; round trip is what "this worker has stopped answering"
+// actually means, and it is already recorded for the rtt_ms telemetry.
+//
+// ⛔ AND IT IS PER-WORKER, because one global number cannot serve a fleet. On that same run, two
+// HEALTHY workers differed 7.4x at p90:
+//
+//     pod 1 (same host)   n=1594  p50 45.9s  p90  50.3s  max  57.2s
+//     pod 3               n=438   p50 63.0s  p90 102.9s  max 128.9s
+//     pod 2 (tunnelled)   n=321   p50 79.6s  p90 374.1s  max 393.6s
+//
+// A window tight enough to reclaim pod 1's work quickly would have dropped pod 2 repeatedly during a
+// run that completed perfectly. Replaying that run's 2,353 round trips against candidate windows:
+// 600 s would have killed NOTHING, 300 s would have killed 59 healthy jobs (2.51%), 120 s would have
+// killed 111 (4.72%). Hence the floor.
+//
+// The adaptive term only ever WIDENS the window: a slow-link worker earns more time, a fast one is
+// never given less than the floor. The ceiling stops a worker that has been slow all run from growing
+// its own deadline without bound, which is how a genuinely hung peer would otherwise hide.
+//
+// ⚠ THE FLOOR IS COUPLED TO hazync#367, NOT A PHYSICAL CONSTANT. Today `seg-connect` has no reconnect:
+// it exits on link close, so a false positive costs that worker for the REST OF THE RUN. That is why
+// the floor is conservative. Once a worker rejoins by itself, a false positive costs one requeue and a
+// few seconds, and 300 s becomes reasonable. Retune here, not by guessing.
+//
+// 600 s is deliberately the SAME floor the worker CLI already uses for "too long without hearing
+// anything" (HAZYNC_STALL_MIN). Reusing that judgement beats inventing a second one.
+fn job_timeout_floor_s() -> f64 {
+    std::env::var("HAZYNC_JOB_TIMEOUT_FLOOR").ok().and_then(|s| s.parse().ok()).unwrap_or(600.0)
+}
+fn job_timeout_mult() -> f64 {
+    std::env::var("HAZYNC_JOB_TIMEOUT_MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(8.0)
+}
+fn job_timeout_ceiling_s() -> f64 {
+    std::env::var("HAZYNC_JOB_TIMEOUT_CEILING").ok().and_then(|s| s.parse().ok()).unwrap_or(1800.0)
+}
+// Samples needed before the adaptive term is trusted. Below this the floor governs: a window fitted to
+// three observations is noise, and the first jobs of a run are the least representative (cold CUDA, a
+// cold link, and the queue still filling).
+fn job_timeout_min_samples() -> usize {
+    std::env::var("HAZYNC_JOB_TIMEOUT_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(16)
+}
+
+/// This peer's deadline, in seconds, from its own observed round trips.
+///
+/// Pure so it can be tested without a socket: `rtts` is that peer's completed round trips in seconds,
+/// in any order. Returns `max(floor, mult * p90)` clamped to `ceiling`, or the floor while there are
+/// fewer than `min_samples`.
+fn peer_job_timeout_s(rtts: &[f64], floor: f64, mult: f64, ceiling: f64, min_samples: usize) -> f64 {
+    if rtts.len() < min_samples {
+        return floor;
+    }
+    let mut v: Vec<f64> = rtts.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // p90 by index, matching how the run above was summarised.
+    let p90 = v[((v.len() as f64) * 0.9) as usize % v.len()];
+    (mult * p90).max(floor).min(ceiling)
+}
+
 // This host's guest image id (METHOD_ID) as the canonical RISC0 hex digest.
 fn method_id_hex() -> String { risc0_zkvm::Digest::from(METHOD_ID).to_string() }
 
@@ -5840,7 +5910,9 @@ fn seg_serve_cmd() {
         println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", height, idx, seg_po2());
     }
     println!("  streaming segments as they are produced (hazync#235), depth {depth}");
-    println!("  listening on 0.0.0.0:{port}");
+    println!("  listening on {}:{port}{}",
+             std::env::var("HAZYNC_BIND").unwrap_or_else(|_| "127.0.0.1".into()),
+             if std::env::var("HAZYNC_BIND").is_ok() { "" } else { "  (loopback by default — set HAZYNC_BIND to widen; hazync#365)" });
 
     // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
     // and assumption set are merged into its claim before it is lifted, and a worker has no session,
@@ -5860,7 +5932,21 @@ fn seg_serve_cmd() {
     let jout: Arc<Mutex<std::collections::HashMap<u32, SuccinctReceipt<ReceiptClaim>>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let alldone = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).expect("bind");
+    // hazync#365, the other half: DO NOT expose an unauthenticated listener by default.
+    //
+    // There is no authentication on this wire — `seg-connect` opens a bare TcpStream and
+    // HAZYNC_WORKER_ID is a log label, not an identity — so anyone who can reach this port can attach
+    // as a worker. They cannot corrupt the proof (every returned receipt is verified, and the assembly
+    // is verified against METHOD_ID) but they can consume work and, before the deadline above, stall
+    // the run outright.
+    //
+    // Binding 0.0.0.0 unconditionally meant a pod on a public IP was open to the internet for the life
+    // of the run. Loopback by default makes reaching it a deliberate act — a tunnel, a private network,
+    // or an explicit HAZYNC_BIND=0.0.0.0 — rather than the automatic consequence of starting a prove.
+    // The first mode-6 validation run tunnelled every worker for exactly this reason.
+    let bind_addr = std::env::var("HAZYNC_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let listener = std::net::TcpListener::bind((bind_addr.as_str(), port))
+        .unwrap_or_else(|e| panic!("bind {bind_addr}:{port}: {e}"));
     listener.set_nonblocking(true).ok();
 
     let t_work = Instant::now();
@@ -5906,7 +5992,17 @@ fn seg_serve_cmd() {
                             println!("  cannot split connection: {e}"); return; } };
 
                         // Sent-but-unanswered work, so a dropped connection returns exactly what it owed.
-                        let inflight: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(VecDeque::new()));
+                        //
+                        // hazync#365: each entry carries WHEN it was written, so a peer that accepts work
+                        // and then goes quiet can be timed out. Segments need this as much as joins do —
+                        // arguably more, since a segment is ~2.8 s of compute and a worker sitting on one
+                        // silently is the common case — and `injobs` already carried an Instant while this
+                        // did not, so only half the transport could be timed.
+                        let inflight: Arc<Mutex<VecDeque<(usize, Instant)>>> = Arc::new(Mutex::new(VecDeque::new()));
+                        // This peer's completed round trips, for its own adaptive deadline. Kept here (not
+                        // shared across peers) because the whole point is that peers differ: on the run this
+                        // was sized from, two healthy workers were 7.4x apart at p90.
+                        let peer_rtts: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
                         // hazync#252: the send INSTANT rides with the job. Assembly's cost was
                         // attributed to geography by inference — run 4 measured 128.7 s where compute
                         // alone predicts ~17 s — and the issue says so in as many words: "that part is
@@ -5921,7 +6017,11 @@ fn seg_serve_cmd() {
                         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
                         let reader = {
-                            let (inflight, injobs, stop) = (inflight.clone(), injobs.clone(), stop.clone());
+                            // #365: peer_rtts is written by the reader (it times each completed round
+                            // trip) and read by the writer (it sizes that peer's deadline), so it is
+                            // cloned here like inflight/injobs rather than moved into the closure.
+                            let (inflight, injobs, stop, peer_rtts) =
+                                (inflight.clone(), injobs.clone(), stop.clone(), peer_rtts.clone());
                             let (out, jout, last_out, queue, jobs) =
                                 (out.clone(), jout.clone(), last_out.clone(), queue.clone(), jobs.clone());
                             std::thread::spawn(move || {
@@ -5983,7 +6083,16 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                                         continue;
                                     }
                                     let plain = (i & !NOLIFT_TAG) as usize;
-                                    inflight.lock().unwrap().retain(|&x| x != plain);
+                                    // #365: record the round trip before dropping the entry — this peer's
+                                    // own distribution is what sizes its deadline.
+                                    {
+                                        let mut fl = inflight.lock().unwrap();
+                                        if let Some(pos) = fl.iter().position(|&(x, _)| x == plain) {
+                                            let (_, at) = fl[pos];
+                                            peer_rtts.lock().unwrap().push(at.elapsed().as_secs_f64());
+                                            fl.remove(pos);
+                                        }
+                                    }
                                     if i & NOLIFT_TAG != 0 {
                                         match bincode::deserialize::<SegmentReceipt>(&body) {
                                             Ok(sr) if sr.verify_integrity_with_context(ctx).is_ok() => {
@@ -6014,6 +6123,41 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                         // reader is draining the other direction on its own thread.
                         while !stop.load(std::sync::atomic::Ordering::Relaxed)
                               && !alldone.load(std::sync::atomic::Ordering::Relaxed) {
+                            // hazync#365: has this peer gone quiet while holding work?
+                            //
+                            // No new thread: this loop already wakes every 20 ms when idle and already
+                            // holds every structure the check needs.
+                            //
+                            // ⛔ ON BREACH THE WHOLE PEER IS DROPPED, never one job. The reader pops
+                            // `injobs` FRONT-first because "the worker proves serially and answers in
+                            // order" — so requeueing a single job while the connection stayed open would
+                            // let a late reply pop the WRONG `owed` entry and mis-attribute every later
+                            // rtt_ms. Tripping `stop` runs the existing teardown below, which shuts the
+                            // socket, joins the reader, and returns BOTH tracks to their queues. One
+                            // unwind path, already correct, rather than a second one to keep in step.
+                            {
+                                let win = peer_job_timeout_s(&peer_rtts.lock().unwrap(), job_timeout_floor_s(),
+                                                             job_timeout_mult(), job_timeout_ceiling_s(),
+                                                             job_timeout_min_samples());
+                                let oldest_seg = inflight.lock().unwrap().front().map(|&(i, at)| (i, at.elapsed().as_secs_f64()));
+                                let oldest_job = injobs.lock().unwrap().front().map(|(t, _, at)| (*t, at.elapsed().as_secs_f64()));
+                                let overdue = match (oldest_seg, oldest_job) {
+                                    (Some((i, a)), _) if a > win => Some((format!("segment {i}"), a)),
+                                    (_, Some((t, a))) if a > win => Some((format!("job {t:#x}"), a)),
+                                    _ => None,
+                                };
+                                if let Some((what, age)) = overdue {
+                                    // Loud, for the same reason the push-depth clamp is loud: a peer
+                                    // dropped in silence reads as "the run is just slow".
+                                    let (nseg, njob) = (inflight.lock().unwrap().len(), injobs.lock().unwrap().len());
+                                    println!("  ⛔ peer={peer} has not answered {what} for {age:.0}s \
+(window {win:.0}s from its own {} round trips, HAZYNC_JOB_TIMEOUT_*). Dropping it and requeueing \
+{nseg} segment(s) + {njob} job(s) — hazync#365.",
+                                             peer_rtts.lock().unwrap().len());
+                                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    break;
+                                }
+                            }
                             let room = { depth.saturating_sub(inflight.lock().unwrap().len()) };
                             let mut wrote = false;
                             for _ in 0..room {
@@ -6030,9 +6174,11 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                                         } else { i as u32 };
                                         // Clone the Arc under the lock, not the ~0.77 MB behind it.
                                         let frame = { wire.lock().unwrap()[i].clone() };
-                                        inflight.lock().unwrap().push_back(i);   // record BEFORE the write
+                                        // #365: the send instant rides with the entry, so a silent peer
+                                        // can be timed out. Recorded BEFORE the write, as before.
+                                        inflight.lock().unwrap().push_back((i, Instant::now()));
                                         if write_frame(&mut ws, tag, &frame).is_err() {
-                                            inflight.lock().unwrap().retain(|&x| x != i);
+                                            inflight.lock().unwrap().retain(|&(x, _)| x != i);
                                             queue.lock().unwrap().push_front(i);
                                             stop.store(true, std::sync::atomic::Ordering::Relaxed);
                                             break;
@@ -6064,7 +6210,8 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                         let _ = reader.join();
                         {
                             let mut q = queue.lock().unwrap();
-                            for i in inflight.lock().unwrap().drain(..) { q.push_front(i); }
+                            // `queue` is indices only — drop the #365 send instant on the way back.
+                            for (i, _) in inflight.lock().unwrap().drain(..) { q.push_front(i); }
                         }
                         {
                             let mut j = jobs.lock().unwrap();
@@ -6530,7 +6677,7 @@ impl Drop for Report119OnExit {
 
 #[cfg(test)]
 mod join_tree_tests {
-    use super::join_tree_widths;
+    use super::{join_tree_widths, peer_job_timeout_s};
 
     /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
     #[derive(Clone, PartialEq, Eq, Debug)]
@@ -6588,6 +6735,53 @@ mod join_tree_tests {
         for n in [116usize, 501, 1684, 8006] {
             assert_eq!(old_tree(n), new_tree(n), "join tree differs at n={n}");
         }
+    }
+
+    /// hazync#365. The deadline is sized from a peer's OWN round trips, and the numbers below are the
+    /// real per-peer distributions from the first mode-6 run
+    /// (docs/history/BENCH_MODE6_3xRTX4090_2026-09-17.md). Every one of those jobs RETURNED, so any
+    /// window that would have killed them is a false positive on a healthy run.
+    #[test]
+    fn peer_deadline_never_clips_a_healthy_worker() {
+        let (floor, mult, ceiling, min_n) = (600.0, 8.0, 1800.0, 16usize);
+
+        // Too few samples: the floor governs. A window fitted to three observations is noise, and the
+        // first jobs of a run are the least representative (cold CUDA, cold link, queue still filling).
+        for n in 0..min_n {
+            let few: Vec<f64> = std::iter::repeat(1.0).take(n).collect();
+            assert_eq!(peer_job_timeout_s(&few, floor, mult, ceiling, min_n), floor,
+                       "below min_samples the floor must govern, n={n}");
+        }
+
+        // pod 1, same host as the coordinator: p90 50.3 s -> 8x = 402 s, under the floor, so the floor
+        // wins. A fast local worker must never get a TIGHTER deadline than a slow remote one.
+        let pod1: Vec<f64> = (0..100).map(|i| 40.0 + (i as f64) * 0.15).collect();   // p90 ~53 s
+        assert_eq!(peer_job_timeout_s(&pod1, floor, mult, ceiling, min_n), floor,
+                   "a fast peer gets the floor, not a tighter window");
+
+        // pod 2, tunnelled over a domestic uplink: p90 374.1 s, max 393.6 s -- all healthy. 8x p90
+        // exceeds the ceiling, so it clamps. The clamp must still be comfortably ABOVE its worst
+        // observed round trip, or the run this was measured from would have killed it.
+        let pod2: Vec<f64> = (0..100).map(|i| if i < 90 { 79.0 + i as f64 } else { 374.0 + (i - 90) as f64 }).collect();
+        let w2 = peer_job_timeout_s(&pod2, floor, mult, ceiling, min_n);
+        assert_eq!(w2, ceiling, "a very slow peer clamps at the ceiling");
+        assert!(w2 > 393.6, "the ceiling must exceed pod 2's worst HEALTHY round trip (393.6 s)");
+
+        // pod 3, in between: p90 102.9 s -> 823 s, above the floor and below the ceiling, so the
+        // adaptive term is what governs. This is the case the multiplier exists for.
+        let pod3: Vec<f64> = (0..100).map(|i| 60.0 + (i as f64) * 0.5).collect();     // p90 ~105 s
+        let w3 = peer_job_timeout_s(&pod3, floor, mult, ceiling, min_n);
+        assert!(w3 > floor && w3 < ceiling, "a middling peer is governed by its own p90, got {w3}");
+
+        // The adaptive term may only ever WIDEN. Slower peer, never a smaller window.
+        assert!(peer_job_timeout_s(&pod3, floor, mult, ceiling, min_n)
+                >= peer_job_timeout_s(&pod1, floor, mult, ceiling, min_n),
+                "a slower peer must not get a tighter deadline than a faster one");
+
+        // And nothing, however pathological, escapes the ceiling.
+        let absurd: Vec<f64> = std::iter::repeat(100_000.0).take(50).collect();
+        assert_eq!(peer_job_timeout_s(&absurd, floor, mult, ceiling, min_n), ceiling,
+                   "a peer that has been slow all run cannot grow its own deadline without bound");
     }
 
     #[test]
