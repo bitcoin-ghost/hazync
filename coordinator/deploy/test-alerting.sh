@@ -37,7 +37,8 @@ fi
 # Every title now opens with a MARK: a green tick for good news, a red siren for bad (2026-09-16).
 # Built from the same UTF-8 bytes hazync-alert.sh emits rather than pasted emoji, so these greps do
 # not depend on this file's encoding surviving an editor or on the runner's locale.
-TICK="$(printf '\xe2\x9c\x85')"
+# (The tick's counterpart is built at its point of use below, as TICK_L1 — the only place it is
+# needed is the POST check, where the header comes back latin-1 decoded.)
 SIREN="$(printf '\xf0\x9f\x9a\xa8')"
 
 echo "== 2. --unit names the failed unit in the title =="
