@@ -248,6 +248,16 @@ jobs:
         run: |
           cd coordinator
           python3 test_claim_grace.py --control
+      - name: The blocked-block warning judges the current claim, not the history (#360)
+        # `_continuous` compared this claim's age to the whole stall, and claim() resets claimed_at on
+        # every hand-over — so after ONE hand-over it could never be true again and the "large block,
+        # not a stall" exemption was unreachable. Block 74,928 was accused of "failing on a bug already
+        # fixed" while being proved normally. Scenario 3 is the #286 (39,413) regression guard.
+        run: cd coordinator && python3 test_blocker_message.py
+      - name: Blocked-block warning POSITIVE CONTROL (latching _continuous restored — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_blocker_message.py --control
       - name: G1 retention gate still detects a missing receipt (positive control)
         # check-retention.py is what separates "the board says this block is proven" from "we can
         # hand you the proof for it" — G1's actual content. It runs unattended on the coordinator, so
