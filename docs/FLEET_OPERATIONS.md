@@ -138,6 +138,9 @@ this way.
   block-966,256 runs.
 - [`history/BENCH_8xL40S_2026-09-08.md`](history/BENCH_8xL40S_2026-09-08.md) — 8×L40S CORE fleet, chunk-count
   verdict, sizing.
+- [`history/BENCH_MODE6_3xRTX4090_2026-09-17.md`](history/BENCH_MODE6_3xRTX4090_2026-09-17.md) — the first
+  mode-6 run: a BOARD block (74,928) distributed across 3 cards and verified against the canonical guest.
+  Read it for the transport finding — a join is ~0.4 s of GPU and ~47 s of round trip.
 - [`BUILDS.md`](BUILDS.md) — what the CORE and GHOST builds contain and their measured card counts.
 - [`history/SEGMENT_DISTRIBUTION.md`](history/SEGMENT_DISTRIBUTION.md) — the original design and its
   two-card and three-card measurements.
