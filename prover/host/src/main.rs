@@ -2560,6 +2560,38 @@ fn report_agg_execute_only(mut b: risc0_zkvm::ExecutorEnvBuilder) {
 ///
 /// The assumptions must be added BEFORE the writes: `add_assumption` records what the guest may
 /// `env::verify`, and the writes are the journals it verifies against.
+/// Read the bridge's per-block bundle for height `n` (`bundle_<n>.json` under `HAZYNC_BRIDGE_OUT`).
+///
+/// Shared by `prove-range-bridge` and by `seg-serve` in mode 6 (#361), so both locate the bundle the
+/// same way and a board block spread over N cards reads exactly what one card would have read.
+fn read_bridge_bundle(n: u32) -> Bundle {
+    let dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
+    let raw = std::fs::read(format!("{dir}/bundle_{n}.json")).expect("read bundle");
+    serde_json::from_slice(&raw).expect("parse bundle")
+}
+
+/// Write the mode-6 RANGE input stream — the board's own per-block proof, from a bridge bundle.
+///
+/// Same discipline as `write_aggregate_env` below, and for the same reason (#361). The guest reads a
+/// FIXED order, so a second copy of this sequence is a second thing to keep in step: it is written
+/// once and called twice -- by `prove-range-bridge` proving on one card, and by `seg-serve` proving
+/// the same block across N. A divergence would desynchronise the guest's stream rather than fail
+/// loudly, and the two receipts have to be interchangeable, because the coordinator verifies
+/// whichever one it is handed against METHOD_ID and the claimed [lo..hi].
+fn write_range_env(b: &mut risc0_zkvm::ExecutorEnvBuilder<'_>, bd: &Bundle) {
+    b.segment_limit_po2(seg_po2());
+    b.write(&6u32).unwrap();
+    b.write(&bd.in_tip).unwrap();
+    b.write(&bd.in_roots).unwrap();
+    b.write(&bd.in_leaves).unwrap();
+    b.write(&bd.in_nbits).unwrap();
+    b.write(&bd.in_time).unwrap();
+    b.write(&bd.in_epoch_start).unwrap();
+    b.write(&bd.in_recent).unwrap();
+    b.write(&bd.witness).unwrap();
+    b.write(&METHOD_ID).unwrap();
+}
+
 fn write_aggregate_env(
     b: &mut risc0_zkvm::ExecutorEnvBuilder<'_>,
     receipts: &[risc0_zkvm::Receipt],
@@ -3783,21 +3815,11 @@ fn cmd_bridge() {
 // prove-range (range_n.bin), so fold-range / verify-range / submit are unchanged.
 fn cmd_prove_range_bridge(n: u32) {
     use std::time::Instant;
-    let dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
-    let raw = std::fs::read(format!("{dir}/bundle_{n}.json")).expect("read bundle");
-    let bd: Bundle = serde_json::from_slice(&raw).expect("parse bundle");
+    // The bundle read and the input stream are shared with mode-6 `seg-serve` (#361), so this block
+    // proved on one card and the same block proved across N write the guest byte-for-byte alike.
+    let bd = read_bridge_bundle(n);
     let mut b = ExecutorEnv::builder();
-    b.segment_limit_po2(seg_po2());
-    b.write(&6u32).unwrap();
-    b.write(&bd.in_tip).unwrap();
-    b.write(&bd.in_roots).unwrap();
-    b.write(&bd.in_leaves).unwrap();
-    b.write(&bd.in_nbits).unwrap();
-    b.write(&bd.in_time).unwrap();
-    b.write(&bd.in_epoch_start).unwrap();
-    b.write(&bd.in_recent).unwrap();
-    b.write(&bd.witness).unwrap();
-    b.write(&METHOD_ID).unwrap();
+    write_range_env(&mut b, &bd);
     let t = Instant::now();
     let receipt = prove_env_with_progress(b.build().unwrap(), &format!("range [{n}..{n}] (bridge)"));
     receipt.verify(METHOD_ID).expect("verify");
@@ -5705,23 +5727,48 @@ fn seg_serve_cmd() {
     // add_assumption, so the aggregate -- the thing that folds the chunk receipts into the block
     // proof -- could not be served at all. Everything downstream is unchanged, because an aggregate
     // session produces ordinary segments like any other.
+    // HAZYNC_RANGE=<n> serves the mode-6 BRIDGE RANGE — the board's own per-block proof (#361).
+    //
+    // The same gap as #153, one mode along. `prove-range-bridge` builds its session from
+    // bundle_<n>.json and proves it in ONE local process, so a board block got exactly one card
+    // however large it was, while the fixture path (modes 4/5) could spread a block over 27. The two
+    // produce different artifacts — the coordinator verifies a KIND_RANGE receipt — so the fast path
+    // was unsubmittable and the submittable path was single-card. Serving mode 6 here closes that:
+    // everything downstream is untouched, because a range session produces ordinary segments too.
+    //
+    // ⛔ The input stream is written by the SAME helper `prove-range-bridge` uses, and must be: the
+    // guest reads a fixed order, so a divergence desynchronises its stream rather than failing loudly.
     let agg = std::env::var("HAZYNC_AGG").is_ok();
-    let (anchor, w) = build_full();
+    let range_n: Option<u32> = std::env::var("HAZYNC_RANGE").ok().and_then(|s| s.parse().ok());
     let mut b = ExecutorEnv::builder();
-    if agg {
-        let nchunks = chunk_bounds(&w, nchunks_env()).len();
-        let receipts = read_chunk_receipts(nchunks);
-        println!("=== segment coordinator (push): AGGREGATE of {} chunk receipts, block {} po2 {} ===",
-                 receipts.len(), w.height, seg_po2());
-        write_aggregate_env(&mut b, &receipts, &anchor, &w);
+    // The only witness field the rest of this function needs. A bundle carries it too, so mode 6 never
+    // builds a BlockWitness — there is no HAZYNC_BLOCK fixture for a board block, which is the whole
+    // reason `build_full()` cannot serve this path.
+    let height: u32;
+    if let Some(n) = range_n {
+        let bd = read_bridge_bundle(n);
+        height = bd.height;
+        println!("=== segment coordinator (push): RANGE [{n}..{n}] from bridge bundle, po2 {} ===",
+                 seg_po2());
+        write_range_env(&mut b, &bd);
     } else {
-        let bounds = chunk_bounds(&w, nchunks_env());
-        let (lo, hi) = *bounds.get(idx).expect("chunk index");
-        b.segment_limit_po2(seg_po2());
-        b.write(&4u32).unwrap();
-        b.write(&w.height).unwrap();
-        b.write(&header_hash(&w.header)).unwrap();
-        write_chunk_inputs(&mut b, &w, lo, hi);
+        let (anchor, w) = build_full();
+        height = w.height;
+        if agg {
+            let nchunks = chunk_bounds(&w, nchunks_env()).len();
+            let receipts = read_chunk_receipts(nchunks);
+            println!("=== segment coordinator (push): AGGREGATE of {} chunk receipts, block {} po2 {} ===",
+                     receipts.len(), w.height, seg_po2());
+            write_aggregate_env(&mut b, &receipts, &anchor, &w);
+        } else {
+            let bounds = chunk_bounds(&w, nchunks_env());
+            let (lo, hi) = *bounds.get(idx).expect("chunk index");
+            b.segment_limit_po2(seg_po2());
+            b.write(&4u32).unwrap();
+            b.write(&w.height).unwrap();
+            b.write(&header_hash(&w.header)).unwrap();
+            write_chunk_inputs(&mut b, &w, lo, hi);
+        }
     }
 
     // hazync#235 / hazync#207: STREAM segments as the executor produces them.
@@ -5789,7 +5836,9 @@ fn seg_serve_cmd() {
         } else { depth }
     };
 
-    if !agg { println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", w.height, idx, seg_po2()); }
+    if !agg && range_n.is_none() {
+        println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", height, idx, seg_po2());
+    }
     println!("  streaming segments as they are produced (hazync#235), depth {depth}");
     println!("  listening on 0.0.0.0:{port}");
 
@@ -6288,7 +6337,13 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
     //
     // `prove-chunk` has always honoured HAZYNC_OUT; the aggregate simply never did. Same convention
     // here, with a default so the file exists even when nobody sets it.
-    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| "aggregate_receipt.bin".into());
+    //
+    // ⛔ Mode 6 defaults to the name `prove-range-bridge` writes, so a board block proved across N
+    // cards lands as the same artifact one card would have produced and submits unchanged (#361).
+    let out = std::env::var("HAZYNC_OUT").unwrap_or_else(|_| match range_n {
+        Some(n) => format!("range_{n}.hzk"),
+        None => "aggregate_receipt.bin".into(),
+    });
     match bincode::serialize(&info.receipt) {
         Ok(bytes) => match std::fs::write(&out, &bytes) {
             Ok(()) => println!("    receipt written to {out} ({} bytes)", bytes.len()),
