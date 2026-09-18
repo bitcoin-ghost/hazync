@@ -76,7 +76,7 @@ From GitHub on 2026-09-16.
 | [#277](https://github.com/bitcoin-ghost/hazync/issues/277) | Anchor warp: prove backwards from the anchor in the tip cluster's idle time |
 | [#310](https://github.com/bitcoin-ghost/hazync/issues/310) | `/api/claim` is unsigned, so anyone can hold blocks under any public key (workers sign from v0.21.5; closes with `CLAIM_REQUIRE_SIG=1`) |
 | [#347](https://github.com/bitcoin-ghost/hazync/issues/347) | Prune bridge bundles once their block is finished for good, keeping checkpoints to rebuild them |
-| [#350](https://github.com/bitcoin-ghost/hazync/issues/350) | Bridge memory scales with the UTXO set: a tip bridge projects to 40–70 GiB, above the planned tip node's 32 GB |
+| [#350](https://github.com/bitcoin-ghost/hazync/issues/350) | ⛔ **Measured, no longer a projection (2026-09-18/19)**: the tip bridge hits `MemoryMax=44G` at h=798,257 (108.06M UTXOs), throttles ~2–3 h at 99% pressure, then OOMs — 2 kills in `dmesg`. Highest checkpoint ever 798,257 against a tip of 967,626. `systemd` shows `active (running)` while frozen. Provers unaffected: ~322,000 blocks of bundles sit ahead of the frontier |
 | [#351](https://github.com/bitcoin-ghost/hazync/issues/351) | Sponsor bot should use the coordinator's API, not write `coordinator.db` directly |
 
 ## Decisions for the operator
