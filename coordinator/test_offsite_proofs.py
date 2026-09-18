@@ -46,6 +46,7 @@ class FakeS3:
     def __init__(self, fail_names=()):
         self.objects = {}                 # (bucket, key) -> bytes
         self.puts = []
+        self.transfers = []               # (key, Config) for uploads that came through upload_fileobj
         self.fail_names = set(fail_names)
 
     def get_paginator(self, name):
@@ -64,6 +65,18 @@ class FakeS3:
             raise RuntimeError("simulated upload failure")
         self.objects[(Bucket, Key)] = Body.read()
         self.puts.append(Key)
+
+    # Uploads from a FILE go through upload_fileobj, which multiparts above a threshold. put_object is
+    # single-part and S3/R2 refuse a single part over 5 GB with EntityTooLarge -- which is exactly how
+    # the 9.4 GB rung state_744257.bin failed against R2 on 2026-09-18. Appends to the SAME self.puts
+    # list as put_object: "what got uploaded" is one question, not two, and every existing assertion
+    # about ck.puts stays meaningful whichever path the caller took.
+    def upload_fileobj(self, Fileobj, Bucket, Key, ExtraArgs=None, Callback=None, Config=None):
+        if os.path.basename(Key) in self.fail_names:
+            raise RuntimeError("simulated upload failure")
+        self.objects[(Bucket, Key)] = Fileobj.read()
+        self.puts.append(Key)
+        self.transfers.append((Key, Config))
 
 
 fails = 0
@@ -423,6 +436,22 @@ check("lowest" in out and "cannot be rebuilt" in out,
 # a missing archive directory is a failure, not a quiet success
 rc, out = run(ck, "checkpoints", "--checkpoints", os.path.join(tmp, "no-such-dir"))
 check(rc == 1 and "no directory" in out, f"a missing checkpoint directory fails the run (rc={rc})")
+
+# ⛔ put_object IS SINGLE-PART, AND S3/R2 REFUSE ONE OVER 5 GB. Rungs are the only objects this mirror
+#    handles that are big enough to reach that: on 2026-09-18 the 0.49 GB rung went up and the 9.41 GB
+#    one came back EntityTooLarge, so everything above 5 GB was silently un-mirrorable. Asserting only
+#    "the rung was uploaded" passes against that bug — FakeS3 enforces no size limit — so these pin the
+#    mechanism and the threshold instead. boto3 is absent here (and in CI), so Config arrives as None
+#    and proves nothing; the constants are the part that can actually be checked.
+check({k for k, _ in ck.transfers} == {C + "state_230000.bin", C + "state_744257.bin"},
+      f"every rung upload goes through upload_fileobj, none through single-part put_object "
+      f"({sorted(k for k, _ in ck.transfers)})")
+check(off.MULTIPART_THRESHOLD <= 5 * 1024 ** 3,
+      f"the multipart threshold is at or under S3/R2's 5 GB single-part limit "
+      f"({off.MULTIPART_THRESHOLD / 1e6:.0f} MB)")
+check(off.MULTIPART_CHUNKSIZE * 10000 >= 100 * 1024 ** 3,
+      f"parts are large enough that a 100 GB archive stays inside the 10,000-part cap "
+      f"({off.MULTIPART_CHUNKSIZE / 1e6:.0f} MB parts)")
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
