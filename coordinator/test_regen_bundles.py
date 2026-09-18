@@ -30,6 +30,8 @@ Usage:
   python3 test_regen_bundles.py --control  # the "no rung below" guard is disabled; MUST fail
 """
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -114,6 +116,36 @@ check(rb.archived_rungs(tmp) == [230000, 740000, 765000],
 # ⛔ The .tmp case is not hypothetical: the 230,000 rung was streamed in as state_230000.bin.tmp, and a
 # regeneration firing mid-transfer must not treat a half-written file as a usable seed.
 check(230000 in rb.archived_rungs(tmp), "a completed rung is usable alongside an in-flight .tmp")
+
+# ── main() exit codes ────────────────────────────────────────────────────────────────────────────────
+#
+# ⛔ THE EXIT CODE IS THE CONTRACT WITH hazync-run-check: 0 ran, 1 wrong, 2 could not check. A refusal
+# that exits 0 is a refusal nothing alerts on — the job stays silent and the operator reads silence as
+# "fine". Everything above tests the DECISION; this tests what the decision is reported AS.
+#
+# Measured by hand against the live archive on 2026-09-18 (all five correct). That is why these exist:
+# a hand probe run once is not a guard, and the first version of that probe piped python through sed
+# and read sed's status, so it would have shown 0 for every case no matter what main() returned.
+#
+# /bin/true stands in for the bridge binary — main() only checks os.access(X_OK) and a dry run never
+# executes it, so this stays within the "no real bridge" scope stated at the top.
+
+def exit_code(args):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        return rb.main(args)
+
+check(exit_code(["--heights", "600000,600001", "--archive", tmp, "--bridge", "/bin/true"]) == 0,
+      "a plannable dry run exits 0")
+check(exit_code(["--heights", "1000", "--archive", tmp, "--bridge", "/bin/true"]) == 2,
+      "no rung below the target exits 2 (could not check), never 0")
+check(exit_code(["--heights", "", "--archive", tmp, "--bridge", "/bin/true"]) == 0,
+      "an empty request exits 0, not an error")
+check(exit_code(["--heights", "600000", "--archive", tmp, "--bridge", "/nonexistent"]) == 2,
+      "a missing bridge binary exits 2 before anything is planned")
+check(exit_code(["--heights", "600000", "--archive", os.path.join(tmp, "nope"),
+                 "--bridge", "/bin/true"]) == 2,
+      "an archive with no rungs at all exits 2")
 
 print()
 if CONTROL:
