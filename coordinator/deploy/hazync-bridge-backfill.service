@@ -1,0 +1,110 @@
+[Unit]
+# One-time backfill walk to put checkpoint rungs INSIDE the bundle gap (hazync#347).
+#
+# WHY THIS EXISTS. The live bridge runs HAZYNC_BRIDGE_EMIT_FROM=967500, so heights 418,269-967,499 are
+# walked past with no bundle written, and they cannot simply be stored: bundles reach 17.0 MB by
+# h=418,000, so that span is >9 TB against 3.9 TB free. regen_bundles.py makes those heights on demand
+# instead — but only from an archived checkpoint strictly BELOW the target, and the only rung below the
+# gap is 230,000. So every regeneration in the gap would seed from 230,000:
+#
+#     plan([600000, 600001]) -> seed 230,000, walk to 600,001 — 370,001 blocks to produce two bundles
+#
+# Measured on this box (journal, 2026-09-15 22:56 .. 2026-09-18 08:40, 254 steps of 2000 blocks covering
+# 99.2% of the span): 230,000 -> 742,257 is 41.4 hours of walking at 0.294 s/block average. So a single
+# sponsorship in the gap costs the better part of two days, every time, for want of a nearer seed.
+#
+# This unit walks that span ONCE, checkpointing every 25,000 blocks, so afterwards any gap height is at
+# most 25,000 blocks from a seed (~2 hours at the local rate) instead of up to 370,001.
+#
+# ⛔ IT WRITES NO BUNDLES. HAZYNC_BRIDGE_EMIT_FROM is set far above the cap, so the walk only advances
+# state and produces checkpoints. That is the entire point: the ~20 rungs cost ~72-93 GB (estimated from
+# the two measured sizes, 487 MB at h=230,000 and 8,986 MB at h=742,257), where the bundles for the same
+# span would cost >9 TB.
+#
+# ⛔ NOT ENABLED, AND DELIBERATELY HAS NO [Install] SECTION. A 41-hour walk sharing one bitcoind's RPC
+# with the live bridge is a decision, not a deployment detail. Start it by hand when that is intended:
+#
+#     hazync-backfill-seed                     # install the 230,000 rung as this unit's starting state
+#     systemctl start hazync-bridge-backfill   # ~41 hours; resumes from its own checkpoint if restarted
+#
+Description=Hazync: one-time backfill walk to create checkpoint rungs inside the bundle gap
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+After=network-online.target bitcoind.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hazync
+Group=hazync
+
+# ⛔ ITS OWN OUTPUT DIRECTORY, NEVER THE LIVE ONE. The running bridge owns
+# /srv/bulk/hazync/bridge_bundles and commits its checkpoint by writing state.bin.tmp and renaming over
+# state.bin. A second bridge writing there would race that rename, and the loser is a corrupt checkpoint
+# for the process the whole board depends on. This is a safety property, not tidiness.
+Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/backfill
+Environment=HAZYNC_BITCOIN_DATADIR=/var/lib/hazync/bitcoin-client
+
+# Stop at the head the live bridge had already passed when this was written. Above this the live bridge's
+# own checkpoints take over, so walking further would duplicate work.
+Environment=HAZYNC_BRIDGE_TO=740000
+
+# ⛔ ABOVE THE CAP ON PURPOSE: emit_from > to means no height in this walk ever writes a bundle.
+# main.rs:3801 defaults emit_from to 0 when the variable is ABSENT, so leaving it unset would emit every
+# bundle from 230,000 up — hundreds of GB and climbing. It must be set, and set high.
+Environment=HAZYNC_BRIDGE_EMIT_FROM=999999999
+
+# A rung every 25,000 blocks — the spacing prune_bundles.py and the archiver already assume. At the
+# measured 0.294 s/block that is a checkpoint roughly every 2 hours.
+Environment=HAZYNC_BRIDGE_CKPT=25000
+
+# Exit at the cap instead of polling for new blocks for ever (main.rs:3785).
+Environment=HAZYNC_BRIDGE_ONCE=1
+
+# Wait for the node to answer, exactly as hazync-bridge.service does: the bridge panics if bitcoind is
+# down, and a panic here costs a restart of a 41-hour job.
+ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/var/lib/hazync/bitcoin-client getblockcount >/dev/null 2>&1; do sleep 5; done'
+# ⛔ hazync-host-bridge, NOT hazync-host. Both exist on the coordinator and they are DIFFERENT binaries
+# (different sha, built a day apart). hazync-bridge.service in this repo still says `hazync-host bridge`,
+# but the deployed unit runs `hazync-host-bridge bridge` — verified from systemd's own ExecStart on the
+# live box. Naming the wrong one here would walk 41 hours with a binary the estate is not running.
+#
+# It also matters that this binary does NOT reject unknown arguments: invoked without a recognised
+# subcommand it silently runs an unrelated chain-proof demo instead of erroring. A typo here would look
+# like a started job.
+ExecStart=/usr/local/bin/hazync-host-bridge bridge
+
+# ⛔ MUST YIELD TO THE LIVE BRIDGE. Both processes drive the same bitcoind over RPC (the bridge reads
+# blocks via bitcoin-cli, main.rs:3569 — there is no direct block-file access and so no exclusive lock,
+# which is why two bridges can run at all). The live bridge feeding the board is the priority; this one
+# is a background chore that may take as long as it likes.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+
+# 41 hours, and it resumes from its own checkpoint rather than restarting the walk.
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=60
+
+# ── hardening, mirroring hazync-bridge.service (#58) ─────────────────────────────────────────────────
+# Same threat model: this parses untrusted, miner-produced block data through a binary that links the
+# same C/C++ surface the guest does, on the box holding the coordinator's verified-proof store.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+# ⛔ Only its own scratch directory is writable. If this is ever pointed at the live bundle store, that
+# is the line that must NOT be widened to include it.
+ReadWritePaths=/srv/bulk/hazync/backfill
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# ⛔ NO [Install] SECTION — see the header. This unit is started by hand, once, and never enabled.

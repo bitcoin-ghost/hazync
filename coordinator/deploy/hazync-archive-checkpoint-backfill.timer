@@ -1,0 +1,18 @@
+[Unit]
+# Companion to hazync-bridge-backfill.service (hazync#347).
+#
+# Cadence: the backfill checkpoints every 25,000 blocks and walks at the 0.294 s/block measured on this
+# box, so a rung appears roughly every 2 hours. Hourly is comfortably inside that, and a missed run costs
+# nothing because the next one still sees the rung as due.
+Description=Hazync: archive backfill-walk checkpoints hourly (rung every 25,000 blocks)
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+
+[Timer]
+# :38 keeps this clear of the offsite timers at :07 and :53, the live archiver at :23, and the nightly
+# checks at 04:17 — so two multi-GB copies never start together.
+OnCalendar=*-*-* *:38:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
