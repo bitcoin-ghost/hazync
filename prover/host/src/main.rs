@@ -227,6 +227,35 @@ fn seg_po2() -> u32 {
         .unwrap_or(if cfg!(feature = "cuda") { 21 } else { 20 })
 }
 
+// ── where seg-serve listens (hazync#365, and the multi-unit ergonomics behind it) ─────────────
+//
+// ⛔ ONE function, used by BOTH the log line and the bind. They used to be two independent
+// env::var calls that agreed only by coincidence: change one and the process prints an address it is
+// not listening on, which is the worst possible lie for someone debugging a worker that will not
+// attach.
+//
+// Loopback stays the default. This wire is UNAUTHENTICATED -- seg-connect opens a bare TcpStream and
+// HAZYNC_WORKER_ID is a log label, not an identity -- so anyone who can reach the port can take work
+// and stall the run. Binding 0.0.0.0 must stay a deliberate act.
+//
+// HAZYNC_SEG_REMOTE=1 is that deliberate act, spelled as intent rather than as a socket detail: it
+// says "workers are on other machines", which is the thing an operator actually knows. HAZYNC_BIND
+// still wins if set, for tunnels and private interfaces.
+fn seg_bind_addr() -> String {
+    if let Ok(b) = std::env::var("HAZYNC_BIND") {
+        return b;
+    }
+    if std::env::var("HAZYNC_SEG_REMOTE").ok().as_deref() == Some("1") {
+        return "0.0.0.0".into();
+    }
+    "127.0.0.1".into()
+}
+
+/// True when nothing widened the bind, so workers on other machines cannot attach.
+fn seg_bind_is_loopback() -> bool {
+    seg_bind_addr() == "127.0.0.1"
+}
+
 // ── the push transport's job deadline (hazync#365) ───────────────────────────────────────────
 //
 // A worker that accepts pushed work and then goes QUIET — without disconnecting — used to stall a run
@@ -5946,9 +5975,18 @@ fn seg_serve_cmd() {
         println!("=== segment coordinator (push) — block {} chunk {} po2 {} ===", height, idx, seg_po2());
     }
     println!("  streaming segments as they are produced (hazync#235), depth {depth}");
-    println!("  listening on {}:{port}{}",
-             std::env::var("HAZYNC_BIND").unwrap_or_else(|_| "127.0.0.1".into()),
-             if std::env::var("HAZYNC_BIND").is_ok() { "" } else { "  (loopback by default — set HAZYNC_BIND to widen; hazync#365)" });
+    println!("  listening on {}:{port}", seg_bind_addr());
+    if seg_bind_is_loopback() {
+        // The old hint was one clause on this line and scrolled past during startup; the consequence
+        // only surfaced much later as a worker that silently never attached.
+        println!("  ⚠ LOOPBACK ONLY — workers on OTHER machines cannot attach to this run.");
+        println!("      multi-unit: set HAZYNC_SEG_REMOTE=1   (or HAZYNC_BIND=<addr> for a tunnel)");
+        println!("      multi-card on this box needs nothing — 127.0.0.1 is correct for local workers");
+    } else {
+        println!("  ⚠ {}:{port} is OPEN and UNAUTHENTICATED for the life of this run — anyone who can",
+                 seg_bind_addr());
+        println!("      reach it can take work and stall the run. Prefer a tunnel on a public host.");
+    }
 
     // Segments 0..total-1 go to workers. The LAST one is deliberately withheld: the session journal
     // and assumption set are merged into its claim before it is lifted, and a worker has no session,
@@ -5980,7 +6018,7 @@ fn seg_serve_cmd() {
     // of the run. Loopback by default makes reaching it a deliberate act — a tunnel, a private network,
     // or an explicit HAZYNC_BIND=0.0.0.0 — rather than the automatic consequence of starting a prove.
     // The first mode-6 validation run tunnelled every worker for exactly this reason.
-    let bind_addr = std::env::var("HAZYNC_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let bind_addr = seg_bind_addr();
     let listener = std::net::TcpListener::bind((bind_addr.as_str(), port))
         .unwrap_or_else(|e| panic!("bind {bind_addr}:{port}: {e}"));
     listener.set_nonblocking(true).ok();
