@@ -1,0 +1,29 @@
+[Unit]
+# The same archiver as hazync-archive-checkpoint.service, pointed at the BACKFILL bridge (hazync#347).
+#
+# hazync-archive-checkpoint.sh already takes the unit name to read heights from (BRIDGE_UNIT) and the
+# directory to read state.bin from (HAZYNC_BRIDGE_OUT). So the backfill walk needs no new archiving
+# code — only this unit, aimed at the other bridge.
+#
+# Both archivers write into the SAME archive directory on purpose: regen_bundles.py then sees one set of
+# rungs and picks the nearest below any target, with no merge step and no second path to configure.
+# Heights cannot collide — the backfill stops at 740,000 and the live bridge is already past 742,000.
+#
+# ⛔ THIS ONLY WORKS BECAUSE the script counts rungs at or below the current height rather than the
+# newest overall. With a plain maximum, this unit would see the live bridge's 742,257 rung, compute a
+# negative difference against its own height, and report "not due" for the entire walk while archiving
+# nothing. See the LAST loop in hazync-archive-checkpoint.sh.
+Description=Hazync: archive checkpoints from the backfill walk (rung every 25,000 blocks)
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+
+[Service]
+Type=oneshot
+# Same reasoning as the live archiver: this copies multi-GB files and must never compete with the
+# coordinator serving the board, the live bridge, or the backfill walk itself.
+Nice=19
+IOSchedulingClass=idle
+Environment=BRIDGE_UNIT=hazync-bridge-backfill
+Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/backfill
+Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
+Environment=SPACING=25000
+ExecStart=/usr/local/sbin/hazync-run-check archive-checkpoint-backfill /usr/local/sbin/hazync-archive-checkpoint
