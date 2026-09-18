@@ -10,7 +10,14 @@ Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
 [Timer]
 # :38 keeps this clear of the offsite timers at :07 and :53, the live archiver at :23, and the nightly
 # checks at 04:17 — so two multi-GB copies never start together.
-OnCalendar=*-*-* *:38:00 UTC
+# ⛔ EVERY 5 MINUTES, NOT HOURLY — MEASURED, NOT ASSUMED. The comment below was written expecting the
+# 0.294 s/block average, giving a rung every ~2 hours. The walk actually starts far faster: measured
+# 2026-09-18 on the live box, 230,001 -> 245,000 took 9 minutes, i.e. 0.036 s/block, so a rung every
+# ~15 minutes. The bridge keeps ONE state.bin and overwrites it at each checkpoint, so an hourly poll
+# would have lost roughly three rungs in four, silently — the exact never-fires failure this job exists
+# to prevent. Polling is cheap: unless a rung is actually due the script exits 0 without copying.
+# The rate falls as height rises, so 5 minutes only gets safer.
+OnCalendar=*-*-* *:00/5:00 UTC
 Persistent=true
 AccuracySec=1min
 
