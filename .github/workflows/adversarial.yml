@@ -143,6 +143,19 @@ jobs:
         run: |
           cd coordinator
           python3 test_worker_beat.py --control
+      - name: Bundle pruning obeys all four conditions (#347)
+        # Bundles are the largest thing on the coordinator's disk and grow with height: measured
+        # 2026-09-17, 5.4 KB near genesis against 2.18 MB at 230,000, 95 GB for the first 230,000.
+        # Deletion is REAL — bundle_path()'s legacy block_<n>.json fallback directory is EMPTY on the
+        # live box, so removing a bundle removes the ability to serve or claim that height, and the
+        # only way back is replaying the bridge forward from a checkpoint below it (0.145 s/block
+        # measured at h=230,000). Every condition is therefore load-bearing. No real R2/B2: the
+        # confirmation sets are injected, as hazync-offsite-proofs.main(argv, client=) allows.
+        run: cd coordinator && python3 test_prune_bundles.py
+      - name: Bundle pruning POSITIVE CONTROL (B2 unchecked, as if condition 3 were half-written — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_prune_bundles.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
