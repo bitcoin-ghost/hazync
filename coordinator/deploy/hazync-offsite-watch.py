@@ -58,6 +58,12 @@ DRILL_USER = os.environ.get("OFFSITE_DRILL_USER", "hazync")
 LAG_ALERT = int(os.environ.get("OFFSITE_LAG_ALERT_SECS", "900"))
 REALERT = int(os.environ.get("OFFSITE_REALERT_SECS", "21600"))
 LOG_REALERT = int(os.environ.get("OFFSITE_LOG_REALERT_SECS", "3600"))
+# Litestream drives ~300 retention list calls an hour against R2, and R2 throttles a small share of
+# them (measured on server 1 over 3 days: 109 429s against 12,584 successes, ~0.9%, steady). One
+# throttled list is not a backup problem, but a single attempt made it indistinguishable from one --
+# and this check runs every 10 min, so at that rate it pages roughly once a day for nothing.
+LTX_ATTEMPTS = int(os.environ.get("OFFSITE_LTX_ATTEMPTS", "3"))
+LTX_RETRY_SECS = float(os.environ.get("OFFSITE_LTX_RETRY_SECS", "5"))
 # A receipt counts as missing only after it has missed a whole hourly mirror cycle. `copy` skips
 # receipts younger than 120 s, so one written just before or during a run waits up to an hour for the
 # next; at 1800 the 07:00 UTC summary (~23 min before the :23 run) flagged those almost every morning
@@ -112,21 +118,44 @@ def ago(secs):
     return f"{secs / 86400:.1f} days"
 
 
+def ltx_transient(text):
+    """True for a listing failure worth retrying, where the copy itself is fine.
+
+    Deliberately narrow. AccessDenied, a missing bucket and a broken config are NOT transient: they
+    need a human either way, so retrying them three times only delays a real alert by 10 s.
+    """
+    t = text.lower()
+    return any(m in t for m in ("429", "slowdown", "serviceunavailable", "503", "500",
+                                "timeout", "timed out", "connection reset", "unexpected eof"))
+
+
 def ledger_lag(run, now):
-    """(seconds since the newest ledger change reached R2, None) or (None, why R2 could not be listed)."""
-    rc, out = run(["litestream", "ltx", "-config", LS_CONFIG, DB], timeout=120)
-    stamps = []
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) >= 5 and f[0].isdigit():
-            try:
-                stamps.append(datetime.datetime.strptime(f[-1], "%Y-%m-%dT%H:%M:%SZ")
-                              .replace(tzinfo=datetime.timezone.utc).timestamp())
-            except ValueError:
-                pass
-    if rc != 0 or not stamps:
-        return None, ((out.strip().splitlines() or ["no output"])[-1])[:300]
-    return max(0.0, now - max(stamps)), None
+    """(seconds since the newest ledger change reached R2, None) or (None, why R2 could not be listed).
+
+    Retries a transient failure so a throttled listing does not page as a lost backup. A sustained
+    outage still alerts once the attempts are spent -- the point is to tell the two apart, not to
+    soften the alarm.
+    """
+    attempts = max(1, LTX_ATTEMPTS)
+    why, attempt = "no output", 0
+    for attempt in range(1, attempts + 1):
+        rc, out = run(["litestream", "ltx", "-config", LS_CONFIG, DB], timeout=120)
+        stamps = []
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) >= 5 and f[0].isdigit():
+                try:
+                    stamps.append(datetime.datetime.strptime(f[-1], "%Y-%m-%dT%H:%M:%SZ")
+                                  .replace(tzinfo=datetime.timezone.utc).timestamp())
+                except ValueError:
+                    pass
+        if rc == 0 and stamps:
+            return max(0.0, now - max(stamps)), None
+        why = ((out.strip().splitlines() or ["no output"])[-1])[:300]
+        if attempt >= attempts or not ltx_transient(why):
+            break
+        time.sleep(LTX_RETRY_SECS)
+    return None, (f"{why}  [{attempt} attempts]" if attempt > 1 else why)
 
 
 def litestream_state(run):

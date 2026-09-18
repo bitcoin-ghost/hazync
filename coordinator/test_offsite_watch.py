@@ -159,6 +159,10 @@ def iso(t):
 class Box:
     def __init__(self):
         self.active, self.lag, self.ltx_rc, self.journal, self.drill = "active", 3, 0, [], "good"
+        # ltx_fail_times: fail the next N listings, then answer normally -- a transient, unlike
+        # ltx_rc which fails for ever. ltx_calls counts attempts, so a test can prove a retry
+        # happened (or prove one did NOT, which is the whole point for AccessDenied).
+        self.ltx_calls, self.ltx_fail_times, self.ltx_error = 0, 0, "AccessDenied: Access Denied"
         self.mirror_result = "success"
         self.mirror_log = ("[offsite-proofs] done: 12 uploaded, 0 failed, 0.00 GB in 0.1 min\n"
                            "[offsite-proofs] done: 3 uploaded, 0 failed, 0.00 GB in 0.1 min\n")
@@ -168,6 +172,10 @@ class Box:
         if cmd[:2] == ["systemctl", "is-active"]:
             return (0 if self.active == "active" else 3), self.active + "\n"
         if cmd[:2] == ["litestream", "ltx"]:
+            self.ltx_calls += 1
+            if self.ltx_fail_times > 0:
+                self.ltx_fail_times -= 1
+                return 1, f'level=ERROR msg="list" error="{self.ltx_error}"\n'
             if self.ltx_rc:
                 return self.ltx_rc, "level=ERROR msg=\"list\" error=\"AccessDenied: Access Denied\"\n"
             return 0, ("level  min_txid          max_txid          size   created\n"
@@ -255,6 +263,32 @@ check(len(sent) == 3 and "cannot list" in sent[-1][0] and "AccessDenied" in sent
       "R2 refusing the listing alerts, with the error")
 box.ltx_rc = 0
 tick(T + 1800)
+
+# 3b. a throttled listing is NOT a lost backup. R2 429s a small share of the ~300 retention list
+#     calls litestream makes an hour, and a single attempt reported that as "cannot list the ledger
+#     copy in R2" -- the same words, and the same priority, a destroyed copy would produce.
+W.LTX_RETRY_SECS = 0
+sent.clear()
+R2_429 = ("operation error S3: ListObjectsV2, https response error StatusCode: 429, "
+          "api error ServiceUnavailable: Reduce your concurrent request rate for the same object.")
+box.ltx_calls, box.ltx_fail_times, box.ltx_error = 0, 2, R2_429
+tick(T + 2000)
+check(sent == [] and box.ltx_calls == 3,
+      f"a 429 that clears on retry sends nothing ({box.ltx_calls} attempts, {len(sent)} alert(s))")
+box.ltx_calls, box.ltx_fail_times = 0, 99
+tick(T + 2050)
+check(len(sent) == 1 and "cannot list" in sent[-1][0] and "429" in sent[-1][2]
+      and f"[{W.LTX_ATTEMPTS} attempts]" in sent[-1][2] and box.ltx_calls == W.LTX_ATTEMPTS,
+      f"...but a 429 that never clears still alerts, and says how many attempts ({box.ltx_calls})")
+box.ltx_fail_times = 0
+tick(T + 2100)                       # recovers, clearing 'ongoing' so the next case can alert
+sent.clear()
+box.ltx_calls, box.ltx_fail_times, box.ltx_error = 0, 99, "AccessDenied: Access Denied"
+tick(T + 2150)
+check(len(sent) == 1 and "AccessDenied" in sent[-1][2] and box.ltx_calls == 1,
+      f"AccessDenied alerts at once, never retried: a credential failure is not transient ({box.ltx_calls} attempt)")
+box.ltx_fail_times = 0
+tick(T + 2200)                       # recovers again, leaving no ongoing problem to leak into case 4
 
 # 4. log warnings: INFO ignored, WARN pushed at default priority, a burst held then sent
 sent.clear()
