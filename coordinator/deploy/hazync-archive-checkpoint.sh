@@ -53,8 +53,18 @@ H=$(journalctl -u "$UNIT" -n 200 --no-pager 2>/dev/null \
 mkdir -p "$ARCHIVE" || { say "cannot check: cannot create $ARCHIVE"; exit 2; }
 
 # Is a rung due? Archive when this height crosses a new multiple of SPACING relative to the newest rung.
-LAST=$(ls -1 "$ARCHIVE" 2>/dev/null | sed -nE 's/^state_([0-9]+)\.bin$/\1/p' | sort -n | tail -1)
-LAST="${LAST:-0}"
+#
+# ⛔ A GLOB, NOT `ls | sed`. shellcheck SC2010 rejects parsing ls output and it is right to: a filename
+# carrying a newline or a glob character breaks the parse silently, and "silently wrong" is the worst
+# failure mode for something that decides whether bundles may be deleted. The loop below cannot misparse
+# — a name that is not exactly state_<digits>.bin is skipped rather than half-read.
+LAST=0
+for _f in "$ARCHIVE"/state_*.bin; do
+    [ -e "$_f" ] || continue                       # no match: the glob stays literal
+    _b=${_f##*/}; _b=${_b#state_}; _b=${_b%.bin}
+    case "$_b" in ''|*[!0-9]*) continue ;; esac    # not a plain height — ignore it
+    [ "$_b" -gt "$LAST" ] && LAST="$_b"
+done
 if [ "$((H - LAST))" -lt "$SPACING" ]; then
     say "height $H, newest rung $LAST, spacing $SPACING — not due (next at $((LAST + SPACING)))"
     exit 0
@@ -89,6 +99,8 @@ if [ "$COPIED" -lt "$SZ" ]; then
 fi
 mv "$DEST.tmp" "$DEST" || { say "commit failed"; rm -f "$DEST.tmp"; exit 1; }
 
-N=$(ls -1 "$ARCHIVE" | grep -c '^state_[0-9]*\.bin$')
+# Same reasoning as the LAST loop above: a glob cannot misparse a filename, `ls | grep` can.
+N=0
+for _f in "$ARCHIVE"/state_*.bin; do [ -e "$_f" ] && N=$((N + 1)); done
 say "archived. $N rung(s), $(du -sh "$ARCHIVE" | cut -f1) total, $(df -BG --output=avail "$ARCHIVE" | tail -1 | tr -d ' ') free"
 exit 0
