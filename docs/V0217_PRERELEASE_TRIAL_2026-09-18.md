@@ -96,8 +96,14 @@ rather than assuming.
   only on the 693 KB block.
 - ⛔ **Groth16 wrapping is CPU-only.** It crashes in `sppark` on every CUDA build (#20, closed
   won't-fix upstream), so the CUDA wrap path remains unexercised and is expected to fail.
-- **The live submission ran on `3f6b5c8`**, before #402/#403 merged — neither is on the `hazync run`
-  path, but the final release candidate was not itself the binary that submitted.
+- ~~**The live submission ran on `3f6b5c8`**, before #402/#403 merged.~~ **Closed 2026-09-18**: the
+  acceptance run for [#367](https://github.com/bitcoin-ghost/hazync/issues/367) used `39c403f`, which
+  carries #402 and #403. `hazync run --distributed --workers=4` claimed block **93,076** from the board,
+  proved it across 4 A40s in 70.1 s and submitted it as `G H O S T` — confirmed from `/api/block/93076`,
+  with `/api/proof/93076` downloading 228,746 bytes whose sha matches the collected receipt byte for byte.
+  ⚠ That block is ~10 KB, so it tests the PATH, not the speedup: claim → serve → four workers attach →
+  progress-gated beat → submit → coordinator re-verification. The speedup figures above come from the
+  separate runs, not from this one.
 - **One block, once.** No sustained multi-block run against the live board.
 - `anchored=no` still applies to the mid-chain trial receipts, and correctly so; anchoring was
   exercised separately, on a folded `lo=1` range.
