@@ -1,0 +1,17 @@
+# Weekly. Pruning is not urgent and never will be: eligibility stops at the spine top minus margin, so
+# it reclaims only what the board has genuinely finished with. Measured on real data 2026-09-18, the
+# whole eligible set was 53,641 bundles for 0.41 GB -- this is housekeeping, not a disk strategy.
+#
+# Sunday 03:20 UTC keeps it clear of check-proofs (04:17), the offsite timers (:11 and :41) and the
+# nightly drift check, so two multi-GB passes never overlap.
+[Unit]
+Description=Prune finished bridge bundles weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 03:20:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

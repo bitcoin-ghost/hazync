@@ -376,6 +376,20 @@ systemctl daemon-reload
 systemctl start hazync-check-disk.service          # first run: read it in the journal
 systemctl enable --now hazync-check-disk.timer
 
+# bundle pruning (hazync#347). ⛔ INSTALL THE OFFSITE MIRROR FIRST: the caller refuses unless BOTH R2
+# and B2 can be listed, by design -- prune_bundles deletes the files the board serves and the legacy
+# block_<n>.json fallback directory is empty here, so a wrong deletion removes the ability to serve
+# that height. Rehearsed on real data 2026-09-18: refused with no checkpoint, refused with no offsite
+# confirmation, and when finally allowed deleted exactly the 53,641 eligible bundles, boundary exact,
+# proofs untouched. Expect it to report 0 for a long while -- eligibility stops at the spine top minus
+# margin, and that whole eligible set was only 0.41 GB.
+install -m 755 coordinator/deploy/prune_bundles.py        /usr/local/sbin/prune-bundles
+install -m 755 coordinator/deploy/hazync-prune-bundles.py /usr/local/sbin/hazync-prune-bundles
+install -m 644 coordinator/deploy/hazync-prune-bundles.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+HAZYNC_PRUNE=/usr/local/sbin/prune-bundles /usr/local/sbin/hazync-prune-bundles   # DRY RUN first — read it
+systemctl enable --now hazync-prune-bundles.timer
+
 # web box (root). hazync-verify from a signed release: check SHA256SUMS.txt.asc and the file's sha256 first.
 install -m 755 check-spine.py      /usr/local/sbin/hazync-check-spine
 install -m 755 hazync-run-check.sh /usr/local/sbin/hazync-run-check
