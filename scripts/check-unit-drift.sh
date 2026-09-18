@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Does the DEPLOYED unit contain anything this repo does not know about? (hazync#168 part C)
 #
-#   ./scripts/check-unit-drift.sh hazync-coord
+#   ./scripts/check-unit-drift.sh hazync-proof      # or `localhost`, running on the box itself
+#
+# ⚠ This said `hazync-coord` until 2026-09-18. That alias points at 152.53.93.164, the ORIGINAL
+# coordinator, which was retired that day. The coordinator has been 159.195.207.224 (`hazync-proof`)
+# since the 2026-09-16 cutover, so anyone following the old usage line checked a box that is gone.
 #
 # WHY THIS DIRECTION. The obvious check is "every path a doc names must exist". That check would
 # NOT have caught the incident this script exists for. On 2026-08-25 the production coordinator's
@@ -22,14 +26,20 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 HOST="${1:-}"
-[ -n "$HOST" ] || { echo "usage: $0 <ssh-host>   e.g. $0 hazync-coord" >&2; exit 2; }
+[ -n "$HOST" ] || { echo "usage: $0 <ssh-host>   e.g. $0 hazync-proof   (or localhost, on the box)" >&2; exit 2; }
 DROPINS_DIR=coordinator/deploy/dropins
 UNITS="${HAZYNC_UNITS:-hazync-coordinator hazync-bridge}"
 ALLOW="${HAZYNC_DRIFT_ALLOW:-coordinator/deploy/unit-drift-allow.txt}"
 
 fail=0
+cannot=0
 note() { echo "  $*"; }
 bad()  { echo "DRIFT $*"; fail=1; }
+# ⛔ "could not read" IS NOT "no drift", AND IT IS NOT DRIFT EITHER. Until 2026-09-18 an unreadable
+# host went through bad(), so a box this script could not reach at all printed "DRIFT FOUND — the box
+# is running configuration this repo does not contain" and exited 1. It had read nothing. The check
+# contract has a code for this: 0 holds, 1 drift, 2 could not check.
+cant() { echo "COULD NOT CHECK $*"; cannot=1; }
 
 # The remote side is read-only and answers in one round trip per unit: `systemctl show` rather than
 # `systemctl cat`, because cat prints the FILE and show prints what actually runs.
@@ -37,13 +47,26 @@ for u in $UNITS; do
     echo
     echo "=== $u on $HOST ==="
 
-    remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "
+    # ⚠ ONLY *.conf. systemd loads drop-ins matching *.conf and ignores everything else, so a parked
+    # copy like `height-cap.conf.parked.bak` (found on the bridge 2026-09-18) is inert -- reporting it
+    # as drift is a false alarm, and false alarms are how a check like this gets muted.
+    probe="
         systemctl show $u -p Environment --value | tr ' ' '\n' | grep -v '^\$' | sed 's/^/ENV /'
         systemctl show $u -p ExecStart --value | grep -oE 'argv\[\]=[^;]*' | sed 's/^/EXEC /'
         systemctl show $u -p User --value | sed 's/^/USER /'
-        ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | sed 's/^/DROPIN /'
-    " 2>/dev/null)
-    if [ -z "$remote" ]; then bad "$u: could not read unit state from $HOST (unreachable, or unit absent)"; continue; fi
+        ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | grep '\.conf\$' | sed 's/^/DROPIN /'
+    "
+    # ⛔ localhost IS NOT AN SSH HOST. The timer that runs this check runs ON the coordinator, and root
+    # there has no authorized_key for root@localhost -- measured 2026-09-18: Permission denied
+    # (publickey). Going through ssh anyway would fail every single run with "could not read unit
+    # state", which reads as an infrastructure problem, gets muted, and leaves real drift unreported:
+    # precisely the silent failure this script exists to catch. So localhost runs the probe directly.
+    if [ "$HOST" = localhost ]; then
+        remote=$(bash -c "$probe" 2>/dev/null)
+    else
+        remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "$probe" 2>/dev/null)
+    fi
+    if [ -z "$remote" ]; then cant "$u: no unit state from $HOST (unreachable, unit absent, or ssh refused)"; continue; fi
 
     # --- 1. drop-in FILES the repo does not ship ------------------------------------------------
     # A drop-in nobody has committed is config that exists only on one disk. `ratelimit.conf` was
@@ -84,11 +107,17 @@ for u in $UNITS; do
 done
 
 echo
-if [ "$fail" = 0 ]; then
-    echo "no drift: everything running on $HOST is declared in this repo."
-else
+if [ "$fail" != 0 ]; then
     echo "DRIFT FOUND — the box is running configuration this repo does not contain."
     echo "Fix by committing it (a drop-in under $DROPINS_DIR), not by deleting it from the box:"
     echo "a setting that is live and undeclared is load-bearing until proven otherwise."
+    # A real finding outranks an unreadable unit: drift is definite, and exiting 2 would hide it.
+    [ "$cannot" != 0 ] && echo "(and at least one unit could not be read at all — see above)"
+    exit 1
 fi
-exit $fail
+if [ "$cannot" != 0 ]; then
+    echo "COULD NOT CHECK — no unit state was readable, so this says NOTHING about drift."
+    exit 2
+fi
+echo "no drift: everything running on $HOST is declared in this repo."
+exit 0

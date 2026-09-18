@@ -1,0 +1,20 @@
+# Daily, not every 10 minutes like the spine and continuity checks. Drift is caused by a person editing
+# a unit by hand; it does not appear between two polls of a running system, and each run fetches from
+# GitHub and reads every unit, which is not work worth repeating 144 times a day.
+#
+# ⚠ UTC IS EXPLICIT. This box is Europe/Berlin, so a bare OnCalendar would fire at 06:10 CEST = 04:10
+# UTC and drift from what the RUNBOOK says twice a year. check-proofs.timer pins UTC for the same reason.
+# 06:10 also sits clear of check-proofs at 04:17 UTC, which is a ~90 CPU-minute pass over every receipt.
+#
+# Persistent=true so a box that is down at 06:10 checks once it is back, rather than skipping the day.
+[Unit]
+Description=Check daily that the box runs no unit configuration missing from the repo
+
+[Timer]
+OnCalendar=*-*-* 06:10:00 UTC
+RandomizedDelaySec=20m
+Persistent=true
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target
