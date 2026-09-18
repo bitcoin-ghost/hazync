@@ -164,6 +164,24 @@ check(not prune_bundles.has_checkpoint_below(50_000, cks),
       "a checkpoint AT the height is not below it — replaying forward from it produces that block")
 
 print()
+
+# ⛔ THE CONTROL INVERTS THE EXIT CODE, as every other coordinator test does
+# (test_worker_beat.py, test_stack_dump.py: `sys.exit(0 if fails else 1)`).
+#
+# Under --control the B2 half of condition 3 is disabled, so the "missing from B2" assertion MUST fail:
+# that failure is the PROOF the guard is real, and is therefore a success for the control run. A control
+# in which everything still passes is the alarming outcome — it means these tests cannot detect the thing
+# they exist to detect. Getting this backwards is what made CI red on the first push: the control did
+# exactly what it should and the job failed anyway.
+if CONTROL:
+    if fails:
+        print(f"CONTROL OK — B2 unchecked and {len(fails)} assertion(s) failed, as they must: "
+              + "; ".join(fails))
+        sys.exit(0)
+    print("CONTROL FAILED — B2 was not checked and every test still passed.")
+    print("These tests cannot detect the thing they exist to detect.")
+    sys.exit(1)
+
 if fails:
     print(f"FAILED {len(fails)}: " + "; ".join(fails))
     sys.exit(1)
