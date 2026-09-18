@@ -46,8 +46,23 @@ say() { echo "[ckpt] $*"; }
 [ -s "$DIR/state.bin" ] || { say "cannot check: no $DIR/state.bin"; exit 2; }
 
 # Height from the journal. See the note above: printed AFTER the save, so it never overstates what is on disk.
-H=$(journalctl -u "$UNIT" -n 200 --no-pager 2>/dev/null \
-      | grep -oE 'checkpoint @ [0-9]+' | tail -1 | grep -oE '[0-9]+')
+JOURNAL=$(journalctl -u "$UNIT" -n 200 --no-pager 2>/dev/null)
+H=$(printf '%s\n' "$JOURNAL" | grep -oE 'checkpoint @ [0-9]+' | tail -1 | grep -oE '[0-9]+')
+
+# ⛔ A WALK THAT HAS NOT CHECKPOINTED YET IS "NOT DUE", NOT "COULD NOT CHECK".
+# For the live bridge, no "checkpoint @ N" in 200 entries really is a fault: it checkpoints every 2,000
+# blocks, constantly. For a freshly started backfill it is simply the first two hours -- 25,000 blocks at
+# the measured 0.294 s/block. Exiting 2 there pushed a 🚨 on the very first run (2026-09-18) for a walk
+# that was working perfectly, and would have re-pushed hourly until the first rung appeared.
+#
+# The resume line carries the height but deliberately does NOT match the pattern above: it reads
+# "checkpoint @ height 230000", so "@ " is followed by a word, not a digit. Falling back to it hands the
+# due-logic below H = the seed height, where LAST is that same seed rung, so H - LAST = 0 and the normal
+# "not due" path answers correctly instead of a false alarm.
+if [ -z "${H:-}" ]; then
+    H=$(printf '%s\n' "$JOURNAL" | grep -oE 'resuming from checkpoint @ height [0-9]+' | tail -1 | grep -oE '[0-9]+$')
+    [ -n "${H:-}" ] && say "no checkpoint written yet; the walk resumed at $H and has not reached its first rung"
+fi
 [ -n "${H:-}" ] || { say "cannot check: no 'checkpoint @ N' line in the last 200 journal entries of $UNIT"; exit 2; }
 
 mkdir -p "$ARCHIVE" || { say "cannot check: cannot create $ARCHIVE"; exit 2; }

@@ -16,4 +16,7 @@ IOSchedulingClass=idle
 Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles
 Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
 Environment=SPACING=25000
+# A missed archive is not urgent -- rungs are ~2 h apart -- and a single unreadable journal
+# read should not page. Every other check unit damps this way; these two did not.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
 ExecStart=/usr/local/sbin/hazync-run-check archive-checkpoint /usr/local/sbin/hazync-archive-checkpoint
