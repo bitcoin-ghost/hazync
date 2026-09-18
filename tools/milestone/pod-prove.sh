@@ -21,7 +21,28 @@ if [ ! -x "$BIN" ]; then
   curl -fsSL -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda || exit 1
   chmod +x "$BIN"
 fi
-[ -f "/workspace/$BLOCK" ] || { curl -fsSLO "https://hazync.org/repro/${BLOCK}.gz" && gunzip -f "${BLOCK}.gz"; }
+# ⛔ THE FIXTURE COMES FROM THE CHECKOUT, NOT A URL. This used to
+#      curl -fsSLO "https://hazync.org/repro/${BLOCK}.gz"
+#    and that path has been 404 since at least 2026-09-18 -- measured with a full GET, following
+#    redirects: the files AND the /repro/ directory itself all return the 1358-byte error page. With
+#    curl -f that is a hard failure, so on any pod without the fixture already staged this script
+#    stopped before proving anything (hazync#395).
+#
+#    Every fixture it wants is committed: prover/block_{130000,140000,741000,962000,965500}.json. So
+#    take it from a checkout, and if there is none, say exactly what to copy rather than failing on a
+#    download that cannot work.
+if [ ! -f "/workspace/$BLOCK" ]; then
+    for _d in "${HAZYNC_REPO:-}/prover" /hazync-zkvm/prover "$HOME/hazync-zkvm/prover" ./prover .; do
+        [ -n "$_d" ] && [ -f "$_d/$BLOCK" ] && { cp "$_d/$BLOCK" "/workspace/$BLOCK"; break; }
+    done
+fi
+if [ ! -f "/workspace/$BLOCK" ]; then
+    echo "no $BLOCK at /workspace and no checkout to take it from." >&2
+    echo "It is committed in the repo — copy it over, e.g.:" >&2
+    echo "    scp <host>:/hazync-zkvm/prover/$BLOCK /workspace/$BLOCK" >&2
+    echo "or set HAZYNC_REPO to a checkout on this box." >&2
+    exit 1
+fi
 
 # ---- static facts -------------------------------------------------------------------------------
 read -r GNAME GUUID GDRV GMEM GPWR GSM GMM < <(nvidia-smi --query-gpu=name,uuid,driver_version,memory.total,power.limit,clocks.max.sm,clocks.max.mem --format=csv,noheader,nounits | tr -d ',')
