@@ -339,6 +339,7 @@ the phone once when a check starts failing, at most hourly while it lasts, and o
 | `check-continuity.py` | coordinator | every 10 min | a block from 1 to the spine's tip has no record of its own, a seam does not link (tip hash or boundary digest), block 1 does not start at genesis, or the last block does not end on the spine's tip |
 | `check-proofs.py` | coordinator | nightly 04:17 UTC | a stored proof no longer hashes to the receipt that was accepted, no longer verifies, or verifies to a different range than its record |
 | `check-unit-drift.sh` | coordinator | nightly 06:10 UTC | a live `*.conf` drop-in, or an `Environment=` key the units actually run with, appears in no repo file and is not listed in `unit-drift-allow.txt` |
+| `hazync-check-disk.sh` | coordinator | hourly :49 UTC | free space on `/srv/bulk` or `/` falls below `HAZYNC_DISK_FLOOR_GB` (500 GB) — ~55 days of warning at the ~9 GB/day a tip-following bridge writes |
 
 Measured before switching them on (2026-09-15): the genesis proof verifies in 50 ms and its tip hash and chainwork
 matched our node at block 41,539; the continuity walk took 0.24 s over 41,539 blocks with no gaps; one stored proof
@@ -365,6 +366,15 @@ install -m 644 coordinator/deploy/hazync-check-unit-drift.{service,timer} /etc/s
 systemctl daemon-reload
 systemctl start hazync-check-unit-drift.service        # first run: read it in the journal
 systemctl enable --now hazync-check-unit-drift.timer
+
+# free space (hazync#397). NOTHING watched disk before this: check-retention.py is the G1 receipt gate
+# despite its name, and prune_bundles.py has never been deployed. It became load-bearing when the
+# bridge was allowed to become tip-following (~9 GB/day).
+install -m 755 coordinator/deploy/hazync-check-disk.sh /usr/local/sbin/hazync-check-disk
+install -m 644 coordinator/deploy/hazync-check-disk.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl start hazync-check-disk.service          # first run: read it in the journal
+systemctl enable --now hazync-check-disk.timer
 
 # web box (root). hazync-verify from a signed release: check SHA256SUMS.txt.asc and the file's sha256 first.
 install -m 755 check-spine.py      /usr/local/sbin/hazync-check-spine

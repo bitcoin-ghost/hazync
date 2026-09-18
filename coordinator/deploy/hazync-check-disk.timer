@@ -1,0 +1,15 @@
+# Hourly. Disk fills over weeks at ~9 GB/day, so this is not about catching it fast -- it is about
+# never being the thing nobody was watching. Hourly costs one df and keeps the alert current.
+#
+# :49 keeps it clear of the offsite timers at :11 and :41 and the backfill archiver every 5 minutes,
+# so it never lands in the middle of a multi-GB copy.
+[Unit]
+Description=Check hourly that the coordinator has free space
+
+[Timer]
+OnCalendar=*-*-* *:49:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
