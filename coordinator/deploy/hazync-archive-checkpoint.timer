@@ -1,0 +1,18 @@
+[Unit]
+# hazync#347 item 6.6. Runs often enough that a 25,000-block rung is never missed, and cheap when it is
+# not due: the script reads one journal line, compares against the newest rung, and exits 0.
+#
+# Cadence reasoning, measured 2026-09-18 on the live bridge: 533 ms/block at h~706,000, so 25,000 blocks
+# is about 3.7 hours. Hourly is comfortably inside that with room for the rate to improve at lower input
+# counts, and a missed run costs nothing because the next one still sees the rung as due.
+Description=Hazync: archive a bridge checkpoint hourly (rung every 25,000 blocks)
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+
+[Timer]
+OnCalendar=*-*-* *:23:00 UTC
+# :23 keeps it off the hour, away from the offsite timers at :07 and :53 and the nightly checks at 04:17.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
