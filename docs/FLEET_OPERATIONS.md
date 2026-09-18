@@ -109,11 +109,22 @@ the receipt the coordinator accepts.
 
 ```sh
 # segment coordinator — ONE block, from its bridge bundle. No HAZYNC_BLOCK, no chunks.
-HAZYNC_RANGE=74928 HAZYNC_BRIDGE_OUT=/workspace HAZYNC_PORT=9110 ./host seg-serve
+# HAZYNC_BIND=0.0.0.0 is REQUIRED for workers on other machines — see below.
+HAZYNC_RANGE=74928 HAZYNC_BRIDGE_OUT=/workspace HAZYNC_PORT=9110 HAZYNC_BIND=0.0.0.0 ./host seg-serve
 
-# every worker, on any machine that can reach it — unchanged from the aggregate
-HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+# every worker, one per card — unchanged from the aggregate
+CUDA_VISIBLE_DEVICES=0 HAZYNC_WORKER_ID=w0 ./host seg-connect <coordinator-host>:9110
 ```
+
+⛔ **Without `HAZYNC_BIND`, a worker on another machine cannot attach.** `seg-serve` binds `127.0.0.1` by
+default (#365) because the wire is **unauthenticated**, so a remote worker gets `Connection refused` against a
+coordinator that is running perfectly. Since #401 the shell says so as it binds, rather than leaving you to
+infer it from a refused connection. `HAZYNC_SEG_REMOTE=1` implies `0.0.0.0`.
+
+⚠ Binding `0.0.0.0` exposes the port to anyone who can route to it, and **anyone who can reach it can feed work
+in**. Expose it only on a network you trust, or forward it over SSH (`ssh -N -L 9110:127.0.0.1:9110 …`) and
+point the worker at `127.0.0.1:9110`. A rented pod usually publishes only the ports declared when it was
+created, so the tunnel is often the only thing that works anyway.
 
 - The bundle is read from **`$HAZYNC_BRIDGE_OUT/bundle_<n>.json`** (default `/root/bridge_bundles`). There is
   no `HAZYNC_BLOCK` fixture for a board block — that is precisely why `build_full()` cannot serve this path.
@@ -174,6 +185,9 @@ shape to optimise for — see the per-pod table in the record.
 | `HAZYNC_RECEIPTS` | `.` | directory holding the chunk receipts |
 | `HAZYNC_OUT` | `chunk_<i>.hzk` / `aggregate_receipt.bin` | receipt output path |
 | `HAZYNC_PORT` | 9110 | `seg-serve` listen port |
+| `HAZYNC_BIND` | `127.0.0.1` | `seg-serve` listen address. **Remote workers cannot attach on the default** (#365) — set `0.0.0.0`, and only on a network you trust |
+| `HAZYNC_SEG_REMOTE` | unset | `=1` implies `HAZYNC_BIND=0.0.0.0`. An explicit `HAZYNC_BIND` still wins |
+| `HAZYNC_RECONNECT_MAX_S` | **600** | how long a worker keeps trying to reconnect after a dropped link before giving up, measured from the **current** outage. `0` restores the old behaviour (exit on drop) |
 | `HAZYNC_PUSH_DEPTH` | 4 | jobs in flight per worker |
 | `HAZYNC_PUSH_BYTES` | 64 MiB | in-flight byte budget; clamps the depth. Raise this, not the depth |
 | `HAZYNC_RESOLVE_LOCAL` | unset | `=1` resolves on the coordinator (#252) |
