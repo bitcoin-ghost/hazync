@@ -26,4 +26,7 @@ Environment=BRIDGE_UNIT=hazync-bridge-backfill
 Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/backfill
 Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
 Environment=SPACING=25000
+# Two runs before paging. A freshly started walk legitimately has no checkpoint for ~2 h, and
+# on 2026-09-18 that pushed a 🚨 on the very first run of a perfectly healthy walk.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
 ExecStart=/usr/local/sbin/hazync-run-check archive-checkpoint-backfill /usr/local/sbin/hazync-archive-checkpoint

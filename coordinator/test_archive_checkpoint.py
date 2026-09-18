@@ -71,15 +71,26 @@ def set_height(h):
     open(p, "w").write(f'#!/bin/sh\necho "bridge: checkpoint @ {h}"\n')
     os.chmod(p, 0o755)
 
-def run(height, rungs, spacing=25000):
-    """DRY run against a fresh archive holding `rungs`; returns the script's stdout."""
+RC = [None]                                   # exit code of the most recent run(), for the cases that turn on it
+
+
+def run(height, rungs, spacing=25000, journal=None):
+    """DRY run against a fresh archive holding `rungs`; returns the script's stdout.
+
+    `journal` replaces the stubbed journalctl output entirely, for the cases where what matters is which
+    lines the unit has printed rather than which height it reached."""
     out_dir = tempfile.mkdtemp(prefix="out_", dir=work)
     arc_dir = tempfile.mkdtemp(prefix="arc_", dir=work)
     with open(os.path.join(out_dir, "state.bin"), "w") as f:
         f.write("x" * 4096)                      # must be non-empty or the script exits 2
     for r in rungs:
         open(os.path.join(arc_dir, r if isinstance(r, str) else f"state_{r}.bin"), "w").close()
-    set_height(height)
+    if journal is None:
+        set_height(height)
+    else:
+        jp = os.path.join(binv, "journalctl")
+        open(jp, "w").write('#!/bin/sh\ncat <<\'JEOF\'\n' + journal + '\nJEOF\n')
+        os.chmod(jp, 0o755)
     env = dict(os.environ)
     env.update({
         "PATH": binv + os.pathsep + env["PATH"],
@@ -89,6 +100,7 @@ def run(height, rungs, spacing=25000):
         "DRY": "1",
     })
     p = subprocess.run(["bash", script], env=env, capture_output=True, text=True, timeout=60)
+    RC[0] = p.returncode
     # DRY must never write a rung, whatever it decides.
     assert not [n for n in os.listdir(arc_dir) if n.endswith(".bin") and n not in
                 [r if isinstance(r, str) else f"state_{r}.bin" for r in rungs]], "DRY run wrote a rung"
@@ -144,6 +156,24 @@ check(due(o), "malformed names and a partial .tmp are ignored, not counted as ru
 #    lowest rung (230,000) would be 60,000 past and due, and the highest (740,000) would be negative.
 o = run(290000, [230000, 250000, 275000, 740000])
 check(not_due(o) and last_seen(o) == 275000, "the nearest rung below is chosen, not the lowest or highest")
+
+# 9. ⛔ A WALK THAT HAS NOT CHECKPOINTED YET IS "NOT DUE", NOT "COULD NOT CHECK".
+#    The resume line reads "checkpoint @ height N", so "@ " is followed by a word and the numeric pattern
+#    deliberately misses it. Before the fallback, a freshly started backfill exited 2 and -- because this
+#    unit set no CHECK_FAILS_BEFORE_ALERT -- pushed a 🚨 on its very first run, for a walk that was
+#    working perfectly, and would have re-pushed hourly until the first rung appeared ~2 h later.
+o = run(230000, [230000],
+        journal="bridge: resuming from checkpoint @ height 230000\n"
+                "bridge: advancing 230001..=740000 (node tip 967556, finality 100)")
+check(RC[0] == 0 and not_due(o) and "has not reached its first rung" in o,
+      f"a walk that has only resumed is not due, not 'cannot check' (rc={RC[0]})")
+
+# 10. ...but a unit showing NEITHER line is still genuinely uncheckable. The fallback must not turn every
+#     silence into a cheerful exit 0: for the LIVE bridge, which checkpoints every 2,000 blocks, no line
+#     at all really is a fault.
+o = run(0, [], journal="bridge: starting up")
+check(RC[0] == 2 and "cannot check" in o,
+      f"no checkpoint line and no resume line is still 'could not check' (rc={RC[0]})")
 
 shutil.rmtree(work, ignore_errors=True)
 
