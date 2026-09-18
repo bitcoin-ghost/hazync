@@ -52,7 +52,7 @@ withhold the sponsor's name. Paying at least the minimum is what earns the name;
 | Blocks | Minimum per block | What is measured |
 |--------|------------------:|------------------|
 | 1 to 200,000 | $1 | trial: slowest block $0.18 (2.0 MB); heaviest 1% about $0.27 |
-| 200,001 to 400,000 | $2 | trial to 230,000: slowest block $0.22 (3.7 MB); heaviest 1% to 230,000 about $0.57; above 230,000 nothing |
+| 200,001 to 400,000 | $2 | trial to 230,000: slowest block $0.22 (3.7 MB); heaviest 1% to 230,000 about $0.57; 230,000–400,000 has bundles (to 418,268) but no cost trial yet |
 | 400,001 to 600,000 | $3 | nothing |
 | 600,001 to 800,000 | $4 | nothing |
 | 800,001 to 1,000,000 | $5 | one block: 966,256, $1.39 of GPU time |
@@ -64,9 +64,20 @@ withhold the sponsor's name. Paying at least the minimum is what earns the name;
   the coordinator) cost about $0.27 up to 200,000 and $0.57 from 200,000 to 230,000: under half the price.
   The heaviest single blocks, 8.68 MB at 197,678 and 16.87 MB at 228,538, cost about $0.79 and $1.53:
   under their price, but not by 2x.
-- **Above 230,000 no bundles exist yet,** so no pod can prove those blocks. A sponsorship there is taken and
+- **Bundles now reach 418,268** (measured 2026-09-18). The 230,000 ceiling this section used to describe was
+  the *retired* coordinator's; the live one has walked well past it, so the whole 200,001–400,000 band is
+  serviceable and a sponsorship there no longer waits. `/api/witness/` returns 200 at 250,000, 400,000 and
+  418,000, and the quote endpoint already reflects it — `waiting: 0` across that band, `waiting: 11` at
+  500,000. Nothing in the bot needed changing; this text was simply behind the bridge.
+- **Above 418,268 no bundles exist,** so no pod can prove those blocks. A sponsorship there is taken and
   held, and waits until the bridge builds its bundles. The quote's `waiting` counts the blocks that wait, and
   the form says so before anyone pays. The bot never rents a pod for them.
+- ⚠ **And that gap will not close on its own.** The live bridge runs with `HAZYNC_BRIDGE_EMIT_FROM=967500`,
+  which advances state without writing a bundle below that height — deliberate, so the walk to the tip is not
+  slowed by emitting ~550,000 files nobody is waiting on. The consequence is that heights 418,269–967,499 are
+  being walked past **right now** with no bundle written and (until hazync#347 6.6 lands) no checkpoint
+  retained either, so filling them later means replaying from genesis: about six days at the 533 ms/block
+  measured on the live bridge at h≈706,000. Sponsorships in those bands should be quoted knowing that.
 - **From 230,000 to 1,000,000 the prices are not checked against a measurement,** except block 966,256
   ($1.39 of GPU time across 27 cards, 2026-09-10). Run a trial in each band once its bundles exist.
 - **Above 1,000,000** the top band runs to `SPONSOR_BAND_TOP` (10^9), which stands for "and above". A block
