@@ -303,6 +303,20 @@ jobs:
         run: |
           cd coordinator
           python3 test_mode6_progress.py --control
+      - name: Distributed run — beat, teardown and the stall window (#367)
+        # `hazync run --distributed` cannot reuse _prove_watched/_run_with_seg_retry, and each reason is
+        # a way to lose a block: that wrapper takes gpu_lock ("one GPU job at a time, per box") while
+        # mode 6 SERVES and its workers prove; its stall watchdog arms only for prove-range/-bridge, so
+        # seg-serve would run with NO progress window at all; and the run owns a server plus N worker
+        # processes, which main() installs no handlers to clean up. Beat, watchdog and teardown are
+        # therefore hand-rolled, and this suite is what says they work. It caught the beat wired into
+        # the poll loop instead of a ticker — a fast fleet would have finished having beaten NOTHING,
+        # losing the block to CLAIM_GRACE exactly as #368 did on the single-card path.
+        run: cd coordinator && python3 test_distributed_run.py
+      - name: Distributed run POSITIVE CONTROL (teardown neutered — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_distributed_run.py --control
       - name: A downloaded proof is named, with its own extension (#278)
         # `curl -O` names a file after the URL path, so /api/proof/1 landed as an extensionless "1".
         # Also pins the host<->worker filename contract: the worker does not pass HAZYNC_OUT, so it

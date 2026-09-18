@@ -272,6 +272,8 @@ ENV = {
     "cli:HAZYNC_ALLOW_DEV_WRITES": "`1`, `true` or `yes` lets a source checkout (`VERSION = \"dev\"`) POST to "
                                    "the default public coordinator.",
     "cli:HAZYNC_GPU_LOCK": "Lock file serialising GPU jobs on one box; `none` disables it.",
+    "cli:HAZYNC_PORT": "Port `seg-serve` listens on for a distributed run (`--distributed`); workers dial "
+                       "it. Default 9110, the same default the host itself uses.",
     "cli:HAZYNC_STALL_MIN": "Minimum seconds without segment progress before a prove is killed.",
     "cli:HAZYNC_FIRST_PROGRESS": "Seconds allowed before the first segment completes.",
     "cli:HAZYNC_ASSEMBLY_MIN": "Floor, in seconds, of the silent lift-and-join budget after the last "
@@ -305,6 +307,13 @@ PASSED = {
                           "sets the first attempt.",
     "cli:HAZYNC_PROGRESS_EVERY": "Makes the host print one line per completed segment, which the watchdog "
                                  "reads (#256).",
+    "cli:HAZYNC_RANGE": "The board block `seg-serve` serves as a mode-6 bridge range (#361/#364). Its "
+                        "presence is what makes the run distributed rather than a fixture prove.",
+    "cli:HAZYNC_PORT": "Port `seg-serve` listens on, and the port local workers dial.",
+    "cli:HAZYNC_WORKER_ID": "Log label for each local worker (`local0`, `local1`, …), so a fleet's timings "
+                            "can be attributed per card.",
+    "cli:CUDA_VISIBLE_DEVICES": "Pins each local worker to one card. ⛔ One prove per card: two do not fit "
+                                "on a 46 GB card (#97), which is what `gpu_lock` exists to prevent.",
     "launcher:BUNDLE_DIR": "One bundle directory per worker loop.",
 }
 
@@ -314,6 +323,9 @@ MODES = {
     "mixed": "with N > 1 loop N-1 folds, and with N > 2 loop N advances the spine; the rest prove. Run it on "
              "ONE box: the spine needs one worker fleet-wide",
     "spine": "every loop runs `hazync spine`",
+    "distributed": "every loop runs `hazync run --distributed`: claim one board block, serve it across "
+                   "many cards (mode 6) and submit it. Continuous by the same means as the other modes — "
+                   "the CLI exits `EX_TEMPFAIL` (75) when the board has nothing and the loop waits 30 s",
 }
 
 

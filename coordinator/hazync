@@ -8,6 +8,15 @@ hazync — Proof Party contributor CLI.
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
   hazync run [id]           # claim + prove + submit (id optional: takes the earliest free block)
+  hazync run [id] --distributed [--workers=N|auto]
+                            # prove ONE board block across MANY cards (mode 6). Serves the block and
+                            # waits for `host seg-connect <this-box>:9110` workers to dial in; they may
+                            # join at any time and survive a dropped link. --workers=N also starts N
+                            # workers here, one per card; `auto` uses every visible card, for a box
+                            # dedicated to this run. Default 0 — cards come from outside, so this
+                            # never competes with board workers already running on this box.
+                            # ⛔ Remote cards need HAZYNC_BIND=0.0.0.0 (the wire is unauthenticated:
+                            # only on a network you trust, or forward the port over SSH).
   hazync selftest           # pre-flight: prover present, guest id matches, can verify a real proof
   hazync fold [n]           # fold n adjacent proven ranges into wider ones (default 1) — helps everyone
   hazync spine [n]          # advance the genesis-anchored spine n steps, each absorbing the widest chunk available (default: all)
@@ -841,9 +850,12 @@ def _run_with_seg_retry(argv, env, work, label, _beat_range=None, _beat_pk=None,
     sys.exit(f"{label} failed to prove even at reduced segment size (SEG_PO2=18) — last error: {_err_tail(last)}")
 
 
-def cmd_prove(args, claimed=False, submit_leaves=False):
+def cmd_prove(args, claimed=False, submit_leaves=False, distributed=False, workers=0, port=None):
     """Prove `rng`. `claimed` is True only when `rng` came from POST /api/claim (the no-argument
-    `hazync run`): only then is there a claim for the heartbeat to keep alive (#251)."""
+    `hazync run`): only then is there a claim for the heartbeat to keep alive (#251).
+
+    `distributed` proves ONE board block across many cards through mode 6 (#361/#364) instead of on
+    this box's single GPU. It produces the SAME receipt, so submit is unchanged."""
     rng = args[0]
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("set HAZYNC_HOST to the prover `host` binary (needs a GPU box + witnesses in WITNESS_DIR)")
@@ -878,6 +890,21 @@ def cmd_prove(args, claimed=False, submit_leaves=False):
         _sk, _pk, _ = identity()
         total = hi - start + 1
         print(f"proving range {rng} ({total} block{'s' if total != 1 else ''}) — the expensive step…")
+        if distributed:
+            # ⛔ MODE 6 NEEDS AN ARCHIVE BUNDLE, and there is no fallback. seg-serve reads
+            # $HAZYNC_BRIDGE_OUT/bundle_<n>.json; the replay path goes through build_full(), which
+            # serves the FIXTURE shape and cannot produce a board block at all (#361). Refusing here
+            # costs nothing; discovering it after a fleet has dialled in costs the fleet's time.
+            if prove_cmd != "prove-range-bridge":
+                sys.exit(f"--distributed needs an archive bundle for block {rng} and the coordinator did "
+                         f"not serve one. Mode 6 has no replay path, so nothing was started.")
+            _prove_distributed(rng, work, env, claimed,
+                               port or int(os.environ.get("HAZYNC_PORT", "9110")), workers)
+            # One block, one receipt: _fold_and_save with a single part is a bare os.replace into
+            # RCPTDIR/<rng>.bin, which is exactly what cmd_submit reads. Nothing downstream changes.
+            _fold_and_save([_prover_out(work, f"range_{start}").name], out, work, env)
+            print("receipt:", out)
+            return
         parts = []
         for i, h in enumerate(range(start, hi + 1), 1):
             _run_with_seg_retry([prove_cmd, str(h)], env, work, f"block {h}",
@@ -1250,12 +1277,220 @@ def _own_proof(n):
             return p.get("handle"), p.get("proof") or f"/api/proof/{n}"
     return None
 
+def local_gpu_count():
+    """How many CUDA devices this box exposes, or 0. Never raises.
+
+    Same idiom run-workers.sh already uses (`nvidia-smi -L`, count lines starting "GPU"), so a box
+    reports the same number to both. A second way of counting cards is a second thing to be wrong.
+    """
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    return sum(1 for line in out.splitlines() if line.startswith("GPU"))
+
+
+def resolve_workers(requested):
+    """How many local workers `--distributed` should start.
+
+    ⛔ DEFAULT 0, NOT "every card". The pull model is the point: cards dial in from outside, and a box
+    running board workers already has one prove per card. Starting a second prover per card there is
+    the VRAM collision gpu_lock exists to prevent (#97) — two po2-21 proves do not fit on a 46 GB card.
+    So an operator asks for local workers explicitly.
+
+    `--workers=auto` is the opt-in that uses every visible card, for a box dedicated to one run.
+    """
+    if requested is None:
+        return 0
+    if requested == "auto":
+        n = local_gpu_count()
+        if n == 0:
+            sys.exit("--workers=auto found no CUDA devices (nvidia-smi listed none). "
+                     "Name a number, or leave it unset and let cards dial in.")
+        return n
+    return requested
+
+
+def _prove_distributed(rng, work, env, claimed, port, want_local):
+    """Prove ONE board block across N cards via mode 6, and leave `range_<n>.hzk` in `work`.
+
+    `seg-serve` executes the guest once and pushes its segments to `seg-connect` workers; the receipt
+    it writes is the SAME artifact `prove-range-bridge` produces for that block (#361), so everything
+    downstream — _prover_out, _fold_and_save, cmd_submit — is untouched.
+
+    ⛔ NO gpu_lock HERE, and that is deliberate. gpu_lock serialises "one GPU job at a time, per box",
+    which is right when this process is the thing proving. In mode 6 it is NOT: seg-serve distributes
+    and proves nothing, while N local workers each hold one card via CUDA_VISIBLE_DEVICES. Taking the
+    global lock would let the server hold it against its own workers and deadlock the run.
+    """
+    sk, pub, _ = identity()
+    lo, hi = parse_range(rng)
+    if lo != hi:
+        sys.exit(f"--distributed proves ONE board block; {rng} is {hi - lo + 1} blocks. "
+                 f"Mode 6 serves a single bridge range (#361).")
+
+    # ⛔ BIND LOOPBACK UNLESS ASKED OTHERWISE. seg-serve's own default is 127.0.0.1 because the wire is
+    # unauthenticated (#365); we do not widen it silently just because this path expects workers. An
+    # operator who wants remote cards sets HAZYNC_BIND=0.0.0.0 and accepts that, exactly as they would
+    # driving seg-serve by hand.
+    serve_env = dict(env, HAZYNC_RANGE=str(lo), HAZYNC_PORT=str(port))
+    addr = f"127.0.0.1:{port}"
+
+    procs, logs = [], []
+    pump = None
+
+    def _stop_all():
+        # ⛔ main() installs no signal handlers, on the stated grounds that free-running proving "has
+        # nothing to hand back". That is true of a single-card prove and FALSE here: this call owns a
+        # server and N workers, each holding VRAM. Leaving them behind wedges the box for the next run
+        # — the exact "stale receipts / busy card" class tools/milestone guards against.
+        for p in procs:
+            if p.poll() is None:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    pass
+        for p in procs:
+            try:
+                p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+
+    try:
+        srv_log = open(os.path.join(work, "seg-serve.log"), "w")
+        logs.append(srv_log)
+        srv = subprocess.Popen([HOSTBIN, "seg-serve"], env=serve_env, cwd=work,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, bufsize=1, start_new_session=True)
+        procs.append(srv)
+
+        # Workers are started AFTER the server, but they do not depend on that ordering: since #402
+        # seg-connect retries its first connect with backoff, so a card that arrives early waits
+        # instead of dying. That is what lets cards outside this process join a run already going.
+        for d in range(want_local):
+            w_env = dict(env, HAZYNC_WORKER_ID=f"local{d}", CUDA_VISIBLE_DEVICES=str(d))
+            wlog = open(os.path.join(work, f"worker{d}.log"), "w")
+            logs.append(wlog)
+            procs.append(subprocess.Popen([HOSTBIN, "seg-connect", addr], env=w_env, cwd=work,
+                                          stdout=wlog, stderr=subprocess.STDOUT,
+                                          start_new_session=True))
+        print(f"  seg-serve on {serve_env.get('HAZYNC_BIND', '127.0.0.1')}:{port}, "
+              f"{want_local} local worker{'' if want_local == 1 else 's'}; "
+              f"more cards may join at any time", flush=True)
+
+        # Progress, the claim beat and the stall watchdog, from the server's own output.
+        #
+        # ⛔ _prove_watched CANNOT be reused: its watchdog arms only for argv[0] in (prove-range,
+        # prove-range-bridge), so seg-serve would run with NO progress window at all, and its
+        # _run_with_seg_retry wrapper takes the gpu_lock this path must not hold. The beat below is
+        # byte-identical to the one there (#310 signs "<range>:<ts>" over INTEGER seconds; the
+        # coordinator rebuilds that exact string) and is PROGRESS-GATED for the same reason: a hung
+        # run must lose its claim, or a stuck fleet holds a block for hours (#256).
+        stall_min = float(os.environ.get("HAZYNC_STALL_MIN", "600"))
+        outer = float(os.environ.get("HAZYNC_PROVE_TIMEOUT", "21600"))
+        st = {"n": 0, "last": None}
+
+        def _pump():
+            for line in srv.stdout:
+                sys.stdout.write(line)
+                srv_log.write(line)
+                if _PROGRESS_RE.search(line):
+                    st["n"] += 1
+                    st["last"] = time.time()
+        pump = threading.Thread(target=_pump, daemon=True)
+        pump.start()
+
+        # ⛔ THE BEAT LIVES IN ITS OWN THREAD, not in the wait loop below, and that is not a style
+        # choice. Tied to the waiter it fires at most once per poll and not at all if the run ends
+        # between polls — a fast fleet then finishes having beaten NOTHING, and a claim that has never
+        # beaten is released after CLAIM_GRACE. _prove_watched puts it in a ticker for the same reason;
+        # this matches it rather than inventing a second shape.
+        tick_s = float(os.environ.get("HAZYNC_TICK", "60"))
+        done = threading.Event()
+
+        def _beat():
+            beaten = 0
+            while not done.wait(tick_s):
+                # Progress-gated, exactly as the single-card path: beating on a timer alone kept a HUNG
+                # prover's claim alive for hours (#256). A wedged fleet must lose its block.
+                if claimed and st["n"] > beaten:
+                    beaten = st["n"]
+                    try:
+                        bts = int(time.time())
+                        post("/api/beat", {"range": rng, "pubkey": pub, "ts": bts,
+                                           "sig": sk.sign(f"{rng}:{bts}".encode()).hex()})
+                    except Exception:
+                        pass
+        threading.Thread(target=_beat, daemon=True).start()
+
+        t0 = time.time()
+        try:
+            while srv.poll() is None:
+                now = time.time()
+                if now - t0 > outer:
+                    _stop_all()
+                    sys.exit(f"distributed prove: no result after {outer:.0f}s (HAZYNC_PROVE_TIMEOUT)")
+                # The window only starts once the first progress line lands: execution is CPU-side and
+                # silent, and on the 16 MB block it took 84 s before a single segment appeared.
+                if st["last"] and now - st["last"] > stall_min:
+                    _stop_all()
+                    sys.exit(f"distributed prove: no progress for {stall_min:.0f}s "
+                             f"(HAZYNC_STALL_MIN) after {st['n']} progress lines — workers gone?")
+                time.sleep(0.5)
+        finally:
+            done.set()
+
+        if srv.returncode != 0:
+            _stop_all()
+            sys.exit(f"distributed prove: seg-serve exited {srv.returncode} — see {work}/seg-serve.log")
+    finally:
+        _stop_all()
+        # ⛔ JOIN THE PUMP BEFORE CLOSING ITS FILE. _stop_all kills the server, which EOFs the pipe and
+        # normally ends the loop — but "normally" is a race, and losing it means a daemon thread writing
+        # to a closed file: an "Exception in thread" on stderr at the exact moment a run is tearing down,
+        # which reads like the prove failed when it did not.
+        if pump is not None:
+            pump.join(timeout=10)
+        for f in logs:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+
 def cmd_run(args):
     # FREE-RUNNING (#37). There is no claim, no lease, no heartbeat and nothing to hand back: proving
     # is unallocated, so a worker that dies mid-block leaves no state behind. That removes the entire
     # class of orphaned-claim failures this function used to exist to manage.
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("no prover binary found — run `hazync selftest` for where it looked.")
+    # ⛔ STRIP FLAGS BEFORE ANYTHING READS args[0] AS A RANGE. parse_range would otherwise be handed
+    # "--distributed" and fail with a message about block ids, which is the wrong thing to debug.
+    distributed = False
+    workers = None
+    rest = []
+    for a in args:
+        if a == "--distributed":
+            distributed = True
+        elif a.startswith("--workers="):
+            val = a.split("=", 1)[1]
+            if val == "auto":
+                workers = "auto"
+            else:
+                try:
+                    workers = int(val)
+                except ValueError:
+                    sys.exit(f"--workers takes a number or 'auto', got {val!r}")
+                if workers < 0:
+                    sys.exit("--workers cannot be negative")
+        elif a.startswith("-"):
+            sys.exit(f"unknown option {a!r} — see `hazync --help`")
+        else:
+            rest.append(a)
+    args = rest
     if args:
         rng = args[0]
         lo, hi = parse_range(rng)
@@ -1325,7 +1560,8 @@ def cmd_run(args):
     # An explicit wide range submits its blocks as it proves them; a single block has nothing to send
     # first, and a claimed block is one block by construction.
     _lo2, _hi2 = parse_range(rng)
-    cmd_prove([rng], claimed=not args, submit_leaves=bool(args) and _hi2 > _lo2)
+    cmd_prove([rng], claimed=not args, submit_leaves=bool(args) and _hi2 > _lo2,
+              distributed=distributed, workers=resolve_workers(workers))
     cmd_submit([rng])
 
 _FOLD_CLAIMS_UNSUPPORTED = False   # set once a coordinator that predates #333 answers /api/foldclaim with 404
