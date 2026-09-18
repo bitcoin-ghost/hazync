@@ -356,6 +356,74 @@ run(b2, "spine", "--spine", SPINE, "--verify", VERIFY, keys=KEYS_B2)
 rc, out = run(b2, "spine", "--spine", SPINE, "--verify", VERIFY, keys=KEYS_B2)
 check(rc == 0 and "already in B2" in out and "R2" not in out, f"with a B2 endpoint the log says B2, not R2 (rc={rc})")
 
+# 10. the checkpoint rungs (hazync#386). Until 2026-09-18 nothing copied /srv/bulk off the box, so the
+#     archived rungs were single-copy — and prune_bundles.py deletes a bundle only because a rung below it
+#     exists to rebuild from. The thing authorising deletion had no second copy of its own.
+CKPT = os.path.join(tmp, "checkpoints")
+os.makedirs(CKPT)
+
+
+def put_rung(name, data, age=3600):
+    p = os.path.join(CKPT, name)
+    with open(p, "wb") as f:
+        f.write(data)
+    t = time.time() - age
+    os.utime(p, (t, t))
+    return p
+
+
+put_rung("state_230000.bin", b"rung at 230000")          # the lowest: the only seed below the bundle gap
+put_rung("state_744257.bin", b"rung at 744257")
+# ⛔ The archiver writes state_<h>.bin.tmp and renames; the 230,000 rung arrived on the box as exactly that.
+#    Uploading a partial rung would be permanent, because the mirror is append-only.
+put_rung("state_290000.bin.tmp", b"half-written rung")
+put_rung("state_.bin", b"no height")
+put_rung("state_abc.bin", b"not a height")
+put_rung("notastate.bin", b"unrelated")
+C = "checkpoints/"
+
+ck = FakeS3()
+rc, out = run(ck, "checkpoints", "--checkpoints", CKPT)
+check(rc == 0 and sorted(ck.puts) == [C + "state_230000.bin", C + "state_744257.bin"],
+      f"checkpoints uploads exactly the complete rungs under {C} (rc={rc}, put {sorted(ck.puts)})")
+check(not any(k.endswith(".tmp") for (_, k) in ck.objects),
+      "a half-written state_<h>.bin.tmp is NOT uploaded — append-only makes a partial rung permanent")
+check(not any(k.endswith("state_.bin") or k.endswith("state_abc.bin") or k.endswith("notastate.bin")
+              for (_, k) in ck.objects), "malformed names are ignored, not half-parsed")
+
+ck.puts.clear()
+rc, out = run(ck, "checkpoints", "--checkpoints", CKPT)
+check(rc == 0 and ck.puts == [], f"a second run uploads nothing and still exits 0 (rc={rc}, put {ck.puts})")
+
+# append-only, as everywhere else in this mirror
+ck.objects[("b", C + "state_744257.bin")] = b"a different-sized copy"
+ck.puts.clear()
+rc, out = run(ck, "checkpoints", "--checkpoints", CKPT)
+check(ck.objects[("b", C + "state_744257.bin")] == b"a different-sized copy" and ck.puts == [],
+      "append-only: a rung whose remote size differs is NOT overwritten")
+
+# a rung still being written waits for the next run
+put_rung("state_800000.bin", b"being written", age=0)
+ck.puts.clear()
+rc, out = run(ck, "checkpoints", "--checkpoints", CKPT, "--min-age", "600")
+check(C + "state_800000.bin" not in ck.puts and "younger" in out,
+      "a rung younger than --min-age is left for the next run")
+put_rung("state_800000.bin", b"being written")          # age it for the checks below
+
+# ⛔ THE LOWEST RUNG IS NOT JUST ANOTHER FILE. Regeneration seeds from the nearest rung strictly BELOW its
+#    target, so the lowest one bounds what can be rebuilt at all. Losing it silently is the failure this
+#    whole mirror exists to prevent, so it must fail loudly even when every other rung is present.
+ckf = FakeS3(fail_names={"state_230000.bin"})
+rc, out = run(ckf, "checkpoints", "--checkpoints", CKPT)
+check(rc == 1 and "MISSING" in out and "state_230000.bin" in out,
+      f"the lowest rung failing to upload fails the run and names it (rc={rc})")
+check("lowest" in out and "cannot be rebuilt" in out,
+      "...and says why the lowest rung specifically matters")
+
+# a missing archive directory is a failure, not a quiet success
+rc, out = run(ck, "checkpoints", "--checkpoints", os.path.join(tmp, "no-such-dir"))
+check(rc == 1 and "no directory" in out, f"a missing checkpoint directory fails the run (rc={rc})")
+
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
     sys.exit(0 if fails else 1)

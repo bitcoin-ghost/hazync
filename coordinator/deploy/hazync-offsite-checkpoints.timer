@@ -1,0 +1,17 @@
+[Unit]
+Description=Hourly: copy the Hazync bridge checkpoint rungs to Cloudflare R2
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/386
+
+[Timer]
+# A rung appears every 25,000 blocks — about 4 hours at the rate measured near the tip — so hourly is
+# comfortably ahead of it, and cheap when nothing is new: the job lists the remote, finds nothing missing
+# and exits 0.
+#
+# :11 keeps it clear of the archiver at :23, the offsite spine copies at :05/10, and the offsite proofs
+# and keys runs, so two multi-GB transfers never start together.
+OnCalendar=*-*-* *:11:00
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

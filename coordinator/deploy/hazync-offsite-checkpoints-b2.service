@@ -1,0 +1,26 @@
+[Unit]
+Description=Hazync: copy the bridge's checkpoint rungs to Backblaze B2 (second copy, append-only)
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/386
+After=network-online.target hazync-coordinator.service
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# The second copy. Every other artifact that matters has one — proofs, spine, sponsor keys, ledger — and
+# the rungs did not, which is what hazync#386 is about. One store failing should not take the only copy of
+# the seed the whole bundle gap regenerates from.
+#
+# Same reasoning as the R2 unit: the lowest rung is the one that bounds what can be rebuilt, so its absence
+# fails the unit; and TimeoutStartSec is hours because the archive is 9.3 GB now and ~100 GB after the
+# backfill (hazync#379).
+# Root only for reading the root-only key file.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs checkpoints --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --min-age 1800 --threads 4 --bwlimit-mbit 64
+TimeoutStartSec=6h
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/srv/bulk/hazync/checkpoints /opt/hazync
