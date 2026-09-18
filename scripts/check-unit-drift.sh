@@ -32,8 +32,14 @@ UNITS="${HAZYNC_UNITS:-hazync-coordinator hazync-bridge}"
 ALLOW="${HAZYNC_DRIFT_ALLOW:-coordinator/deploy/unit-drift-allow.txt}"
 
 fail=0
+cannot=0
 note() { echo "  $*"; }
 bad()  { echo "DRIFT $*"; fail=1; }
+# ⛔ "could not read" IS NOT "no drift", AND IT IS NOT DRIFT EITHER. Until 2026-09-18 an unreadable
+# host went through bad(), so a box this script could not reach at all printed "DRIFT FOUND — the box
+# is running configuration this repo does not contain" and exited 1. It had read nothing. The check
+# contract has a code for this: 0 holds, 1 drift, 2 could not check.
+cant() { echo "COULD NOT CHECK $*"; cannot=1; }
 
 # The remote side is read-only and answers in one round trip per unit: `systemctl show` rather than
 # `systemctl cat`, because cat prints the FILE and show prints what actually runs.
@@ -60,7 +66,7 @@ for u in $UNITS; do
     else
         remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "$probe" 2>/dev/null)
     fi
-    if [ -z "$remote" ]; then bad "$u: could not read unit state from $HOST (unreachable, or unit absent)"; continue; fi
+    if [ -z "$remote" ]; then cant "$u: no unit state from $HOST (unreachable, unit absent, or ssh refused)"; continue; fi
 
     # --- 1. drop-in FILES the repo does not ship ------------------------------------------------
     # A drop-in nobody has committed is config that exists only on one disk. `ratelimit.conf` was
@@ -101,11 +107,17 @@ for u in $UNITS; do
 done
 
 echo
-if [ "$fail" = 0 ]; then
-    echo "no drift: everything running on $HOST is declared in this repo."
-else
+if [ "$fail" != 0 ]; then
     echo "DRIFT FOUND — the box is running configuration this repo does not contain."
     echo "Fix by committing it (a drop-in under $DROPINS_DIR), not by deleting it from the box:"
     echo "a setting that is live and undeclared is load-bearing until proven otherwise."
+    # A real finding outranks an unreadable unit: drift is definite, and exiting 2 would hide it.
+    [ "$cannot" != 0 ] && echo "(and at least one unit could not be read at all — see above)"
+    exit 1
 fi
-exit $fail
+if [ "$cannot" != 0 ]; then
+    echo "COULD NOT CHECK — no unit state was readable, so this says NOTHING about drift."
+    exit 2
+fi
+echo "no drift: everything running on $HOST is declared in this repo."
+exit 0

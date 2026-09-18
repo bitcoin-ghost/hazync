@@ -23,6 +23,12 @@ set -uo pipefail
 
 REPO="${HAZYNC_DRIFT_REPO:-/var/lib/hazync-drift/repo}"
 REMOTE="${HAZYNC_DRIFT_REMOTE:-https://github.com/bitcoin-ghost/hazync.git}"
+# ⛔ THIS RUNS THE SCRIPT FROM THE FETCHED REF, NOT THE ONE INSTALLED BESIDE IT. That is the point --
+# the question is whether the box matches the repo as it stands now -- but it means the timer must not
+# be enabled until the drift script's own fixes are ON the ref. Installing this while main still had
+# the ssh-only script made every run report "could not read unit state" (measured 2026-09-18).
+# HAZYNC_DRIFT_REF exists so this path can be exercised against a branch before it merges.
+REF="${HAZYNC_DRIFT_REF:-main}"
 HOST="${1:-localhost}"
 
 if [ ! -d "$REPO/.git" ]; then
@@ -30,8 +36,8 @@ if [ ! -d "$REPO/.git" ]; then
     git clone --quiet "$REMOTE" "$REPO" || { echo "clone of $REMOTE into $REPO failed"; exit 2; }
 fi
 
-git -C "$REPO" fetch --quiet origin main || {
-    echo "fetch of origin/main failed; NOT checking against a stale tree"; exit 2; }
+git -C "$REPO" fetch --quiet origin "$REF" || {
+    echo "fetch of origin/$REF failed; NOT checking against a stale tree"; exit 2; }
 git -C "$REPO" reset --hard --quiet FETCH_HEAD || {
     echo "reset to FETCH_HEAD failed; NOT checking against a stale tree"; exit 2; }
 
