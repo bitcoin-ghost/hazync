@@ -7,6 +7,11 @@ minute, so use the live API; the snapshot below is dated.
 
 ## Release
 
+- **In preparation: v0.21.7** ([notes](history/releases/RELEASE_NOTES_v0.21.7.md)) — a board block across many
+  cards (mode 6, #361/#364) driven by one command, `hazync run --distributed` (#367/#408); the bridge's height
+  cap removed (#398); any bundle in the gap rebuildable on demand (#374, #377, #378); sponsorship payments
+  through BTCPay (#371, #372). Not a re-baseline: `METHOD_ID 37987b85` is unchanged, reproduced twice on
+  2026-09-18 from separate commits.
 - **Latest: [v0.21.6](https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.6)**, published
   2026-09-15 ([notes](history/releases/RELEASE_NOTES_v0.21.6.md)). Assets: `hazync-host-x86_64-linux-gnu`,
   `hazync-host-x86_64-linux-gnu-cuda`, `hazync-worker`, `hazync-run-workers.sh`, `hazync-coordinator.py`,

@@ -9,6 +9,16 @@ Maintenance: add the new entry here in the same change that publishes the releas
 id history, with the commit that produced each id, is [`reproduce/LINEAGE.tsv`](reproduce/LINEAGE.tsv).
 Copies of recent release bodies are kept in [`docs/history/releases/`](docs/history/releases/).
 
+## v0.21.7 — unreleased
+A board block across many cards, and the height cap comes off. `seg-serve` serves a mode-6 bridge range so a
+board block gets N cards and still emits the `KIND_RANGE` receipt the coordinator accepts (#361, #364), and
+`hazync run --distributed` drives the whole thing from one command (#408); `seg-connect` reconnects after a
+dropped link instead of exiting (#402); the shell says plainly that a loopback bind means remote workers cannot
+attach (#401); the bridge's height cap is removed and free space is watched hourly (#398, #399); any bundle in
+the gap can be rebuilt on demand from a checkpoint rung (#374, #377, #378, #383); sponsorship payments run
+through BTCPay (#371, #372); key rotation is off unless `ROTATE_ENABLED=1` (#311, #348); offsite mirroring
+handles files over 5 GB and stops paging on a throttled listing (#390, #393, #403). Not a re-baseline.
+
 ## v0.21.6 — 2026-09-15
 Workers move to api.hazync.org, and folders stop colliding. The worker's default coordinator is
 `https://api.hazync.org` (#332); folders get 32 candidates and 60 s fold claims for keys with proven work
