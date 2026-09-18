@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly: copy the Hazync bridge checkpoint rungs to Backblaze B2
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/386
+
+[Timer]
+# :41 rather than :11, so the two stores are not uploading the same multi-GB rung at the same moment and
+# competing for the same uplink. Both are append-only, so whichever runs second simply finds it present.
+OnCalendar=*-*-* *:41:00
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

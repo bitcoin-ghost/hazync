@@ -111,10 +111,17 @@ def plan(local, remote):
     return missing, differ
 
 
-def list_local(proofs, min_age, now):
+def list_local(root, min_age, now, prefix="proof_", suffix=""):
+    """{name: size} for files under root named prefix*suffix and older than min_age, plus a young count.
+
+    ⛔ `suffix` exists for the checkpoints mirror. The archiver writes `state_<h>.bin.tmp` and renames
+    (hazync#347 6.6), and the 230,000 rung was streamed onto the box as exactly that. Matching on the
+    prefix alone would upload a half-written rung — and because this mirror is APPEND-ONLY, the complete
+    file would then never replace it. A partial rung that can never be corrected is worse than no rung.
+    """
     local, young = {}, 0
-    for e in os.scandir(proofs):
-        if not e.is_file() or not e.name.startswith("proof_"):
+    for e in os.scandir(root):
+        if not e.is_file() or not e.name.startswith(prefix) or not e.name.endswith(suffix):
             continue
         st = e.stat()
         if now - st.st_mtime < min_age:
@@ -431,13 +438,70 @@ def ledger_copy(s3, bucket, prefix, db, where="B2"):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def checkpoints_copy(s3, bucket, prefix, root, min_age, threads, bwlimit_mbit, where="R2"):
+    """Mirror the bridge's archived checkpoint rungs, append-only. Uploads and verifies in one pass.
+
+    WHY THIS EXISTS (hazync#386). `prune_bundles.py` will not delete a bundle unless an archived rung
+    below it exists to rebuild from — that is the entire safety argument for pruning. The rungs live on
+    /srv/bulk, which no offsite unit touched, so the thing authorising deletion was itself single-copy.
+    Lose a rung and the bundles pruned against it are not rebuildable, and nothing would notice until
+    someone tried to regenerate one.
+
+    Unlike `copy`/`check`, this uploads and verifies in a single mode: there are tens of rungs, not the
+    ~100,000 files the proofs directory holds, so a split pass buys nothing.
+
+    ⛔ THE LOWEST RUNG IS NOT JUST ANOTHER FILE. Regeneration seeds from the nearest rung STRICTLY BELOW
+    the target, so the lowest one bounds what can be rebuilt at all. Today that is state_230000.bin, the
+    only seed below the 418,269-967,499 bundle gap, rescued from the retiring coordinator. If it is
+    missing remotely this returns 1 even when every other rung is present.
+    """
+    if not os.path.isdir(root):
+        log(f"checkpoints: NOT uploaded, no directory at {root}")
+        return 1
+    local, young = list_local(root, min_age, time.time(), prefix="state_", suffix=".bin")
+    # ⛔ The prefix and suffix are not enough: `state_abc.bin` and `state_.bin` satisfy both and are not
+    # heights. The height is parsed below to find the lowest rung, so a malformed name is a crash rather
+    # than a skipped file. hazync-archive-checkpoint.sh guards the same hazard on the shell side
+    # (`case "$_b" in ''|*[!0-9]*) continue`); this is that guard, on this side.
+    local = {n: sz for n, sz in local.items() if n[len("state_"):-len(".bin")].isdigit()}
+    if not local:
+        log(f"checkpoints: nothing to mirror in {root} ({young} younger than {min_age:.0f} s skipped)")
+        return 0
+    remote = list_remote(s3, bucket, prefix)
+    missing, differ = plan(local, remote)
+    total = sum(local[n] for n in missing)
+    log(f"{bucket}/{prefix}: {len(remote)} remote, {len(local)} local rungs "
+        f"({young} younger than {min_age:.0f} s skipped), {len(missing)} to upload ({total / 1e9:.2f} GB)")
+    if differ:
+        log(f"WARNING: {len(differ)} rung(s) differ in size from the remote copy and are NOT overwritten "
+            f"(append-only); first: {differ[0]}")
+    failed = 0
+    if missing:
+        _, failed, _ = upload_all(s3, bucket, prefix, root, missing, local, threads, bwlimit_mbit)
+
+    remote = list_remote(s3, bucket, prefix)
+    absent = sorted(n for n in local if remote.get(n) != local[n])
+    lowest = min(local, key=lambda n: int(n[len("state_"):-len(".bin")]))
+    lowest_ok = remote.get(lowest) == local[lowest]
+    log(f"checkpoints: {len(local) - len(absent)}/{len(local)} rungs complete in {where}; "
+        f"lowest is {lowest} ({local[lowest] / 1e9:.2f} GB), {'present' if lowest_ok else 'MISSING'}")
+    if not lowest_ok:
+        log("checkpoints: the LOWEST rung is the seed everything below the bundle gap regenerates from — "
+            "without it those heights cannot be rebuilt at all")
+    for n in absent[:10]:
+        log(f"  missing or wrong size: {n}")
+    return 1 if (failed or absent) else 0
+
+
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check", "spine", "keys", "ledger"])
+    ap.add_argument("mode", choices=["copy", "check", "spine", "keys", "ledger", "checkpoints"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
     ap.add_argument("--spine", default=os.environ.get("COORD_SPINE", "/var/lib/hazync/spine"))
+    ap.add_argument("--checkpoints", default=os.environ.get("HAZYNC_CKPT_ARCHIVE", "/srv/bulk/hazync/checkpoints"),
+                    help="checkpoints: the bridge's archived rungs (state_<height>.bin)")
     ap.add_argument("--verify", help="spine: hazync-verify binary; a copy it rejects is not uploaded")
     ap.add_argument("--identities", default=os.environ.get("SPONSOR_IDENTITIES", "/var/lib/hazync/sponsor-bot/identities"))
     ap.add_argument("--pubkey", help="keys: the recipient's armored PUBLIC key file")
@@ -463,6 +527,13 @@ def main(argv=None, client=None):
 
     if a.mode == "spine":
         return spine_copy(s3, bucket, f"spine-{method_prefix(a.repo)}/", a.spine, a.verify, where)
+
+    if a.mode == "checkpoints":
+        # ⛔ NOT namespaced by guest id, unlike proofs and the spine. A rung is bridge state — the UTXO
+        # forest at a height — and a re-baseline does not change its bytes. Namespacing it would orphan
+        # every existing rung the next time the guest id moved, which is the opposite of the point.
+        return checkpoints_copy(s3, bucket, "checkpoints/", a.checkpoints, a.min_age,
+                                a.threads, a.bwlimit_mbit, where)
 
     if a.mode == "ledger":
         return ledger_copy(s3, bucket, "ledger/", a.db, where)
