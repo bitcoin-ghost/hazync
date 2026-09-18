@@ -224,14 +224,29 @@ few minutes during the toolkit unpack, so a comfortable-looking figure five minu
   clearing these loses nothing, and a re-baseline invalidates them regardless (~3.7 GB for 17k).
 
 **Pass `SKIP_GROTH16=1`.** groth16 is a runtime rzup component the host does not link against, so the
-release build does not need it — it only costs a 488 MB download and, on a slow link, three timeouts.
+release build does not need it — it only costs a ~5 GB download and, on a slow link, three timeouts.
 
 ### Set RZUP_TIMEOUT when running build-release.sh
 
 `build-release.sh` forwards `RZUP_TIMEOUT` **only when the caller sets it** — deliberately, since a
 hardcoded default in a wrapper defeats the default it wraps. The consequence is easy to walk into: the
-groth16 component is a 488 MB download, and on anything short of a datacentre link it times out at the
-default and burns 3 x 300 s of retries before warning and carrying on.
+groth16 component is a **~5 GB** download, and on anything short of a datacentre link it times out at
+the default and burns 3 x 300 s of retries before warning and carrying on.
+
+⛔ **488 MB is the RUST TOOLCHAIN, not groth16** — `provision-vps.sh` says so at its own definition,
+and this page used to repeat that number for the wrong artifact. Measured on the retired coordinator
+2026-09-18, the installed component is **5,314,631,872 bytes across four files**:
+
+| file | bytes |
+|---|---|
+| `stark_verify_final.zkey` | 3,620,786,504 |
+| `preprocessed_coeffs.bin` | 1,442,123,704 |
+| `stark_verify_graph.bin` | 251,721,088 |
+| `fuzzed_msm_results.bin` | 576 |
+
+rzup caches no archive, so the download is about the same size as what lands on disk. That is why the
+default fails: 5 GB inside 300 s needs ~17 MB/s sustained, and even `RZUP_TIMEOUT=7200` needs ~740 KB/s
+held for two hours. Budget the timeout against 5 GB over the slowest link you care about, not 488 MB.
 
 ```bash
 RZUP_TIMEOUT=7200 ./prover/build-release.sh cpu
