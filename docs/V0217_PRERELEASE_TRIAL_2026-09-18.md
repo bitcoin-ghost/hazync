@@ -69,12 +69,38 @@ digest is the equivalence test; the file hash is not.** `anchored=no` is likewis
 a mid-chain range proves a transition between its stated boundaries, and anchoring comes
 from the connected chain or from `verify-range` / `verify-chain`.
 
-## What this did NOT establish
+## The four gaps above were closed the same day
 
-- Nothing was submitted to the live board; `verify-any` is the same binary gate
-  `server.py` runs, but an end-to-end submission was not performed.
-- No measurement above 3 cards, and none on the 16 MB block in the 3-card topology.
-- `anchored=no` throughout — genesis anchoring was never exercised.
+Every limitation this document originally listed was then measured. Raw logs and receipts per gap
+live under `~/hazync-v0217-trial/<gap>/RESULT.md`.
+
+| gap | result |
+|---|---|
+| **live submission** | block **92,864** proved and submitted to the public board as `G H O S T`, 9 segments, 44.9 s. Confirmed from the board, not the exit code: `/api/block/92864` → `status=proved`, `unbroken=true`, and `/api/proof/92864` downloads 229,002 B — exactly the receipt size on the pod |
+| **more than 3 cards** | block 230,000 on **4 × RTX PRO 6000 Blackwell**: TOTAL **96.0 s** vs 331.5 s on one card (**3.45x**), 18 segments per worker |
+| **the 16 MB block** | block 418,268 (15,979,389 B, 1,650 segments) on 4 cards: **1454.9 s (24.2 min)** vs **3665.5 s (61.1 min)** on 2 MIG slices — **2.52x** |
+| **genesis anchoring** | `/api/proof/1-2048` → `RANGE PROOF [1..2048] VERIFIED — genesis-anchored`. ⛔ With a CONTROL: the same binary REFUSED a mid-chain proof on the genesis pin, exit 101. A verifier that accepts everything passes a positive-only test |
+| **Groth16 proving** | `ci_snark_prove.sh` on a CPU host: **226,946 B → 4,217 B in 49 s**, wrapped proof verifies, and `out_tip_hash` / `range_work` / `total_cum_work` all preserved across the wrap |
+
+Segment count was predicted to scale linearly with bundle size (693,287 B → 72 segments, so 23.0x
+should give ~1,656). Measured **1,650** — linear to within 0.4%. That was a prediction worth testing
+rather than assuming.
+
+## What is STILL not established
+
+- **Nothing above 4 cards.** 6x and 8x configurations were refused for lack of capacity, and the REST
+  API's `gpuTypeIds` is a closed enum with no MIG entries, so the GraphQL ids that advertise 8-way are
+  not creatable. ⚠ `lowestPrice` reports a PRICE, not availability — it still lists configurations the
+  create call refuses. Only the POST tells the truth.
+- **The 16 MB block was proven on one machine's four cards, not across units.** Multi-unit was shown
+  only on the 693 KB block.
+- ⛔ **Groth16 wrapping is CPU-only.** It crashes in `sppark` on every CUDA build (#20, closed
+  won't-fix upstream), so the CUDA wrap path remains unexercised and is expected to fail.
+- **The live submission ran on `3f6b5c8`**, before #402/#403 merged — neither is on the `hazync run`
+  path, but the final release candidate was not itself the binary that submitted.
+- **One block, once.** No sustained multi-block run against the live board.
+- `anchored=no` still applies to the mid-chain trial receipts, and correctly so; anchoring was
+  exercised separately, on a folded `lo=1` range.
 
 ## Traps this run walked into (so the next one doesn't)
 
