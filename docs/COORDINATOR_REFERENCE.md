@@ -188,11 +188,12 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 | `HAZYNC_NTFY` | `''` / — | `_ntfy_url()`, `cmd_notify()` | An ntfy topic or URL for alerts when this worker stops or cannot work; overrides what `hazync notify` saved. `off` disables. |
 | `HAZYNC_NTFY_REPEAT` | `'3600'` | `notify()` | Seconds before the same problem is pushed again. |
 | `HAZYNC_GPU_LOCK` | `'/tmp/hazync-gpu.lock'` | `gpu_lock()` | Lock file serialising GPU jobs on one box; `none` disables it. |
-| `HAZYNC_STALL_MIN` | `'600'` | `_prove_watched()` | Minimum seconds without segment progress before a prove is killed. |
+| `HAZYNC_STALL_MIN` | `'600'` | `_prove_watched()`, `_prove_distributed()` | Minimum seconds without segment progress before a prove is killed. |
 | `HAZYNC_FIRST_PROGRESS` | `'1800'` | `_prove_watched()` | Seconds allowed before the first segment completes. |
 | `HAZYNC_ASSEMBLY_MIN` | `'1800'` | `_prove_watched()` | Floor, in seconds, of the silent lift-and-join budget after the last segment. |
-| `HAZYNC_PROVE_TIMEOUT` | `'21600' if watch else '5400'` | `_prove_watched()` | Outer bound, seconds, for one host invocation (6 h for a watched prove, 90 min otherwise). |
-| `HAZYNC_TICK` | `'60'` | `_prove_watched()` | Seconds between progress lines; a beat is sent on a tick only if a segment finished since the last one. |
+| `HAZYNC_PROVE_TIMEOUT` | `'21600' if watch else '5400'` / `'21600'` | `_prove_watched()`, `_prove_distributed()` | Outer bound, seconds, for one host invocation (6 h for a watched prove, 90 min otherwise). |
+| `HAZYNC_TICK` | `'60'` | `_prove_watched()`, `_prove_distributed()` | Seconds between progress lines; a beat is sent on a tick only if a segment finished since the last one. |
+| `HAZYNC_PORT` | `'9110'` | `cmd_prove()` | Port `seg-serve` listens on for a distributed run (`--distributed`); workers dial it. Default 9110, the same default the host itself uses. |
 | `HAZYNC_FOLD_CONCURRENCY` | `'1'` | `_fold_conc()` | Folds run concurrently within one tree level. |
 | `HAZYNC_SPINE_VRANGES_TTL` | `'300'` | constant `SPINE_VRANGES_TTL` | Seconds `hazync spine` reuses its copy of `/api/vranges`. |
 
@@ -200,10 +201,14 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 
 | variable | value | set in | meaning |
 |---|---|---|---|
+| `HAZYNC_RANGE` | `str(lo)` | `_prove_distributed()` | The board block `seg-serve` serves as a mode-6 bridge range (#361/#364). Its presence is what makes the run distributed rather than a fixture prove. |
+| `HAZYNC_PORT` | `str(port)` | `_prove_distributed()` | Port `seg-serve` listens on, and the port local workers dial. |
 | `HAZYNC_PROGRESS_EVERY` | `'1' (unless already set)` | `_run_with_seg_retry()` | Makes the host print one line per completed segment, which the watchdog reads (#256). |
 | `HAZYNC_BRIDGE_OUT` | `BUNDLES` / `str(wd)` | `cmd_prove()`, `cmd_selftest()` | Bundle directory for `prove-range-bridge`. |
 | `HAZYNC_WITNESS_DIR` | `WITNESS` | `cmd_prove()` | Witness directory for the replay path `prove-range`. |
 | `HAZYNC_SEG_PO2` | `str(_po2)` | `_run_with_seg_retry()` | Segment size for this attempt, stepping down on failure; an inherited value sets the first attempt. |
+| `HAZYNC_WORKER_ID` | `f'local{d}'` | `_prove_distributed()` | Log label for each local worker (`local0`, `local1`, …), so a fleet's timings can be attributed per card. |
+| `CUDA_VISIBLE_DEVICES` | `str(d)` | `_prove_distributed()` | Pins each local worker to one card. ⛔ One prove per card: two do not fit on a 46 GB card (#97), which is what `gpu_lock` exists to prevent. |
 
 ## Launcher (`coordinator/run-workers.sh`, shipped as `hazync-run-workers.sh`)
 
@@ -236,5 +241,6 @@ From `main()`'s dispatch table; usage and summary from the module docstring.
 | `fold` | every loop runs `hazync fold` |
 | `mixed` | with N > 1 loop N-1 folds, and with N > 2 loop N advances the spine; the rest prove. Run it on ONE box: the spine needs one worker fleet-wide |
 | `spine` | every loop runs `hazync spine` |
+| `distributed` | every loop runs `hazync run --distributed`: claim one board block, serve it across many cards (mode 6) and submit it. Continuous by the same means as the other modes — the CLI exits `EX_TEMPFAIL` (75) when the board has nothing and the loop waits 30 s |
 
-⚠ The script's own header comment lists `MODE` as `prove | fold | mixed`, omitting `spine`; the `case` statement accepts the modes above.
+⚠ The script's own header comment lists `MODE` as `prove | fold | mixed`, omitting `spine`, `distributed`; the `case` statement accepts the modes above.
