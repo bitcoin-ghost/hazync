@@ -1,0 +1,19 @@
+[Unit]
+# Keep the bridge checkpoints it would otherwise overwrite (hazync#347 item 6.6).
+#
+# Runs under hazync-run-check so a failure pushes to the phone once, re-pushes at most hourly while it
+# lasts, and pushes again on recovery — the same treatment the integrity checks get. The script's exit
+# codes match that contract: 0 held, 1 something is wrong, 2 could not check.
+Description=Hazync: archive a bridge checkpoint so a deleted bundle has a way back
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+
+[Service]
+Type=oneshot
+# Nice and idle-IO: this copies ~8.6 GB and must never compete with the coordinator serving the board
+# or the bridge writing its next checkpoint.
+Nice=19
+IOSchedulingClass=idle
+Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles
+Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
+Environment=SPACING=25000
+ExecStart=/usr/local/sbin/hazync-run-check archive-checkpoint /usr/local/sbin/hazync-archive-checkpoint
