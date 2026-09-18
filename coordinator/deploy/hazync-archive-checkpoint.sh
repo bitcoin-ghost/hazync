@@ -58,11 +58,21 @@ mkdir -p "$ARCHIVE" || { say "cannot check: cannot create $ARCHIVE"; exit 2; }
 # carrying a newline or a glob character breaks the parse silently, and "silently wrong" is the worst
 # failure mode for something that decides whether bundles may be deleted. The loop below cannot misparse
 # — a name that is not exactly state_<digits>.bin is skipped rather than half-read.
+#
+# ⛔ AND ONLY RUNGS AT OR BELOW $H COUNT. "Newest rung overall" breaks as soon as two bridges share this
+# archive, which is exactly what the backfill walk does (hazync-bridge-backfill.service): it walks
+# 230,000 -> 740,000 while the live bridge is already past 742,000. With a plain maximum, the backfill's
+# archiver at H=300,000 would compute 300000 - 740000 = -440000, which is `-lt 25000`, so it would report
+# "not due" and archive NOTHING — silently, for the whole 41-hour walk, which is precisely the
+# never-fires failure this job exists to prevent. Asking for the newest rung BELOW the current height is
+# also just the correct question: the live archiver still sees 740000 as its predecessor and waits for
+# 765000, and the backfill archiver sees its own progression.
 LAST=0
 for _f in "$ARCHIVE"/state_*.bin; do
     [ -e "$_f" ] || continue                       # no match: the glob stays literal
     _b=${_f##*/}; _b=${_b#state_}; _b=${_b%.bin}
     case "$_b" in ''|*[!0-9]*) continue ;; esac    # not a plain height — ignore it
+    [ "$_b" -gt "$H" ] && continue                 # a rung ABOVE us belongs to another bridge's walk
     [ "$_b" -gt "$LAST" ] && LAST="$_b"
 done
 if [ "$((H - LAST))" -lt "$SPACING" ]; then

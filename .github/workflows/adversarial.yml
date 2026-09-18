@@ -168,6 +168,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_regen_bundles.py --control
+      - name: Checkpoint archiving stays correct when two bridges share one archive (#347)
+        # The archiver's wrong answer is SILENT AND SAFE-LOOKING: concluding "not due" exits 0, prints one
+        # tidy line and archives nothing, so nothing alerts. Counting the newest rung OVERALL rather than
+        # the newest at or below the current height makes the backfill walk's archiver compute a negative
+        # difference against the live bridge's higher rung — "not due" every hour for 41 hours, archiving
+        # nothing — while prune_bundles.py goes on deleting bundles on the strength of rungs that are not
+        # accumulating. journalctl is stubbed and every run is DRY, so no bridge and no copying.
+        run: cd coordinator && python3 test_archive_checkpoint.py
+      - name: Checkpoint archiving POSITIVE CONTROL (at-or-below rule removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_archive_checkpoint.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
