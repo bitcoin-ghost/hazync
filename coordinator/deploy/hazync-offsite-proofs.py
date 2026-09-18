@@ -199,6 +199,39 @@ class RateLimit:
             time.sleep(min(wait, 1.0))
 
 
+# ⛔ S3 AND R2 REFUSE A SINGLE-PART UPLOAD OVER 5 GB with EntityTooLarge, and put_object is always one
+# part. That silently capped everything this script could mirror at 5 GB. It survived unnoticed because
+# proofs are megabytes; the first object big enough to hit it was the 9.41 GB checkpoint rung
+# state_744257.bin, which failed against R2 on 2026-09-18 while the 0.49 GB rung beside it went up fine.
+# Anything read from a file goes through put_file() below, never put_object.
+MULTIPART_THRESHOLD = 64 << 20          # above 64 MiB, upload in parts
+MULTIPART_CHUNKSIZE = 64 << 20          # 64 MiB parts: a 9.4 GB rung is ~147, and the hard cap is 10,000
+
+
+def _transfer_config():
+    """Multipart settings for a file upload, or None where boto3 is absent — this module is imported
+    without it by the tests, the same reason make_client imports boto3 lazily.
+
+    use_threads=False because upload_all ALREADY runs one thread per file, and make_client sizes the
+    connection pool at threads+4. Threads per file on top of that would want threads*max_concurrency
+    connections and starve the pool it was given."""
+    try:
+        from boto3.s3.transfer import TransferConfig
+    except ImportError:
+        return None
+    return TransferConfig(multipart_threshold=MULTIPART_THRESHOLD,
+                          multipart_chunksize=MULTIPART_CHUNKSIZE,
+                          use_threads=False)
+
+
+def put_file(s3, bucket, key, fileobj, content_type):
+    """Upload an open file, splitting into parts above MULTIPART_THRESHOLD. Use this and not
+    put_object for anything read from disk: put_object cannot exceed 5 GB."""
+    s3.upload_fileobj(Fileobj=fileobj, Bucket=bucket, Key=key,
+                      ExtraArgs={"ContentType": content_type},
+                      Config=_transfer_config())
+
+
 def upload_all(s3, bucket, prefix, root, names, sizes, threads, bwlimit_mbit):
     """Upload root/<name> to prefix+name for each name. (done, failed, bytes sent)."""
     rl = RateLimit(bwlimit_mbit * 1e6 / 8)
@@ -209,7 +242,7 @@ def upload_all(s3, bucket, prefix, root, names, sizes, threads, bwlimit_mbit):
         size = sizes[name]
         rl.take(size)
         with open(os.path.join(root, name), "rb") as f:
-            s3.put_object(Bucket=bucket, Key=prefix + name, Body=f, ContentType="application/octet-stream")
+            put_file(s3, bucket, prefix + name, f, "application/octet-stream")
         return size
 
     with ThreadPoolExecutor(max(1, threads)) as ex:
@@ -423,7 +456,7 @@ def ledger_copy(s3, bucket, prefix, db, where="B2"):
             return 0 if remote[name] == size else 1
         try:
             with open(gz, "rb") as f:
-                s3.put_object(Bucket=bucket, Key=prefix + name, Body=f, ContentType="application/gzip")
+                put_file(s3, bucket, prefix + name, f, "application/gzip")
         except Exception as e:
             log(f"ledger: FAILED {prefix}{name}: {e!r}")
             return 1
