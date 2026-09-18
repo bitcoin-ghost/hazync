@@ -83,8 +83,15 @@ class FakeS3:
         self.objects[(Bucket, Key)] = body
         self.puts.append(Key)
         self.transfers.append((Key, Config))
-        if Callback:                       # delivered in chunks, as a real multipart upload does
-            step = max(1, (Config.multipart_chunksize if Config else 0) or 8)
+        if Callback:
+            # ⛔ A FIXED STEP, NEVER Config.multipart_chunksize. This stub simulates multipart
+            # DELIVERY; it is not meant to reproduce production's part size. Chunking by the real
+            # 64 MiB made the number of callbacks depend on whether boto3 was installed: locally
+            # Config is None, so a 14-byte rung arrived in two pieces and the assertion saw 6 charges
+            # for 3 files; on the CI runner -- which DOES have boto3, contrary to what I assumed from
+            # the workflow not installing it -- it arrived in one, giving 3 for 3, and the run failed
+            # there while passing here. Config is still recorded, for what asserts on it.
+            step = 8
             sent = 0
             while sent < len(body):
                 n = min(step, len(body) - sent)
@@ -455,8 +462,9 @@ check(rc == 1 and "no directory" in out, f"a missing checkpoint directory fails 
 #    handles that are big enough to reach that: on 2026-09-18 the 0.49 GB rung went up and the 9.41 GB
 #    one came back EntityTooLarge, so everything above 5 GB was silently un-mirrorable. Asserting only
 #    "the rung was uploaded" passes against that bug — FakeS3 enforces no size limit — so these pin the
-#    mechanism and the threshold instead. boto3 is absent here (and in CI), so Config arrives as None
-#    and proves nothing; the constants are the part that can actually be checked.
+#    mechanism and the threshold instead. ⚠ boto3 is absent LOCALLY but PRESENT on the CI runner, so
+#    Config is None here and a real TransferConfig there — never assert on it, and never let a stub's
+#    behaviour depend on it. The module constants are the part that means the same in both places.
 check({k for k, _ in ck.transfers} == {C + "state_230000.bin", C + "state_744257.bin"},
       f"every rung upload goes through upload_fileobj, none through single-part put_object "
       f"({sorted(k for k, _ in ck.transfers)})")
