@@ -1,0 +1,30 @@
+# Delete bridge bundles whose block is finished for good (hazync#347), but only ever with proof that
+# the receipts exist in BOTH R2 and B2. See hazync-prune-bundles.py for why the caller exists.
+#
+# ⛔ DRY RUN BY DEFAULT IS NOT THE POINT HERE -- this unit passes --apply deliberately. The safety is
+# in the five conditions, every one of which was exercised on real data 2026-09-18: it refused on a
+# missing checkpoint, refused with no offsite confirmation, and when finally allowed deleted exactly
+# the 53,641 eligible bundles and nothing else, leaving proofs untouched and the boundary exact.
+[Unit]
+Description=Hazync: prune bundles whose block is proven, spined and backed up in both stores
+Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HZ_REPO=/opt/hazync
+Environment=COORD_DB=/var/lib/hazync/coordinator.db
+Environment=COORD_SPINE=/var/lib/hazync/spine
+Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles
+Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
+# Two runs before paging: a store being briefly unreachable is an exit 2, not a problem to wake anyone for.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check prune-bundles /usr/local/sbin/hazync-prune-bundles --apply
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=3600

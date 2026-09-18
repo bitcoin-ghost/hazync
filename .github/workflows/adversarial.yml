@@ -156,6 +156,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_prune_bundles.py --control
+      - name: Prune CALLER refuses on a partial or empty offsite listing (#397)
+        run: cd coordinator && python3 test_prune_caller.py
+      - name: Prune caller POSITIVE CONTROL (both-or-nothing removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_prune_caller.py --control
       - name: On-demand bundle regeneration picks a seed that can actually produce the block (#347)
         # The live bridge runs HAZYNC_BRIDGE_EMIT_FROM=967500, so 418,269-967,499 are walked past with no
         # bundle written, and bundles reach 17.0 MB by h=418,000 — >9 TB to store the gap against 3.9 TB
