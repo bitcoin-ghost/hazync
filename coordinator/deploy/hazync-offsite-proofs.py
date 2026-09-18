@@ -58,7 +58,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 SPINE_READ_TRIES = 5
 SPINE_READ_PAUSE = 1.0
@@ -185,6 +185,17 @@ class RateLimit:
         self.bps, self.tokens, self.t, self.lock = bps, bps, time.monotonic(), threading.Lock()
 
     def take(self, n):
+        """Charge n bytes, waiting until the budget allows it.
+
+        ⛔ THE BUCKET GOES INTO DEBT ON PURPOSE. The old version returned early when
+        `self.tokens >= self.bps`, an escape hatch that existed because tokens are capped at one
+        second's worth, so any n larger than that could never be satisfied and would deadlock. The
+        cost was that the cap did not bind at all on a big charge: measured three times on the
+        checkpoint rungs at 156, 133 and 158 Mbit/s against --bwlimit-mbit 64.
+
+        Charging into a negative balance fixes both. A large chunk is allowed through immediately,
+        and the debt is repaid by the NEXT caller waiting, so the average rate converges on bps and
+        nothing can deadlock however large n is."""
         if self.bps <= 0:
             return
         while True:
@@ -192,11 +203,11 @@ class RateLimit:
                 now = time.monotonic()
                 self.tokens = min(self.bps, self.tokens + (now - self.t) * self.bps)
                 self.t = now
-                if self.tokens >= n or self.tokens >= self.bps:
-                    self.tokens -= n
+                if self.tokens > 0:
+                    self.tokens -= n            # may go negative; the debt is paid by waiting
                     return
-                wait = (n - self.tokens) / self.bps
-            time.sleep(min(wait, 1.0))
+                wait = -self.tokens / self.bps
+            time.sleep(min(max(wait, 0.01), 1.0))
 
 
 # ⛔ S3 AND R2 REFUSE A SINGLE-PART UPLOAD OVER 5 GB with EntityTooLarge, and put_object is always one
@@ -224,11 +235,16 @@ def _transfer_config():
                           use_threads=False)
 
 
-def put_file(s3, bucket, key, fileobj, content_type):
+def put_file(s3, bucket, key, fileobj, content_type, on_bytes=None):
     """Upload an open file, splitting into parts above MULTIPART_THRESHOLD. Use this and not
-    put_object for anything read from disk: put_object cannot exceed 5 GB."""
+    put_object for anything read from disk: put_object cannot exceed 5 GB.
+
+    on_bytes(n) is called as each part lands, which is the only visibility into a multi-GB upload:
+    the caller uses it both to charge the rate limiter DURING the transfer and to report progress
+    while a single large file is still in flight."""
     s3.upload_fileobj(Fileobj=fileobj, Bucket=bucket, Key=key,
                       ExtraArgs={"ContentType": content_type},
+                      Callback=on_bytes,
                       Config=_transfer_config())
 
 
@@ -238,30 +254,52 @@ def upload_all(s3, bucket, prefix, root, names, sizes, threads, bwlimit_mbit):
     done = failed = sent = 0
     last = t1 = time.monotonic()
 
+    # ⛔ CHARGED PER PART, NOT PER FILE. rl.take(size) once before the upload spent the whole file's
+    # budget in one call, which the old escape hatch then waved through -- so --bwlimit-mbit did not
+    # bind on exactly the objects it matters for. Charging as each part lands makes the cap real.
+    tick = threading.Lock()
+    progress = {"bytes": 0}
+
+    def on_bytes(n):
+        rl.take(n)
+        with tick:
+            progress["bytes"] += n
+
     def up(name):
-        size = sizes[name]
-        rl.take(size)
         with open(os.path.join(root, name), "rb") as f:
-            put_file(s3, bucket, prefix + name, f, "application/octet-stream")
-        return size
+            put_file(s3, bucket, prefix + name, f, "application/octet-stream", on_bytes=on_bytes)
+        return sizes[name]
+
+    total = sum(sizes[n] for n in names)
+
+    def report():
+        el = time.monotonic() - t1
+        with tick:
+            b = progress["bytes"]
+        eta = (total - b) / (b / el) / 60 if b and el else 0
+        log(f"progress: {done}/{len(names)} files, {failed} failed, {b / 1e9:.2f} of {total / 1e9:.2f} GB "
+            f"({b * 100 / total if total else 0:.0f}%), {b * 8 / 1e6 / el if el else 0:.0f} Mbit/s, "
+            f"ETA {eta:.0f} min")
 
     with ThreadPoolExecutor(max(1, threads)) as ex:
         futs = {ex.submit(up, n): n for n in names}
-        for fut in as_completed(futs):
-            try:
-                sent += fut.result()
-                done += 1
-            except Exception as e:                  # counted, reported, and the run exits 1
-                failed += 1
-                if failed <= 10:
-                    log(f"FAILED {futs[fut]}: {e!r}")
+        pending = set(futs)
+        # ⚠ A 30 s CHECK INSIDE as_completed ONLY FIRES WHEN A FILE FINISHES. Two rungs totalling
+        # 9.89 GB therefore logged NOTHING for ~10 minutes and read as hung. Waiting with a timeout
+        # ticks on the clock instead, so a single large file in flight still reports.
+        while pending:
+            just_done, pending = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
+            for fut in just_done:
+                try:
+                    sent += fut.result()
+                    done += 1
+                except Exception as e:              # counted, reported, and the run exits 1
+                    failed += 1
+                    if failed <= 10:
+                        log(f"FAILED {futs[fut]}: {e!r}")
             if time.monotonic() - last >= 30:
                 last = time.monotonic()
-                el = last - t1
-                rate = done / el if el else 0
-                eta = (len(names) - done - failed) / rate if rate else 0
-                log(f"progress: {done}/{len(names)} uploaded, {failed} failed, {sent / 1e9:.2f} GB, "
-                    f"{rate:.1f} files/s, {sent * 8 / 1e6 / el:.0f} Mbit/s, ETA {eta / 60:.0f} min")
+                report()
     log(f"done: {done} uploaded, {failed} failed, {sent / 1e9:.2f} GB in {(time.monotonic() - t1) / 60:.1f} min")
     return done, failed, sent
 
