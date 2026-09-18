@@ -1,0 +1,29 @@
+# Integrity check: nothing runs on this box that the repo does not declare. (hazync#380)
+#
+# Runs ON the coordinator against `localhost`, using the script's local mode rather than ssh: root has
+# no authorized_key for root@localhost here (measured 2026-09-18, Permission denied (publickey)), so an
+# ssh round trip would fail every run and the alert would be muted within days.
+#
+# The 2026-08-25 incident this guards: the live coordinator unit was a hand-edited hybrid holding
+# COORD_BIND and TRUSTED_PROXIES, both load-bearing and in no repo. Rebuilding from the repo would have
+# dropped them silently. systemd hides this twice over -- `systemctl cat` prints superseded lines as if
+# live, and daemon-reload does not restart -- so a bad edit detonates at some unrelated later restart.
+[Unit]
+Description=Hazync integrity: the box runs no unit configuration missing from the repo
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HAZYNC_DRIFT_REPO=/var/lib/hazync-drift/repo
+# Two runs before the first push. Drift is slow and human-caused, so one missed day costs nothing,
+# whereas a failed git fetch pushing immediately would train us to ignore this alert.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-unit-drift /usr/local/sbin/hazync-check-unit-drift localhost
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=600

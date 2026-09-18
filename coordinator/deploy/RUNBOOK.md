@@ -338,6 +338,7 @@ the phone once when a check starts failing, at most hourly while it lasts, and o
 | `check-spine.py --url` | web box | every 10 min | the copy `api.hazync.org` serves does not verify, or its tip is not mempool.space's block at that height (blockstream.info as fallback). Explorers publish no chainwork |
 | `check-continuity.py` | coordinator | every 10 min | a block from 1 to the spine's tip has no record of its own, a seam does not link (tip hash or boundary digest), block 1 does not start at genesis, or the last block does not end on the spine's tip |
 | `check-proofs.py` | coordinator | nightly 04:17 UTC | a stored proof no longer hashes to the receipt that was accepted, no longer verifies, or verifies to a different range than its record |
+| `check-unit-drift.sh` | coordinator | nightly 06:10 UTC | a live `*.conf` drop-in, or an `Environment=` key the units actually run with, appears in no repo file and is not listed in `unit-drift-allow.txt` |
 
 Measured before switching them on (2026-09-15): the genesis proof verifies in 50 ms and its tip hash and chainwork
 matched our node at block 41,539; the continuity walk took 0.24 s over 41,539 blocks with no gaps; one stored proof
@@ -353,6 +354,17 @@ install -m 644 coordinator/deploy/hazync-check-{spine,continuity,proofs}.{servic
 systemctl daemon-reload
 systemctl start hazync-check-spine.service hazync-check-continuity.service   # first runs: read them in the journal
 systemctl enable --now hazync-check-spine.timer hazync-check-continuity.timer hazync-check-proofs.timer
+
+# unit drift (hazync#380). Runs against `localhost` in the script's LOCAL mode, not over ssh: root has no
+# authorized_key for root@localhost here, so an ssh round trip would fail every run and get muted.
+# It keeps its OWN checkout at /var/lib/hazync-drift/repo and refreshes it each run -- /opt/hazync is
+# behind main by design and /root/hazync-release moves with the release build, so comparing against
+# either would report drift for config that is committed and fine.
+install -m 755 coordinator/deploy/hazync-check-unit-drift.sh /usr/local/sbin/hazync-check-unit-drift
+install -m 644 coordinator/deploy/hazync-check-unit-drift.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl start hazync-check-unit-drift.service        # first run: read it in the journal
+systemctl enable --now hazync-check-unit-drift.timer
 
 # web box (root). hazync-verify from a signed release: check SHA256SUMS.txt.asc and the file's sha256 first.
 install -m 755 check-spine.py      /usr/local/sbin/hazync-check-spine

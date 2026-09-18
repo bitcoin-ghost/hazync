@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Does the DEPLOYED unit contain anything this repo does not know about? (hazync#168 part C)
 #
-#   ./scripts/check-unit-drift.sh hazync-coord
+#   ./scripts/check-unit-drift.sh hazync-proof      # or `localhost`, running on the box itself
+#
+# ⚠ This said `hazync-coord` until 2026-09-18. That alias points at 152.53.93.164, the ORIGINAL
+# coordinator, which was retired that day. The coordinator has been 159.195.207.224 (`hazync-proof`)
+# since the 2026-09-16 cutover, so anyone following the old usage line checked a box that is gone.
 #
 # WHY THIS DIRECTION. The obvious check is "every path a doc names must exist". That check would
 # NOT have caught the incident this script exists for. On 2026-08-25 the production coordinator's
@@ -22,7 +26,7 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 HOST="${1:-}"
-[ -n "$HOST" ] || { echo "usage: $0 <ssh-host>   e.g. $0 hazync-coord" >&2; exit 2; }
+[ -n "$HOST" ] || { echo "usage: $0 <ssh-host>   e.g. $0 hazync-proof   (or localhost, on the box)" >&2; exit 2; }
 DROPINS_DIR=coordinator/deploy/dropins
 UNITS="${HAZYNC_UNITS:-hazync-coordinator hazync-bridge}"
 ALLOW="${HAZYNC_DRIFT_ALLOW:-coordinator/deploy/unit-drift-allow.txt}"
@@ -37,12 +41,25 @@ for u in $UNITS; do
     echo
     echo "=== $u on $HOST ==="
 
-    remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "
+    # ⚠ ONLY *.conf. systemd loads drop-ins matching *.conf and ignores everything else, so a parked
+    # copy like `height-cap.conf.parked.bak` (found on the bridge 2026-09-18) is inert -- reporting it
+    # as drift is a false alarm, and false alarms are how a check like this gets muted.
+    probe="
         systemctl show $u -p Environment --value | tr ' ' '\n' | grep -v '^\$' | sed 's/^/ENV /'
         systemctl show $u -p ExecStart --value | grep -oE 'argv\[\]=[^;]*' | sed 's/^/EXEC /'
         systemctl show $u -p User --value | sed 's/^/USER /'
-        ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | sed 's/^/DROPIN /'
-    " 2>/dev/null)
+        ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | grep '\.conf\$' | sed 's/^/DROPIN /'
+    "
+    # ⛔ localhost IS NOT AN SSH HOST. The timer that runs this check runs ON the coordinator, and root
+    # there has no authorized_key for root@localhost -- measured 2026-09-18: Permission denied
+    # (publickey). Going through ssh anyway would fail every single run with "could not read unit
+    # state", which reads as an infrastructure problem, gets muted, and leaves real drift unreported:
+    # precisely the silent failure this script exists to catch. So localhost runs the probe directly.
+    if [ "$HOST" = localhost ]; then
+        remote=$(bash -c "$probe" 2>/dev/null)
+    else
+        remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "$probe" 2>/dev/null)
+    fi
     if [ -z "$remote" ]; then bad "$u: could not read unit state from $HOST (unreachable, or unit absent)"; continue; fi
 
     # --- 1. drop-in FILES the repo does not ship ------------------------------------------------
