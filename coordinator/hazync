@@ -8,11 +8,12 @@ hazync — Proof Party contributor CLI.
   hazync prove <id>         # prove that range on your GPU  -> a receipt .bin
   hazync submit <id>        # sign the receipt with your key and submit it for verification
   hazync run [id]           # claim + prove + submit (id optional: takes the earliest free block)
-  hazync run [id] --distributed [--workers=N]
+  hazync run [id] --distributed [--workers=N|auto]
                             # prove ONE board block across MANY cards (mode 6). Serves the block and
                             # waits for `host seg-connect <this-box>:9110` workers to dial in; they may
                             # join at any time and survive a dropped link. --workers=N also starts N
-                            # workers here, one per card. Default 0 — cards come from outside, so this
+                            # workers here, one per card; `auto` uses every visible card, for a box
+                            # dedicated to this run. Default 0 — cards come from outside, so this
                             # never competes with board workers already running on this box.
                             # ⛔ Remote cards need HAZYNC_BIND=0.0.0.0 (the wire is unauthenticated:
                             # only on a network you trust, or forward the port over SSH).
@@ -1289,6 +1290,27 @@ def local_gpu_count():
     return sum(1 for line in out.splitlines() if line.startswith("GPU"))
 
 
+def resolve_workers(requested):
+    """How many local workers `--distributed` should start.
+
+    ⛔ DEFAULT 0, NOT "every card". The pull model is the point: cards dial in from outside, and a box
+    running board workers already has one prove per card. Starting a second prover per card there is
+    the VRAM collision gpu_lock exists to prevent (#97) — two po2-21 proves do not fit on a 46 GB card.
+    So an operator asks for local workers explicitly.
+
+    `--workers=auto` is the opt-in that uses every visible card, for a box dedicated to one run.
+    """
+    if requested is None:
+        return 0
+    if requested == "auto":
+        n = local_gpu_count()
+        if n == 0:
+            sys.exit("--workers=auto found no CUDA devices (nvidia-smi listed none). "
+                     "Name a number, or leave it unset and let cards dial in.")
+        return n
+    return requested
+
+
 def _prove_distributed(rng, work, env, claimed, port, want_local):
     """Prove ONE board block across N cards via mode 6, and leave `range_<n>.hzk` in `work`.
 
@@ -1454,12 +1476,16 @@ def cmd_run(args):
         if a == "--distributed":
             distributed = True
         elif a.startswith("--workers="):
-            try:
-                workers = int(a.split("=", 1)[1])
-            except ValueError:
-                sys.exit(f"--workers takes a number, got {a.split('=', 1)[1]!r}")
-            if workers < 0:
-                sys.exit("--workers cannot be negative")
+            val = a.split("=", 1)[1]
+            if val == "auto":
+                workers = "auto"
+            else:
+                try:
+                    workers = int(val)
+                except ValueError:
+                    sys.exit(f"--workers takes a number or 'auto', got {val!r}")
+                if workers < 0:
+                    sys.exit("--workers cannot be negative")
         elif a.startswith("-"):
             sys.exit(f"unknown option {a!r} — see `hazync --help`")
         else:
@@ -1535,7 +1561,7 @@ def cmd_run(args):
     # first, and a claimed block is one block by construction.
     _lo2, _hi2 = parse_range(rng)
     cmd_prove([rng], claimed=not args, submit_leaves=bool(args) and _hi2 > _lo2,
-              distributed=distributed, workers=(0 if workers is None else workers))
+              distributed=distributed, workers=resolve_workers(workers))
     cmd_submit([rng])
 
 _FOLD_CLAIMS_UNSUPPORTED = False   # set once a coordinator that predates #333 answers /api/foldclaim with 404

@@ -195,7 +195,24 @@ time.sleep(1)
 left = [p for p in live_children() if p not in before]
 check(not left, f"no fake-host processes survived teardown (left: {len(left)})")
 
-print("6. mode 6 is ONE block")
+print("6. MODE=distributed passes the flag (continuous mode\'s whole contract)")
+# ⛔ THE FLAG CANNOT RIDE IN $job. run-workers.sh interpolates it as ONE shell word, so
+# job="run --distributed" reaches the CLI as a single argument and main()'s dispatch dict looks up
+# "run --distributed" and reports an unknown command. It needs its own variable, appended UNQUOTED.
+# Without this assertion MODE=distributed is ACCEPTED and silently behaves as plain prove mode --
+# worse than rejecting it, because the operator sees workers running and no distribution happening.
+import subprocess as _sp
+_probe = r'''
+job="run"; job_args="--distributed"
+bash -c 'set -- '"$job"' '"$job_args"'; printf "%s|" "$#"; for a in "$@"; do printf "[%s]" "$a"; done'
+'''
+_out = _sp.run(["bash", "-c", _probe], capture_output=True, text=True).stdout.strip()
+check(_out == "2|[run][--distributed]", f"MODE=distributed yields argv: run --distributed (got {_out!r})")
+_probe0 = _probe.replace('job_args="--distributed"', 'job_args=""')
+_out0 = _sp.run(["bash", "-c", _probe0], capture_output=True, text=True).stdout.strip()
+check(_out0 == "1|[run]", f"...and an empty job_args leaves other modes untouched (got {_out0!r})")
+
+print("7. mode 6 is ONE block")
 try:
     hz._prove_distributed("100-200", tempfile.mkdtemp(), dict(os.environ), False, 9113, 0)
     one_block = False

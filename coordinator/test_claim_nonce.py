@@ -120,7 +120,10 @@ _PK = _SK.public_key().public_bytes(serialization.Encoding.Raw, serialization.Pu
 got = []
 hz.HOSTBIN = sys.executable
 hz.identity = lambda: (_SK, _PK, "tester")
-hz.cmd_prove = lambda args, claimed=False, submit_leaves=False: got.append(args[0])
+# **kw, because this stands in for a real function whose signature grows: #367 added distributed,
+# workers and port, and a stub pinned to the old parameter list failed with "unexpected keyword
+# argument 'distributed'" — in CI, not here, because nothing local ran the other suites.
+hz.cmd_prove = lambda args, claimed=False, submit_leaves=False, **kw: got.append(args[0])
 hz.cmd_submit = lambda args: None
 hz.time.sleep = lambda s: None                   # the retry backoff, not what is under test
 

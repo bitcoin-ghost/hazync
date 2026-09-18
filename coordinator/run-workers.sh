@@ -47,9 +47,10 @@ STOP="${2:-}"
 COORD_URL="${COORD_URL:-https://api.hazync.org}"
 LOG_DIR="${LOG_DIR:-$HOME/hazync-workers}"
 MODE="${MODE:-prove}"
+job_args=""      # extra CLI arguments; only MODE=distributed sets any
 case "$MODE" in
-    prove|fold|mixed|spine) ;;
-    *) echo "MODE must be prove, fold, mixed or spine (got: $MODE)" >&2; exit 2 ;;
+    prove|fold|mixed|spine|distributed) ;;
+    *) echo "MODE must be prove, fold, mixed, spine or distributed (got: $MODE)" >&2; exit 2 ;;
 esac
 # The CLI is `hazync` in the repo and `hazync-worker` on the release — `hazync` alone is too generic
 # a name to drop into someone's PATH, so packaging renames it. This script only ever looked for the
@@ -185,6 +186,12 @@ for i in $(seq 1 "$N"); do
         job="spine"; tag="hazync-spine-loop-$i"
     elif [ "$MODE" = fold ] || { [ "$MODE" = mixed ] && [ "$i" = "$((N-1))" ] && [ "$N" -gt 1 ]; }; then
         job="fold"; tag="hazync-fold-loop-$i"
+    elif [ "$MODE" = distributed ]; then
+        # ⛔ THE FLAG CANNOT RIDE IN $job. It is interpolated as ONE shell word (measured: argc=1), so
+        # `job="run --distributed"` reaches the CLI as a single argument and main()'s dispatch dict
+        # looks up "run --distributed" and reports an unknown command. It needs its own variable,
+        # appended UNQUOTED at the invocation, which is why only that one line changes.
+        job="run"; job_args="--distributed"; tag="hazync-distributed-loop-$i"
     else
         job="run";  tag="hazync-worker-loop-$i"
     fi
@@ -206,7 +213,7 @@ for i in $(seq 1 "$N"); do
             # `hazync notify`), the first success after that pushes another, and a stopped loop pushes too.
             log="'"$LOG_DIR"'/worker_'"$i"'.log"; fails=0; alerted=0
             while true; do
-                "./$CLI_NAME" '"$job"' >> "$log" 2>&1
+                "./$CLI_NAME" '"$job"' '"$job_args"' >> "$log" 2>&1
                 rc=$?
                 if [ "$rc" -eq 78 ]; then
                     echo "worker '"$i"' stopped: unrecoverable (guest id mismatch, or no usable GPU), see $log" >&2
