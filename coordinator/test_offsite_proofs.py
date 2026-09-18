@@ -47,6 +47,7 @@ class FakeS3:
         self.objects = {}                 # (bucket, key) -> bytes
         self.puts = []
         self.transfers = []               # (key, Config) for uploads that came through upload_fileobj
+        self.callbacks = []               # (key, bytes reported) — proves the progress hook actually ran
         self.fail_names = set(fail_names)
 
     def get_paginator(self, name):
@@ -71,12 +72,25 @@ class FakeS3:
     # the 9.4 GB rung state_744257.bin failed against R2 on 2026-09-18. Appends to the SAME self.puts
     # list as put_object: "what got uploaded" is one question, not two, and every existing assertion
     # about ck.puts stays meaningful whichever path the caller took.
+    # ⛔ THE CALLBACK MUST FIRE, IN PARTS. Everything the caller does DURING a multi-GB upload hangs off
+    # it: charging the rate limiter per part, and reporting progress while one large file is still in
+    # flight. A stand-in that ignored Callback left both invisible to this suite -- the run went green
+    # while neither behaviour was exercised at all.
     def upload_fileobj(self, Fileobj, Bucket, Key, ExtraArgs=None, Callback=None, Config=None):
         if os.path.basename(Key) in self.fail_names:
             raise RuntimeError("simulated upload failure")
-        self.objects[(Bucket, Key)] = Fileobj.read()
+        body = Fileobj.read()
+        self.objects[(Bucket, Key)] = body
         self.puts.append(Key)
         self.transfers.append((Key, Config))
+        if Callback:                       # delivered in chunks, as a real multipart upload does
+            step = max(1, (Config.multipart_chunksize if Config else 0) or 8)
+            sent = 0
+            while sent < len(body):
+                n = min(step, len(body) - sent)
+                Callback(n)
+                sent += n
+            self.callbacks.append((Key, sent))
 
 
 fails = 0
@@ -452,6 +466,43 @@ check(off.MULTIPART_THRESHOLD <= 5 * 1024 ** 3,
 check(off.MULTIPART_CHUNKSIZE * 10000 >= 100 * 1024 ** 3,
       f"parts are large enough that a 100 GB archive stays inside the 10,000-part cap "
       f"({off.MULTIPART_CHUNKSIZE / 1e6:.0f} MB parts)")
+
+# ⛔ THE RATE LIMIT WAS CHARGED ONCE PER FILE, AND THAT IS WHY --bwlimit DID NOT BIND.
+#    rl.take(whole_file_size) ran before the upload started. The bucket holds one second of budget, so
+#    that single oversized charge hit the `tokens >= bps` escape hatch, returned immediately, and the
+#    9.4 GB transfer then streamed with nothing charging it at all: measured 156, 133 and 158 Mbit/s
+#    against --bwlimit-mbit 64.
+#
+#    ⚠ A TIMING TEST CANNOT TELL THE TWO APART. Both versions throttle a series of small charges, and
+#    both wait on a single oversized one. What actually changed is WHERE the charge happens, so that is
+#    what this pins: the limiter must be charged per PART, which means more calls than there are files.
+spy_calls = []
+_orig_take = off.RateLimit.take
+
+
+def _spy_take(self, n):
+    spy_calls.append(n)
+    return _orig_take(self, n)
+
+
+off.RateLimit.take = _spy_take
+try:
+    ckr = FakeS3()
+    rc, out = run(ckr, "checkpoints", "--checkpoints", CKPT)
+finally:
+    off.RateLimit.take = _orig_take
+
+n_files = len([k for k in ckr.puts if k.startswith(C)])
+check(rc == 0 and n_files >= 2, f"the spy run uploaded the rungs (rc={rc}, {n_files} files)")
+check(len(spy_calls) > n_files,
+      f"the rate limiter is charged per PART, not once per file "
+      f"({len(spy_calls)} charges for {n_files} files)")
+check(all(n <= off.MULTIPART_CHUNKSIZE for n in spy_calls),
+      "no single charge exceeds one part, so the bucket is never handed a whole file at once")
+check(len(ckr.callbacks) == n_files and all(b > 0 for _, b in ckr.callbacks),
+      f"the progress callback fired for every upload ({ckr.callbacks})")
+check(sum(b for _, b in ckr.callbacks) == sum(len(v) for (bk, k), v in ckr.objects.items() if k.startswith(C)),
+      "the bytes reported by the callback add up to the bytes actually stored")
 
 print(f"{'CONTROL: ' if CONTROL else ''}{fails} failure(s)")
 if CONTROL:
