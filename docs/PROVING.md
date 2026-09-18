@@ -117,6 +117,14 @@ NGPU=2 LO=1 HI=550 HAZYNC_WITNESS_DIR=/w bash rangecluster.sh   # multi-GPU fan-
 submitted range) additionally emits a full boundary digest so ranges can be chained on the same seam
 invariant the guest fold enforces. See [`SPEC.md`](SPEC.md) §10.
 
+> **One board block across many cards.** `prove-range-bridge` proves a board block in a single process, so
+> a large block gets one card however many you have. Since #361/#364 `seg-serve` can serve the same block
+> as a **mode-6 bridge range** — `HAZYNC_RANGE=<n> ./host seg-serve` with `seg-connect` workers — spreading
+> its segments across N cards and still emitting the `KIND_RANGE` receipt the coordinator accepts. The
+> chunk/aggregate path in [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md) proves a *fixture* and its receipt
+> is **not** submittable. See
+> [A board block across many cards](FLEET_OPERATIONS.md#a-board-block-across-many-cards-mode-6).
+
 ## Prover reliability: the risc0 segment-boundary retry
 
 The pinned prover (`risc0-circuit-rv32im` 4.0.5) has a preflight bug: for ~10% of blocks a proving

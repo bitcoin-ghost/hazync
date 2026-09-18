@@ -1,7 +1,11 @@
 # Fleet operations — one block across many GPUs
 
 How to prove a single block on many cards with the shipped CORE build (v0.21.x, canonical `METHOD_ID` in
-`reproduce/METHOD_ID`). Everything here is one binary, `hazync-host-x86_64-linux-gnu-cuda` (called `./host`
+`reproduce/METHOD_ID`).
+
+> **Proving a block from the board?** Go to
+> [A board block across many cards (mode 6)](#a-board-block-across-many-cards-mode-6). The chunk and
+> aggregate sections below prove a *fixture*, and their receipt is one the coordinator will not accept. Everything here is one binary, `hazync-host-x86_64-linux-gnu-cuda` (called `./host`
 below). Commands, defaults and constants are read from `prover/host/src/main.rs`; numbers cite the run that
 measured them.
 
@@ -93,6 +97,69 @@ HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
 Wire tags are bits of the job index: `JOIN_TAG` bit 31, `RESOLVE_TAG` bit 30, `NOLIFT_TAG` bit 29,
 `LIFT_TAG` bit 28. A worker tests resolve before join, because both bodies are pairs.
 
+## A board block across many cards (mode 6)
+
+Everything above proves a **fixture**: `HAZYNC_BLOCK=block_<n>.json`, chunks, then the mode-5 aggregate.
+That path cannot be submitted to the board. The coordinator verifies a **`KIND_RANGE`** receipt, and the
+fixture path emits mode 4 (`KIND_CHUNK`) or the mode-5 aggregate — so before #361/#364 the fast path was
+unsubmittable and the submittable path (`prove-range-bridge`) was one card, however large the block.
+
+Mode 6 closes that: `seg-serve` serves a **bridge range**, so a board block gets N cards and still produces
+the receipt the coordinator accepts.
+
+```sh
+# segment coordinator — ONE block, from its bridge bundle. No HAZYNC_BLOCK, no chunks.
+HAZYNC_RANGE=74928 HAZYNC_BRIDGE_OUT=/workspace HAZYNC_PORT=9110 ./host seg-serve
+
+# every worker, on any machine that can reach it — unchanged from the aggregate
+HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
+```
+
+- The bundle is read from **`$HAZYNC_BRIDGE_OUT/bundle_<n>.json`** (default `/root/bridge_bundles`). There is
+  no `HAZYNC_BLOCK` fixture for a board block — that is precisely why `build_full()` cannot serve this path.
+- `HAZYNC_CHUNKS` is **not used**. A range is one session; the parallelism is segments across cards, not
+  chunks across cards.
+- ⛔ **`HAZYNC_LIFTX_HINT` is NOT read here**, exactly as it is not read by `prove-range-bridge`. The hint
+  table is written by `write_chunk_inputs`; mode 6 goes through `write_range_env`, which mode 6 and
+  `prove-range-bridge` share so their receipts stay interchangeable. Setting it changes nothing on this path.
+- **Put a worker on the coordinator's own card**, as with the aggregate — `seg-serve` distributes but does
+  not prove.
+
+### ⛔ A distributed prove must beat its claim
+
+A board block is claimed before it is proved, and a claim that has never reported progress is released
+after `CLAIM_GRACE` (600 s). A block worth distributing takes an hour, so this matters: the worker watches
+`seg-serve`'s output, and mode 6 prints a **different shape** from a single-card prove —
+
+```
+     91/2352 segments  124s elapsed, ~3071s left     <- number FIRST, noun PLURAL
+     joins 25/2352
+```
+
+against a single-card prove's `segment 91/2352` (number last, singular). `hazync` understands both since
+#368. An older worker does not, so on a distributed run its progress never rises, the claim is never
+beaten, and the coordinator hands the block to someone else ten minutes in. **Use a worker from v0.21.7 or
+later for mode 6.**
+
+### Measured
+
+The first mode-6 run, block **74,928** on 3 × RTX 4090 with the canonical guest verified on all three
+([`history/BENCH_MODE6_3xRTX4090_2026-09-17.md`](history/BENCH_MODE6_3xRTX4090_2026-09-17.md)):
+
+```
+execution         123.6 s
+worker wall      2622.7 s   <- 2,352 segments pushed over the network
+assembly          948.1 s   <- last segment + join tree + resolves
+TOTAL            3694.4 s
+```
+
+Both tips matched what the board recorded for that range, and the receipt was **229,754 bytes — the same
+size as the one submitted for the same block from a single card**. The two paths are interchangeable by
+construction: one helper writes the input stream for both.
+
+⚠ Wait dominated: pod 2 waited 1,855 s of its 3,694 s. Three cards on a 2,352-segment block is not the
+shape to optimise for — see the per-pod table in the record.
+
 ## Knobs
 
 | variable | default | what it does |
@@ -100,8 +167,10 @@ Wire tags are bits of the job index: `JOIN_TAG` bit 31, `RESOLVE_TAG` bit 30, `N
 | `HAZYNC_SEG_PO2` | **21** on CUDA, 20 otherwise | segment size. po2 21 peaks near **22 GB**; po2 22 peaks ~40.6 GB and measured ~11.5% faster on an L40S ([`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) §3.1), so only on ≥46 GB cards |
 | `HAZYNC_CHUNKS` | 2 | chunk count; identical on every command |
 | `HAZYNC_CHUNK` | 0 | chunk index for `seg-serve` in chunk mode (`prove-chunk` takes it as an argument) |
-| `HAZYNC_BLOCK` | `block_full.json` | the block file |
+| `HAZYNC_BLOCK` | `block_full.json` | the block file (fixture path only; mode 6 does not use it) |
 | `HAZYNC_AGG` | unset | serve the mode-5 aggregate. **Presence-tested** |
+| `HAZYNC_RANGE` | unset | `=<n>` serves the **mode-6 bridge range** for board block `n`, from `$HAZYNC_BRIDGE_OUT/bundle_<n>.json`. Parsed, not presence-tested |
+| `HAZYNC_BRIDGE_OUT` | `/root/bridge_bundles` | where mode 6 reads `bundle_<n>.json` |
 | `HAZYNC_RECEIPTS` | `.` | directory holding the chunk receipts |
 | `HAZYNC_OUT` | `chunk_<i>.hzk` / `aggregate_receipt.bin` | receipt output path |
 | `HAZYNC_PORT` | 9110 | `seg-serve` listen port |
