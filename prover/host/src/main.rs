@@ -281,6 +281,42 @@ fn job_timeout_min_samples() -> usize {
     std::env::var("HAZYNC_JOB_TIMEOUT_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(16)
 }
 
+// hazync#367: how long to wait with NO worker connected while work is still outstanding.
+//
+// MEASURED 2026-09-17, on the run that validated #365. After the deadline dropped a quiet peer and
+// requeued its 4 segments, the coordinator stayed alive and listening with nobody connected --
+// serve=1, listening=1, the log frozen at the breach line -- through t+30 s, t+60 s and t+90 s, and
+// was still holding the port when the run was abandoned.
+//
+// With an operator watching that is defensible: `seg-connect` has no reconnect, so a replacement
+// worker is started by hand and the requeued work is there waiting for it. Unattended it is a silent
+// hang, which is precisely what #367 warns about -- "an operator driving three shells notices a
+// stall; a one-command run does not". #365 made a QUIET WORKER fail fast; a run that loses EVERY
+// worker still waited for ever.
+//
+// 600 s is the same floor #365 uses and the same the worker CLI uses for HAZYNC_STALL_MIN. Reusing
+// that judgement beats inventing a third one, and it is comfortably long enough to start a worker by
+// hand after noticing.
+fn no_peers_timeout_s() -> f64 {
+    std::env::var("HAZYNC_NO_PEERS_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(600.0)
+}
+
+/// Whether the run should give up: nobody is connected, work is stranded, and it has been that way
+/// for longer than the timeout.
+///
+/// Pure so it can be tested without a socket, exactly like `peer_job_timeout_s`. Each condition is
+/// load-bearing and the middle one is the dangerous one to omit:
+///
+/// - `live_peers > 0` -- someone is proving. Never give up on a run that is making progress.
+/// - `outstanding > 0` -- something is actually stranded. ⛔ A run whose segments are all back and
+///   whose join tree is being assembled locally legitimately has NO peers; giving up there would
+///   destroy a finished proof seconds before it is written out.
+/// - `quiet_s > timeout_s` -- past the grace. A worker may be restarting, and a run that has just
+///   lost its only peer has not yet failed.
+fn no_peers_breached(live_peers: usize, outstanding: usize, quiet_s: f64, timeout_s: f64) -> bool {
+    live_peers == 0 && outstanding > 0 && quiet_s > timeout_s
+}
+
 /// This peer's deadline, in seconds, from its own observed round trips.
 ///
 /// Pure so it can be tested without a socket: `rtts` is that peer's completed round trips in seconds,
@@ -5961,16 +5997,32 @@ fn seg_serve_cmd() {
     // can be plain detached threads. The main thread then stays free to drive the tree WHILE they
     // are still alive, which is the whole point.
     let acc_alldone = alldone.clone();
+    // hazync#367: how many workers are connected RIGHT NOW. Incremented on accept, decremented where
+    // each connection thread returns what it owed, so it counts live provers rather than sockets ever
+    // seen. The acceptor is the only reader, which is why the "how long has it been zero" clock below
+    // is a plain local -- no second shared structure, no mutex.
+    let live_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let acc_live = live_peers.clone();
     let (aq, ao, aw, aj, ajo, alo, atk) =
         (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone(),
          total_known.clone());
     // Detached on purpose -- see the deadlock note above; nothing joins this handle.
     let _acceptor = std::thread::spawn(move || {
         let mut handles = Vec::new();
+        // hazync#367: when the peer count last fell to zero with work still outstanding. `None` while
+        // anyone is connected, or while nothing is stranded. Local because the WouldBlock arm below is
+        // the only reader; see the note there.
+        let mut quiet_since: Option<Instant> = None;
         while !acc_alldone.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
                 Ok((s, peer)) => {
                     println!("  worker connected from {peer}");
+                    // hazync#367: counted here and decremented at the very end of this thread, below.
+                    // Incrementing and decrementing in one place keeps them impossible to desynchronise
+                    // -- a leaked count would make the no-peers check believe a worker is still there
+                    // and never fire, which is the failure this is meant to remove.
+                    acc_live.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let live = acc_live.clone();
                     let (queue, out, wire, jobs, jout, alldone, last_out, total_known) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(),
                          alo.clone(), atk.clone());
@@ -6217,9 +6269,38 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                             let mut j = jobs.lock().unwrap();
                             for (t, b, _) in injobs.lock().unwrap().drain(..) { j.push_front((t, b)); }
                         }
+                        // hazync#367: the matching decrement for the fetch_add on accept. It belongs
+                        // HERE, after the owed work is back on the queues -- so by the time the count
+                        // can reach zero, everything this peer held is visible as outstanding work
+                        // rather than briefly invisible to the check.
+                        live.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     }));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // hazync#367: nobody connected, work stranded, and it has stayed that way.
+                    //
+                    // This rides the existing 50 ms wake rather than adding a thread, the same way
+                    // #365's deadline rides the writer's 20 ms idle poll. `quiet_since` is a plain
+                    // local because this loop is its only reader -- no second shared clock.
+                    let n = acc_live.load(std::sync::atomic::Ordering::Relaxed);
+                    let outstanding = aq.lock().unwrap().len() + aj.lock().unwrap().len();
+                    if n > 0 || outstanding == 0 {
+                        quiet_since = None;      // someone is here, or nothing is stranded
+                    } else {
+                        let since = *quiet_since.get_or_insert_with(Instant::now);
+                        let win = no_peers_timeout_s();
+                        if no_peers_breached(n, outstanding, since.elapsed().as_secs_f64(), win) {
+                            // Loud, for the same reason #365's drop is loud: a coordinator holding a
+                            // port in silence reads as "the run is just slow".
+                            println!("  ⛔ no worker has been connected for {:.0}s and {outstanding} \
+piece(s) of work are stranded (window {win:.0}s, HAZYNC_NO_PEERS_TIMEOUT). Giving up — hazync#367.",
+                                     since.elapsed().as_secs_f64());
+                            println!("     seg-connect has no reconnect: a worker that dropped will not \
+come back by itself. Start one against this coordinator, or re-run.");
+                            acc_alldone.store(true, std::sync::atomic::Ordering::Relaxed);
+                            std::process::exit(1);
+                        }
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => { println!("  accept failed: {e}"); break; }
@@ -6677,7 +6758,7 @@ impl Drop for Report119OnExit {
 
 #[cfg(test)]
 mod join_tree_tests {
-    use super::{join_tree_widths, peer_job_timeout_s};
+    use super::{join_tree_widths, peer_job_timeout_s, no_peers_breached};
 
     /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
     #[derive(Clone, PartialEq, Eq, Debug)]
@@ -6794,5 +6875,43 @@ mod join_tree_tests {
                 assert!(pair[1] < pair[0], "width must strictly shrink, n={n}: {pair:?}");
             }
         }
+    }
+
+    /// hazync#367. MEASURED 2026-09-17 on the run that validated #365: after the deadline dropped a
+    /// quiet peer and requeued its 4 segments, `seg-serve` stayed alive and listening with nobody
+    /// connected through t+30 s, t+60 s and t+90 s, and was still holding the port when the run was
+    /// abandoned. These are the conditions under which giving up is right -- and, more importantly,
+    /// the ones under which it would be WRONG.
+    #[test]
+    fn no_peers_timeout_fires_only_when_work_is_stranded() {
+        let win = 600.0;
+
+        // A connected worker is proving. However long the run takes and however deep the queue, a
+        // coordinator with peers has not failed.
+        for quiet in [0.0, 600.0, 86_400.0] {
+            assert!(!no_peers_breached(1, 12, quiet, win), "a live peer must never trip it, quiet={quiet}");
+            assert!(!no_peers_breached(3, 1, quiet, win), "three live peers must never trip it, quiet={quiet}");
+        }
+
+        // ⛔ THE DANGEROUS ONE. Once every segment is back and the join tree is being assembled
+        // locally there are legitimately NO peers and nothing outstanding. Firing here would kill the
+        // run seconds before it writes out a finished proof -- destroying hours of fleet time at the
+        // moment of success.
+        for quiet in [0.0, 600.0, 86_400.0] {
+            assert!(!no_peers_breached(0, 0, quiet, win),
+                    "no peers but nothing stranded is a FINISHING run, not a failure (quiet={quiet})");
+        }
+
+        // The measured case: 4 segments requeued, nobody connected. At the 90 s actually observed it
+        // must NOT fire -- that is one hand-started worker away from finishing -- and past the window
+        // it must, because `seg-connect` has no reconnect and nobody is coming back by themselves.
+        assert!(!no_peers_breached(0, 4, 90.0, win), "90 s of quiet is well inside the 600 s grace");
+        assert!(!no_peers_breached(0, 4, 600.0, win), "exactly at the window is not yet past it");
+        assert!(no_peers_breached(0, 4, 600.1, win), "past the window with work stranded, give up");
+        assert!(no_peers_breached(0, 1, 3600.0, win), "a single stranded job is still stranded");
+
+        // The knob must actually move the boundary, or it is decoration.
+        assert!(no_peers_breached(0, 4, 61.0, 60.0), "a tightened window fires sooner");
+        assert!(!no_peers_breached(0, 4, 1000.0, 3600.0), "a widened window waits longer");
     }
 }
