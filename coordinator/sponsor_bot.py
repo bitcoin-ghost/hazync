@@ -314,6 +314,65 @@ def has_bundle(h):
     return any(os.path.exists(f) for f in files)
 
 
+# Measured on the live coordinator's own bridge journal, 2026-09-18: 230,000 -> 742,257 is 508,000 blocks
+# in 41.4 h of walking. There is no single rate for the chain — 0.019 s/block below 100,000 against 0.596
+# near the tip, because the cost follows the UTXO set — so this is the average across the gap, which is
+# the span these replays actually walk.
+REGEN_S_PER_BLOCK = 0.294
+# A replay longer than this is REPORTED, never suggested: it is a decision, not a chore.
+REGEN_WALK_WARN = 50000
+CKPT_ARCHIVE = os.environ.get("HAZYNC_CKPT_ARCHIVE", "/srv/bulk/hazync/checkpoints")
+
+# test_regen_advice.py --control sets this, to show the "no checkpoint below it" refusal can fail.
+_CONTROL_IGNORE_MISSING_RUNG = False
+
+
+def regen_advice(plan, waiting, s_per_block=REGEN_S_PER_BLOCK, warn_blocks=REGEN_WALK_WARN):
+    """One line on whether held blocks with no bundle can be regenerated, and what that would cost.
+
+    Pure. `plan` is what regen_bundles.plan() returned, so the "strictly below" rule lives in ONE place
+    rather than being restated here where the two could drift apart.
+    """
+    if not plan:
+        return None
+    if plan["missing"] and not _CONTROL_IGNORE_MISSING_RUNG:
+        return (f"{waiting} held block(s) have no bundle and CANNOT be regenerated: no archived checkpoint "
+                f"below height {min(plan['missing'])}. A replay without one starts at GENESIS (~6 days) "
+                f"while looking exactly like a working job.")
+    span = plan["hi"] - plan["rung"]
+    hours = span * s_per_block / 3600.0
+    if span > warn_blocks:
+        return (f"{waiting} held block(s) have no bundle. Regeneration is possible but expensive: the "
+                f"nearest checkpoint below them is {plan['rung']:,}, so the replay walks {span:,} blocks "
+                f"(~{hours:.1f} h at the measured {s_per_block} s/block) to produce {waiting}. NOT started "
+                f"— hazync#379 puts checkpoints inside the gap, cutting this to ~{warn_blocks:,} blocks.")
+    return (f"{waiting} held block(s) have no bundle; regenerate from checkpoint {plan['rung']:,} with a "
+            f"{span:,}-block replay (~{hours:.1f} h): "
+            f"coordinator/deploy/regen_bundles.py --heights <heights> --apply")
+
+
+def regen_note(heights):
+    """regen_advice() for these heights against the archived checkpoints, or None.
+
+    ⛔ NEVER RAISES. This runs at startup, before a single pod is rented; an exception here would stop
+    every sponsorship over what is only a reporting improvement. Any failure falls back to the caller's
+    plain message.
+
+    ⛔ The import is lazy on purpose: regen_bundles imports THIS module inside its own main() for
+    --from-waiting, so importing it at module level here would be a cycle.
+    """
+    try:
+        import sys
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy")
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        import regen_bundles
+        return regen_advice(regen_bundles.plan(heights, regen_bundles.archived_rungs(CKPT_ARCHIVE)),
+                            len(heights))
+    except Exception:
+        return None
+
+
 def covered(coord, heights):
     """The heights among `heights` covered by verified proofs, whoever made them."""
     return {h for h, f in coord.blocks(heights).items() if f["covered"]} if heights else set()
@@ -841,9 +900,17 @@ class Bot:
             if fixed:
                 self.log(f"corrected {fixed} work row(s) whose block was proven before its pod was stopped")
             if self.trial is None:
-                waiting = len(pending_work(self.coord, need_bundle=False)) - len(pending_work(self.coord))
-                if waiting:
-                    self.log(f"{waiting} held block(s) have no bundle yet and wait for the bridge: no pod is rented for them")
+                have = {h for _, h in pending_work(self.coord)}
+                unbundled = [h for _, h in pending_work(self.coord, need_bundle=False) if h not in have]
+                if unbundled:
+                    # ⛔ "wait for the bridge" is a wait FOR EVER in the 418,269-967,499 gap: the live
+                    # bridge runs HAZYNC_BRIDGE_EMIT_FROM=967500, so it walks those heights writing no
+                    # bundle and will never come back for them. Say whether they can be made from an
+                    # archived checkpoint instead, and what that costs. Reporting only — a replay is
+                    # hours and this runs before any pod is rented.
+                    self.log(regen_note(unbundled) or
+                             f"{len(unbundled)} held block(s) have no bundle yet and wait for the bridge:"
+                             " no pod is rented for them")
             if self.trial is not None:
                 bad = trial_refusals(self.coord, self.trial)
                 if bad:
