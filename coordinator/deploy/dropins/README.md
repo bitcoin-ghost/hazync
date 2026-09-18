@@ -147,3 +147,20 @@ proven throughout.
 `<unit>-alert.conf` → live `/etc/systemd/system/<unit>.service.d/alert.conf`, for the coordinator,
 bridge, backup, retention check and node tip. They route failures (and, for the two `Restart=always`
 services, crashes) to `hazync-alert.sh`. See RUNBOOK § Alerts.
+
+## The bridge height cap, and why there is no longer one (hazync#397)
+
+`hazync-bridge-height-cap.conf` is gone as of #398. Its history is worth keeping, because the file it
+left behind on the box was a trap:
+
+| when | value | reason |
+|---|---|---|
+| 2026-07-30 | `HAZYNC_BRIDGE_TO=220000` | emergency: the accumulator fix took the bridge to 77,600 blocks/hr and it would have filled `/root` in ~10 h |
+| 2026-09-16 21:30 | `HAZYNC_BRIDGE_TO=418257` | "parked for the 21:00 cutover; raise this again afterwards" |
+| 2026-09-16 23:57 | `HAZYNC_BRIDGE_TO=967300` | "walk to the chain tip", safe only because `EMIT_FROM=967500` stops it writing bundles |
+| 2026-09-18 | *removed* | ⛔ 967300 is **below** `EMIT_FROM=967500`, so the bridge halted before it could ever emit and the board was frozen at 418,268 for ever (#397) |
+
+⛔ The 418257 version survived on the coordinator as `height-cap.conf.parked.bak` until 2026-09-18.
+systemd only loads `*.conf`, so it was inert — but renaming it back would have re-capped the bridge at
+almost exactly the height the board was already stuck at. It was deleted rather than left as a
+plausible-looking "backup" of a setting that must not come back.
