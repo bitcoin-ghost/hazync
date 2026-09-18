@@ -1,0 +1,23 @@
+# Free space on the filesystems the coordinator cannot do without (hazync#397).
+#
+# Nothing watched disk before this. check-retention.py is the G1 receipt gate despite the name, and
+# prune_bundles.py has never been deployed. This became load-bearing when the bridge was allowed to
+# become tip-following: ~9 GB/day, which is fine until it is not, and nobody would have been told.
+[Unit]
+Description=Hazync: free space on /srv/bulk and / is above the floor
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HAZYNC_DISK_PATHS=/srv/bulk /
+Environment=HAZYNC_DISK_FLOOR_GB=500
+# Two runs before paging. Disk fills over weeks, not minutes, and a df that fails once should not page.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-disk /usr/local/sbin/hazync-check-disk
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=120

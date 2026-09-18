@@ -180,6 +180,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_archive_checkpoint.py --control
+      - name: Free space is watched at all (#397)
+        run: cd coordinator && python3 test_check_disk.py
+      - name: Disk check POSITIVE CONTROL (floor comparison removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_check_disk.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #
