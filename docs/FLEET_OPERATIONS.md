@@ -121,6 +121,32 @@ default (#365) because the wire is **unauthenticated**, so a remote worker gets 
 coordinator that is running perfectly. Since #401 the shell says so as it binds, rather than leaving you to
 infer it from a refused connection. `HAZYNC_SEG_REMOTE=1` implies `0.0.0.0`.
 
+### One command instead of the two above (#367)
+
+The recipe above claims nothing and submits nothing — it proves a block you already chose. `hazync` can drive
+the whole thing under your own key:
+
+```sh
+# claim the earliest free block, serve it, wait for cards, submit it
+hazync run --distributed
+
+# or a specific block, also starting 4 local workers (one per card)
+HAZYNC_BIND=0.0.0.0 hazync run 74928 --distributed --workers=4
+```
+
+- **`--workers` defaults to 0**, so nothing competes with board workers already running on this box. Cards come
+  from outside: start `host seg-connect <this-box>:9110` wherever you like, and since #402 a worker that arrives
+  **before** the server waits and retries rather than dying, so they may join in any order and at any time.
+- The receipt is the same `range_<n>.hzk` one card would have produced, so submission is unchanged.
+- ⛔ **One block.** Mode 6 serves a single bridge range; `hazync run 100-200 --distributed` is refused up front.
+- The claim is beaten from a progress-gated ticker throughout, so a run far longer than `CLAIM_GRACE` (600 s)
+  keeps its block — and a **wedged** fleet still loses it, which is the behaviour you want.
+
+⚠ **This costs throughput on the board.** Measured 2026-09-18 on block 230,000: four cards pooled on one block
+is **96.0 s/block**, while the same four cards proving a block each is **82.9 s/block**. Pooling buys **latency**
+on one block (3.45x), not more blocks per hour. Use it for the block holding the frontier, for a large block, or
+for the tip — not to make the party go faster.
+
 ⚠ Binding `0.0.0.0` exposes the port to anyone who can route to it, and **anyone who can reach it can feed work
 in**. Expose it only on a network you trust, or forward it over SSH (`ssh -N -L 9110:127.0.0.1:9110 …`) and
 point the worker at `127.0.0.1:9110`. A rented pod usually publishes only the ports declared when it was
