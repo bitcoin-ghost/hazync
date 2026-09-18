@@ -180,6 +180,93 @@ jobs:
         run: |
           cd coordinator
           python3 test_archive_checkpoint.py --control
+
+      # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
+      #
+      # Registration here is by hand, one step per test — there is no glob, `pytest` or discovery in this
+      # workflow. Twelve coordinator suites were therefore never run by CI at all: not removed, not
+      # quarantined, simply dropped on the way in. All twelve pass, `git log -S` over .github/ shows none
+      # of them was ever registered and later taken out, no workflow file has ever been deleted, and they
+      # are not merely recent (test_node_tip.py dates to 2026-08-17).
+      #
+      # Eleven of the twelve ship a POSITIVE CONTROL, so this adds 23 steps. A control that never runs is
+      # the "checks that cannot fail" shape these controls exist to catch, one level up.
+      #
+      # Cost measured before adding them: 26 s for all twelve, plain + control, of which test_sponsor_bot
+      # is 18 s and the rest are about a second each. No new dependencies — three import `cryptography`,
+      # which eight already-registered suites here use today.
+      - name: Claim caps (test_claim_cap.py)
+        run: cd coordinator && python3 test_claim_cap.py
+      - name: Claim caps POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_claim_cap.py --control
+      - name: Claim retake (test_claim_retake.py)
+        run: cd coordinator && python3 test_claim_retake.py
+      - name: Claim retake POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_claim_retake.py --control
+      - name: Signed claims, #310 (test_claim_signed.py)
+        run: cd coordinator && python3 test_claim_signed.py
+      - name: Signed claims POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_claim_signed.py --control
+      - name: Folded count (test_folded_count.py)
+        run: cd coordinator && python3 test_folded_count.py
+      - name: Folded count POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_folded_count.py --control
+      - name: Frontier blocker (test_frontier_blocker.py)
+        run: cd coordinator && python3 test_frontier_blocker.py
+      - name: Frontier blocker POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_frontier_blocker.py --control
+      - name: Spine ranges (test_spine_ranges.py)
+        run: cd coordinator && python3 test_spine_ranges.py
+      - name: Spine ranges POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_spine_ranges.py --control
+      # The only one of the twelve with no --control; registered plain.
+      - name: Node tip (test_node_tip.py)
+        run: cd coordinator && python3 test_node_tip.py
+      # ⛔ The sponsor bot RENTS GPUs AND SPENDS REAL MONEY. test_sponsor_bot.py is 1,004 lines and its
+      # own docstring says a bug that leaves a pod running or launches past a cap "spends real money and
+      # nothing on the board would show it". It has a positive control. None of it has ever run in CI.
+      - name: Sponsor bot — money safety, queue, cost log (test_sponsor_bot.py)
+        run: cd coordinator && python3 test_sponsor_bot.py
+      - name: Sponsor bot POSITIVE CONTROL (pods not terminated on error — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_sponsor_bot.py --control
+      - name: Sponsor bot signed API, #351 (test_sponsor_bot_api.py)
+        run: cd coordinator && python3 test_sponsor_bot_api.py
+      - name: Sponsor bot API POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_sponsor_bot_api.py --control
+      - name: Sponsorship holds (test_sponsor_holds.py)
+        run: cd coordinator && python3 test_sponsor_holds.py
+      - name: Sponsorship holds POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_sponsor_holds.py --control
+      - name: Sponsorship identity keys (test_sponsor_identity.py)
+        run: cd coordinator && python3 test_sponsor_identity.py
+      - name: Sponsorship identity POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_sponsor_identity.py --control
+      - name: Sponsorship payments (test_sponsor_payments.py)
+        run: cd coordinator && python3 test_sponsor_payments.py
+      - name: Sponsorship payments POSITIVE CONTROL (must FAIL)
+        run: |
+          cd coordinator
+          python3 test_sponsor_payments.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
