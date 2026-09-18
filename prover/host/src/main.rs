@@ -5691,6 +5691,140 @@ fn read_frame(s: &mut std::net::TcpStream) -> std::io::Result<(u32, Vec<u8>)> {
 
 // Worker: connect, then read-prove-write forever. It holds no work list, does no claiming and
 // makes no decisions -- the segment coordinator drives. That also makes it simpler than the pull worker.
+// ── seg-connect reconnect policy (hazync#367 follow-up) ──────────────────────────────────────
+//
+// WHY THIS EXISTS. `seg-connect` used to exit on link close: a worker that dropped was gone for the
+// rest of the run and somebody restarted it by hand. That is defensible with an operator watching and
+// a silent loss otherwise, and it is why the #365 deadline floor is 600 s rather than 300 -- a false
+// positive cost that worker permanently, so the window had to be generous.
+//
+// ⛔ THE SERVER SIDE ALREADY MAKES THIS SAFE, which is the whole reason a bare retry is correct:
+//   - a dropped connection returns what it owed, and those segments go back on the queue;
+//   - work is tracked by TAG, not by position, so a returning worker takes fresh tasks;
+//   - #365's deadline reclaims a peer that goes quiet.
+// So a reconnecting worker cannot double-prove. It simply asks for more work.
+//
+// The policy is split out from the loop deliberately: `cuda` is a non-default feature and CI builds
+// `host` with ExternalProver, so `get_prover_server()` -- called before the connect -- means no CI test
+// can drive seg-connect end to end. These functions need neither a socket nor a GPU.
+//
+// Modelled on prove_segment_resilient one level down: bounded, retry ONLY what is known transient,
+// and stay loud. A silent reconnect would hide a flapping link, and link quality is exactly what a
+// cross-machine fleet needs to see.
+
+/// Seconds to wait before reconnect attempt `n` (1-based): 1, 2, 4, 8, 16, capped at 30.
+fn seg_reconnect_backoff_s(attempt: u32) -> u64 {
+    let raw = 1u64 << attempt.saturating_sub(1).min(20);
+    raw.min(30)
+}
+
+/// Whether to keep trying, given how long we have been failing.
+///
+/// ⛔ CAPPED ON ELAPSED TIME, NOT ATTEMPT COUNT. Backoff means attempts and wall-clock diverge
+/// wildly, and what actually matters is "how long has this card been earning nothing". 600 s is the
+/// same floor HAZYNC_STALL_MIN and the #365 deadline already use -- reusing that judgement beats
+/// inventing a fourth one.
+fn seg_reconnect_should_retry(elapsed_s: f64) -> bool {
+    let cap = std::env::var("HAZYNC_RECONNECT_MAX_S")
+        .ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(600.0);
+    cap > 0.0 && elapsed_s < cap
+}
+
+/// A link failure is transient and worth reconnecting for. Anything else is not.
+///
+/// ⛔ DELIBERATELY NARROW. A deserialize failure, a prove failure or a malformed frame will fail
+/// identically on a fresh connection, and retrying those burns a card to say the same thing three
+/// times. Only the transport is retried.
+fn seg_reconnect_is_link_failure(kind: &str) -> bool {
+    matches!(kind, "link closed" | "send failed" | "connect")
+}
+
+/// Reconnect after a transport failure. `true` to resume the task loop, `false` to give up.
+///
+/// Resets `t_down` on success so the cap always measures the CURRENT outage, and resets
+/// `last_send_ms` so the idle-latency signal (#252) is not polluted by the outage itself. `done` and
+/// the run clock are deliberately NOT reset: they are per-run accounting, and a reconnect does not
+/// start a new run.
+fn seg_reconnect(id: &str, addr: &str, s: &mut std::net::TcpStream,
+                 t_down: &mut std::time::Instant, attempt: &mut u32,
+                 last_send_ms: &mut u128) -> bool {
+    loop {
+        if !seg_reconnect_should_retry(t_down.elapsed().as_secs_f64()) {
+            println!("[reconnect] [{id}] giving up after {:.0}s down", t_down.elapsed().as_secs_f64());
+            return false;
+        }
+        *attempt += 1;
+        let wait = seg_reconnect_backoff_s(*attempt);
+        println!("[reconnect] [{id}] attempt {attempt}, retrying {addr} in {wait}s");
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+        match std::net::TcpStream::connect(addr) {
+            Ok(ns) => {
+                ns.set_nodelay(true).ok();
+                *s = ns;
+                *t_down = std::time::Instant::now();
+                *attempt = 0;
+                *last_send_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                println!("[reconnect] [{id}] reconnected to {addr}");
+                return true;
+            }
+            Err(e) => println!("[reconnect] [{id}] still down: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod seg_reconnect_tests {
+    use super::{seg_reconnect_backoff_s, seg_reconnect_is_link_failure, seg_reconnect_should_retry};
+
+    /// Backoff must GROW and must STOP growing. Unbounded doubling means a worker that has been down
+    /// nine minutes sleeps another eight before noticing the coordinator came back.
+    #[test]
+    fn backoff_doubles_then_caps_at_30s() {
+        assert_eq!(seg_reconnect_backoff_s(1), 1);
+        assert_eq!(seg_reconnect_backoff_s(2), 2);
+        assert_eq!(seg_reconnect_backoff_s(3), 4);
+        assert_eq!(seg_reconnect_backoff_s(5), 16);
+        assert_eq!(seg_reconnect_backoff_s(6), 30, "must cap, not reach 32");
+        assert_eq!(seg_reconnect_backoff_s(40), 30, "a large attempt must not overflow the shift");
+        assert_eq!(seg_reconnect_backoff_s(0), 1, "attempt 0 must not underflow to a huge shift");
+    }
+
+    /// ⛔ THE NARROWNESS IS THE POINT. A deserialize or prove failure fails identically on a fresh
+    /// connection; retrying it burns a card to say the same thing again. Only transport is retried.
+    #[test]
+    fn only_transport_failures_reconnect() {
+        assert!(seg_reconnect_is_link_failure("link closed"));
+        assert!(seg_reconnect_is_link_failure("send failed"));
+        assert!(seg_reconnect_is_link_failure("connect"));
+        assert!(!seg_reconnect_is_link_failure("deserialize segment"),
+                "a malformed frame must not be retried");
+        assert!(!seg_reconnect_is_link_failure("prove"), "a prove failure must not be retried");
+        assert!(!seg_reconnect_is_link_failure(""), "an unknown kind must not be retried");
+    }
+
+    /// The cap is on elapsed time, because backoff makes attempt count and wall-clock diverge.
+    #[test]
+    fn retry_until_the_elapsed_cap() {
+        std::env::remove_var("HAZYNC_RECONNECT_MAX_S");
+        assert!(seg_reconnect_should_retry(0.0));
+        assert!(seg_reconnect_should_retry(599.0));
+        assert!(!seg_reconnect_should_retry(600.0), "at the cap it stops");
+        assert!(!seg_reconnect_should_retry(6000.0));
+    }
+
+    /// An operator must be able to turn it off. 0 means "behave as before": never reconnect.
+    #[test]
+    fn zero_disables_reconnect_entirely() {
+        std::env::set_var("HAZYNC_RECONNECT_MAX_S", "0");
+        assert!(!seg_reconnect_should_retry(0.0), "0 must mean never, not an immediate cap breach");
+        std::env::set_var("HAZYNC_RECONNECT_MAX_S", "5");
+        assert!(seg_reconnect_should_retry(1.0));
+        assert!(!seg_reconnect_should_retry(9.0));
+        std::env::remove_var("HAZYNC_RECONNECT_MAX_S");
+    }
+}
+
 fn seg_connect_cmd(addr: &str) {
     use risc0_zkvm::{VerifierContext, Segment, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
     use std::time::Instant;
@@ -5698,7 +5832,30 @@ fn seg_connect_cmd(addr: &str) {
     let opts = ProverOpts::succinct();
     let server = risc0_zkvm::get_prover_server(&opts).expect("prover server");
     let ctx = VerifierContext::default();
-    let mut s = std::net::TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
+    // The connection is the ONLY thing rebuilt on a reconnect. `server`, `ctx`, `opts` and `id` are
+    // built above and never touched by the socket -- and the prover server costs seconds to create,
+    // so re-entering here rather than re-running the command keeps a reconnect cheap.
+    // ⛔ `t_down` is reset every time we are CONNECTED, so the cap measures the current outage, not
+    // the age of the worker. Measuring since start meant a worker that ran happily for an hour and
+    // then dropped was already past its budget and would refuse to reconnect -- a reconnect that
+    // never reconnects, which is worse than none because it looks implemented.
+    let mut t_down = Instant::now();
+    let mut attempt: u32 = 0;
+    let mut s = loop {
+        match std::net::TcpStream::connect(addr) {
+            Ok(s) => break s,
+            Err(e) => {
+                attempt += 1;
+                if !seg_reconnect_is_link_failure("connect")
+                    || !seg_reconnect_should_retry(t_down.elapsed().as_secs_f64()) {
+                    panic!("connect {addr}: {e}");
+                }
+                let wait = seg_reconnect_backoff_s(attempt);
+                println!("[reconnect] connect {addr} failed ({e}); attempt {attempt}, retrying in {wait}s");
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+        }
+    };
     s.set_nodelay(true).ok();   // these are small frames; Nagle would add 40 ms for nothing
     // hazync#254: every line leads with epoch ms and every task gets one line. The old output printed
     // every 25th task and carried no absolute time, so a fleet's aggregate timing could not be
@@ -5716,8 +5873,22 @@ fn seg_connect_cmd(addr: &str) {
         say(format!("[{id}] task kind={kind} {detail} recv_ms={recv_ms} send_ms={} wait_s={:.3} compute_s={compute_s:.3} bytes_in={bytes_in} bytes_out={bytes_out} done={done}",
                  now_ms(), wait_ms as f64 / 1000.0));
     };
-    loop {
-        let (idx, body) = match read_frame(&mut s) { Ok(v) => v, Err(e) => { say(format!("[{id}] link closed: {e}")); break; } };
+    // `'run` wraps the task loop so a dropped link reconnects and resumes instead of exiting. The
+    // server has already requeued whatever this worker owed, so resuming means asking for fresh
+    // work -- never re-proving something already returned.
+    'run: loop {
+        let (idx, body) = match read_frame(&mut s) {
+            Ok(v) => v,
+            Err(e) => {
+                say(format!("[{id}] link closed: {e}"));
+                // ⛔ NOT an error: SEG_EOF is how the coordinator says there is no more work, and it
+                // arrives as a clean frame, not a link failure. Only transport failures land here.
+                match seg_reconnect(&id, addr, &mut s, &mut t_down, &mut attempt, &mut last_send_ms) {
+                    true => continue 'run,
+                    false => break 'run,
+                }
+            }
+        };
         let recv_ms = now_ms();
         let wait_ms = recv_ms.saturating_sub(last_send_ms);
         if idx == SEG_EOF { say(format!("[{id}] no more work")); break; }
@@ -5730,7 +5901,13 @@ fn seg_connect_cmd(addr: &str) {
             let lifted = server.lift(&sr).expect("lift");
             let out = bincode::serialize(&lifted).expect("serialize lift");
             let compute_s = t.elapsed().as_secs_f64();
-            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
+            if let Err(e) = write_frame(&mut s, idx, &out) {
+            say(format!("[{id}] send failed: {e}"));
+            // This task's result is lost, and that is fine: the server requeued it the moment the
+            // connection dropped. Reconnect and take fresh work rather than re-proving it here.
+            if seg_reconnect(&id, addr, &mut s, &mut t_down, &mut attempt, &mut last_send_ms) { continue 'run; }
+            break 'run;
+        }
             done += 1;
             last_send_ms = now_ms();
             if quiet { say(format!("[{id}] lifted the merged last segment in {:.2}s", t.elapsed().as_secs_f64())); }
@@ -5752,7 +5929,13 @@ fn seg_connect_cmd(addr: &str) {
             let r = server.resolve(&cond, &assum).expect("resolve");
             let out = bincode::serialize(&r).expect("serialize resolve");
             let compute_s = t.elapsed().as_secs_f64();
-            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
+            if let Err(e) = write_frame(&mut s, idx, &out) {
+            say(format!("[{id}] send failed: {e}"));
+            // This task's result is lost, and that is fine: the server requeued it the moment the
+            // connection dropped. Reconnect and take fresh work rather than re-proving it here.
+            if seg_reconnect(&id, addr, &mut s, &mut t_down, &mut attempt, &mut last_send_ms) { continue 'run; }
+            break 'run;
+        }
             done += 1;
             last_send_ms = now_ms();
             if quiet { say(format!("[{id}] resolve {} in {:.2}s ({done} done)", idx & !RESOLVE_TAG, t.elapsed().as_secs_f64())); }
@@ -5771,7 +5954,13 @@ fn seg_connect_cmd(addr: &str) {
             let j = server.join(&a, &b).expect("join");
             let out = bincode::serialize(&j).expect("serialize join");
             let compute_s = t.elapsed().as_secs_f64();
-            if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
+            if let Err(e) = write_frame(&mut s, idx, &out) {
+            say(format!("[{id}] send failed: {e}"));
+            // This task's result is lost, and that is fine: the server requeued it the moment the
+            // connection dropped. Reconnect and take fresh work rather than re-proving it here.
+            if seg_reconnect(&id, addr, &mut s, &mut t_down, &mut attempt, &mut last_send_ms) { continue 'run; }
+            break 'run;
+        }
             done += 1;
             last_send_ms = now_ms();
             if quiet {
@@ -5799,7 +5988,13 @@ fn seg_connect_cmd(addr: &str) {
             bincode::serialize(&lifted).expect("serialize lift")
         };
         let compute_s = t.elapsed().as_secs_f64();
-        if let Err(e) = write_frame(&mut s, idx, &out) { say(format!("[{id}] send failed: {e}")); break; }
+        if let Err(e) = write_frame(&mut s, idx, &out) {
+            say(format!("[{id}] send failed: {e}"));
+            // This task's result is lost, and that is fine: the server requeued it the moment the
+            // connection dropped. Reconnect and take fresh work rather than re-proving it here.
+            if seg_reconnect(&id, addr, &mut s, &mut t_down, &mut attempt, &mut last_send_ms) { continue 'run; }
+            break 'run;
+        }
         done += 1;
         last_send_ms = now_ms();
         if quiet {
