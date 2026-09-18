@@ -156,6 +156,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_prune_bundles.py --control
+      - name: On-demand bundle regeneration picks a seed that can actually produce the block (#347)
+        # The live bridge runs HAZYNC_BRIDGE_EMIT_FROM=967500, so 418,269-967,499 are walked past with no
+        # bundle written, and bundles reach 17.0 MB by h=418,000 — >9 TB to store the gap against 3.9 TB
+        # free. Those heights must be made on demand from an archived checkpoint. Both failure modes are
+        # SILENT: a missing seed makes bridge_load_state() return None and the resume path rebuilds from
+        # genesis (~6 days at the measured 533-599 ms/block), and a rung AT height N cannot produce block
+        # N because replaying forward from N yields N+1 onward. No real bridge or replay here.
+        run: cd coordinator && python3 test_regen_bundles.py
+      - name: Regeneration POSITIVE CONTROL (a rung at the target accepted — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_regen_bundles.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
