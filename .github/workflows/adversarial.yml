@@ -267,6 +267,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_sponsor_payments.py --control
+      - name: The sponsor bot tells the truth about blocks the bridge will never reach (#347)
+        # The bot used to log "N held block(s) have no bundle yet and wait for the bridge". Below
+        # h=418,268 that is true and the wait ends. Inside 418,269-967,499 it is FALSE: the live bridge
+        # runs HAZYNC_BRIDGE_EMIT_FROM=967500, walks those heights writing nothing, and never returns —
+        # so a sponsor could hold a block there for ever while the log said to be patient. The line now
+        # reports whether the block can be rebuilt from an archived checkpoint and what that costs. The
+        # message IS the feature; nothing else reports it, so it is pinned here.
+        run: cd coordinator && python3 test_regen_advice.py
+      - name: Sponsor bot advice POSITIVE CONTROL (no-checkpoint-below refusal disabled — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_regen_advice.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never

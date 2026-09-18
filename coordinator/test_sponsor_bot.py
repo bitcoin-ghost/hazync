@@ -481,12 +481,25 @@ runner = FakeRunner(per_block=0.01)
 s_wait = sponsor(400000, 400001, paid_at=100)
 s_now = sponsor(9500, 9501, paid_at=200)
 logs = []
+# ⛔ PIN THE CHECKPOINT ARCHIVE TO AN EMPTY DIRECTORY. The bot now reports whether a held block with no
+# bundle could be regenerated from an archived checkpoint, and that answer depends on what is in
+# HAZYNC_CKPT_ARCHIVE — a machine-global path outside the test's control. Left unpinned this scenario
+# would say one thing on a CI runner (no archive at all) and another on the live coordinator (two rungs
+# today, more as the archiver runs): a test that passes or fails according to which box ran it.
+_saved_archive = sponsor_bot.CKPT_ARCHIVE
+sponsor_bot.CKPT_ARCHIVE = tempfile.mkdtemp(prefix="ckpt_none_")
 reason = make_bot(api, runner, max_pods=2, blocks_per_pod=5, log=logs.append).run()
+sponsor_bot.CKPT_ARCHIVE = _saved_archive
 check(reason == "done" and status_of(s_now) == "proven" and [hs for _, hs in runner.started] == [[9500, 9501]],
       f"a run proves the blocks it can and never gives a pod a block with no bundle ({runner.started})")
 check(len(api.deploys) == 1 and not api.live() and status_of(s_wait) == "paid",
       f"it rents nothing for the earlier sponsorship with no bundles, which stays held ({len(api.deploys)} deploys, {status_of(s_wait)})")
-check(any("2 held block(s) have no bundle yet" in m for m in logs), "and the log says how many held blocks wait")
+# The COUNT is what this pins. The old wording was "have no bundle YET", and the "yet" is exactly what
+# changed: inside the 418,269-967,499 gap the bridge writes no bundle and never comes back, so "yet"
+# promised a wait that never ends.
+check(any("2 held block(s) have no bundle" in m for m in logs), "and the log says how many held blocks wait")
+check(any("CANNOT be regenerated" in m for m in logs),
+      "with no archived checkpoint, it says so rather than telling the operator to wait for the bridge")
 plan_lines = sponsor_bot.plan_text(COORD, BOTDB)
 check(any("2 more block(s) wait for bundles" in line for line in plan_lines), f"so does the plan ({plan_lines[-2:]})")
 reset()
