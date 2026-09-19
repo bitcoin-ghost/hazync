@@ -116,7 +116,7 @@ configuration one. ⚠ **The two phases alert differently**: each OOM kill fires
 phase by `wchan=mem_cgroup_handle_over_high` and flat CPU ticks, never by unit state.
 
 ⚠ **The provers are not waiting on any of this.** Bundles exist contiguously to **418,268** and the board's
-frontier is **93,333**, so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
+frontier was **93,333** when this was measured (2026-09-18; it has since passed 95,000), so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
 work at any plausible size. #350 gates *tip-following* and closing the 418,269–967,499 gap, not the board.
 
 ⛔ **As of 2026-09-19 the bridge is deliberately STOPPED**, not crash-looping — the text above describes what
