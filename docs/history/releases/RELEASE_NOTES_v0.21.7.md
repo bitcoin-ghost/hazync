@@ -104,8 +104,9 @@ could-not-check, floor `HAZYNC_DISK_FLOOR_GB=500`. It contains no delete path.
 ⛔ **Removing the cap does not by itself unfreeze the board, and this release does not claim it does.**
 `EMIT_FROM=967500` still gates emission, and the bridge cannot yet walk that far. Measured on server 1 on
 2026-09-18/19: it reaches ~44 GiB RSS by **h=800,257** (112.1M UTXOs), meets its `MemoryMax=44G` cgroup
-ceiling, throttles at ~99% memory pressure, and is then OOM-killed — **22 kills** between 20:27:08 and
-06:35:29, one alert each (`journalctl`; an earlier note said "two", read from `dmesg`, which is a ring
+ceiling, throttles at ~99% memory pressure, and is then OOM-killed — **23 kills** between 20:27:08 and
+06:35:29, ~36 alerts (TWO hooks fire per kill: `OnFailure=` and `ExecStopPost=--crash`) (`journalctl`; an
+earlier note said "two" kills, read from `dmesg`, which is a ring
 buffer holding only the last two). ⛔ **And it progresses nowhere**: the highest checkpoint ever reached
 is **h=800,257**, and the last three resumes were all *from* 800,257 — once the parallel backfill grew to
 ~21.5 GiB, each ~12-minute cycle reloads ~29 GiB of state, walks a few hundred blocks and dies. That is
@@ -116,7 +117,7 @@ configuration one. ⚠ **The two phases alert differently**: each OOM kill fires
 phase by `wchan=mem_cgroup_handle_over_high` and flat CPU ticks, never by unit state.
 
 ⚠ **The provers are not waiting on any of this.** Bundles exist contiguously to **418,268** and the board's
-frontier is **93,333**, so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
+frontier was **93,333** when this was measured (2026-09-18; it has since passed 95,000), so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
 work at any plausible size. #350 gates *tip-following* and closing the 418,269–967,499 gap, not the board.
 
 ⛔ **As of 2026-09-19 the bridge is deliberately STOPPED**, not crash-looping — the text above describes what
