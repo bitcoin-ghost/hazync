@@ -162,7 +162,7 @@ bridge (`hazync-bridge.service`), which writes bundles the coordinator serves vi
 local read — no cross-box copy); the coordinator verifies receipts on CPU with the canonical `host`
 binary (no GPU required to *verify*). Put it behind a reverse proxy (nginx) with TLS; the public
 `hazync.org` page points its board at this API (CORS is open by default). Units + cutover:
-`deploy/hazync-bridge.service`, `deploy/hazync-coordinator.service`, `deploy/migrate-coordinator.sh` —
+`deploy/hazync-bridge.service`, `deploy/hazync-coordinator.service` —
 see `deploy/RUNBOOK.md`.
 
 ## Status — honest
