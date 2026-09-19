@@ -104,9 +104,11 @@ could-not-check, floor `HAZYNC_DISK_FLOOR_GB=500`. It contains no delete path.
 ⛔ **Removing the cap does not by itself unfreeze the board, and this release does not claim it does.**
 `EMIT_FROM=967500` still gates emission, and the bridge cannot yet walk that far. Measured on server 1 on
 2026-09-18/19: it reaches ~44 GiB RSS at **h=798,257** (108.06M UTXOs), meets its `MemoryMax=44G` cgroup
-ceiling, throttles at ~99% memory pressure for two to three hours, and is then OOM-killed — two kills in
-`dmesg`, 20:26:49 and 01:08:48. It resumes from its checkpoint and does make forward progress each cycle
-(798,257 → 800,257 on the third), but the tip is 967,626 and the working set grows with the UTXO set. That is
+ceiling, throttles at ~99% memory pressure, and is then OOM-killed — **22 kills** between 20:27:08 and
+06:35:29, one alert each (`journalctl`; an earlier note said "two", read from `dmesg`, which is a ring
+buffer holding only the last two). ⛔ **And it progresses nowhere**: the highest checkpoint ever reached
+is **h=800,257**, and the last three resumes were all *from* 800,257 — once the parallel backfill grew to
+~21.5 GiB, each ~12-minute cycle reloads ~29 GiB of state, walks a few hundred blocks and dies. That is
 [#350](https://github.com/bitcoin-ghost/hazync/issues/350), and it is a resident-state/sizing problem, not a
 configuration one. ⚠ `systemd` reports `active (running)` throughout the frozen window, so nothing alerts —
 judge it by `wchan` and CPU ticks, not by unit state.
