@@ -291,6 +291,19 @@ jobs:
         run: |
           cd coordinator
           python3 test_regen_advice.py --control
+      - name: Regeneration queue — one replay at a time, never beside a bridge (test_regen_queue.py)
+        # Advice reports; the queue ACTS, and acting spends coordinator CPU on a paid block. Two guards
+        # matter and neither is tidiness: a replay is ~10 GB of accumulator on a 62.8 GiB box that also
+        # serves the board, so two at once is two bridges on one machine — the shape that OOM-killed the
+        # live bridge 23 times on 2026-09-18 while systemd reported `active (running)` throughout. The
+        # second guard refuses to start beside the backfill, which has NO resume: killing it at 76% costs
+        # a walk from genesis. bridge_running() is tested against a FAKE /proc, so the result cannot depend
+        # on what happens to be running on the runner.
+        run: cd coordinator && python3 test_regen_queue.py
+      - name: Regeneration queue POSITIVE CONTROL (both guards disabled — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_regen_queue.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
