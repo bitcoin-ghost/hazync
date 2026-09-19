@@ -215,6 +215,16 @@ def ensure_tables(c):
       CREATE TABLE IF NOT EXISTS sponsor_pods(
         pod_id TEXT PRIMARY KEY, name TEXT, gpu_type TEXT, cost_per_hr REAL,
         created_at REAL, terminated_at REAL, usd_estimate REAL, note TEXT);
+      CREATE TABLE IF NOT EXISTS regen_queue(
+        height INTEGER PRIMARY KEY,             -- one row per height; re-queueing is a no-op
+        sponsorship_id INTEGER,                 -- the paid sponsorship that wants it
+        queued_at REAL NOT NULL,
+        started_at REAL, finished_at REAL,      -- started and not finished == in flight, at most one
+        pid INTEGER,                            -- the replay's pid, so a killed bot's row can be reaped
+        rung INTEGER,                           -- the archived checkpoint it seeded from
+        outcome TEXT,                           -- NULL while queued or running; done | refused | failed
+        detail TEXT);
+      CREATE INDEX IF NOT EXISTS regen_queue_outcome ON regen_queue(outcome);
     """)
     if "pubkey" not in {r[1] for r in c.execute("PRAGMA table_info(sponsor_work)")}:
         c.execute("ALTER TABLE sponsor_work ADD COLUMN pubkey TEXT")
@@ -371,6 +381,109 @@ def regen_note(heights):
                             len(heights))
     except Exception:
         return None
+
+
+# ---------- the regeneration queue (hazync#347) ----------
+#
+# regen_advice() above REPORTS. This QUEUES and RUNS, one replay at a time, because the operator's ruling is
+# that coordinator CPU may be spent on a block SOMEONE HAS PAID FOR: "if the compute falls onto our
+# coordinator then no i dont want it at all" / "yes its fine for sponsor bot as they are paying". Payment is
+# the rate limiter, so only held (paid) sponsorships reach this queue — never a public request.
+#
+# ⛔ ONE AT A TIME IS THE SAFETY PROPERTY, NOT TIDINESS. A replay is ~10 GB of accumulator against a 62.8 GiB
+# box that also serves the board. Two at once is two bridges on one machine, which is exactly the shape that
+# OOM-killed the live bridge 23 times overnight on 2026-09-18. regen_bundles.py has no lock of its own.
+
+REGEN_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy", "regen_bundles.py")
+BRIDGE_BINARY = "hazync-host-bridge"
+
+# test_regen_queue.py --control sets these, to show the one-at-a-time and bridge guards can fail.
+_CONTROL_IGNORE_ONE_AT_A_TIME = False
+_CONTROL_IGNORE_BRIDGE_BUSY = False
+
+
+def bridge_running(proc="/proc"):
+    """PIDs of any bridge already walking on this box, excluding this process. Empty when none.
+
+    ⛔ READ /proc, NEVER `pgrep -f hazync-host-bridge`. pgrep's own command line contains the pattern, and
+    so does this module (REGEN_BIN is logged, and the replay's argv names the binary), so a name match
+    reports a bridge that is only the bot talking about one. Matching basename(argv[0]) exactly means the
+    process must BE the bridge, not mention it. A clean box reporting a phantom process has cost hours
+    three separate times.
+    """
+    me, out = os.getpid(), []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit() or int(name) == me:
+            continue
+        try:
+            with open(os.path.join(proc, name, "cmdline"), "rb") as f:
+                argv0 = f.read().split(b"\0")[0]
+        except OSError:
+            continue                      # the process exited between listdir and open: not a bridge
+        if argv0 and os.path.basename(argv0.decode("utf-8", "replace")) == BRIDGE_BINARY:
+            out.append(int(name))
+    return sorted(out)
+
+
+def regen_enqueue(c, pairs, now):
+    """Queue (sponsorship_id, height) pairs for regeneration. Already-queued heights are left alone. Count added."""
+    n = 0
+    for sid, h in pairs:
+        n += c.execute("INSERT OR IGNORE INTO regen_queue(height, sponsorship_id, queued_at) VALUES(?,?,?)",
+                       (int(h), sid, now)).rowcount
+    c.commit()
+    return n
+
+
+def regen_inflight(c):
+    """The row whose replay was started and has not finished, or None. At most one by construction."""
+    return c.execute("SELECT * FROM regen_queue WHERE started_at IS NOT NULL AND finished_at IS NULL "
+                     "ORDER BY started_at LIMIT 1").fetchone()
+
+
+def regen_next(c):
+    """The oldest queued height not yet attempted, or None."""
+    return c.execute("SELECT * FROM regen_queue WHERE started_at IS NULL AND outcome IS NULL "
+                     "ORDER BY queued_at, height LIMIT 1").fetchone()
+
+
+def regen_reap(c, now, alive=None):
+    """Fail any row left in flight by a bot that stopped mid-replay. Returns the heights reaped.
+
+    ⛔ Without this a killed bot leaves a row started-but-never-finished, and the one-at-a-time guard then
+    refuses every future replay for ever — a queue that silently stops working and reports nothing.
+    """
+    alive = bridge_running() if alive is None else alive
+    reaped = []
+    for r in c.execute("SELECT height, pid FROM regen_queue WHERE started_at IS NOT NULL "
+                       "AND finished_at IS NULL").fetchall():
+        if r["pid"] and r["pid"] in alive:
+            continue                       # still walking: leave it alone
+        c.execute("UPDATE regen_queue SET finished_at=?, outcome='failed', "
+                  "detail='the bot stopped while this replay was running' WHERE height=?", (now, r["height"]))
+        reaped.append(r["height"])
+    if reaped:
+        c.commit()
+    return reaped
+
+
+def regen_start(c, height, pid, rung, now):
+    c.execute("UPDATE regen_queue SET started_at=?, pid=?, rung=? WHERE height=?", (now, pid, rung, height))
+    c.commit()
+
+
+def regen_finish(c, height, rc, detail, now):
+    """Map regen_bundles.main()'s exit codes onto an outcome. They are pinned by its own docstring:
+    0 ran, 1 something is wrong, 2 could not check (no rung below, no bridge, no space)."""
+    outcome = {0: "done", 2: "refused"}.get(rc, "failed")
+    c.execute("UPDATE regen_queue SET finished_at=?, outcome=?, detail=? WHERE height=?",
+              (now, outcome, (detail or "")[:500], height))
+    c.commit()
+    return outcome
 
 
 def covered(coord, heights):
@@ -866,6 +979,13 @@ class Bot:
         self._capacity_at = 0.0
         self._refusals = 0
         self._coord_errors = 0
+        self._regen_proc = None            # the one in-flight replay, or None
+        self._regen_height = None
+        # ⛔ Its OWN counter, not self._n. _n is the pod sequence number and only moves when a pod is
+        # deployed — and while the queue is waiting for a bridge, nothing is being rented. Keyed on _n the
+        # "waiting" line would print every tick or, far worse, never, leaving the queue silently stalled
+        # with nothing on the record to say why.
+        self._regen_waits = 0
 
     # --- money ---
     def _live(self):
@@ -906,11 +1026,20 @@ class Bot:
                     # ⛔ "wait for the bridge" is a wait FOR EVER in the 418,269-967,499 gap: the live
                     # bridge runs HAZYNC_BRIDGE_EMIT_FROM=967500, so it walks those heights writing no
                     # bundle and will never come back for them. Say whether they can be made from an
-                    # archived checkpoint instead, and what that costs. Reporting only — a replay is
-                    # hours and this runs before any pod is rented.
+                    # archived checkpoint instead, and what that costs.
                     self.log(regen_note(unbundled) or
                              f"{len(unbundled)} held block(s) have no bundle yet and wait for the bridge:"
                              " no pod is rented for them")
+                    # ...and then QUEUE them. These are held sponsorships, so they are paid for; the drain
+                    # below runs one replay at a time and refuses while any bridge is walking.
+                    byh = {h: sid for sid, h in pending_work(self.coord, need_bundle=False)}
+                    added = regen_enqueue(c, [(byh.get(h), h) for h in unbundled], now=self.clock())
+                    if added:
+                        self.log(f"queued {added} height(s) for regeneration, one replay at a time")
+                reaped = regen_reap(c, self.clock())
+                if reaped:
+                    self.log(f"{len(reaped)} replay(s) were in flight when a previous bot stopped, "
+                             f"marked failed so the queue is not blocked for ever: {reaped[:10]}")
             if self.trial is not None:
                 bad = trial_refusals(self.coord, self.trial)
                 if bad:
@@ -945,11 +1074,17 @@ class Bot:
                     break
                 if coord_ok:
                     try:
+                        self._regen(c, now)
                         self._assign(c, now)
                         self._launch(c, now)
                         if self.stop_reason == "runpod":
                             break
-                        if not self._live() and not pending_work(self.coord, (), self.trial):
+                        # ⛔ AN IN-FLIGHT REPLAY HOLDS THE LOOP OPEN. Without the last clause the bot sees no
+                        # live pod and nothing provable (the block has no bundle yet — that is the whole
+                        # point) and declares itself done, exiting and orphaning a ~2 h walk it started and
+                        # paid for. The bundle would land with nobody left to prove it.
+                        if (not self._live() and not pending_work(self.coord, (), self.trial)
+                                and self._regen_proc is None and regen_inflight(c) is None):
                             # The last blocks can land after this pass's reconcile, just before their pod is stopped.
                             if self.trial is None:
                                 for sid in reconcile(self.coord):
@@ -973,6 +1108,70 @@ class Bot:
                     self._restore_signals(saved)
             c.close()
         return self.stop_reason
+
+    def _regen(self, c, now):
+        """Advance the regeneration queue by AT MOST ONE replay. Never raises.
+
+        ⛔ NEVER RAISES, for the same reason regen_note() does not: _assign and _launch run immediately
+        after this in the same try, with pods live and money already spent. A queue problem must not stop a
+        run that is proving blocks.
+
+        ⛔ NON-BLOCKING. A replay is hours and the tick is seconds, so it is started with Popen and polled
+        on later ticks — never waited on here.
+        """
+        try:
+            if self._regen_proc is not None:
+                rc = self._regen_proc.poll()
+                if rc is None:
+                    return                                     # still walking; look again next tick
+                out = ""
+                try:
+                    out = (self._regen_proc.stdout.read() or "") if self._regen_proc.stdout else ""
+                except Exception:
+                    pass
+                last = (out.strip().splitlines() or [""])[-1][:200]
+                outcome = regen_finish(c, self._regen_height, rc, last, now)
+                self.log(f"regeneration of block {self._regen_height} {outcome} (exit {rc}): {last}")
+                self._regen_proc, self._regen_height = None, None
+                return
+
+            if regen_inflight(c) is not None and not _CONTROL_IGNORE_ONE_AT_A_TIME:
+                return                                         # another row is mid-replay: one at a time
+
+            row = regen_next(c)
+            if row is None:
+                return
+
+            busy = bridge_running()
+            if busy and not _CONTROL_IGNORE_BRIDGE_BUSY:
+                # Not an error and not a refusal of the row — it stays queued and is tried again next tick.
+                # Said on the first wait and then rarely, so a long wait is on the record without flooding it.
+                if self._regen_waits % 20 == 0:
+                    self.log(f"regeneration of block {row['height']} waits: a bridge is already walking "
+                             f"(pid {busy[0]}). Two replays on one box is what OOM-killed the bridge.")
+                self._regen_waits += 1
+                return
+            self._regen_waits = 0
+
+            sys.path.insert(0, os.path.dirname(REGEN_BIN)) if os.path.dirname(REGEN_BIN) not in sys.path else None
+            import regen_bundles
+            p = regen_bundles.plan([row["height"]], regen_bundles.archived_rungs(CKPT_ARCHIVE))
+            if not p or p["missing"]:
+                regen_finish(c, row["height"], 2,
+                             "no archived checkpoint below it; a replay would start at genesis", now)
+                self.log(f"regeneration of block {row['height']} refused: no archived checkpoint below it "
+                         f"— a replay without a seed starts at GENESIS (~6 days) looking like a working job.")
+                return
+
+            proc = subprocess.Popen([sys.executable, REGEN_BIN, "--heights", str(row["height"]), "--apply"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            regen_start(c, row["height"], proc.pid, p["rung"], now)
+            self._regen_proc, self._regen_height = proc, row["height"]
+            span = row["height"] - p["rung"]
+            self.log(f"regenerating block {row['height']} from checkpoint {p['rung']:,} "
+                     f"({span:,}-block replay, ~{span * REGEN_S_PER_BLOCK / 3600.0:.1f} h), pid {proc.pid}")
+        except Exception as e:
+            self.log(f"the regeneration queue could not be advanced this look ({e}); trying again")
 
     def _coord_error(self, e):
         self._coord_errors += 1

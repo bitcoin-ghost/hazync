@@ -137,7 +137,11 @@ def main(argv=None):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         try:
             import sponsor_bot
-            coord = sponsor_bot.Coordinator()
+            # ⛔ Coord.from_env(), not Coordinator(): sponsor_bot has never defined a class by that name, so
+            # this raised AttributeError, the bare `except Exception` below swallowed it, and --from-waiting
+            # reported "cannot check: sponsor bot unavailable" (exit 2) every time it was ever run. Nothing
+            # caught it because no test registers this path in CI.
+            coord = sponsor_bot.Coord.from_env()
             wanted = [h for _, h in sponsor_bot.pending_work(coord, need_bundle=False)]
             have = {h for _, h in sponsor_bot.pending_work(coord)}
             heights = [h for h in wanted if h not in have]
