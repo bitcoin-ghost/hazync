@@ -1,0 +1,58 @@
+[Unit]
+Description=Hazync: prove held sponsorships on rented GPUs, within a spend cap
+Documentation=https://github.com/bitcoin-ghost/hazync/pull/372
+After=network-online.target hazync-coordinator.service
+Wants=network-online.target
+Requires=hazync-coordinator.service
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=simple
+User=hazync-sponsor
+Group=hazync-sponsor
+
+# ⛔ INSTALLED DISABLED ON PURPOSE. Nothing can be sponsored until the 2-of-3 wallet exists, so until
+# then this bot would start, find an empty queue and stop. `systemctl enable --now` it when payments are
+# live. It is listed here so that enabling it is one documented command rather than a remembered one.
+#
+# ⛔ THE THREE MONEY FLAGS HAVE NO DEFAULTS, BY DESIGN. Bot.__init__ raises BotRefused unless each is
+# positive, so a unit that forgets one fails loudly instead of renting GPUs on an assumption. They are
+# spelled out below rather than left to the environment for the same reason.
+#
+# THE CAPS, and what they actually mean — none of them is per block:
+#   --max-usd            total for THIS RUN. Cumulative spend; on reaching it every pod is terminated
+#                        and the run exits with stop_reason=budget.
+#   --max-usd-per-hour   the COMBINED hourly rate of all live pods at once. A brake on how fast money
+#                        leaves, not a total.
+#   --pod-price-ceiling  $/h for ONE pod; a dearer one is terminated at once (default 1.0, left as is).
+#
+# Scale, MEASURED from this bot's own log on 2026-09-19 (12 proven blocks, 4 pods, $0.84 spent ever):
+# $0.0699 all-in per proven block, including boot and idle. Near genesis a block ran 40 s / $0.008; in
+# the 200,001-400,000 band, ~983 s / $0.2020. So $50 is roughly 250-700 blocks, not 50.
+# ⚠ outcomes were `cancelled 8, proven 12` — a third of attempts were cancelled, and the all-in figure
+# already carries that waste.
+Environment=SPONSOR_BOT_HOME=/var/lib/hazync/sponsor-bot
+# Everything else defaults correctly on this box: the bot API key, the RunPod key and the pod ssh key all
+# live under SPONSOR_BOT_HOME, and both coordinator URLs default to http://127.0.0.1:8899.
+ExecStart=/usr/bin/python3 /opt/hazync/coordinator/sponsor_bot.py run --live \
+    --max-usd 50 --max-usd-per-hour 10 --max-pods 4
+
+# ⛔ NOT Restart=always. This bot SPENDS MONEY. A crash loop that restarts it would rent pods again and
+# again against a cap it re-reads as fresh each time, so a bug could spend the cap repeatedly in an hour.
+# It stops, pages the phone through OnFailure=, and waits for a person.
+Restart=no
+
+# The bot terminates every pod it owns in its `finally`, and that must be allowed to finish: a killed
+# cleanup leaves rented GPUs running and billing with nothing tracking them.
+KillSignal=SIGINT
+TimeoutStopSec=300
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hazync/sponsor-bot
+ReadOnlyPaths=/opt/hazync
+
+[Install]
+WantedBy=multi-user.target
