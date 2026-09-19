@@ -291,6 +291,19 @@ jobs:
         run: |
           cd coordinator
           python3 test_regen_advice.py --control
+      - name: Rescued-tree offsite copy — deterministic, encrypted, append-only (test_offsite_rescued.py)
+        # /srv/bulk/hazync/rescued-from-old-box is 2.67 GB pulled off the coordinator retired on
+        # 2026-09-19. Measured that day: ZERO offsite units named that path, against six covering other
+        # paths, and the source box is stopped and disabled — so server 1 holds the only copy, including
+        # a rescued ed25519 private key. Two properties carry the backup: the object is named by the
+        # sha256 of a DETERMINISTIC tar (so the weekly run re-uploads nothing, rather than adding 2.67 GB
+        # to an append-only bucket for ever), and the ciphertext is pinned to the operator's public key
+        # (a swapped key would still "succeed" and restore nothing).
+        run: cd coordinator && python3 test_offsite_rescued.py
+      - name: Rescued-tree offsite POSITIVE CONTROL (determinism defeated — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_offsite_rescued.py --control
       - name: Regeneration queue — one replay at a time, never beside a bridge (test_regen_queue.py)
         # Advice reports; the queue ACTS, and acting spends coordinator CPU on a paid block. Two guards
         # matter and neither is tidiness: a replay is ~10 GB of accumulator on a 62.8 GiB box that also

@@ -1,0 +1,43 @@
+[Unit]
+Description=Hazync: encrypted copy of the tree rescued from the retired coordinator to Backblaze B2 (append-only, content-named)
+Documentation=https://github.com/hazync/hazync-admin/issues/1
+After=network-online.target
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# /srv/bulk/hazync/rescued-from-old-box is 2.67 GB pulled off 152.53.93.164 before it was retired on
+# 2026-09-19. MEASURED that day: ZERO offsite units named that path, against six covering other paths.
+# The box it came from is stopped and disabled, so server 1 holds the only copy. It carries the rescued
+# ed25519 identity, twelve coordinator.db snapshots, and the receipts-and-evidence tars.
+#
+# Encrypted here to the operator's GPG encryption subkey, the same key and the same treatment as the
+# sponsor identities: only the PUBLIC half is on this box, pinned by fingerprint, so neither server 1 nor
+# B2 can read a copy back. Root only, for the root-only B2 keys and the 0600 rescued files.
+#
+# ⛔ WEEKLY, NOT HOURLY, AND THAT IS DELIBERATE. Every other offsite unit mirrors something that is still
+# being written. This is a FROZEN ARCHIVE — nothing writes to that directory any more — so the object is
+# named by the sha256 of a deterministic tar and every run after the first finds it present and uploads
+# nothing. Hourly would re-tar and re-hash 2.67 GB to reach the same conclusion 168 times a week.
+ExecStart=/usr/local/sbin/hazync-offsite-proofs rescued --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --rescued /srv/bulk/hazync/rescued-from-old-box --pubkey /etc/hazync/backup/sponsor-keys.pub.asc --recipient 777FE81F8CC077FD3D08055E852C2B3190F5B928
+TimeoutStartSec=2h
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/srv/bulk/hazync/rescued-from-old-box /opt/hazync
+# ⛔ TMPDIR IS ON DISK BECAUSE /tmp ON THIS BOX IS A 32 G tmpfs — I.E. RAM. PrivateTmp=true would put the
+# 2.67 GB tar AND its ~2.67 GB ciphertext into memory, ~5.3 GB of pressure on the machine whose memory
+# ceiling is the open bug (#350) and which carries a 22 GiB backfill walk. That is exactly the pressure
+# rescued_tar() streams to disk to avoid, reintroduced by the unit file. /srv/bulk is the 5.9 TB block
+# device (4.09 TB free when this was written) and is where both files belong.
+Environment=TMPDIR=/srv/bulk/hazync/tmp
+ReadWritePaths=/srv/bulk/hazync/tmp
+# The directory does not exist on a fresh box, and a missing TMPDIR fails the run at the first write.
+ExecStartPre=/usr/bin/mkdir -p /srv/bulk/hazync/tmp
+
+[Install]
+WantedBy=multi-user.target
