@@ -53,8 +53,12 @@ sudo systemctl daemon-reload && sudo systemctl enable --now hazync-bridge     # 
 sudo cp coordinator/deploy/hazync-coordinator.service /etc/systemd/system/    # HAZYNC_BRIDGE_OUT must point at the bridge's bundle dir
 sudo systemctl daemon-reload && sudo systemctl enable --now hazync-coordinator
 curl -s localhost:8899/api/state | head -c 300      # smoke test
-# Migrating an EXISTING coordinator onto this box? Use coordinator/deploy/migrate-coordinator.sh
-# (WAL-safe DB + receipts, old→new) BEFORE repointing the nginx proxy; decommission the old box only after.
+# Migrating an EXISTING coordinator onto this box? The ORDER is the durable part, and it outlived the
+# script: take a WAL-consistent DB snapshot (sqlite `.backup`, safe while the old coordinator still
+# serves), copy it and the receipts across, verify the new board renders identically, repoint the nginx
+# proxy, and decommission the old box ONLY after that. `migrate-coordinator.sh` performed exactly this
+# for the 2026-09-16 cutover and was retired on 2026-09-19 — it hard-coded that migration's two hosts and
+# relayed through a workstation because the boxes had no mutual trust, which is not the general case.
 ```
 
 `TIP_HEIGHT` is a **floor**, not the ceiling, and it is the *last* of three answers the coordinator
@@ -205,8 +209,9 @@ data-durability gaps a public write endpoint exposes:
 
   ⛔ **This previously said "set `COORD_BIND` to its private-network IP (not `0.0.0.0`)". That is not
   possible on the live topology and the instruction was unfollowable** (hazync#218). The coordinator
-  has `lo`, one PUBLIC `eth0` (152.53.93.164) and `docker0`; the web box (83.136.255.218) proxies to
-  it **over the public internet**. There is no private IP to bind, and `COORD_BIND=127.0.0.1` would
+  has `lo`, one PUBLIC `eth0` and `docker0`; the web box proxies to
+  it **over the public internet**. (Measured on the ORIGINAL coordinator, `152.53.93.164`, retired
+  2026-09-19; the topology argument is unchanged on server 1, `159.195.207.224`.) There is no private IP to bind, and `COORD_BIND=127.0.0.1` would
   take the board dark. `COORD_BIND=0.0.0.0` is correct here — the access control is the firewall,
   not the bind address.
 
