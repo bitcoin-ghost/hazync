@@ -1,0 +1,17 @@
+[Unit]
+Description=Weekly: encrypted copy of the rescued coordinator tree to Backblaze B2
+Documentation=https://github.com/hazync/hazync-admin/issues/1
+
+[Timer]
+# Weekly, because the source is frozen: nothing writes to that directory any more, so after the first
+# upload every run is a no-op that re-tars 2.67 GB to confirm the content hash it already knows. The
+# point of running it again at all is to notice if the object goes missing from B2.
+#
+# Sunday 04:17: off the hour so it does not collide with the hourly mirrors, and in the quiet window
+# after the daily summary at 09:00 has long passed.
+OnCalendar=Sun *-*-* 04:17:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

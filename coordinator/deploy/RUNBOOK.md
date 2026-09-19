@@ -462,6 +462,7 @@ Drilled on 2026-09-15: it took 4 s, integrity ok, and submission/vrange/contribu
 | Litestream logs WARN/ERROR lines | default, at most one push an hour | `hazync-offsite-watch.timer` |
 | The spine copy fails: `spine.bin` and `spine.json` still disagree after 5 reads, `hazync-verify` rejects it, or the upload fails | high | `hazync-offsite-spine.service` `OnFailure=` |
 | The sponsor keys copy fails: the public key file is not the pinned fingerprint or cannot encrypt, encryption fails, the ciphertext is not to that key, or the upload fails | high | `hazync-offsite-keys.service` `OnFailure=` |
+| The rescued-tree copy fails: the source directory is gone, the public key is not the pinned fingerprint, encryption fails, the ciphertext is not to that key or leaks plaintext names, or the upload half-lands | high | `hazync-offsite-rescued-b2.service` `OnFailure=` |
 | Daily at 08:00 UK time: receipts in R2 vs disk (a receipt counts as missing once it is older than `OFFSITE_PROOF_GRACE_SECS`, 2 h, so it has missed a whole hourly run), the mirror's 24 h, ledger lag, a **restore drill**, and the newest **spine copy** downloaded, checked against its sha256, verified with `hazync-verify`, and compared with the live spine (a problem over `OFFSITE_SPINE_LAG_SECS`, 1 h, behind), and whether the current **sponsor identities** have a copy in R2 encrypted to the pinned key (a problem once unchanged for `OFFSITE_KEYS_GRACE_SECS`, 2 h, with no copy; or when the key expires within `OFFSITE_KEY_EXPIRY_WARN_DAYS`, 60) | low if all good, high if not | `hazync-offsite-summary.timer` |
 
 The restore drill restores the ledger from R2 into `/var/lib/hazync/restore-drill`, checks integrity,
@@ -514,6 +515,7 @@ script writes both; only the keys file and bucket differ.
 | The spine | `hazync-offsite-spine-b2.timer`, every 10 min (:08): `spine --verify /usr/local/bin/hazync-verify` | `hazync-backup/spine-<first 8 of METHOD_ID>/spine_<lo>-<hi>.{bin,json}` | up to ~10 min |
 | Sponsor signing identities, **encrypted** | `hazync-offsite-keys-b2.timer`, hourly at :07 UTC: `keys` | `hazync-backup/sponsor-keys/identities-<hash>.tar.gpg` | up to ~1 h |
 | Ledger | `hazync-offsite-ledger-b2.timer`, daily 04:47 UTC: `ledger` (SQLite online backup, `integrity_check`, gzip) | `hazync-backup/ledger/coordinator-<UTC stamp>.db.gz`, one per run, never overwritten | up to ~1 day |
+| **The rescued coordinator tree**, encrypted | `hazync-offsite-rescued-b2.timer`, **weekly** Sun 04:17: `rescued` | `hazync-backup/rescued/rescued-<sha256 of the tar, 16 hex>.tar.gpg`, one per state, never overwritten | n/a — the source is frozen |
 
 - **Every unit pages the phone on failure** through `OnFailure=`, exactly like its R2 twin.
 - **The daily summary adds B2 lines**: receipts in B2 vs disk, the B2 mirror's 24 h, the spine copy verified,
@@ -533,11 +535,20 @@ script writes both; only the keys file and bucket differ.
 cd coordinator/deploy
 install -m 755 hazync-offsite-proofs.py /usr/local/sbin/hazync-offsite-proofs
 install -m 755 hazync-offsite-watch.py /usr/local/sbin/hazync-offsite-watch
-install -m 644 hazync-offsite-{proofs,spine,keys,ledger}-b2.{service,timer} /etc/systemd/system/
+install -m 644 hazync-offsite-{proofs,spine,keys,ledger,rescued}-b2.{service,timer} /etc/systemd/system/
 systemctl daemon-reload
 systemctl start hazync-offsite-ledger-b2.service hazync-offsite-spine-b2.service hazync-offsite-keys-b2.service
-systemctl enable --now hazync-offsite-{proofs,spine,keys,ledger}-b2.timer
+systemctl enable --now hazync-offsite-{proofs,spine,keys,ledger,rescued}-b2.timer
 ```
+
+⛔ **The `install` of `hazync-offsite-proofs.py` above is not optional when only the units change.** The
+script at `/usr/local/sbin/hazync-offsite-proofs` is a COPY, not a symlink into `/opt/hazync`, so the two
+drift silently and nothing checks them. Measured 2026-09-19: the installed copy was 605 lines while
+`/opt/hazync/coordinator/deploy/hazync-offsite-proofs.py` was 501 — the INSTALLED one ahead, from a deploy
+that updated `/usr/local/sbin` without refreshing the repo tree on the box. A unit shipped without its
+script simply fails every run: `hazync-offsite-rescued-b2` calls the `rescued` mode, which a copy
+predating it does not have. Compare both before enabling:
+`sha256sum /usr/local/sbin/hazync-offsite-proofs /opt/hazync/coordinator/deploy/hazync-offsite-proofs.py`
 
 The first receipt copy is large (24.4 GB / 106,691 receipts on 2026-09-15); run it by hand, then enable the
 hourly timer, so the hourly unit's 45 min limit does not kill it:

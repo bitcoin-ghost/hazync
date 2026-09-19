@@ -6,6 +6,7 @@
     hazync-offsite-proofs.py spine   --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --verify /usr/local/bin/hazync-verify
     hazync-offsite-proofs.py keys    --keys /etc/hazync/backup/r2.keys --bucket hazync-proofs --pubkey KEY.asc --recipient FINGERPRINT
     hazync-offsite-proofs.py ledger  --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --db /var/lib/hazync/coordinator.db
+    hazync-offsite-proofs.py rescued --keys /etc/hazync/backup/b2.keys --bucket hazync-backup --pubkey KEY.asc --recipient FINGERPRINT
 
 A receipt is immutable once written, so the mirror only ever ADDS: a file already present remotely is
 never re-uploaded or deleted. Keys are namespaced by guest id (`proofs-<first 8 of METHOD_ID>/`),
@@ -457,6 +458,127 @@ def keys_copy(s3, bucket, prefix, src, pubkey, fpr, where="R2"):
         shutil.rmtree(home, ignore_errors=True)
 
 
+# test_offsite_rescued.py --control sets this, to show the determinism guard can fail.
+#
+# ⛔ A MODULE FLAG, NOT A MONKEYPATCH. Subclassing tarfile.TarInfo to carry a varying mtime does NOT
+# defeat this: the line below ASSIGNS ti.mtime = 0 immediately after construction, so the subclass's
+# value is overwritten and determinism survives — the control passed while disabling nothing. That is
+# the fifth inert control written today; the flag goes where the property is actually established.
+_CONTROL_NONDETERMINISTIC_TAR = False
+
+
+def rescued_tar(src, out):
+    """Write a deterministic tar of every regular file under `src` to the open file `out`. (count, bytes).
+
+    ⛔ STREAMED TO DISK, NOT BUILT IN MEMORY. identities_tar() returns bytes, which is right for a handful
+    of 64-byte keys and wrong here: the rescued tree is 2.67 GB across 23 files, the largest 840 MB, on a
+    box already carrying a 22 GiB backfill walk. Holding the tar and then its ciphertext in RAM would be
+    ~5 GB of avoidable pressure on the machine whose memory limits are the open bug (#350).
+
+    Deterministic for the same reason identities_tar is: sorted names, zeroed mtime and owner, so the same
+    tree gives the same bytes and its sha256 names the state. A re-run then uploads nothing.
+    """
+    names = []
+    for root, _, files in os.walk(src):
+        for n in files:
+            f = os.path.join(root, n)
+            if os.path.isfile(f) and not os.path.islink(f):
+                names.append(os.path.relpath(f, src).replace(os.sep, "/"))
+    h = hashlib.sha256()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for rel in sorted(names):
+            full = os.path.join(src, rel)
+            ti = tarfile.TarInfo("rescued/" + rel)
+            ti.size = os.path.getsize(full)
+            ti.mtime, ti.mode, ti.uid, ti.gid, ti.uname, ti.gname = 0, 0o600, 0, 0, "", ""
+            if _CONTROL_NONDETERMINISTIC_TAR:
+                ti.mtime = int(os.path.getmtime(full))   # control only: the real mtime, so the tar drifts
+            with open(full, "rb") as f:
+                tar.addfile(ti, f)
+    out.flush()
+    out.seek(0)
+    for chunk in iter(lambda: out.read(1 << 20), b""):
+        h.update(chunk)
+    size = out.tell()
+    out.seek(0)
+    return len(names), size, h.hexdigest()
+
+
+def rescued_copy(s3, bucket, prefix, src, pubkey, fpr, where="B2"):
+    """Encrypted copy of the tree rescued from the retired coordinator, append-only (hazync-admin#1).
+
+    WHY THIS EXISTS. /srv/bulk/hazync/rescued-from-old-box is 2.67 GB (2.49 GiB -- `du -sh` says 2.5G,
+    which is the same number in binary units) pulled off 152.53.93.164 before it
+    was retired on 2026-09-19, and MEASURED that day: zero offsite units named that path, against six
+    that cover other paths. The box it came from is stopped and disabled, so server 1 holds the only
+    copy. It carries the rescued ed25519 identity, twelve coordinator.db snapshots, and the receipts and
+    evidence tars.
+
+    ⛔ ENCRYPTED, BECAUSE IT CONTAINS A PRIVATE KEY. Same treatment as the sponsor identities: gpg to the
+    encryption subkey of --recipient, whose PUBLIC half alone is on this box, so neither server 1 nor the
+    bucket can read it back. The ciphertext is checked against the recipient's subkeys before upload, and
+    refused if the plaintext file names leaked into it.
+
+    ⛔ APPEND-ONLY AND CONTENT-NAMED. The object is rescued-<sha256[:16]>.tar.gpg over the DETERMINISTIC
+    tar, so an unchanged tree uploads nothing on every later run. This is a frozen archive, not a mirror:
+    nothing writes to that directory any more.
+    """
+    if not os.path.isdir(src):
+        log(f"rescued: NOT uploaded, no directory at {src}")
+        return 1
+    home = tempfile.mkdtemp(prefix="hzr-")
+    try:
+        subs, _, why = recipient_keys(home, pubkey, fpr)
+        if why:
+            log(f"rescued: NOT uploaded, {why}")
+            return 1
+        with tempfile.NamedTemporaryFile(prefix="rescued-", suffix=".tar") as tf:
+            count, size, digest = rescued_tar(src, tf)
+            name = f"rescued-{digest[:16]}.tar.gpg"
+            remote = list_remote(s3, bucket, prefix)
+            if name in remote:
+                log(f"rescued: {prefix}{name} ({count} files, {size / 1e9:.2f} GB) already in {where}; "
+                    f"{sum(1 for k in remote if k.endswith('.tar.gpg'))} encrypted copies there")
+                return 0
+            with tempfile.NamedTemporaryFile(prefix="rescued-", suffix=".tar.gpg") as cf:
+                rc, _, err = gpg(home, ["--trust-model", "always", "--recipient", fpr,
+                                        "--output", cf.name, "--yes", "--encrypt", tf.name])
+                if rc != 0:
+                    log(f"rescued: NOT uploaded, gpg --encrypt failed: {err.strip()[-300:]}")
+                    return 1
+                cf.seek(0)
+                head = cf.read(1 << 20)
+                if not set(packet_keyids(home, head)) & set(subs):
+                    log(f"rescued: NOT uploaded, the ciphertext is not encrypted to an encryption subkey of {fpr}")
+                    return 1
+                if b"rescued/" in head:
+                    log("rescued: NOT uploaded, the ciphertext contains plaintext file names")
+                    return 1
+                cf.seek(0)
+                # ⛔ Captured HERE, and the verification below stays inside this `with`. Read outside it
+                # the size would describe a file that has already been unlinked -- true by luck of
+                # scoping, and misleading in exactly the failure case it exists to report.
+                enc = os.path.getsize(cf.name)
+                log(f"rescued: {count} files, {size / 1e9:.2f} GB -> {enc / 1e9:.2f} GB encrypted to "
+                    f"{', '.join(subs)}; uploading {prefix}{name}")
+                try:
+                    put_file(s3, bucket, prefix + name, cf, "application/pgp-encrypted")
+                except Exception as e:
+                    log(f"rescued: FAILED {prefix}{name}: {e!r}")
+                    return 1
+                # ⛔ Re-LIST rather than trust the upload returning. A multipart upload that half-lands
+                # raises nothing useful, and this object is the only copy of a private key.
+                ok = list_remote(s3, bucket, prefix).get(name) == enc
+                log(f"rescued: {prefix}{name} {'complete' if ok else 'INCOMPLETE'} in {where}")
+                if not ok:
+                    log("rescued: the tree it came from is on a box that is stopped and disabled, so "
+                        "until this lands server 1 holds the ONLY copy")
+                return 0 if ok else 1
+    finally:
+        gpg_stop(home)
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def ledger_snapshot(db, out):
     """Online-backup the live ledger db into out. (rows in ranges, None) or (None, why it is refused).
     Opened read-only, so a wrong path fails instead of creating an empty database."""
@@ -566,7 +688,7 @@ def checkpoints_copy(s3, bucket, prefix, root, min_age, threads, bwlimit_mbit, w
 
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["copy", "check", "spine", "keys", "ledger", "checkpoints"])
+    ap.add_argument("mode", choices=["copy", "check", "spine", "keys", "ledger", "checkpoints", "rescued"])
     ap.add_argument("--keys", required=True)
     ap.add_argument("--bucket")
     ap.add_argument("--proofs", default=os.environ.get("COORD_PROOFS", "/var/lib/hazync/proofs"))
@@ -575,7 +697,10 @@ def main(argv=None, client=None):
                     help="checkpoints: the bridge's archived rungs (state_<height>.bin)")
     ap.add_argument("--verify", help="spine: hazync-verify binary; a copy it rejects is not uploaded")
     ap.add_argument("--identities", default=os.environ.get("SPONSOR_IDENTITIES", "/var/lib/hazync/sponsor-bot/identities"))
-    ap.add_argument("--pubkey", help="keys: the recipient's armored PUBLIC key file")
+    ap.add_argument("--rescued", default=os.environ.get("HAZYNC_RESCUED",
+                                                        "/srv/bulk/hazync/rescued-from-old-box"),
+                    help="rescued: the tree pulled off the retired coordinator")
+    ap.add_argument("--pubkey", help="keys, rescued: the recipient's armored PUBLIC key file")
     ap.add_argument("--recipient", help="keys: the recipient's primary key fingerprint (pinned)")
     ap.add_argument("--db", default=os.environ.get("COORD_DB", "/var/lib/hazync/coordinator.db"),
                     help="ledger: the live coordinator database")
@@ -608,6 +733,11 @@ def main(argv=None, client=None):
 
     if a.mode == "ledger":
         return ledger_copy(s3, bucket, "ledger/", a.db, where)
+
+    if a.mode == "rescued":
+        if not a.pubkey or not a.recipient:
+            raise SystemExit("rescued needs --pubkey and --recipient")
+        return rescued_copy(s3, bucket, "rescued/", a.rescued, a.pubkey, a.recipient, where)
 
     if a.mode == "keys":
         if not a.pubkey or not a.recipient:
