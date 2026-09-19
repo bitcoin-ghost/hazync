@@ -302,7 +302,7 @@ aarch64 verifier it builds embeds it.
 `not_anchored`.
 
 **The risk is what gets served, not what gets built.** A reader who clicks "verify" trusts the site serving
-`hazync-verify.js` and `hazync-verify.wasm`. Served at `hazync.org/verify/` (both measured 200, 1,064,517 bytes, on 2026-09-14). On 2026-08-11 the bitcoinghost.org
+`hazync-verify.js` and `hazync-verify.wasm`. Served at `hazync.org/verify/` (both measured 200; the wasm is 1,065,400 bytes as of the v0.21.7 cutover, 2026-09-19). On 2026-08-11 the bitcoinghost.org
 module was two re-baselines behind and told readers the live spine was forged. A stale module has the same
 size and exports and returns HTTP 200, so only calling it reveals the difference (header of
 `scripts/check-deployed-verifier.sh`).
