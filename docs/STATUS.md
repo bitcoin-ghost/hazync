@@ -7,16 +7,18 @@ minute, so use the live API; the snapshot below is dated.
 
 ## Release
 
-- **In preparation: v0.21.7** ([notes](history/releases/RELEASE_NOTES_v0.21.7.md)) — a board block across many
-  cards (mode 6, #361/#364) driven by one command, `hazync run --distributed` (#367/#408); the bridge's height
-  cap removed (#398); any bundle in the gap rebuildable on demand (#374, #377, #378); sponsorship payments
-  through BTCPay (#371, #372). Not a re-baseline: `METHOD_ID 37987b85` is unchanged, reproduced twice on
-  2026-09-18 from separate commits.
-- **Latest: [v0.21.6](https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.6)**, published
-  2026-09-15 ([notes](history/releases/RELEASE_NOTES_v0.21.6.md)). Assets: `hazync-host-x86_64-linux-gnu`,
-  `hazync-host-x86_64-linux-gnu-cuda`, `hazync-worker`, `hazync-run-workers.sh`, `hazync-coordinator.py`,
-  `hazync-verify-x86_64-linux-gnu`, `hazync-verify-aarch64`, `hazync-verify.wasm`, `SHA256SUMS.txt`,
-  `SHA256SUMS.txt.asc`. Check them as in [`SECURITY.md`](../SECURITY.md#verifying-releases).
+- **Latest: [v0.21.7](https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.7)**, published
+  2026-09-19 ([notes](history/releases/RELEASE_NOTES_v0.21.7.md)) — a board block across many cards (mode 6,
+  #361/#364) driven by one command, `hazync run --distributed` (#367/#408); the bridge's height cap removed
+  (#398); any bundle in the gap rebuildable on demand (#374, #377, #378); sponsorship payments through BTCPay
+  (#371, #372). Not a re-baseline: `METHOD_ID 37987b85` is unchanged. Tag `e05c455` dereferences to commit
+  `1eded646`; `latest` confirmed by API and by the CDN serving guest `37987b85`.
+  ⚠ **The browser verifier at `hazync.org/verify/` still serves v0.21.6's module** (1,064,517 B,
+  sha `344a21b9…`) against v0.21.7's 1,065,400 B (`f66cfc1f…`). The §3 cutover has not run.
+- **Previous: [v0.21.6](https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.6)**, published
+  2026-09-15 ([notes](history/releases/RELEASE_NOTES_v0.21.6.md)). Every release ships the same seven assets
+  plus `SHA256SUMS.txt` and `SHA256SUMS.txt.asc`; check them as in
+  [`SECURITY.md`](../SECURITY.md#verifying-releases).
 
 ## Guest
 
@@ -39,18 +41,18 @@ Live: [`/api/state?slim=1`](https://api.hazync.org/api/state?slim=1) ·
 route: [`COORDINATOR_REFERENCE.md`](COORDINATOR_REFERENCE.md). `api.hazync.org/api` is the endpoint workers use; `bitcoinghost.org/hazync/api` was retired
 on 2026-09-16 (no worker had used it since 15 Sep).
 
-Snapshot at **2026-09-15 16:58 UTC**:
+Snapshot at **2026-09-19 09:57 UTC**:
 
 | | |
 |---|---|
-| proven | 70,337 blocks |
-| folded | 44,882 blocks, 37,922 folds |
-| frontier (genesis-anchored, contiguous) | 70,031 |
-| spine | `[1..45,648]` |
-| chain tip / `pct` | 967,160 / 7.2 |
-| contributors | 7 |
+| proven | 98,935 blocks |
+| folded | 74,158 blocks, 58,555 folds |
+| frontier (genesis-anchored, contiguous) | 96,930 |
+| spine | `[1..79,655]` |
+| chain tip / `pct` | 967,691 / **10.0** |
+| contributors | 8 |
 | `/api/meta` `method_id` | canonical |
-| `/api/meta` `source_sha256` | equals `coordinator/server.py` at `aef03a8` (coordinator restarted 16:19 UTC) |
+| `/api/meta` `source_sha256` | `60fa3a47…` |
 | sponsorship (`/api/sponsor`) | `open: false`, `payments: false`, `priced: true` |
 
 ## Shipped in v0.21
