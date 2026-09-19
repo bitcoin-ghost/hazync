@@ -1,0 +1,11 @@
+[Unit]
+Description=Check hourly that hazync.org serves the newest release's verifier
+
+[Timer]
+# Hourly at :37, off the other checks' minutes so they do not contend.
+OnCalendar=*:37
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,31 @@
+[Unit]
+# Integrity check: does hazync.org serve the verifier the newest release shipped?
+#
+# ⛔ WHY THIS EXISTS. On 2026-09-19 the site served v0.21.6's module for hours after v0.21.7
+# published, and NOTHING noticed. release.sh classes `deployed-verifier` as IGNORABLE_JOB because
+# that job tests the LIVE SITE and is red BY CONSTRUCTION between a release and its cutover — so a
+# green release is compatible with a stale site, and no scheduled check existed to catch the gap
+# afterwards. scripts/check-deployed-verifier.sh already existed and already exited 1 correctly; it
+# was installed nowhere and wired to no timer. A check that runs on no box cannot fail.
+#
+# ⚠ DO NOT SET ALLOW_SKIP=1 HERE. The script honours it (line 41) and exits 0 when its tooling is
+# missing. That is right for a developer laptop and exactly wrong here: it would rebuild the silent
+# hole this unit exists to close.
+Description=Hazync integrity: hazync.org serves the verifier the newest release shipped
+Documentation=https://github.com/bitcoin-ghost/hazync/blob/main/docs/RELEASE_PROCESS.md
+After=network-online.target
+Wants=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# Two consecutive failures before paging: a release and its cutover are minutes apart, and one
+# transient fetch failure is not a stale deployment.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-deployed-verifier /usr/local/sbin/hazync-check-deployed-verifier
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
