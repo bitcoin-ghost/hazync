@@ -119,6 +119,19 @@ phase by `wchan=mem_cgroup_handle_over_high` and flat CPU ticks, never by unit s
 frontier is **93,333**, so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
 work at any plausible size. #350 gates *tip-following* and closing the 418,269–967,499 gap, not the board.
 
+⛔ **As of 2026-09-19 the bridge is deliberately STOPPED**, not crash-looping — the text above describes what
+it did before it was stopped. It was shut down at 06:54 UTC+2 after 23 OOM kills and ~36 alerts, with its
+h=800,257 checkpoint intact, and it will stay down until the memory cap is raised. Nothing in this release
+depends on it: the bridge produces witnesses for heights **above 418,268**, and the frontier is still below
+94,000. **Provers, contributors and the public board are entirely unaffected** — the board gained ~900 blocks
+during the thrash and has kept advancing since the bridge went down.
+
+The fix is a two-part configuration change, both prepared and neither shipped in this release because neither
+is a release artifact: `HAZYNC_BRIDGE_CKPT=200` so a killed cycle banks its progress, and
+`MemoryHigh=48G`/`MemoryMax=52G` so the cap matches what the post-#355 code actually needs (~49 GiB peak
+against the measured tip set of 165,212,120 coins). The cap raise waits on the parallel backfill walk
+releasing its ~21.5 GiB.
+
 ## Any bundle in the gap can be rebuilt on demand (#374, #377, #378, #383)
 
 `EMIT_FROM=967500` leaves 418,269–967,499 with no bundle, because storing them needs >9 TB. Instead the bridge
