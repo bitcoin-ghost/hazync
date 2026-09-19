@@ -101,6 +101,20 @@ the board was frozen at 418,268. The cap is removed and the drop-ins are in git,
 (220000 → 418257 → 967300 → removed). A **free-space check** runs hourly alongside it: 0 ok / 1 low / 2
 could-not-check, floor `HAZYNC_DISK_FLOOR_GB=500`. It contains no delete path.
 
+⛔ **Removing the cap does not by itself unfreeze the board, and this release does not claim it does.**
+`EMIT_FROM=967500` still gates emission, and the bridge cannot yet walk that far. Measured on server 1 on
+2026-09-18/19: it reaches ~44 GiB RSS at **h=798,257** (108.06M UTXOs), meets its `MemoryMax=44G` cgroup
+ceiling, throttles at ~99% memory pressure for two to three hours, and is then OOM-killed — two kills in
+`dmesg`, 20:26:49 and 01:08:48. It resumes from its checkpoint and does make forward progress each cycle
+(798,257 → 800,257 on the third), but the tip is 967,626 and the working set grows with the UTXO set. That is
+[#350](https://github.com/bitcoin-ghost/hazync/issues/350), and it is a resident-state/sizing problem, not a
+configuration one. ⚠ `systemd` reports `active (running)` throughout the frozen window, so nothing alerts —
+judge it by `wchan` and CPU ticks, not by unit state.
+
+⚠ **The provers are not waiting on any of this.** Bundles exist contiguously to **418,268** and the board's
+frontier is **93,333**, so roughly **322,000 blocks of witnesses already sit ahead of the fleet** — months of
+work at any plausible size. #350 gates *tip-following* and closing the 418,269–967,499 gap, not the board.
+
 ## Any bundle in the gap can be rebuilt on demand (#374, #377, #378, #383)
 
 `EMIT_FROM=967500` leaves 418,269–967,499 with no bundle, because storing them needs >9 TB. Instead the bridge

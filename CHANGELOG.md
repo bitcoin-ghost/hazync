@@ -14,7 +14,8 @@ A board block across many cards, and the height cap comes off. `seg-serve` serve
 board block gets N cards and still emits the `KIND_RANGE` receipt the coordinator accepts (#361, #364), and
 `hazync run --distributed` drives the whole thing from one command (#408); `seg-connect` reconnects after a
 dropped link instead of exiting (#402); the shell says plainly that a loopback bind means remote workers cannot
-attach (#401); the bridge's height cap is removed and free space is watched hourly (#398, #399); any bundle in
+attach (#401); the bridge's height cap is removed and free space is watched hourly (#398, #399), though the
+bridge still stops short of the tip on current hardware (#350); any bundle in
 the gap can be rebuilt on demand from a checkpoint rung (#374, #377, #378, #383); sponsorship payments run
 through BTCPay (#371, #372); key rotation is off unless `ROTATE_ENABLED=1` (#311, #348); offsite mirroring
 handles files over 5 GB and stops paging on a throttled listing (#390, #393, #403). Not a re-baseline.
