@@ -304,6 +304,19 @@ jobs:
         run: |
           cd coordinator
           python3 test_regen_queue.py --control
+      - name: Tip controller — fleet scaling from the prover's own progress (test_tip_controller.py)
+        # The tip target is every block proven inside 10 minutes and published at tip-1, so the fleet is
+        # sized DURING the proof and the decision function IS the feature: nothing else decides whether a
+        # card is rented or dropped. Two guards protect against acting on a number that is not there.
+        # seg-serve reports "joins 25/2352" through the whole assembly phase with no elapsed and no ETA,
+        # and the join tree does not divide across workers at all (main.rs:5381) — so cards added there
+        # cannot help and still cost money. And slow_tail compares each card against the fleet's own
+        # median on THIS block, which with one card would cull the only card proving.
+        run: cd coordinator && python3 test_tip_controller.py
+      - name: Tip controller POSITIVE CONTROL (both guards disabled — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_controller.py --control
       - name: A distributed (mode-6) prove beats its claim (#361/#364)
         # seg-serve prints "91/2352 segments" and "joins 25/2352" — number FIRST, noun PLURAL — while a
         # single-card prove prints "segment 91/2352". _PROGRESS_RE knew only the latter, so st["n"] never
