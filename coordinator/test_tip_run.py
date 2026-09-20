@@ -195,6 +195,47 @@ try:
 except tr.RunRefused as e:
     check("died before verifying" in str(e), f"a dead aggregate is noticed, not waited on ({str(e)[:50]}…)")
 
+# ── 5b. ⛔ AN AGGREGATOR THAT VANISHES IS NOT "STILL WORKING" ─────────────────────────────────────
+# Measured 2026-09-20 on the 23-card run: the pods were terminated while run_block was still polling.
+# Every subsequent poll correctly reported `unreachable` -- which is NOT `dead`, because one failed ssh
+# must never abort a healthy run -- so the loop kept asking a fleet that no longer existed, printing
+# nothing, until an outer `timeout` killed it at 45 minutes. The run reported EXIT=124 and not one word
+# about why. `unreachable` is the right verdict for ONE poll and the wrong one to repeat 1200 times.
+class VanishingRunner(FakeRunner):
+    """Answers normally, then goes unreachable for ever once the aggregate starts."""
+
+    def aggregate_status(self):
+        return {"alive": True, "verified": False, "unreachable": True, "joins": None}
+
+
+cards, r = fresh()
+r.__class__ = VanishingRunner
+try:
+    tr.run_block(block="966256", cards=cards, runner=r, now=Clock().now, sleep=lambda s: None,
+                 unreachable_limit=20, tick_s=3.0)
+    check(False, "a vanished aggregator must stop the run")
+except tr.RunRefused as e:
+    check("unreachable for 20 consecutive polls" in str(e),
+          f"a vanished aggregator stops the run instead of polling in silence ({str(e)[:56]}…)")
+    check("probably gone" in str(e) and "terminated" in str(e),
+          "and the message says what actually happened, so the next reader is not left with EXIT=124")
+
+# ⛔ AND ONE BAD ssh MUST STILL NOT ABORT ANYTHING. The counter has to reset on any answer, or a fleet
+# with an occasional slow probe dies at poll 20 of a run that was working perfectly.
+class FlakyRunner(FakeRunner):
+    def aggregate_status(self):
+        self.agg_ticks = getattr(self, "agg_ticks", 0) + 1
+        if self.agg_ticks % 3:                        # unreachable 2 polls in every 3
+            return {"alive": True, "verified": False, "unreachable": True}
+        return {"alive": True, "verified": self.agg_ticks >= 60, "digest": "84e6643e"}
+
+
+cards, r = fresh()
+r.__class__ = FlakyRunner
+res = tr.run_block(block="966256", cards=cards, runner=r, now=Clock().now, sleep=lambda s: None,
+                   unreachable_limit=20)
+check(res["ok"], "a flaky probe does NOT abort the run — the counter resets on every answer")
+
 # ── 6. an empty fleet is refused rather than dividing by zero ─────────────────────────────────────
 try:
     tr.run_block(block="966256", cards={}, runner=FakeRunner({}), now=Clock().now, sleep=lambda s: None)

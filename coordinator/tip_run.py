@@ -54,7 +54,8 @@ def verify_fleet_empty(runner, cards):
             "ok": not dirty and not silent and len(clean) == len(cards)}
 
 
-def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200, tick_s=3.0):
+def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200, tick_s=3.0,
+              unreachable_limit=20):
     """Drive one block to a verified receipt. Returns a summary dict.
 
     `cards` maps chunk -> card. `runner` supplies the remote actions. `now`/`sleep` are injected so a
@@ -128,14 +129,32 @@ def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200,
 
     # ── phase 6 ───────────────────────────────────────────────────────────────────────────────────
     runner.start_aggregate(block=block, chunks=n)
-    for _ in range(max_ticks):
+    # ⛔ AN AGGREGATOR WE CANNOT REACH MUST NOT BE POLLED IN SILENCE. One bad ssh is not a dead
+    # aggregate -- saying "dead" there would abort a healthy run -- but an aggregator that stays
+    # unreachable is usually gone for good (terminated, evicted, network lost), and the old loop kept
+    # asking for the full tick budget with nothing printed. Measured 2026-09-20: a 23-card run sat
+    # polling a fleet that no longer existed until an outer `timeout` killed it at 45 minutes, and the
+    # run reported nothing at all about why.
+    gone = 0
+    for tick in range(max_ticks):
         out = runner.aggregate_status()
         if out.get("verified"):
             return {"ok": True, "block": block, "cards": n,
                     "wall_s": round(now() - t0, 1), "chunk_phase_s": chunk_phase_s,
-                    "digest": out.get("digest"), "events": events}
-        if not out.get("alive", True):
-            raise RunRefused("the aggregate died before verifying — see agg.err on the coordinator")
+                    "digest": out.get("digest"), "joins": out.get("joins"), "events": events}
+        if out.get("unreachable"):
+            gone += 1
+            if gone >= unreachable_limit:
+                raise RunRefused(
+                    f"the aggregator has been unreachable for {gone} consecutive polls "
+                    f"(~{gone * tick_s:.0f}s). It is probably gone -- terminated, evicted or "
+                    f"network-partitioned. Not waiting out the remaining "
+                    f"{max_ticks - tick} ticks in silence.")
+        else:
+            gone = 0
+            if not out.get("alive", True):
+                raise RunRefused("the aggregate died before verifying — see agg.err on the coordinator")
         sleep(tick_s)
 
-    raise RunRefused("the aggregate never verified within the tick budget")
+    raise RunRefused(f"the aggregate never verified within {max_ticks} ticks "
+                     f"(~{max_ticks * tick_s / 60:.0f} min); last joins={out.get('joins')}")
