@@ -148,6 +148,40 @@ check(tl.spend_so_far([{"price": 0.34}] * 27, 544.0) == 1.387,
       f"run 4's cost is reproduced exactly: $"
       f"{tl.spend_so_far([{'price': 0.34}] * 27, 544.0)} vs $1.387 recorded")
 
+# ── 7. the screening report: rc=0 is not a pass ────────────────────────────────────────────────────
+GOOD_SCREEN = {"rc": 0, "segments": 31, "s_per_segment": 2.1,
+               "gpu": "NVIDIA GeForce RTX 4090", "peak_vram_mib": "22460"}
+
+rep = tl.report_from_screen(GOOD_SCREEN, method_id=tl.CANONICAL_METHOD_ID)
+ok, why = tl.qualify(rep)
+check(ok, f"a card that screened cleanly qualifies ({why})")
+check(abs(rep["rate"] - 1 / 2.1) < 1e-9, f"rate is segments per second ({rep['rate']:.4f})")
+
+# ⛔ THE ONE THAT MATTERS: exit 0 having proved nothing.
+rep = tl.report_from_screen({"rc": 0, "segments": 0, "s_per_segment": None},
+                            method_id=tl.CANONICAL_METHOD_ID)
+ok, why = tl.qualify(rep)
+check(not ok, "a screening that exited 0 with ZERO segments does not qualify")
+check("proved nothing" in rep["note"], f"and the note says why ({rep['note']})")
+check(rep["rate"] is None, "a card with no measured rate reports rate None, not 0")
+
+# A non-zero exit is refused, and said plainly.
+rep = tl.report_from_screen({"rc": 101, "segments": 0}, method_id=tl.CANONICAL_METHOD_ID)
+check(not tl.qualify(rep)[0], "a screening that exited non-zero does not qualify")
+check("exited 101" in rep["note"], f"the exit code is reported ({rep['note']})")
+
+# ⚠ CUDA 804 is an UNPREPARED card, not a bad one — bootstrap2.sh fixes it by removing the compat libs.
+# Discarding it would throw away a working GPU, so the note must distinguish it.
+rep = tl.report_from_screen({"rc": 1, "segments": 0}, method_id=tl.CANONICAL_METHOD_ID,
+                            log="terminate called ... CUDA error 804 forward compatibility")
+check(not tl.qualify(rep)[0], "a CUDA 804 card does not qualify as it stands")
+check("804" in rep["note"] and "remove them and retry" in rep["note"],
+      f"but the note says it is fixable, not fatal ({rep['note']})")
+
+# A screened card still fails the METHOD_ID gate if the guest is wrong -- screening is not a substitute.
+rep = tl.report_from_screen(GOOD_SCREEN, method_id="deadbeef" * 8)
+check(not tl.qualify(rep)[0], "a clean screening does not excuse a wrong METHOD_ID")
+
 EXPECTED_CONTROL_FAILURES = {
     "a wrong METHOD_ID is refused (ok)",
     "the bridge guest is refused for proving",

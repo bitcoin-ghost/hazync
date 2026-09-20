@@ -148,3 +148,58 @@ def keep_and_release(cards, want, *, min_fraction=None):
 def spend_so_far(cards, elapsed_s):
     """What the fleet has cost, in dollars, for `elapsed_s` of wall clock."""
     return round(sum((c.get("price") or 0.0) for c in cards) * (elapsed_s / 3600.0), 3)
+
+
+# The screening prove that `tools/milestone/bootstrap2.sh` runs on every card before it is trusted:
+# one chunk of a real near-tip block at HAZYNC_CHUNKS=64, so ~30 segments of representative work.
+# Cheap enough to run on every card, real enough that a card which passes it can prove.
+SCREEN_MIN_SEGMENTS = int(os.environ.get("HAZYNC_TIP_SCREEN_MIN_SEGMENTS", "1"))
+
+# CUDA error 804 on a consumer card means the driver's compat libraries are shadowing the real ones.
+# bootstrap2.sh removes them first for exactly this reason. A card failing this way is NOT a bad card —
+# it is an unprepared one, and saying so is the difference between fixing it and discarding it.
+CUDA_COMPAT_HINT = "cuda error 804"
+
+
+def report_from_screen(screen, *, method_id, binary_sha=None, expect_binary_sha=None, log=""):
+    """Turn a card's `screen.json` plus its reported METHOD_ID into the dict `qualify()` consumes.
+
+    ⛔ A ZERO EXIT IS NOT A PASS. The screening can exit 0 having produced no segments at all — which is
+    a card that ran something and proved nothing. `segments` is the evidence, not `rc`, and a card whose
+    screening yielded nothing measurable must not be handed a chunk of a real block.
+
+    ⚠ `rate` is segments per second, the figure ranking uses. It is None when the screening did not
+    measure one; `keep_and_release` deliberately never puts an unmeasured card in the slow tail.
+    """
+    screen = screen or {}
+    rc = screen.get("rc")
+    segs = screen.get("segments") or 0
+    sps = screen.get("s_per_segment")
+
+    smoke_ok = (rc == 0) and segs >= SCREEN_MIN_SEGMENTS and bool(sps)
+
+    note = ""
+    if not smoke_ok:
+        if CUDA_COMPAT_HINT in (log or "").lower():
+            # Distinguishable on purpose: this one is fixed by removing /usr/local/cuda*/compat, which
+            # bootstrap2.sh does. Discarding the card instead would throw away a working GPU.
+            note = "CUDA 804 — the driver compat libraries are shadowing the real ones; remove them and retry"
+        elif rc != 0:
+            note = f"screening prove exited {rc}"
+        elif segs < SCREEN_MIN_SEGMENTS:
+            note = f"screening produced {segs} segments — it ran but proved nothing"
+        else:
+            note = "screening measured no per-segment rate"
+
+    return {
+        "reachable": True,               # we have its screen.json, so we reached it
+        "method_id": method_id,
+        "binary_sha": binary_sha,
+        "expect_binary_sha": expect_binary_sha,
+        "smoke_ok": smoke_ok,
+        "rate": (1.0 / sps) if sps else None,
+        "segments": segs,
+        "gpu": screen.get("gpu"),
+        "peak_vram_mib": screen.get("peak_vram_mib"),
+        "note": note,
+    }
