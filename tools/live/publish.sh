@@ -2,8 +2,14 @@
 # Publish the live frame to the public page. Runs WHERE THE RENDERER RUNS (the tip box), pushing one
 # file one way to the web box.
 #
-#   HAZYNC_PUBLISH_DEST=hazync-web:/var/www/hazync/live ./publish.sh /path/to/frame.png
-#   ./publish.sh --loop /path/to/frame.png        # publish whenever the frame changes
+#   HAZYNC_PUBLISH_DEST=root@152.53.86.216: HAZYNC_PUBLISH_KEY=~/.ssh/hazync_publish \
+#     ./publish.sh --loop frame.png
+#
+# ⛔ THE DESTINATION PATH IS RELATIVE TO THE RESTRICTED ROOT, SO IT IS EMPTY. The publish key is
+#    pinned to `rrsync -wo -no-del /var/www/hazync/live`, and rrsync resolves every path INSIDE that
+#    directory -- so a dest of `host:/var/www/hazync/live` is asked for
+#    /var/www/hazync/live/var/www/hazync/live and fails with a "No such file or directory" that reads
+#    like a missing target rather than a path that was doubled. Verified against the live host.
 #
 # ⛔ THE COLLECTOR MUST NOT RUN ON THE WEB BOX. It needs ssh to every pod, and the web box is the
 #    most exposed machine there is. Keep the pod key on the tip box; push a PNG the other way.
@@ -18,7 +24,15 @@
 #    baked into the image.
 set -u
 
-DEST=${HAZYNC_PUBLISH_DEST:?set HAZYNC_PUBLISH_DEST, e.g. hazync-web:/var/www/hazync/live}
+DEST=${HAZYNC_PUBLISH_DEST:?set HAZYNC_PUBLISH_DEST, e.g. root@152.53.86.216: (path relative to the restricted root, so usually empty)}
+
+# ⚠ A dest carrying the restricted directory's own path is the mistake this catches -- it doubles
+# under rrsync and the error names a directory nobody typed.
+case "$DEST" in
+  *:/var/www/*) echo "refusing: HAZYNC_PUBLISH_DEST must be anchored at the restricted root." >&2
+                echo "  the key is pinned to /var/www/hazync/live, so use 'user@host:' with no path." >&2
+                exit 2 ;;
+esac
 KEY=${HAZYNC_PUBLISH_KEY:-}
 LOOP=0
 [ "${1:-}" = "--loop" ] && { LOOP=1; shift; }
