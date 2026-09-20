@@ -64,6 +64,19 @@
   #banner.show { display: block; }
   #banner.stale { color: var(--warn); }
   #banner.dead  { color: var(--bad); }
+  button {
+    font: inherit; font-size: 13px; color: var(--fg); background: transparent;
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }
+  /* Kept out of the flex flow so a message never resizes the frame: the picture must not jump
+     because a line of text appeared under it. */
+  #sharemsg {
+    position: absolute; left: 16px; bottom: 6px; margin: 0;
+    font-size: 12px; color: var(--dim); min-height: 1em;
+  }
   footer { flex: 0 0 auto; width: 100%; max-width: 1920px; margin-top: 8px;
            font-size: 12px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px 16px; }
   a { color: inherit; }
@@ -91,7 +104,9 @@
   <h1>HAZYNC &mdash; zkVM bitcoin block proofs, live</h1>
   <span class="sp"></span>
   <span id="status">connecting&hellip;</span>
+  <button id="share" type="button" aria-label="Share this view">Share</button>
 </header>
+<p id="sharemsg" role="status" aria-live="polite"></p>
 
 <div class="frame-wrap">
   <div id="banner"></div>

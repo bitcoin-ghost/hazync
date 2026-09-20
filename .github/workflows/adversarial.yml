@@ -567,6 +567,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
+      - name: Share shares the frame's bytes, and never a stale frame as live (tools/live)
+        # Runs the SHIPPED live.js against a mock browser, so it exercises the real handler rather
+        # than a re-implementation that would pass while the page is broken.
+        run: cd tools/live && python3 test_share.py
+      - name: Share POSITIVE CONTROL (cancelled-share check removed — must FAIL)
+        run: |
+          cd tools/live
+          python3 test_share.py --control
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
