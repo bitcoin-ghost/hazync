@@ -461,6 +461,7 @@ def main():
 
         result = tip_run.run_block(block=a.block, cards=assignment, runner=runner,
                                    now=time.time, sleep=time.sleep, feed=feed,
+                                   on_event=lambda m: log(f"  {m}"),
                                    max_ticks=1200, tick_s=6.0)
         log("RESULT " + json.dumps(result, indent=1))
         return 0 if result.get("ok") else 1

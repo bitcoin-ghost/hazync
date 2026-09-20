@@ -54,7 +54,7 @@ def card_state(probe):
     probe = probe.strip()
     if not probe:
         return UNREACHABLE
-    if probe == "DONE":
+    if probe == "DONE" or probe.startswith("DONE:"):
         return DONE
 
     parts = probe.split(":")
@@ -99,10 +99,16 @@ def can_accept_reassignment(probe):
     hazync#97 memory failure (`rc=101`, "drop a rung ... SEG_PO2=20"). Require the card to be idle by
     measurement — no prove process AND VRAM released — never by inference from its output.
     """
-    if card_state(probe) in (UNREACHABLE, DONE):
-        # DONE is the trap: it means a receipt exists, which says nothing about VRAM.
+    if card_state(probe) == UNREACHABLE:
         return False
     parts = probe.strip().split(":")
+    # A finished card now reports `DONE:SZ:UTIL:VRAM:NPROC`; drop the marker and judge the metrics.
+    # ⛔ THE ORIGINAL POINT STILL STANDS: a receipt is NOT evidence the card is free -- pod-prove.sh
+    # writes chunk_N.bin while the process still holds ~22 GB, and reassigning there starts a second
+    # prove on top of the first and both die (hazync#97). The difference is that we now MEASURE
+    # whether it has let go, instead of refusing every finished card for ever.
+    if parts and parts[0] == "DONE":
+        parts = parts[1:]
     if len(parts) != 4:
         return False
     try:
@@ -160,13 +166,22 @@ def probe_body():
 
     The caller passes RDIR and CHUNK as assignments *before* this body, never inside it.
     """
+    # ⛔ THE METRICS ARE REPORTED EVEN WHEN THE RECEIPT EXISTS. This used to `echo DONE` and stop, so a
+    # card that had finished reported NOTHING about its process or its VRAM -- and
+    # can_accept_reassignment, which needs exactly those, could only refuse it. The consequence was
+    # that once every card had a receipt no card could ever take reassigned work, so a wedged chunk
+    # could only ever be restarted ON THE CARD THAT WEDGED. Measured 2026-09-20: a 4090 with no usable
+    # CUDA device (`cudaErrorNoDevice`) was handed its own chunk back instead of the work moving to any
+    # of the ten idle cards that had already finished.
+    #
+    # `DONE:` is kept as a prefix so the state stays readable at a glance and old replies still parse.
     return (
-        'if [ -f "$RDIR/chunk_$CHUNK.bin" ]; then echo DONE; else '
         'Z=$(stat -c%s "$RDIR/prove.log" 2>/dev/null || echo 0); '
         'U=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); '
         'V=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1); '
         'N=$(pgrep -cf hazync-host-cuda); '
-        'echo "$Z:${U:-0}:${V:-0}:$N"; fi'
+        'if [ -f "$RDIR/chunk_$CHUNK.bin" ]; then echo "DONE:$Z:${U:-0}:${V:-0}:$N"; '
+        'else echo "$Z:${U:-0}:${V:-0}:$N"; fi'
     )
 
 

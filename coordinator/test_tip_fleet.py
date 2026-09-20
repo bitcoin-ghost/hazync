@@ -175,6 +175,38 @@ rec = [x for x in r["actions"] if x["action"] in ("reassign", "restart_in_place"
 check(len(rec) == 1 and rec[0]["action"] == "restart_in_place",
       f"with only a VRAM-holding card available, the chunk restarts in place ({rec})")
 
+# ── ⛔ A FINISHED CARD THAT HAS LET GO OF THE GPU CAN TAKE MORE WORK ──────────────────────────────
+# The probe used to `echo DONE` and stop, so a card with a receipt reported nothing about its process
+# or its VRAM — and can_accept_reassignment, which needs exactly those, could only refuse it. Once
+# every card had a receipt, NO card could accept reassigned work, so a wedged chunk could only ever be
+# restarted on the card that wedged. Measured 2026-09-20: a 4090 with no usable CUDA device
+# (cudaErrorNoDevice) was handed its own chunk back while ten idle finished cards sat there.
+body = tf.probe_body()
+check("DONE:$Z:" in body,
+      "the probe reports its metrics even when the receipt exists")
+check(body.index("nvidia-smi") < body.index("chunk_$CHUNK.bin"),
+      "⛔ and gathers them BEFORE testing for the receipt, so the DONE path cannot skip them")
+
+check(tf.card_state("DONE:512:0:400:0") == tf.DONE, "DONE:… still reads as DONE")
+check(tf.card_state("DONE") == tf.DONE, "and a bare DONE from an older card still parses")
+check(tf.can_accept_reassignment("DONE:512:0:400:0"),
+      "⛔ a finished card with no prover and VRAM released CAN take reassigned work")
+check(not tf.can_accept_reassignment("DONE:512:8:23000:1"),
+      "⛔ but a finished card still HOLDING 23 GB cannot — pod-prove.sh writes the receipt while the "
+      "process keeps the VRAM, and reassigning there starts a second prove and both die")
+check(not tf.can_accept_reassignment("DONE:512:0:400:1"),
+      "nor one whose prover process is still alive")
+
+# and the planner now MOVES the work rather than retrying the broken card
+plan = tf.plan_tick(assignments={0: "dead", 1: "fin"},
+                    probes={"dead": "512:0:0:0", "fin": "DONE:900:0:300:0"},
+                    staged={1}, busy=set(),
+                    last_size={0: 512}, last_change={0: 0.0},   # keyed by CHUNK, not card
+                    now=1000.0, stall_s=100.0)
+acts = [a for a in plan["actions"] if a["action"] in ("reassign", "restart_in_place")]
+check(acts and acts[0]["action"] == "reassign" and acts[0]["to"] == "fin",
+      f"⛔ a wedged chunk is REASSIGNED to the idle finished card, not retried in place ({acts})")
+
 EXPECTED_CONTROL_FAILURES = {
     "a proving card is WORKING",
     "a COLD-STARTING card (silent log, holds VRAM) is WORKING, not idle",
