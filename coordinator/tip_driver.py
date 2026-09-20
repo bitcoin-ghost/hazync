@@ -21,6 +21,7 @@ sequential probe once wedged a run for 12 minutes.
 command line, so a remote `pkill -f hazync` kills the ssh session that issued it and reports nothing.
 """
 
+import base64
 import concurrent.futures
 import os
 import subprocess
@@ -123,19 +124,25 @@ class SSHRunner:
     def kill_provers(self, card, timeout=PROBE_TIMEOUT_S):
         """Stop everything proving on this card.
 
-        ⛔ VIA A SCRIPT, NOT A PATTERN. `pkill -f hazync-host-cuda` matches the ssh command line that
-        carries it, so the remote shell kills itself and the real processes survive — reported as
-        success. Writing the script first and running it by path means the pattern never appears in the
-        argv being matched.
+        ⛔ THE PATTERN MUST NEVER APPEAR IN THE COMMAND LINE, AND A HEREDOC IS NOT ENOUGH. `pgrep -f`
+        matches the FULL command line of every process, including the remote shell that is carrying the
+        script — so embedding the script inline, even inside `cat <<EOS`, still puts `hazync-host-cuda`
+        in that shell's argv. The remote `pgrep` then finds the ssh session itself, kills it, and the
+        call returns a transport error while the real provers keep running. Measured on a live pod
+        2026-09-20: ssh exit 255 on both cards, having killed nothing.
+
+        So the script is carried as BASE64 and decoded on the far side. The argv holds only the encoded
+        blob, which matches nothing, and the pattern exists solely inside a file.
         """
         script = (
-            "cat > /tmp/hzkill.sh <<'EOS'\n"
             "for p in $(pgrep -f pod-prove); do kill -9 $p 2>/dev/null; done\n"
             "for p in $(pgrep -f hazync-host-cuda); do kill -9 $p 2>/dev/null; done\n"
-            "EOS\n"
-            "sh /tmp/hzkill.sh; rm -f /tmp/hzkill.sh; echo KILLED"
+            "echo KILLED\n"
         )
-        return self.run(card, script, timeout=timeout) is not None
+        blob = base64.b64encode(script.encode()).decode()
+        body = f"echo {blob} | base64 -d > /tmp/hzkill.sh && sh /tmp/hzkill.sh; rm -f /tmp/hzkill.sh"
+        out = self.run(card, body, timeout=timeout)
+        return out is not None and "KILLED" in out
 
 
 def _sq(s):

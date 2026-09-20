@@ -159,6 +159,26 @@ st = runner(FakeSSH(rules=[("agg.log", None)])).aggregate_status()
 check(st["alive"] and not st["verified"] and st["unreachable"],
       "an unreachable aggregator is reported unreachable, NOT dead")
 
+# ── 7. ⛔ /dev/tcp IS A BASH FEATURE, AND /bin/sh IS dash ──────────────────────────────────────────
+# Found by the first live run. Under dash the dial test reports "cannot open /dev/tcp/...: No such
+# file", so it NEVER succeeds: every worker loops its full 600 s and never attaches, even when the
+# aggregate is perfectly reachable. An entire fleet looks armed and proves nothing, with no error.
+# run_continuous.sh used bash here; changing it to sh silently broke attachment.
+ssh = FakeSSH()
+r = runner(ssh, agg_dial=58231)
+r.arm_auto_attach({0: A})
+aa = "\n".join(b for _, b in ssh.cmds)
+check("timeout 3 bash -c" in aa, "the dial test runs under bash, not sh")
+check("sh -c \"</dev/tcp" not in aa.replace('bash -c "</dev/tcp', ''),
+      "no /dev/tcp test is left running under sh")
+check("setsid bash ./autoattach.sh" in aa,
+      "the attach script itself is run under bash — it uses bash-only parameter expansion")
+check("#!/bin/bash" in aa, "and carries a bash shebang")
+
+# ⛔ WORKERS DIAL THE PUBLISHED PORT, NOT THE BOUND ONE.
+check(f"{A.ip}" not in aa or "10.0.0.9:58231" in aa,
+      "workers dial the aggregator's published address")
+
 EXPECTED_CONTROL_FAILURES = {
     "⛔ a push the far side cannot confirm is NOT staged — the silent scp drop",
 }

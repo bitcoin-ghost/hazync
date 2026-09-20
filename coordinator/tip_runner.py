@@ -88,10 +88,17 @@ class FleetRunner:
         """
         script = (
             f"cat > /workspace/autoattach.sh <<'EOS'\n"
+            f"#!/bin/bash\n"
             f"AGG=$1; WID=$2\n"
             f"cd /workspace || exit 1\n"
             f"for i in $(seq 1 600); do\n"
-            f"  if timeout 3 sh -c \"</dev/tcp/${{AGG%%:*}}/${{AGG##*:}}\" 2>/dev/null; then\n"
+            # ⛔ bash, NOT sh. /dev/tcp is a BASH feature; /bin/sh is dash on the RunPod image and
+            # reports "cannot open /dev/tcp/...: No such file". Under sh this test NEVER succeeds, so
+            # the worker loops its full 600 s and never attaches even when the aggregate is perfectly
+            # reachable — an entire fleet that looks armed and proves nothing. run_continuous.sh used
+            # bash here for exactly this reason; changing it to sh silently broke attachment, and the
+            # first live run is what caught it.
+            f"  if timeout 3 bash -c \"</dev/tcp/${{AGG%%:*}}/${{AGG##*:}}\" 2>/dev/null; then\n"
             f"    HAZYNC_WORKER_ID=$WID exec ./hazync-host-cuda seg-connect \"$AGG\" > aggw.log 2>&1\n"
             f"  fi\n"
             f"  sleep 1\n"
@@ -103,7 +110,7 @@ class FleetRunner:
             if card == self.agg:
                 continue                       # the aggregator serves; it does not dial itself
             self.ssh.run(card, script)
-            self.ssh.run(card, f"cd /workspace && nohup setsid ./autoattach.sh {target} w{chunk} "
+            self.ssh.run(card, f"cd /workspace && nohup setsid bash ./autoattach.sh {target} w{chunk} "
                                f"> aa.log 2>&1 < /dev/null & disown; exit 0")
 
     # ── phase 3 ────────────────────────────────────────────────────────────────────────────────────
