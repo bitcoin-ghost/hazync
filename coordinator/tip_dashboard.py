@@ -141,14 +141,38 @@ def write_feed(rundir, cards):
     return len(text.splitlines())
 
 
-def write_t0(rundir, t):
-    """Declare the run's start. Call this when the CLOCK starts — phase 1 — not when clearing begins."""
+def write_t0(rundir, t, once=True):
+    """Declare the SESSION's start. Returns the epoch now in force.
+
+    ⛔ t0 IS THE SESSION, NOT THE BLOCK, AND MOVING IT DESTROYS THE HISTORY. `collect.py`'s
+    `blocks_from_cards` drops every height that began before t0:
+
+        if since and e["t0"] < since: continue
+
+    so advancing t0 at the start of each block deletes every block already proved in that session.
+    Measured against the real collector on a two-block capture: t0=1000 yields blocks [100, 101],
+    t0=1020 yields [101]. A 24-hour session would show "1 block today" for its whole duration, the
+    time-per-block chart would hold a single bar, and the cost would only ever cover the current
+    block — all of it looking perfectly healthy.
+
+    So this is WRITE-ONCE by default: the first block of a session sets it, every later block leaves
+    it alone. `DashboardFeed.start()` is the session boundary and clears it.
+
+    ⚠ The filter is also why t0 must not be earlier than the real start: a run inherits the previous
+    occupant's log lines, and a t0 before them counts their blocks as this session's.
+    """
     path = os.path.join(rundir, "t0")
+    if once and os.path.exists(path):
+        try:
+            with open(path) as fh:
+                return float(fh.read().strip())
+        except (OSError, ValueError):
+            pass                      # unreadable: fall through and rewrite it
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(f"{float(t):.3f}\n")
     os.replace(tmp, path)
-    return path
+    return float(t)
 
 
 def stream_cmd(rundir, action, *, script, key=None, log_dir=None):
@@ -245,8 +269,16 @@ class DashboardFeed:
         self.names = []
 
     def start(self, cards):
-        """Write pods.txt and start the streamer. `cards` as for `pods_txt`."""
+        """Begin a SESSION: write pods.txt, clear any previous t0, and start the streamer.
+
+        ⛔ Clearing t0 here is what makes `mark_t0` write-once safe. Without it a new session would
+        inherit the last one's t0 and count its blocks as this session's.
+        """
         n = write_feed(self.rundir, cards)
+        try:
+            os.remove(os.path.join(self.rundir, "t0"))
+        except OSError:
+            pass                      # no previous session
         self.names = [c["cid"] for c in cards]
         argv, env = stream_cmd(self.rundir, "start", script=self.script,
                                key=self.key, log_dir=self.log_dir)
@@ -254,7 +286,8 @@ class DashboardFeed:
         return n
 
     def mark_t0(self, t):
-        return write_t0(self.rundir, t)
+        """Declare the session clock at the first block's T0. Write-once — see write_t0()."""
+        return write_t0(self.rundir, t, once=True)
 
     def staleness(self, now, limit_s=15.0):
         return staleness(last_epochs(self.rundir, self.names), now, limit_s=limit_s)

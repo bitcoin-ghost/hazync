@@ -118,10 +118,24 @@ except tdash.FeedRefused:
 check(open(os.path.join(d, "pods.txt")).read() == before,
       "a refused write leaves the PREVIOUS pods.txt untouched, not a truncated one")
 
-# ── 7. t0 is the clock, and the clock starts at phase 1 ───────────────────────────────────────────
+# ── 7. t0 is the SESSION clock, and moving it destroys the history ───────────────────────────────
 tdash.write_t0(d, 1789918763.353)
 check(abs(float(open(os.path.join(d, "t0")).read()) - 1789918763.353) < 0.001,
       "t0 round-trips to the millisecond — the dashboard's whole elapsed clock counts from it")
+
+# ⛔ MEASURED AGAINST THE REAL COLLECTOR, not assumed. collect.py's blocks_from_cards does
+#     if since and e["t0"] < since: continue
+# so every height that began before t0 is DROPPED. On a two-block capture, t0=1000 yields [100, 101]
+# and t0=1020 yields [101]. Advancing t0 per block would make a 24-hour session read "1 block today"
+# for its whole duration, with one bar on the chart and the cost of one block — all looking healthy.
+back = tdash.write_t0(d, 1789999999.0)
+check(abs(back - 1789918763.353) < 0.001,
+      f"⛔ a SECOND mark does NOT move t0 ({back}) — moving it deletes every block already proved "
+      f"in the session")
+check(abs(float(open(os.path.join(d, "t0")).read()) - 1789918763.353) < 0.001,
+      "and the file on disk still holds the session's original start")
+check(abs(tdash.write_t0(d, 1789999999.0, once=False) - 1789999999.0) < 0.001,
+      "once=False is the explicit override, for a genuinely new session")
 
 # ── 8. the streamer is invoked by argv, never a shell string ──────────────────────────────────────
 argv, env = tdash.stream_cmd("/run dir", "start", script="./tip-stream.sh", key="/k/id", log_dir="/L")
@@ -182,6 +196,16 @@ check(not os.path.exists(os.path.join(d2, "t0")),
       "back-date the run by the whole of phase 0")
 fd.mark_t0(1789918763.353)
 check(os.path.exists(os.path.join(d2, "t0")), "mark_t0() is what declares the clock")
+check(abs(fd.mark_t0(1789999999.0) - 1789918763.353) < 0.001,
+      "a later block in the SAME session does not move the clock")
+
+# ⛔ BUT A NEW SESSION MUST NOT INHERIT THE LAST ONE'S CLOCK, or it counts the previous session's
+# blocks as its own. start() is the session boundary and clears t0.
+fd.start(CARDS)
+check(not os.path.exists(os.path.join(d2, "t0")),
+      "start() clears t0 — that is what makes mark_t0 write-once safe across sessions")
+check(abs(fd.mark_t0(1789999999.0) - 1789999999.0) < 0.001,
+      "and the new session sets its own clock")
 fd.stop()
 check(calls[-1][0] == ["./tip-stream.sh", "stop"], "stop() stops the streamer")
 
