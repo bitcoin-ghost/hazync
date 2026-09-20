@@ -34,6 +34,22 @@ def chain_facts():
         return {"ok": False, "error": str(e)[:120]}
 
 
+def read_phase(rundir):
+    """What the run says it is doing, from `$RUNDIR/phase`. One short line, or None.
+
+    ⛔ A LIVE FLEET DOING NOTHING LOOKS EXACTLY LIKE A DEAD FEED. Preparing a card means staging a
+    fixture and pulling a 407 MB prover -- minutes of flat traces and an empty dial, indistinguishable
+    on the frame from an idle fleet or a broken collector. That question was asked three times in one
+    evening, and every time the answer was "it is preparing". The run writes what it is doing; the
+    frame says it.
+    """
+    try:
+        with open(os.path.join(rundir, "phase")) as fh:
+            return (fh.read().strip() or None)
+    except OSError:
+        return None
+
+
 def read_pods(rundir):
     """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption."""
     out = {}
@@ -63,15 +79,17 @@ class StreamCursor:
     WINDOW_S samples and is read from the END of the file instead.
     """
 
-    __slots__ = ("offset", "ino", "size", "secs", "by_block")
+    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h")
 
     def __init__(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
+        self.peak, self.peak_h = 0.0, None
 
     def reset(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
+        self.peak, self.peak_h = 0.0, None
 
 
 def _tail_lines(path, nbytes):
@@ -119,6 +137,7 @@ def read_streams(rundir, now, cursors=None):
                 with open(path) as fh:
                     newrows = fh.readlines()
                 secs, by_block = 0, {}
+                peak, peak_h = 0.0, None
             else:
                 st = os.stat(path)
                 # ⛔ A SHRUNK OR REPLACED FILE MUST RESET THE CURSOR. tip-stream.sh truncates the
@@ -144,6 +163,7 @@ def read_streams(rundir, now, cursors=None):
                 cur.offset += cut
                 newrows = blob[:cut].decode("utf8", "replace").splitlines(keepends=True)
                 secs, by_block = cur.secs, cur.by_block
+                peak, peak_h = cur.peak, cur.peak_h
         except OSError:
             continue
 
@@ -155,12 +175,39 @@ def read_streams(rundir, now, cursors=None):
             if len(f) < 11:
                 continue
             secs += 1
+
+            # ⛔ FINISHING MUST NOT LOOK LIKE NOT STARTING. The join tree's leaf dot is green when
+            # seg_n/seg_total >= 1, but a card that has finished stops emitting `segment n/N`, so
+            # seg_total falls back to 0, the ratio reads 0.0, and the dot reverts to grey -- the card
+            # appears to un-finish the moment it succeeds. `peak` is the furthest this card got on the
+            # height it is working, and it resets only when the card moves to a different block.
+            if f[9] and f[10].strip().isdigit():
+                try:
+                    n_, tot_ = int(f[8] or 0), int(f[9] or 0)
+                except ValueError:
+                    n_ = tot_ = 0
+                if tot_ > 0:
+                    if f[10].strip() != peak_h:
+                        peak, peak_h = 0.0, f[10].strip()
+                    peak = max(peak, min(1.0, n_ / tot_))
+
             h = f[10].strip()
             if not h.isdigit():
                 continue
             try:
                 ts = float(f[0])
             except ValueError:
+                continue
+            # ⛔ AN IDLE SAMPLE MUST NOT OPEN A BLOCK. tip-stream falls back to
+            # `ls /workspace/block_*.json` for the height, so every card reports the block from the
+            # moment its FIXTURE IS STAGED -- during preparation, minutes before T0. blocks_from_cards
+            # then drops the height as "began before the run" and the grid stays empty for the whole
+            # run. Measured 2026-09-20 on block 741,000: the four cards first reported it 84-119 s
+            # before t0, and the snapshot held ZERO blocks while all four proved it.
+            #
+            # A block is opened by the first sample that shows WORK on it. An idle sample still counts
+            # toward `secs` above, because the card is rented whether or not it is busy.
+            if f[7] == "idle" and h not in by_block:
                 continue
             e = by_block.get(h)
             if e is None:
@@ -174,6 +221,7 @@ def read_streams(rundir, now, cursors=None):
                 e["prove"] += 1
         if cur is not None:
             cur.secs, cur.by_block = secs, by_block
+            cur.peak, cur.peak_h = peak, peak_h
 
         # WINDOW, for the traces: only what the waveform draws. Read from the END of the file rather
         # than slicing the whole capture -- at 24 h that slice was the thing being paid for.
@@ -203,6 +251,7 @@ def read_streams(rundir, now, cursors=None):
                       "t": t, "w": w, "u": u,
                       "phase": phase, "seg_n": seg_n, "seg_total": seg_total, "block": block,
                       "observed_s": secs, "spend_usd": round(secs * rate / 3600.0, 4),
+                      "peak": round(peak, 4),
                       "block_s": by_block})
     return cards
 
@@ -382,6 +431,7 @@ def main():
                 now = ns + 0.5          # just after the last sample: the fleet reads as live
         if a.demo:
             cards, blocks = demo(now, a.at, a.cards)
+            phase_label = None
             # the simulated chain tip IS the block in flight, or the grid mislabels its own window
             # as BACKFILL once the simulated day runs past a hardcoded height
             tip = blocks[-1]["h"]
@@ -389,6 +439,7 @@ def main():
                      "pct": 7.75, "contributors": 7, "ok": True}
         else:
             cards = read_streams(a.rundir, now, cursors)
+            phase_label = read_phase(a.rundir)
             chain = chain_facts()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
@@ -409,7 +460,8 @@ def main():
             pass                                                         # blocks_from_cards now
         else:
             spend_total = sum((b.get("cost") or 0) for b in blocks)
-        snap = {"t": now, "demo": bool(a.demo), "chain": chain, "cards": cards, "blocks": blocks,
+        snap = {"t": now, "demo": bool(a.demo), "phase": phase_label,
+                "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}
         tmp = a.out + ".tmp"
