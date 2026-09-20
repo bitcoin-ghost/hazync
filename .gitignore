@@ -49,3 +49,13 @@ prover/block_*.json.meta2.json
 # where 30 of those 63 artefacts sat.
 fuzz-native/build/
 fuzz-native/build-asan/
+
+# Key material must never be committable by accident. Nothing matching these is tracked today
+# (verified 2026-09-20), and these patterns keep it that way -- a stray key reaches a public repo
+# once and is burned for ever.
+*.key
+*.pem
+id_ed25519
+id_ed25519.pub
+id_rsa
+key.hex
