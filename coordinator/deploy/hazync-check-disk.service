@@ -11,7 +11,12 @@ OnFailure=hazync-alert@%n.service
 
 [Service]
 Type=oneshot
-Environment=HAZYNC_DISK_PATHS=/srv/bulk /
+# ⛔ QUOTED, BECAUSE systemd SPLITS `Environment=` ON WHITESPACE. Unquoted, `/srv/bulk /` is parsed as
+# the assignment HAZYNC_DISK_PATHS=/srv/bulk followed by a second word `/`, which is not an assignment
+# and is discarded. The check then watches ONE path and still reports success — measured on server 1,
+# 2026-09-20, first run after install: `[disk] all 1 path(s) above the 500G floor`. `/` is named first
+# in this unit's own Description and was the path not being watched.
+Environment="HAZYNC_DISK_PATHS=/srv/bulk /"
 Environment=HAZYNC_DISK_FLOOR_GB=500
 # Two runs before paging. Disk fills over weeks, not minutes, and a df that fails once should not page.
 Environment=CHECK_FAILS_BEFORE_ALERT=2

@@ -37,7 +37,20 @@ ReadOnlyPaths=/srv/bulk/hazync/rescued-from-old-box /opt/hazync
 Environment=TMPDIR=/srv/bulk/hazync/tmp
 ReadWritePaths=/srv/bulk/hazync/tmp
 # The directory does not exist on a fresh box, and a missing TMPDIR fails the run at the first write.
-ExecStartPre=/usr/bin/mkdir -p /srv/bulk/hazync/tmp
+#
+# ⛔ THE `+` IS LOAD-BEARING. Without it this unit cannot start AT ALL on a box where the directory is
+# absent — which is every box, the first time. systemd builds the mount namespace BEFORE running any
+# ExecStartPre, and `ReadWritePaths=` above names a path that must already exist, so the namespace setup
+# fails and takes the mkdir down with it. Measured on server 1, 2026-09-20:
+#
+#   Failed to set up mount namespacing: /srv/bulk/hazync/tmp: No such file or directory
+#   Failed at step NAMESPACE spawning /usr/bin/mkdir: No such file or directory
+#   hazync-offsite-rescued-b2.service: Control process exited, code=exited, status=226/NAMESPACE
+#
+# i.e. the very command meant to create the directory is the one the missing directory prevents from
+# running. `ExecStartPre=+` runs outside the sandbox, before the namespace is applied, which is the one
+# place this can work.
+ExecStartPre=+/usr/bin/mkdir -p /srv/bulk/hazync/tmp
 
 [Install]
 WantedBy=multi-user.target

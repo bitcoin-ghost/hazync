@@ -99,6 +99,34 @@ check(rc == 1 and "could not be read" in o,
 rc, o = run({"/srv/bulk": 500}, ["/srv/bulk"])
 check(rc == 0, f"exactly at the floor is not low (rc={rc})")
 
+# 7. The SHIPPED UNIT must hand the script BOTH paths.
+#
+# ⛔ Every case above passes HAZYNC_DISK_PATHS in already-correct form, so none of them can see how the
+# unit file spells it -- and that is exactly where this check was broken in production. systemd splits
+# `Environment=` on whitespace, so the unqualified `Environment=HAZYNC_DISK_PATHS=/srv/bulk /` set the
+# variable to `/srv/bulk` alone and silently dropped `/`. The check then watched one filesystem and
+# still reported success: `[disk] all 1 path(s) above the 500G floor` (server 1, 2026-09-20). A check
+# that cannot fail for half its job is the failure this whole file exists to prevent, so the unit's own
+# spelling is pinned here rather than trusted.
+UNIT = os.path.join(HERE, "deploy", "hazync-check-disk.service")
+unit_paths = None
+for line in open(UNIT):
+    line = line.strip()
+    if not line.startswith("Environment="):
+        continue
+    val = line[len("Environment="):].strip()
+    # systemd strips one layer of surrounding quotes from the whole assignment.
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        val = val[1:-1]
+        words = [val]                      # quoted: the whole thing is ONE assignment
+    else:
+        words = val.split()                # unquoted: systemd splits here, and extra words are dropped
+    if words and words[0].startswith("HAZYNC_DISK_PATHS="):
+        unit_paths = words[0][len("HAZYNC_DISK_PATHS="):].split()
+        break
+check(unit_paths == ["/srv/bulk", "/"],
+      f"the shipped unit passes both paths, not one (got {unit_paths})")
+
 EXPECTED_CONTROL_FAILURES = {
     "below the floor exits 1 and names the path and both numbers (rc=0)",
     "one low path among healthy ones still exits 1 (rc=0)",
