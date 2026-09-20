@@ -50,7 +50,17 @@ class SmokeRunPod(sponsor_bot.RunPod):
     def deploy_listening(self, name, ssh_pubkey, gpu_types=sponsor_bot.GPU_TYPES):
         refused, answered = None, False
         for gt in gpu_types:
-            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: ALL, gpuCount: 1, "
+            # ⛔ SECURE, NOT ALL. `cloudType: ALL` includes community hosts, and those mostly never
+            # start at all -- RunPod never publishes a port for them, so the run waits out its full
+            # SSH timeout and then gives up having paid for pods that never existed.
+            #
+            # Measured 2026-09-20 across two runs, and the split is by PRICE, which is the tell:
+            #     $0.34/hr   1 of 6 started   (17%)
+            #     $0.49/hr   1 of 1 started
+            #     $0.74/hr  14 of 14 started  (100%)
+            # A 4-card run died outright on it: three of five never started, so only two came up and
+            # the run could not reach its minimum. The cheap listing is not cheaper, it is absent.
+            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, "
                  "volumeInGb: 0, containerDiskInGb: 40, "
                  f"gpuTypeId: {self._s(gt)}, name: {self._s(name)}, "
                  f"imageName: {self._s(sponsor_bot.IMAGE)}, ports: \"22/tcp,9110/tcp\", "

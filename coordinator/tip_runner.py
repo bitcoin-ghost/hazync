@@ -192,12 +192,27 @@ while time.time() < end:
         Run 4 lost 40 s between staging and the listener being ready; arming in advance is what keeps a
         card from having to be told twice.
         """
+        # ⛔ THE ATTACH WINDOW MUST NOT EXPIRE BEFORE THE AGGREGATE OPENS. This counted to 600 and
+        # gave up, and the countdown started at T0 -- so the window closed 600 s into the CHUNK phase,
+        # which has nothing to do with when the listener appears.
+        #
+        # Measured 2026-09-20 on 14 cards: one slow card made the chunk phase 637 s, the aggregate
+        # began listening at ~23:16, and every worker's attach had already expired at 23:14:27 --
+        # about ninety seconds too early. The aggregate then ran all 529 segments ON ONE CARD while
+        # thirteen idle cards sat beside it, which is precisely the cost seg-serve exists to remove.
+        # Nothing looked broken: the cards were reachable, the script was staged and correct, and it
+        # had simply stopped waiting.
+        #
+        # It now waits as long as the run does. `attach.stop` is how the run ends it deliberately,
+        # and the day-long cap only exists so a pod kept alive by hand cannot spin for ever.
         script = (
             f"cat > /workspace/autoattach.sh <<'EOS'\n"
             f"#!/bin/bash\n"
             f"AGG=$1; WID=$2\n"
             f"cd /workspace || exit 1\n"
-            f"for i in $(seq 1 600); do\n"
+            f"rm -f /workspace/attach.stop\n"
+            f"for i in $(seq 1 86400); do\n"
+            f"  [ -f /workspace/attach.stop ] && exit 0\n"
             # ⛔ bash, NOT sh. /dev/tcp is a BASH feature; /bin/sh is dash on the RunPod image and
             # reports "cannot open /dev/tcp/...: No such file". Under sh this test NEVER succeeds, so
             # the worker loops its full 600 s and never attaches even when the aggregate is perfectly
@@ -220,6 +235,17 @@ while time.time() < end:
                                f"> aa.log 2>&1 < /dev/null & disown; exit 0")
 
     # ── phase 3 ────────────────────────────────────────────────────────────────────────────────────
+    def stop_auto_attach(self, cards):
+        """End the attach wait on every worker. Called when the run is done with them.
+
+        ⚠ Best effort by design: a card we cannot reach is usually one about to be terminated, and
+        failing the teardown over it would be worse than leaving a loop on a pod that is going away.
+        """
+        for card in dict.fromkeys(cards.values() if hasattr(cards, "values") else cards):
+            if card == self.agg:
+                continue
+            self.ssh.run(card, "touch /workspace/attach.stop; exit 0")
+
     def probe_all(self, cards, reassigned=()):
         return tip_driver.probe_all(self.ssh, cards, reassigned=reassigned)
 
