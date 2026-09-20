@@ -175,6 +175,19 @@ def main(argv=None, confirmed_names=None):
     top = spine_top(a.spine)
     ckpts = archived_checkpoints(a.checkpoints)
 
+    # ⛔ AN UNCONFIGURED CHECKPOINT ARCHIVE IS "CANNOT CHECK", NOT "NOTHING TO PRUNE".
+    # `--checkpoints` defaults to $HAZYNC_CKPT_ARCHIVE else "", and archived_checkpoints("") returns []
+    # through its own `if not archive_dir` guard. With no rungs every height is then kept for "no
+    # archived checkpoint below it", and the run prints a confident `would delete 0 bundle(s), 0.00 GB`
+    # -- indistinguishable from a healthy box with nothing due. Measured 2026-09-20 on server 1: a
+    # systemd-run invocation that omitted the variable reported exactly that while the real archive held
+    # 24 rungs. `--no-require-checkpoint` says the rungs are deliberately irrelevant, so it is exempt.
+    if not a.no_require_checkpoint and not os.path.isdir(a.checkpoints or ""):
+        print(f"[prune] cannot check: no checkpoint archive at {a.checkpoints or '<unset>'} "
+              "(set HAZYNC_CKPT_ARCHIVE or pass --checkpoints; pass --no-require-checkpoint only if "
+              "replaying from genesis is genuinely intended)", file=sys.stderr)
+        return 2
+
     if not os.path.isdir(a.bundles):
         print(f"[prune] cannot check: no bundle directory at {a.bundles}", file=sys.stderr)
         return 2
@@ -201,6 +214,17 @@ def main(argv=None, confirmed_names=None):
             except ValueError:
                 continue
     heights.sort()
+
+    # ⛔ AND AN EMPTY BUNDLE DIRECTORY IS ALSO "CANNOT CHECK". `os.path.isdir` above passes on a
+    # directory that exists and holds nothing, which is exactly what a stale path looks like: on server 1
+    # the pre-/srv/bulk `/var/lib/hazync/bridge_bundles` still exists with 0 files while the live store
+    # holds 418,269, so a run that inherited the old default listed it happily and concluded "would
+    # delete 0". A coordinator with no bundles at all is not a state this job should reason about.
+    if not heights:
+        print(f"[prune] cannot check: no bundle_<height>.json files under {a.bundles} "
+              "(the directory exists but is empty — check HAZYNC_BRIDGE_OUT points at the live store)",
+              file=sys.stderr)
+        return 2
 
     doomed, kept_reasons, freed = [], {}, 0
     for h in heights:

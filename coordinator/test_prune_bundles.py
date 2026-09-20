@@ -163,6 +163,57 @@ check(prune_bundles.has_checkpoint_below(60_000, cks), "a checkpoint below the h
 check(not prune_bundles.has_checkpoint_below(50_000, cks),
       "a checkpoint AT the height is not below it — replaying forward from it produces that block")
 
+# ⛔ "CANNOT CHECK" MUST NOT LOOK LIKE "NOTHING TO PRUNE".
+#
+# Both cases below were live on server 1 on 2026-09-20. A systemd-run invocation that omitted
+# HAZYNC_CKPT_ARCHIVE and HAZYNC_BRIDGE_OUT fell back to "" and to the pre-/srv/bulk
+# /var/lib/hazync/bridge_bundles — a directory that still EXISTS and holds 0 files — and printed a
+# confident `[prune] would delete 0 bundle(s), 0.00 GB` while the real store held 418,269 bundles and
+# the real archive 24 rungs. Nothing about that output says the job was looking at the wrong place, and
+# "0 to delete" is exactly what a healthy, up-to-date box prints. The exit contract already has a code
+# for not knowing — 2 — and these two cases now use it.
+import sqlite3  # noqa: E402
+
+
+def _cfg(*, checkpoints, bundles, seed_bundle=False):
+    """A minimal but REAL config: passing re-verify marker, a spine, and a ledger with one range."""
+    d = tempfile.mkdtemp(prefix="prunecfg_")
+    state = os.path.join(d, "state"); os.makedirs(state)
+    open(os.path.join(state, "check-proofs"), "w").write("0 0")   # 0 fails => re-verify passed
+    spine = os.path.join(d, "spine"); os.makedirs(spine)
+    open(os.path.join(spine, "spine.json"), "w").write('{"hi": 90000}')
+    db = os.path.join(d, "coordinator.db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE ranges (id TEXT, lo INT, hi INT, receipt_sha TEXT, status TEXT)")
+    conn.execute("INSERT INTO ranges VALUES ('r1', 1000, 1000, 'sha', 'verified')")
+    conn.commit(); conn.close()
+    if bundles is not None:
+        os.makedirs(bundles, exist_ok=True)
+        if seed_bundle:
+            open(os.path.join(bundles, "bundle_1000.json"), "w").write("{}")
+    argv = ["--db", db, "--spine", spine, "--state-dir", state, "--bundles", bundles or ""]
+    if checkpoints is not None:
+        argv += ["--checkpoints", checkpoints]
+    return argv
+
+
+# An UNSET checkpoint archive is "cannot check", not "every height kept for want of a rung".
+rc = prune_bundles.main(_cfg(checkpoints=None, bundles=os.path.join(tmp, "b_unset"), seed_bundle=True),
+                        confirmed_names={"r2": set(), "b2": set()})
+check(rc == 2, f"an unset checkpoint archive exits 2, not a cheerful 0 (rc={rc})")
+
+# ... but --no-require-checkpoint says the rungs are deliberately irrelevant, so it must NOT trip.
+rc = prune_bundles.main(_cfg(checkpoints=None, bundles=os.path.join(tmp, "b_norq"), seed_bundle=True)
+                        + ["--no-require-checkpoint"],
+                        confirmed_names={"r2": set(), "b2": set()})
+check(rc != 2, f"--no-require-checkpoint is exempt from that guard (rc={rc})")
+
+# A bundle directory that EXISTS but is EMPTY is the stale-path signature, not an empty backlog.
+ck = os.path.join(tmp, "ck")      # the real archive created earlier in this file
+rc = prune_bundles.main(_cfg(checkpoints=ck, bundles=os.path.join(tmp, "b_empty")),
+                        confirmed_names={"r2": set(), "b2": set()})
+check(rc == 2, f"an existing but EMPTY bundle directory exits 2 (rc={rc})")
+
 print()
 
 # ⛔ THE CONTROL INVERTS THE EXIT CODE, as every other coordinator test does
