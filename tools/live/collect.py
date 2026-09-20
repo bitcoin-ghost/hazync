@@ -242,6 +242,11 @@ def blocks_from_cards(cards, state, now):
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
         out.append({"h": int(h), "arrive": a["t0"],
+                    # ⛔ `done` is a BOOLEAN and the pulse needs a TIME. The renderer animates a
+                    # block travelling from the join tree to its cell for PULSE seconds after it
+                    # finished, so it has to know WHEN that was -- `(now - t1) > 5` cannot say.
+                    # t1 is the last moment any card reported this height, which is that instant.
+                    "done_at": a["t1"],
                     "prove_s": round(a["prove"] / n_cards, 1) or None,
                     "fold_s": round(a["asm"] / n_cards, 1) or None,
                     "segs": a["segs"], "cards": len(a["cards"]),

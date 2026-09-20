@@ -23,6 +23,10 @@ from tip24e import (W, H, PAD, LX0, LX1, LTOP, LROW, LYTOP, LYBOT, RCX, RCY, ROU
                     fonts, bloom, cell_xy, hx, mix, mmss, NBLOCKS, LANES)
 
 WINDOW = GCOL * GROWS          # 144 cells, exactly as the film
+# Seconds a completed block spends crossing to its cell. The film used 70 because its
+# clock compressed a day into a minute; live, this is real seconds and the renderer
+# draws about once a second, so 6 gives roughly six frames of travel.
+PULSE_S = float(os.environ.get('HAZYNC_PULSE_S', '6'))
 
 # One colour per worker, so a lane is identifiable at a glance. Same green/orange family as the
 # rest of the frame — colouring by GPU type made every card of the same model indistinguishable.
@@ -277,6 +281,33 @@ def draw_live(snap, fo):
         else:
             col = mix(TEXT, GROUND, .07)
         d.rectangle([cx, cy, cx + GCELL, cy + GCELL], fill=col)
+    # ---------------- the pulse: a finished block travels from the tree to its own cell
+    # Ported from the film (tip24c.py), which had it and this renderer never did. It is the only
+    # thing on the frame that marks the MOMENT a block finishes: every other element shows a state,
+    # so a block completing looked identical to a block that had completed some time ago.
+    #
+    # ⛔ IT NEEDS A TIME, AND `done` IS A BOOLEAN. collect.py carries `done_at` (the last sample for
+    # that height) for exactly this. A snapshot from an older collector has no `done_at`, so the
+    # pulse simply does not fire rather than the frame failing.
+    #
+    # ⛔ ONLY FOR A BLOCK THAT HAS A CELL. Outside [lo, hi] there is nowhere for it to land and
+    # cell_xy would place it over some other block's square.
+    # ⚠ Guarded against a card clock that runs ahead of ours: a negative age is not a fresh block.
+    for b in blocks:
+        t_done = b.get('done_at')
+        if not t_done or not (lo <= b['h'] <= hi):
+            continue
+        age = now - t_done
+        if not (0.0 <= age < PULSE_S):
+            continue
+        f = age / PULSE_S
+        cx, cy = cell_xy(b['h'] - lo)
+        tx_, ty_ = cx + GCELL / 2, cy + GCELL / 2
+        px, py = TX1 + (tx_ - TX1) * f, RCY + (ty_ - RCY) * f
+        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18))
+        r_ = 7 - 3 * f
+        d.ellipse([px - r_, py - r_, px + r_, py + r_], fill=mix(OK, GROUND, .95))
+
     kx = GX0
     for lbl, c_ in (('proving', MAP_PROVING), ('folding', MAP_FOLDING), ('done', MAP_DONE)):
         d.rectangle([kx, GKEY_Y + 2, kx + 11, GKEY_Y + 12], fill=mix(c_, GROUND, .92))

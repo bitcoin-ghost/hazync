@@ -575,6 +575,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_share.py --control
+      - name: A finished block pulses to its cell, and stops (tools/live)
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live && python3 test_pulse.py
+      - name: Pulse POSITIVE CONTROL (age window removed — must FAIL)
+        run: |
+          cd tools/live
+          python3 test_pulse.py --control
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
