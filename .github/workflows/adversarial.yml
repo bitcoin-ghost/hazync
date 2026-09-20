@@ -210,6 +210,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_tip_driver.py --control
+      - name: A card that cannot prove is never given a chunk (Phase 5 tip lifecycle)
+        run: cd coordinator && python3 test_tip_lifecycle.py
+      - name: Tip lifecycle POSITIVE CONTROL (METHOD_ID gate removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_lifecycle.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #
