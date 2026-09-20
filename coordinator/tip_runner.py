@@ -10,9 +10,11 @@ card is healthy, that logic belongs in `tip_fleet` where it can be tested withou
 does, reports, and refuses — it never judges.
 """
 
+import base64
 import concurrent.futures
 import os
 import posixpath
+import time
 
 import tip_driver
 
@@ -105,6 +107,84 @@ class FleetRunner:
         body = (f"chmod +x /workspace/pod-prove.sh 2>/dev/null; mkdir -p {workdir} && cd /workspace && {assigns} "
                 f"nohup setsid ./pod-prove.sh {chunk} > {workdir}/run.log 2>&1 < /dev/null & disown; exit 0")
         return self.ssh.run(card, body) is not None
+
+    # ── card-to-card reachability, tested BEFORE the clock ────────────────────────────────────────
+    #
+    # ⛔ POD-TO-POD CONNECTIVITY IS NOT GUARANTEED, AND THE DRIVER CANNOT TEST IT FOR THEM. Measured
+    # 2026-09-20 on two rented pods: the aggregate's published port answered from the ORCHESTRATOR
+    # and the other pod got `connect: No route to host`. Reaching it from here proves only that the
+    # port is open to the internet; it says nothing about the path the workers will take. The probe
+    # has to run ON each worker.
+    #
+    # Without this the run looks perfectly armed: seg-serve listens, autoattach.sh loops correctly,
+    # `aa.log` stays 0 bytes, and the aggregate sits at `0/N segments` until the tick budget is
+    # spent. That is exactly how the first 2-card milestone run failed.
+
+    # The throwaway listener, as a SCRIPT rather than a `python3 -c` one-liner: quoting a multi-line
+    # program through ssh is how escaping bugs get in, and this one only has to accept and close.
+    _LISTENER = """import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", PORT))
+s.listen(16)
+s.settimeout(1)
+end = time.time() + SECS
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+        c.close()
+    except Exception:
+        pass
+"""
+
+    def check_reachability(self, cards, *, secs=30):
+        """{card: bool} — can each worker actually open a TCP connection to the aggregate's port?
+
+        Opens a throwaway listener on the aggregator, probes from every worker in parallel, and lets
+        the listener expire. The aggregator is never probed against itself.
+
+        ⛔ A LISTENER THAT NEVER CAME UP WOULD CONDEMN A HEALTHY FLEET. Every card would read
+        unreachable and the run would discard cards that are perfectly fine, so the listener is
+        VERIFIED from the aggregator before a single negative result is believed. When it cannot be
+        confirmed this returns None rather than a verdict — "we could not test" is not "they failed".
+        """
+        script = (self._LISTENER.replace("PORT", str(self.agg_port))
+                                .replace("SECS", str(int(secs))))
+        blob = base64.b64encode(script.encode()).decode()
+        self.ssh.run(self.agg,
+                     f"echo {blob} | base64 -d > /tmp/reachlisten.py && "
+                     f"nohup timeout {int(secs) + 5} python3 /tmp/reachlisten.py "
+                     f"> /tmp/reachlisten.log 2>&1 < /dev/null & disown; exit 0",
+                     timeout=tip_driver.PROBE_TIMEOUT_S)
+        time.sleep(2)                      # give it a moment to bind before asking if it is up
+
+        # ⛔ CONFIRM THE LISTENER, from the aggregator itself, before trusting any failure below.
+        up = (self.ssh.run(self.agg,
+                           f"(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -c ':{self.agg_port} '",
+                           timeout=tip_driver.PROBE_TIMEOUT_S) or "").strip().splitlines()
+        if not up or not up[-1].strip().isdigit() or int(up[-1].strip()) < 1:
+            return None
+
+        workers = [c for c in dict.fromkeys(cards.values() if hasattr(cards, "values") else cards)
+                   if c.cid != self.agg.cid]
+        host = self.agg.ip
+
+        def one(card):
+            # ⛔ bash, NOT sh. /dev/tcp is a bash feature and /bin/sh is dash, where the test can
+            # never succeed -- which once made an entire armed fleet attach to nothing.
+            out = self.ssh.run(
+                card,
+                f"timeout 5 bash -c '</dev/tcp/{host}/{self.agg_dial}' >/dev/null 2>&1 "
+                f"&& echo REACH || echo NOREACH",
+                timeout=tip_driver.PROBE_TIMEOUT_S)
+            # ⛔ EXACT MATCH ON THE LAST LINE. `endswith("REACH")` is TRUE for "NOREACH", so an
+            # unreachable card read as reachable -- the dangerous direction, since it lets a fleet
+            # that cannot attach straight through the gate this function exists to be.
+            last = (out or "").strip().splitlines()
+            return card, bool(last) and last[-1].strip() == "REACH"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=FANOUT) as pool:
+            return dict(pool.map(one, workers))
 
     def arm_auto_attach(self, cards):
         """Pre-position the attach script so joining the aggregate costs ~0 once its listener opens.

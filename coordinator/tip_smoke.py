@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
+import tip_lifecycle                   # noqa: E402
 import tip_run                          # noqa: E402
 import tip_runner                       # noqa: E402
 import tip_session                      # noqa: E402
@@ -189,6 +190,10 @@ def prepare(ssh, card, *, block_path, block_name, repo_hint):
     return ok_bin and ok_blk and size.isdigit() and int(size) > 0
 
 
+def assignment_preview(order):
+    """chunk -> card, as run_block will hold it. Used before the clock so the probe sees the fleet."""
+    return {i: c for i, c in enumerate(order)}
+
 def dash_chain(a):
     """The three processes that turn telemetry into a published frame.
 
@@ -333,6 +338,29 @@ def main():
         if 9110 not in agg_ports:
             raise SystemExit("the aggregator has no published 9110 — workers could never attach")
         agg_dial = agg_ports[9110][1]
+
+        # ── card-to-card reachability, BEFORE the clock ───────────────────────────────────────────
+        # ⛔ REACHING THE PORT FROM HERE PROVES NOTHING ABOUT THE WORKERS. Measured 2026-09-20: the
+        # aggregate's published port answered from this box while the other pod got `No route to
+        # host`. Pod-to-pod connectivity is not guaranteed and varies between rentals -- the first
+        # pair that day could reach each other and the second could not. Untested, the run looks
+        # armed and the aggregate sits at 0/N until the tick budget is spent.
+        probe_runner = tip_runner.FleetRunner(
+            ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
+            agg_port=9110, agg_dial=agg_dial)
+        reach = probe_runner.check_reachability(assignment_preview(order), secs=25)
+        if reach is None:
+            log("⚠ could not stand up a listener on the aggregator, so reachability is UNTESTED — "
+                "continuing, because 'we could not test' is not 'they failed'")
+        else:
+            ok, why, unreachable = tip_lifecycle.reachability_verdict(
+                {c.cid: v for c, v in reach.items()})
+            log(f"reachability: {why}")
+            if not ok:
+                raise SystemExit(
+                    f"{why}. These cards would sit in their retry loop contributing nothing while "
+                    f"the fleet size everyone reasons about silently includes them. Rent "
+                    f"replacements rather than running a fleet that does not exist.")
 
         # ── prepare ───────────────────────────────────────────────────────────────────────────────
         for c in order:
