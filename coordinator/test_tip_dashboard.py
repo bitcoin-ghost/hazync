@@ -219,6 +219,41 @@ try:
 except tdash.FeedRefused:
     check(calls2 == [], "a refused feed never starts the streamer — it would stream into nothing")
 
+# ── 9d. the join: addressing from the Card, money from the fleet ─────────────────────────────────
+class FakeCard:
+    def __init__(self, cid, ip, port): self.cid, self.ip, self.port = cid, ip, port
+
+
+RUN = [FakeCard("hz-a", "10.0.0.1", 22), FakeCard("hz-b", "10.0.0.2", 40022)]
+FLEET = [{"id": "hz-a", "price": 0.34, "gpu": "NVIDIA GeForce RTX 4090", "pod_id": "pod1"},
+         {"id": "hz-b", "price": 0.69, "gpu": "NVIDIA L40S"}]
+
+j = tdash.feed_records(RUN, FLEET)
+check([r["cid"] for r in j["records"]] == ["hz-a", "hz-b"], "every running card gets a record")
+check(j["records"][0]["price"] == 0.34 and j["records"][0]["gpu"] == "NVIDIA GeForce RTX 4090",
+      "the price and GPU come from the fleet entry")
+check(j["records"][0]["ip"] == "10.0.0.1" and j["records"][1]["port"] == 40022,
+      "the address comes from the Card")
+check(j["unassigned"] == [], "nothing is unassigned when the run uses the whole fleet")
+check(tdash.pods_txt(j["records"]).count("\n") == 2, "and the join feeds pods_txt directly")
+
+# ⛔ NEITHER SILENT FALLBACK IS ACCEPTABLE. price=0 under-reports a run with no budget cap; dropping
+# the card hides a pod that is proving and being billed.
+try:
+    tdash.feed_records(RUN + [FakeCard("hz-z", "10.0.0.9", 22)], FLEET)
+    check(False, "a card with no fleet entry must be refused")
+except tdash.FeedRefused as e:
+    check("no budget cap" in str(e) and "being billed" in str(e),
+          f"a card with no fleet entry is refused, naming both bad fallbacks ({str(e)[:44]}…)")
+
+# ⚠ A SPARE IS REPORTED, NOT REFUSED — holding spares is legitimate, but they are being paid for and
+# will not appear in the dashboard's cost.
+j2 = tdash.feed_records([RUN[0]], FLEET)
+check(j2["unassigned"] == ["hz-b"],
+      f"a rented card not in the run is REPORTED as unassigned ({j2['unassigned']}) — it is still "
+      f"being billed and will not show in the dashboard's cost")
+check(len(j2["records"]) == 1, "and it is not silently added to the run")
+
 # ── 10. cross-check against the REAL reader, when it is present ───────────────────────────────────
 # ⚠ tools/live/ arrives with #427. Until it merges this cannot run, and a silent skip would be a check
 # that cannot fail — so it reports its own status explicitly and is NOT counted as a pass.

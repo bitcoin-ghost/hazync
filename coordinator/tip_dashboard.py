@@ -296,3 +296,46 @@ class DashboardFeed:
         argv, env = stream_cmd(self.rundir, "stop", script=self.script,
                                key=self.key, log_dir=self.log_dir)
         return self.run(argv, env)
+
+
+def feed_records(cards, fleet):
+    """Join the two halves of a card into the dicts `pods_txt` consumes.
+
+    A card exists twice in this codebase and neither half is sufficient alone:
+
+        tip_driver.Card      cid, ip, port        -- how to REACH it
+        the lifecycle dict   id, price, gpu       -- what it COSTS and what it is
+
+    `cards` is an iterable of anything with `.cid`, `.ip` and `.port`; `fleet` is the lifecycle dicts.
+    Returns `{"records": [...], "unassigned": [...]}`.
+
+    ⛔ A CARD WITH NO FLEET ENTRY IS REFUSED, NOT DEFAULTED. The tempting fallbacks are both silent
+    and both wrong: `price=0.0` under-reports the spend on a run that has NO budget cap by decision,
+    and dropping the card removes it from the dashboard while it goes on proving and go on being
+    billed. Either way the money on the frame is not the money being spent.
+
+    ⚠ `unassigned` is a fleet entry with no card in this run — a spare, or one dropped by
+    `keep_and_release`. It is REPORTED rather than refused, because holding spares is legitimate, but
+    it is never silent: those pods are being paid for and will not appear in the dashboard's cost.
+    """
+    by_id = {}
+    for f in fleet or ():
+        fid = f.get("id")
+        if fid is not None:
+            by_id[str(fid)] = f
+
+    records, matched = [], set()
+    for c in cards:
+        cid = str(getattr(c, "cid", c))
+        f = by_id.get(cid)
+        if f is None:
+            raise FeedRefused(
+                f"card {cid} is in the run but not in the fleet list, so it has no price and no GPU "
+                f"name. Defaulting the price to 0 would under-report a run that has no budget cap, "
+                f"and dropping the card would hide a pod that is proving and being billed")
+        matched.add(cid)
+        records.append({"cid": cid, "ip": getattr(c, "ip", None), "port": getattr(c, "port", None),
+                        "price": f.get("price"), "gpu": f.get("gpu"), "pod_id": f.get("pod_id") or cid})
+
+    return {"records": records,
+            "unassigned": sorted(set(by_id) - matched)}
