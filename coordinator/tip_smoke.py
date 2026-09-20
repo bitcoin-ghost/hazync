@@ -126,6 +126,51 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
     return ready, portmap
 
 
+HOST_URL = ("https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/"
+            "hazync-host-x86_64-linux-gnu-cuda")
+
+
+def binary_size():
+    """The prover binary's real size, from the release. Never guessed."""
+    import urllib.request
+    req = urllib.request.Request(HOST_URL, method="HEAD")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return int(r.headers["Content-Length"])
+
+
+def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
+    """Pull the 407 MB prover onto the card BEFORE the clock starts, resuming if interrupted.
+
+    ⛔ A 407 MB DOWNLOAD HAS NO BUSINESS INSIDE THE TIMED RUN. pod-prove.sh fetches it on first use,
+    which means a card on a slow link spends the run downloading -- and the tick planner, which
+    judges a card by whether its prove.log is growing, sees no growth and restarts it. `curl -o`
+    truncates, so every restart began the download AGAIN from zero.
+
+    Measured 2026-09-20: one pod pulled at ~1 MB/s (4.8 MB -> 18.6 MB in 14 s) and never got past
+    60 seconds before being restarted, while its twin had the whole binary and proved in 15 s. The
+    run could never finish, and the only visible symptom was one card sitting at 0% GPU.
+
+    ⚠ `-C -` RESUMES. Without it this has the same failure as pod-prove.sh, just earlier.
+    ⚠ The card fetches from the CDN itself; pushing it from here would put 407 MB per card through
+      the driver's uplink for no benefit.
+    """
+    got = -1
+    for _ in range(tries):
+        out = ssh.run(card, "stat -c%s /workspace/hazync-host-cuda 2>/dev/null || echo 0",
+                      timeout=60) or "0"
+        got = int((out.strip().splitlines() or ["0"])[-1] or 0)
+        if got == want:
+            ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
+            return True, got
+        # nohup so the fetch survives this ssh session, -C - so a partial file continues.
+        ssh.run(card,
+                "pgrep -f 'curl.*hazync-host' >/dev/null 2>&1 || "
+                f"nohup curl -fsSL -C - -o /workspace/hazync-host-cuda {HOST_URL} "
+                "> /workspace/fetch.log 2>&1 < /dev/null & disown; exit 0", timeout=60)
+        time.sleep(wait_s)
+    return False, got
+
+
 def prepare(ssh, card, *, block_path, block_name, repo_hint):
     """Stage the binary, the fixture and pod-prove.sh, and clear the CUDA compat trap."""
     # ⛔ CUDA ERROR 804 ON A CONSUMER CARD IS AN UNPREPARED CARD, NOT A BAD ONE. The driver's compat
@@ -138,6 +183,7 @@ def prepare(ssh, card, *, block_path, block_name, repo_hint):
     # `setsid: failed to execute ./pod-prove.sh: Permission denied` and a zero-byte prove.log.
     ssh.run(card, "chmod +x /workspace/pod-prove.sh", timeout=60)
     size = (ssh.run(card, f"stat -c%s /workspace/{block_name} 2>/dev/null || echo 0") or "0").strip()
+    size = (size.splitlines() or ["0"])[-1]
     log(f"  {card.cid}: pod-prove.sh={'ok' if ok_bin else 'FAILED'} "
         f"fixture={'ok' if ok_blk else 'FAILED'} ({size} bytes on the card)")
     return ok_bin and ok_blk and size.isdigit() and int(size) > 0
@@ -292,6 +338,21 @@ def main():
         for c in order:
             if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
                 raise SystemExit(f"{c.cid} could not be prepared")
+
+        # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
+        # minutes, and doing it one at a time would double that for no reason.
+        want = binary_size()
+        log(f"fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards before T0")
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
+        for c, ok, n in got:
+            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
+        bad = [c.cid for c, ok, _ in got if not ok]
+        if bad:
+            raise SystemExit(f"the prover never finished downloading on {bad} — "
+                             f"a card that starts the run without it spends the run fetching, and "
+                             f"the stall detector restarts it from zero every time")
 
         # ── the dashboard feed, BEFORE the clock ──────────────────────────────────────────────────
         os.makedirs(a.rundir, exist_ok=True)
