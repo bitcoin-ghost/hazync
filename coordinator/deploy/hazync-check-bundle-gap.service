@@ -1,0 +1,20 @@
+# Integrity check: the tip bundles the coordinator serves are contiguous and still arriving.
+# Runs on the COORDINATOR -- the push side is write-only and cannot see what landed.
+[Unit]
+Description=Hazync integrity: tip bundles are complete and still arriving
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles
+Environment=HAZYNC_BRIDGE_EMIT_FROM=967500
+# Two runs before paging, as the other checks do: one unreadable moment is not an incident.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-bundle-gap /usr/local/sbin/hazync-check-bundle-gap
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=300

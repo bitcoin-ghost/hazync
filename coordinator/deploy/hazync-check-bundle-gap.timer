@@ -1,0 +1,14 @@
+# Every 5 minutes. The stall test needs several readings before it will speak (BUNDLE_STALL_RUNS=4), so
+# this cadence puts a genuine stall ~20 minutes from silent to paged.
+#
+# :*/5 at second 40 keeps it clear of the bundle push on the minute.
+[Unit]
+Description=Check every 5 minutes that tip bundles are complete and arriving
+
+[Timer]
+OnCalendar=*-*-* *:0/5:40
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
