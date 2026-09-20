@@ -139,6 +139,24 @@ check("RDIR=/workspace CHUNK=0" in seen or "CHUNK=0 RDIR=/workspace" in seen,
 check("_reassigned" not in seen,
       "the orchestrator's bookkeeping path never appears in a remote command")
 
+# ── 9. ⛔ THE KEY probe_all RETURNS MUST BE THE KEY plan_tick LOOKS UP ─────────────────────────────
+# This is an integration seam with no natural error: if the keys disagree, every lookup returns None,
+# every card reads UNREACHABLE, and UNREACHABLE is the state that deliberately takes NO ACTION -- so a
+# whole run would sit there doing nothing, with no exception and nothing in any log. It was wrong when
+# first written (keyed by card.cid while assignments hold Card objects) and only surfaced when the two
+# halves were wired together.
+calls.clear()
+assign = {0: td.Card("a", "10.0.0.1", 22), 1: td.Card("b", "10.0.0.2", 22)}
+probes = td.probe_all(runner, assign)
+check(set(probes.keys()) == set(assign.values()),
+      "probe_all is keyed by the SAME objects the assignment map holds")
+check(all(tf.card_state(probes.get(c)) != tf.UNREACHABLE for c in assign.values()),
+      "so every assigned card resolves to a real state, not UNREACHABLE")
+
+# A Card is the same card wherever it came from, so a copy still finds its probe.
+copy = td.Card("a", "10.0.0.1", 22)
+check(probes.get(copy) is not None, "a Card compares and hashes by cid, so a copy is the same key")
+
 EXPECTED_CONTROL_FAILURES = {
     "the probe reaches ssh with `$(stat …)` INTACT",
     "the probe reaches ssh with `$(pgrep …)` INTACT",

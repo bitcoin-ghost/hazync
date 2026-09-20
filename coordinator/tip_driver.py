@@ -50,6 +50,17 @@ class Card:
     def __repr__(self):
         return f"Card({self.cid} {self.loc} {self.ip}:{self.port})"
 
+    # ⛔ HASHED AND COMPARED BY cid, BECAUSE THE PROBE MAP IS KEYED BY CARD. `plan_tick` looks a card up
+    # with `probes.get(card)`, where `card` is whatever the assignment map holds. Without these, two
+    # Card objects for the same pod are different keys, every lookup returns None, every card reads
+    # UNREACHABLE and the run does nothing at all -- silently, because UNREACHABLE is the state that
+    # deliberately takes no action.
+    def __hash__(self):
+        return hash(self.cid)
+
+    def __eq__(self, other):
+        return isinstance(other, Card) and self.cid == other.cid
+
 
 class SSHRunner:
     """The real remote-execution layer. Tests substitute their own object with the same three methods."""
@@ -91,6 +102,24 @@ class SSHRunner:
             return False
         return os.path.isfile(local) and os.path.getsize(local) > 0
 
+    def push(self, card, local, remote, timeout=COPY_TIMEOUT_S):
+        """Copy a file ONTO the card. Returns True only if the far end confirms it.
+
+        ⛔ THE CONFIRMATION IS THE POINT, and it is the caller's job: `scp` exiting 0 says the transfer
+        was attempted, not that a file of the right size is sitting there. `FleetRunner.stage_receipt`
+        checks `test -s` on the far side before believing this, because a silent drop once staged 21 of
+        22 chunks and `seg-serve` panicked with nothing useful in any log.
+        """
+        if not (os.path.isfile(local) and os.path.getsize(local) > 0):
+            return False                      # never push something we have not got
+        cmd = ["scp", *[o for o in SSH_OPTS if o != "-n"], "-i", self.key,
+               "-P", str(card.port), local, f"{self.user}@{card.ip}:{remote}"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        return p.returncode == 0
+
     def kill_provers(self, card, timeout=PROBE_TIMEOUT_S):
         """Stop everything proving on this card.
 
@@ -129,12 +158,16 @@ def probe_all(runner, assignments, reassigned=(), workers=32):
         for chunk, card in assignments.items():
             rdir = f"{card.workdir}/re{chunk}" if chunk in reassigned else card.workdir
             futures[pool.submit(runner.run, card, body,
-                                {"RDIR": rdir, "CHUNK": str(chunk)})] = card.cid
+                                {"RDIR": rdir, "CHUNK": str(chunk)})] = card
         for fut in concurrent.futures.as_completed(futures):
-            cid = futures[fut]
+            # ⛔ KEYED BY THE CARD OBJECT, not by its id: this map is consumed by `plan_tick`, which
+            # looks up with the value held in the assignment map. Keying by anything else makes every
+            # lookup miss and every card read UNREACHABLE -- and UNREACHABLE takes no action, so the
+            # run would simply sit there.
+            card = futures[fut]
             try:
                 reply = fut.result()
             except Exception:
                 reply = None
-            out[cid] = (reply or "").strip().splitlines()[-1] if reply else None
+            out[card] = (reply or "").strip().splitlines()[-1] if reply else None
     return out

@@ -222,6 +222,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_tip_run.py --control
+      - name: An unconfirmed push is not a staged receipt (Phase 5 fleet runner)
+        run: cd coordinator && python3 test_tip_runner.py
+      - name: Fleet runner POSITIVE CONTROL (far-side check removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_runner.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #
