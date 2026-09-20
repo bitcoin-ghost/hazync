@@ -182,6 +182,40 @@ check("804" in rep["note"] and "remove them and retry" in rep["note"],
 rep = tl.report_from_screen(GOOD_SCREEN, method_id="deadbeef" * 8)
 check(not tl.qualify(rep)[0], "a clean screening does not excuse a wrong METHOD_ID")
 
+# ── 8. the bind: too narrow is a silent no-op, too wide is an open unauthenticated port ───────────
+ok, why = tl.bind_verdict({}, cards_are_remote=True)
+check(not ok and "CANNOT attach" in why,
+      "⛔ the DEFAULT loopback bind with remote cards is refused — they would retry for 600 s "
+      "looking armed and contribute nothing")
+
+ok, why = tl.bind_verdict({"HAZYNC_SEG_REMOTE": "1"}, cards_are_remote=True)
+check(not ok and "UNAUTHENTICATED" in why,
+      "⛔ 0.0.0.0 is refused unless explicitly accepted — the segment wire has no identity")
+
+ok, why = tl.bind_verdict({"HAZYNC_SEG_REMOTE": "1"}, cards_are_remote=True, accept_public=True)
+check(ok, f"0.0.0.0 is allowed when the operator says so ({why})")
+
+ok, why = tl.bind_verdict({"HAZYNC_BIND": "10.0.0.5"}, cards_are_remote=True)
+check(ok, f"a private/tunnel address needs no special pleading ({why})")
+
+ok, _ = tl.bind_verdict({}, cards_are_remote=False)
+check(ok, "a local-only fleet on loopback is fine")
+
+check(tl.effective_bind({"HAZYNC_BIND": "1.2.3.4", "HAZYNC_SEG_REMOTE": "1"}) == "1.2.3.4",
+      "HAZYNC_BIND wins over SEG_REMOTE, as the prover's seg_bind_addr() does")
+
+# ── 9. reachability: NO QUORUM ────────────────────────────────────────────────────────────────────
+ok, why, bad = tl.reachability_verdict({"a": True, "b": True})
+check(ok and not bad, f"all cards reaching the aggregate passes ({why})")
+
+ok, why, bad = tl.reachability_verdict({"a": True, "b": False, "c": True})
+check(not ok and bad == ["b"],
+      f"⛔ ONE unreachable card fails the gate — no quorum. It would sit in its retry loop while the "
+      f"straggler, projection and cost are all computed against a fleet that does not exist ({why})")
+
+ok, why, bad = tl.reachability_verdict({})
+check(not ok, "probing nothing is not a pass")
+
 EXPECTED_CONTROL_FAILURES = {
     "a wrong METHOD_ID is refused (ok)",
     "the bridge guest is refused for proving",

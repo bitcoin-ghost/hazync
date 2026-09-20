@@ -36,10 +36,17 @@ class FleetRunner:
     the aggregator.
     """
 
-    def __init__(self, ssh, aggregator, *, stage_dir, agg_port=9110,
+    def __init__(self, ssh, aggregator, *, stage_dir, agg_port=9110, agg_dial=None,
                  prove_env=None, workdir="/workspace"):
         self.ssh, self.agg = ssh, aggregator
+        # ⛔ THE PORT seg-serve BINDS IS NOT ALWAYS THE PORT WORKERS DIAL. On RunPod the container's
+        # 9110 is published on some arbitrary external port (58231, 27427 …), so an aggregator that
+        # binds 9110 is reached at publicIp:58231. Using one number for both means every worker dials a
+        # closed port, sits in its 600-second retry loop looking armed, and contributes nothing — the
+        # silent no-op the reachability gate exists to catch. `agg_dial` defaults to `agg_port` for the
+        # simple case where they genuinely are the same.
         self.stage_dir, self.agg_port, self.workdir = stage_dir, int(agg_port), workdir
+        self.agg_dial = int(agg_dial if agg_dial is not None else agg_port)
         # The settings every 966,256 run used. LIFTX_HINT is not optional: without it the host omits the
         # pubkey hints the CORE guest expects and the guest dies with `DeserializeUnexpectedEnd`, which
         # reads as a corrupt fixture and sends you hunting the wrong thing.
@@ -91,7 +98,7 @@ class FleetRunner:
             f"done\n"
             f"EOS\nchmod +x /workspace/autoattach.sh; echo ARMED"
         )
-        target = f"{self.agg.ip}:{self.agg_port}"
+        target = f"{self.agg.ip}:{self.agg_dial}"   # what a worker dials, not what seg-serve binds
         for chunk, card in cards.items():
             if card == self.agg:
                 continue                       # the aggregator serves; it does not dial itself

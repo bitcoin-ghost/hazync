@@ -203,3 +203,75 @@ def report_from_screen(screen, *, method_id, binary_sha=None, expect_binary_sha=
         "peak_vram_mib": screen.get("peak_vram_mib"),
         "note": note,
     }
+
+
+# ── card-to-card reachability, and the bind that makes it possible ────────────────────────────────
+#
+# Two separate failures live here and they pull in opposite directions.
+#
+# ⛔ A LOOPBACK BIND WITH REMOTE CARDS IS A SILENT NO-OP. seg-serve defaults to 127.0.0.1 because the
+# segment wire is UNAUTHENTICATED — `seg-connect` opens a bare TcpStream and HAZYNC_WORKER_ID is a log
+# label, not an identity. With that default, a worker on another machine cannot attach; since #402 it
+# RETRIES with backoff rather than dying, so it sits in its 600-second loop looking armed and
+# contributing nothing. The run then proceeds with fewer cards than anyone believes it has.
+#
+# ⛔ AND 0.0.0.0 PUTS THAT UNAUTHENTICATED PORT ON EVERY INTERFACE. Anyone who can reach it can take
+# work and stall the run. The prover's own words: "Prefer a tunnel on a public host."
+#
+# So the gate refuses BOTH: a bind too narrow for the fleet to attach, and one wider than the operator
+# has said they want.
+PUBLIC_BIND = "0.0.0.0"
+LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
+
+
+def effective_bind(env):
+    """What seg-serve will actually listen on, by the prover's own rule.
+
+    `HAZYNC_BIND` wins; else `HAZYNC_SEG_REMOTE=1` means 0.0.0.0; else loopback. Mirrors
+    `seg_bind_addr()` in prover/host/src/main.rs — if that changes, this must change with it.
+    """
+    if env.get("HAZYNC_BIND"):
+        return env["HAZYNC_BIND"]
+    if env.get("HAZYNC_SEG_REMOTE") == "1":
+        return PUBLIC_BIND
+    return "127.0.0.1"
+
+
+def bind_verdict(env, *, cards_are_remote, accept_public=False):
+    """Can the fleet attach, and is the port wider than intended? Returns (ok, reason)."""
+    bind = effective_bind(env)
+
+    if cards_are_remote and bind in LOOPBACK_BINDS:
+        return False, (
+            f"seg-serve would bind {bind}, so workers on other machines CANNOT attach — they will "
+            f"retry for 600 s looking armed and contribute nothing. Set HAZYNC_SEG_REMOTE=1, or "
+            f"HAZYNC_BIND to a tunnel or private address.")
+
+    if bind == PUBLIC_BIND and not accept_public:
+        return False, (
+            "seg-serve would bind 0.0.0.0, putting an UNAUTHENTICATED proving port on every interface — "
+            "anyone who can reach it can take work and stall the run. Prefer a tunnel "
+            "(HAZYNC_BIND=<private addr>), or pass accept_public if that is genuinely intended.")
+
+    if not cards_are_remote and bind not in LOOPBACK_BINDS:
+        return True, f"bind {bind} is wider than this local-only fleet needs, but it will work"
+
+    return True, f"bind {bind}"
+
+
+def reachability_verdict(results):
+    """Every card must have reached the aggregate's port. Returns (ok, reason, unreachable).
+
+    ⛔ NO QUORUM. A card that cannot attach is not a slow card — it is a card that will sit in its retry
+    loop and do nothing, while the fleet size everyone is reasoning about silently includes it. Running
+    anyway means the straggler, the projection and the cost are all computed against a fleet that does
+    not exist. Refuse, drop the card deliberately, and re-plan with the size you actually have.
+    """
+    unreachable = sorted(str(c) for c, ok in results.items() if not ok)
+    if not results:
+        return False, "no cards were probed for reachability", []
+    if unreachable:
+        return False, (f"{len(unreachable)} of {len(results)} card(s) cannot reach the aggregate: "
+                       f"{', '.join(unreachable[:8])}"
+                       f"{'…' if len(unreachable) > 8 else ''}"), unreachable
+    return True, f"all {len(results)} cards reached the aggregate", []

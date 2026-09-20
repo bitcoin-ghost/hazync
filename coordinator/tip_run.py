@@ -45,7 +45,12 @@ def verify_fleet_empty(runner, cards):
             clean.append(cid)
         else:
             dirty.append(cid)
-    return {"clean": sorted(clean), "dirty": sorted(dirty), "silent": sorted(silent),
+    # ⛔ SORT BY NAME, NOT BY THE OBJECT. A Card defines __eq__ and __hash__ (it is a dict key) but no
+    # ordering, so sorted() on Cards raises TypeError. The unit tests used strings, which sort happily,
+    # and the first live run is what found it -- sort by str() so any card type works.
+    key = str
+    return {"clean": sorted(clean, key=key), "dirty": sorted(dirty, key=key),
+            "silent": sorted(silent, key=key),
             "ok": not dirty and not silent and len(clean) == len(cards)}
 
 
