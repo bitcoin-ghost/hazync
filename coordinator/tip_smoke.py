@@ -182,6 +182,40 @@ def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
     return False, got
 
 
+def gpu_smoke(ssh, card, timeout_s=300):
+    """Make the card actually PROVE something on its GPU, and verify it. (ok, detail)
+
+    ⛔ A BINARY THAT IS THE RIGHT SIZE IS NOT A CARD THAT CAN USE IT. Two of twelve cards in the
+    2026-09-20 run were duds, and neither was caught before the clock because nothing had ever asked
+    them to prove anything:
+
+      * `hz-smoke-13` had no usable CUDA device at all. It died one second into its chunk with
+        `cudaErrorNoDevice`, and every check before that passed -- the fixture landed, the 407 MB
+        prover was byte-exact, ssh answered, and it could reach the aggregator. `method-id` never
+        touches CUDA, so it proves nothing about the GPU.
+      * `hz-smoke-15` was worse, because it LOOKED busy: 100% reported utilisation while holding
+        723 MiB and drawing 87 W. A 4090 genuinely proving holds ~22 GB and pulls 300-400 W. It ran
+        fifteen minutes and produced no segments.
+
+    This is the boot check `fleet.sh` has always had and this path never did, and it is exactly what
+    my own notes demanded after a dud card claimed and abandoned 14 blocks: the boot check must
+    include a real GPU prove. `prove-block` is self-contained -- no fixture, no arguments -- and its
+    output must say VERIFIED. Nothing weaker distinguishes these two cards from a working one.
+    """
+    out = ssh.run(card,
+                  f"cd /workspace && timeout {int(timeout_s)} ./hazync-host-cuda prove-block "
+                  f"> gpu_smoke.log 2>&1; "
+                  f"if grep -q VERIFIED gpu_smoke.log; then echo GPU_OK; "
+                  f"else echo \"GPU_BAD $(tail -1 gpu_smoke.log 2>/dev/null | cut -c1-120)\"; fi",
+                  timeout=timeout_s + 60)
+    last = (out or "").strip().splitlines()
+    if not last:
+        # ⚠ An ssh we could not complete is not a bad card. Say so rather than discarding a good one.
+        return None, "unreachable during the GPU smoke"
+    line = last[-1].strip()
+    return (line == "GPU_OK"), line
+
+
 def prepare(ssh, card, *, block_path, block_name, repo_hint):
     """Stage the binary, the fixture and pod-prove.sh, and clear the CUDA compat trap."""
     # ⛔ CUDA ERROR 804 ON A CONSUMER CARD IS AN UNPREPARED CARD, NOT A BAD ONE. The driver's compat
@@ -443,6 +477,34 @@ def main():
             raise SystemExit(f"the prover never finished downloading on {bad} — "
                              f"a card that starts the run without it spends the run fetching, and "
                              f"the stall detector restarts it from zero every time")
+
+        # ── the GPU smoke, BEFORE the clock ───────────────────────────────────────────────────────
+        log(f"proving one block on each of {len(order)} cards to prove the GPU works")
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            smoke = list(pool.map(lambda c: (c, *gpu_smoke(ssh, c)), order))
+        duds = []
+        for c, ok, detail in smoke:
+            if ok:
+                log(f"  {c.cid}: GPU ok")
+            elif ok is None:
+                log(f"  ⚠ {c.cid}: {detail} — not judged a dud on an ssh failure")
+            else:
+                log(f"  ⛔ {c.cid}: {detail}")
+                duds.append(c.cid)
+        if duds:
+            # Same treatment as an unreachable card: drop it, release it, re-plan with what is left.
+            order = [c for c in order if c.cid not in set(duds)]
+            for p in [x for x in created if x["name"] in set(duds)]:
+                sponsor_bot.terminate_confirmed(api, p["id"])
+                log(f"  released {p['name']} — its GPU cannot prove")
+            created = [x for x in created if x["name"] not in set(duds)]
+            with open(rented_path, "w") as fh:
+                json.dump(created, fh, indent=1)
+            if len(order) < 2:
+                raise SystemExit(f"only {len(order)} card(s) have a working GPU")
+            joined = tip_dashboard.feed_records(order, fleet)
+            feed.start(joined["records"])
+            log(f"re-planned with {len(order)} card(s) after dropping {sorted(duds)}")
 
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
