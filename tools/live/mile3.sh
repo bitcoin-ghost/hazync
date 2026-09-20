@@ -29,7 +29,10 @@ set -u
 S=${S:?set S to the run directory (holding pods.txt)}
 K=${HAZYNC_SSH_KEY:-~/.ssh/ghost_signet_ed25519}
 BLOCK=${BLOCK:-block_962000.json}
-# Where locally-built block files live. A TIP block is NOT on hazync.org/repro (which serves only
+# Where locally-built block files live. ⛔ THE FIXTURES ARE ON bitcoinghost.org/hazync/repro/,
+# NOT hazync.org/repro/ -- that path 404s and has since at least 2026-09-18; the migration to
+# hazync.org never carried it across. Verified 2026-09-20: block_966256.json.gz is 1,624,998 bytes
+# there and gunzips cleanly. A TIP block is NOT on it either (it serves only
 # 962000/966256/966280), so prep copies from here when the file exists and only falls back to the
 # download for the published ones.
 STAGE=${STAGE:-/home/defenwycke/tipblocks}
@@ -61,7 +64,7 @@ prep)
       [ -f "$STAGE/$BLOCK" ] && timeout 900 scp -q -o StrictHostKeyChecking=no -i "$K" -P "$port" \
           "$STAGE/$BLOCK" root@"$ip":/workspace/ 2>/dev/null
       R=$(T=300 SSH "$ip" "$port" "cd /workspace && chmod +x pod-prove.sh && \
-           { [ -f $BLOCK ] || { curl -fsSLO https://hazync.org/repro/${BLOCK}.gz && gunzip -f ${BLOCK}.gz; }; } && \
+           { [ -f $BLOCK ] || { curl -fsSL -S -O https://bitcoinghost.org/hazync/repro/${BLOCK}.gz && gunzip -f ${BLOCK}.gz; }; } && \
            rm -f chunk_*.bin prove.log result.json gpu_samples.csv agg.log && \
            echo BLOCKSHA=\$(sha256sum $BLOCK | cut -c1-16) \
                 LEFT=\$(ls chunk_*.bin 2>/dev/null | wc -l) \
