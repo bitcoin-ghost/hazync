@@ -516,6 +516,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_canonical_ids.py --control
+      - name: The dashboard's incremental reader matches the whole-file one (tools/live)
+        # read_streams() re-read every card's entire capture each tick: 1.43 s at 12 h and 2.0-5.4 s
+        # at 24 h on 30 cards, against a 1.0 s interval. Now 0.077 s steady-state. The equivalence
+        # case feeds one capture to both paths over several ticks and requires identical output.
+        run: cd tools/live && python3 test_collect_incremental.py
+      - name: Incremental reader POSITIVE CONTROL (partial-line guard removed — must FAIL)
+        run: |
+          cd tools/live
+          python3 test_collect_incremental.py --control
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls

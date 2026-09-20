@@ -48,7 +48,53 @@ def read_pods(rundir):
     return out
 
 
-def read_streams(rundir, now):
+class StreamCursor:
+    """Per-card incremental read state: how far we have counted, and what we counted.
+
+    ⛔ WITHOUT THIS THE COLLECTOR FALLS BEHIND ITS OWN INTERVAL ON A LONG RUN. `readlines()`
+    re-reads and re-parses the ENTIRE capture every tick, and the capture grows at 1 line/sec/card.
+    Measured on 30 synthetic cards: 0.15 s at 1 hour, 0.38 s at 3 h, 0.73 s at 6 h, 1.43 s at 12 h,
+    and 2.0-5.4 s (median 3.8 s over five reads) at 24 h -- against an --interval of 1.0 s. The
+    dashboard does not break; it degrades to a frame every few seconds by the end of the day, with
+    nothing on the frame to say so.
+
+    The whole-file pass is a pure accumulator -- every row contributes once, independently and
+    monotonically -- so it resumes from a byte offset. The trace pass is already bounded to the last
+    WINDOW_S samples and is read from the END of the file instead.
+    """
+
+    __slots__ = ("offset", "ino", "size", "secs", "by_block")
+
+    def __init__(self):
+        self.offset, self.ino, self.size = 0, None, 0
+        self.secs, self.by_block = 0, {}
+
+    def reset(self):
+        self.offset, self.ino, self.size = 0, None, 0
+        self.secs, self.by_block = 0, {}
+
+
+def _tail_lines(path, nbytes):
+    """The last `nbytes` of a file as complete lines; a partial first line is dropped."""
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        back = min(nbytes, size)
+        fh.seek(size - back)
+        chunk = fh.read(back)
+    lines = chunk.decode("utf8", "replace").splitlines(keepends=True)
+    if back < size and lines:
+        lines = lines[1:]            # cut mid-way by the seek
+    return lines
+
+
+def read_streams(rundir, now, cursors=None):
+    """Read every card's stream.
+
+    `cursors` is a dict name -> StreamCursor. Pass one and each file is read INCREMENTALLY from where
+    the last tick stopped; omit it and every file is read whole, exactly as before -- which is what
+    --once, --demo and --replay want, and what the equivalence test compares against.
+    """
     cards = []
     sdir = os.path.join(rundir, "stream")
     if not os.path.isdir(sdir):
@@ -58,18 +104,53 @@ def read_streams(rundir, now):
         if not fn.endswith(".csv"):
             continue
         name = fn[:-4]
+        path = os.path.join(sdir, fn)
         t, w, u = [], [], []
         phase, seg_n, seg_total, block = "idle", 0, 0, None
-        secs, by_block = 0, {}
+
+        cur = None
+        if cursors is not None:
+            cur = cursors.get(name)
+            if cur is None:
+                cur = cursors[name] = StreamCursor()
+
         try:
-            with open(os.path.join(sdir, fn)) as fh:
-                allrows = fh.readlines()
+            if cur is None:
+                with open(path) as fh:
+                    newrows = fh.readlines()
+                secs, by_block = 0, {}
+            else:
+                st = os.stat(path)
+                # ⛔ A SHRUNK OR REPLACED FILE MUST RESET THE CURSOR. tip-stream.sh truncates the
+                # stream directory between sessions and a new session is a new inode. Seeking to a
+                # stale offset in a fresh file would skip the start of the run and undercount the
+                # money for the rest of it.
+                if cur.ino is not None and (st.st_ino != cur.ino or st.st_size < cur.size):
+                    cur.reset()
+                cur.ino, cur.size = st.st_ino, st.st_size
+                with open(path, "rb") as fh:
+                    fh.seek(cur.offset)
+                    blob = fh.read()
+                # ⛔ NEVER CONSUME A PARTIAL LAST LINE. The stream is appended over a reconnecting
+                # ssh, so a read landing mid-write is NORMAL, not exceptional. Both naive choices are
+                # wrong and both are silent:
+                #   advance past it  -> the fragment has too few fields and is skipped, and so does
+                #                       its remainder on the next tick. The sample is LOST FOR EVER.
+                #                       Verified: with this guard removed the count stays at 10 where
+                #                       it should reach 11, and observed_s IS the money.
+                #   do not advance   -> the completed line is read again and counted TWICE.
+                # Advance to the last NEWLINE and leave the remainder for next time.
+                cut = blob.rfind(b"\n") + 1
+                cur.offset += cut
+                newrows = blob[:cut].decode("utf8", "replace").splitlines(keepends=True)
+                secs, by_block = cur.secs, cur.by_block
         except OSError:
             continue
-        # WHOLE FILE, for money: each 1 Hz line IS a second this card was observed running. Counting
-        # samples rather than integrating a wall clock means the figure is correct on a one-shot run,
-        # on a replay of a finished capture, and across a collector restart.
-        for line in allrows:
+
+        # EVERY NEW ROW, for money: each 1 Hz line IS a second this card was observed running.
+        # Counting samples rather than integrating a wall clock means the figure is correct on a
+        # one-shot run, on a replay of a finished capture, and across a collector restart.
+        for line in newrows:
             f = line.rstrip("\n").split(",")
             if len(f) < 11:
                 continue
@@ -91,8 +172,17 @@ def read_streams(rundir, now):
                 e["asm"] += 1
             elif f[7] in ("proving", "executed"):
                 e["prove"] += 1
-        # WINDOW, for the traces: only what the waveform draws
-        for line in allrows[-WINDOW_S:]:
+        if cur is not None:
+            cur.secs, cur.by_block = secs, by_block
+
+        # WINDOW, for the traces: only what the waveform draws. Read from the END of the file rather
+        # than slicing the whole capture -- at 24 h that slice was the thing being paid for.
+        # ~70 bytes per line with a wide margin, so WINDOW_S lines are always covered.
+        try:
+            window = _tail_lines(path, WINDOW_S * 160)
+        except OSError:
+            window = []
+        for line in window[-WINDOW_S:]:
             f = line.rstrip("\n").split(",")
             if len(f) < 11:
                 continue
@@ -276,6 +366,9 @@ def main():
                     help="anchor 'now' to the newest sample, so a finished capture renders as live")
     a = ap.parse_args()
     state = {}
+    # One cursor per card, carried across ticks. A fresh cursor reads the file whole, so --once and
+    # the first tick of --loop are unchanged; every later tick reads only what has been appended.
+    cursors = {}
     while True:
         now = time.time()
         if a.replay and not a.demo:
@@ -290,7 +383,7 @@ def main():
             chain = {"tip": tip, "frontier": 74927, "proven": 75443, "folded": 62306,
                      "pct": 7.75, "contributors": 7, "ok": True}
         else:
-            cards = read_streams(a.rundir, now)
+            cards = read_streams(a.rundir, now, cursors)
             chain = chain_facts()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
