@@ -347,6 +347,7 @@ def main():
 
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
+        phase(f"PREPARING · renting {a.cards} cards (+{a.spares} spare)")
         existing = {p["name"] for p in api.pods()}
         log(f"pods already on the account (untouched): {sorted(existing) or 'none'}")
         # ⛔ RENT SPARES. RunPod does not always start what it sells: on 2026-09-20 one of two pods
@@ -371,6 +372,7 @@ def main():
             log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
                 f"  (recorded in {rented_path})")
 
+        phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
         cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
         if len(cards) < a.cards:
             raise SystemExit(f"only {len(cards)} of {want} rented cards came up; needed {a.cards}")
@@ -469,6 +471,7 @@ def main():
                 log(f"feed rewritten for {len(order)} card(s)")
 
         # ── prepare ───────────────────────────────────────────────────────────────────────────────
+        phase(f"PREPARING · staging the block onto {len(order)} cards")
         for c in order:
             if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
                 raise SystemExit(f"{c.cid} could not be prepared")
@@ -476,7 +479,7 @@ def main():
         # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
         # minutes, and doing it one at a time would double that for no reason.
         want = binary_size()
-        log(f"fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards before T0")
+        phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
         import concurrent.futures as _cf
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
@@ -489,7 +492,7 @@ def main():
                              f"the stall detector restarts it from zero every time")
 
         # ── the GPU smoke, BEFORE the clock ───────────────────────────────────────────────────────
-        log(f"proving one block on each of {len(order)} cards to prove the GPU works")
+        phase(f"PREPARING · proving one block on each of {len(order)} GPUs")
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             smoke = list(pool.map(lambda c: (c, *gpu_smoke(ssh, c)), order))
         duds = []
@@ -528,13 +531,18 @@ def main():
         # the requested count would either raise or silently prove a chunk count the fleet cannot
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
+        phase(f"PROVING block {a.block} on {len(order)} cards")
         log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
             f"(binds 9110, dialled on {agg_dial})")
 
+        # ⚠ The fold caption is set from the run's own event stream, so it appears when the
+        # aggregate actually starts rather than when we guess it might.
         result = tip_run.run_block(block=a.block, cards=assignment, runner=runner,
                                    now=time.time, sleep=time.sleep, feed=feed,
                                    on_event=lambda m: log(f"  {m}"),
                                    max_ticks=1200, tick_s=6.0)
+        phase(f"VERIFIED block {a.block} in {result.get('wall_s')}s on {len(order)} cards"
+              if result.get("ok") else f"FAILED on block {a.block}")
         log("RESULT " + json.dumps(result, indent=1))
         return 0 if result.get("ok") else 1
 
