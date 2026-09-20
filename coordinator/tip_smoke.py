@@ -163,10 +163,20 @@ def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
         if got == want:
             ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
             return True, got
-        # nohup so the fetch survives this ssh session, -C - so a partial file continues.
+        # ⛔ NOT pgrep. `pgrep -f 'curl.*hazync-host'` MATCHES THE SSH SESSION CARRYING IT: the
+        # pattern is in our own command line on the remote, so the check always succeeded, the `||`
+        # always short-circuited, and curl NEVER RAN. Measured twice -- 0 bytes on every card after
+        # five minutes of "fetching", with no fetch.log and no lock file to show for it.
+        #
+        # ⛔ AND THIS FIX WAS LOST ONCE. It was applied live on the box and never committed, so a
+        # later deploy from the branch silently restored the pgrep version and a 12-card run stalled
+        # on it again. A fix that exists only on a machine is a fix that gets clobbered.
+        #
+        # `flock -n` needs no pattern at all: it either takes the lock or exits, so exactly one
+        # fetch runs per card and a retry here simply resumes it.
         ssh.run(card,
-                "pgrep -f 'curl.*hazync-host' >/dev/null 2>&1 || "
-                f"nohup curl -fsSL -C - -o /workspace/hazync-host-cuda {HOST_URL} "
+                "nohup flock -n /workspace/fetch.lock "
+                f"curl -fsSL -S -C - -o /workspace/hazync-host-cuda {HOST_URL} "
                 "> /workspace/fetch.log 2>&1 < /dev/null & disown; exit 0", timeout=60)
         time.sleep(wait_s)
     return False, got
@@ -339,50 +349,7 @@ def main():
             raise SystemExit("the aggregator has no published 9110 — workers could never attach")
         agg_dial = agg_ports[9110][1]
 
-        # ── card-to-card reachability, BEFORE the clock ───────────────────────────────────────────
-        # ⛔ REACHING THE PORT FROM HERE PROVES NOTHING ABOUT THE WORKERS. Measured 2026-09-20: the
-        # aggregate's published port answered from this box while the other pod got `No route to
-        # host`. Pod-to-pod connectivity is not guaranteed and varies between rentals -- the first
-        # pair that day could reach each other and the second could not. Untested, the run looks
-        # armed and the aggregate sits at 0/N until the tick budget is spent.
-        probe_runner = tip_runner.FleetRunner(
-            ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
-            agg_port=9110, agg_dial=agg_dial)
-        reach = probe_runner.check_reachability(assignment_preview(order), secs=25)
-        if reach is None:
-            log("⚠ could not stand up a listener on the aggregator, so reachability is UNTESTED — "
-                "continuing, because 'we could not test' is not 'they failed'")
-        else:
-            ok, why, unreachable = tip_lifecycle.reachability_verdict(
-                {c.cid: v for c, v in reach.items()})
-            log(f"reachability: {why}")
-            if not ok:
-                raise SystemExit(
-                    f"{why}. These cards would sit in their retry loop contributing nothing while "
-                    f"the fleet size everyone reasons about silently includes them. Rent "
-                    f"replacements rather than running a fleet that does not exist.")
-
-        # ── prepare ───────────────────────────────────────────────────────────────────────────────
-        for c in order:
-            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
-                raise SystemExit(f"{c.cid} could not be prepared")
-
-        # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
-        # minutes, and doing it one at a time would double that for no reason.
-        want = binary_size()
-        log(f"fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards before T0")
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
-            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
-        for c, ok, n in got:
-            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
-        bad = [c.cid for c, ok, _ in got if not ok]
-        if bad:
-            raise SystemExit(f"the prover never finished downloading on {bad} — "
-                             f"a card that starts the run without it spends the run fetching, and "
-                             f"the stall detector restarts it from zero every time")
-
-        # ── the dashboard feed, BEFORE the clock ──────────────────────────────────────────────────
+        # ── the dashboard feed: started NOW, so the page is not dark through setup ───────────────
         os.makedirs(a.rundir, exist_ok=True)
         fleet = [{"id": p["name"], "price": p["price"], "gpu": p["gpu_type"], "pod_id": p["id"]}
                  for p in created]
@@ -413,7 +380,70 @@ def main():
             os.close(fd)
             helpers.append((name, pid))
             log(f"  started {name} -> {name}.log")
-        time.sleep(8)                      # let the streamer produce a sample before T0
+        time.sleep(4)                      # let the streamer produce a sample
+
+        # ── card-to-card reachability, BEFORE the clock ───────────────────────────────────────────
+        # ⛔ REACHING THE PORT FROM HERE PROVES NOTHING ABOUT THE WORKERS. Measured 2026-09-20: the
+        # aggregate's published port answered from this box while the other pod got `No route to
+        # host`. Pod-to-pod connectivity is not guaranteed and varies between rentals -- the first
+        # pair that day could reach each other and the second could not. Untested, the run looks
+        # armed and the aggregate sits at 0/N until the tick budget is spent.
+        probe_runner = tip_runner.FleetRunner(
+            ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
+            agg_port=9110, agg_dial=agg_dial)
+        reach = probe_runner.check_reachability(assignment_preview(order), secs=25)
+        if reach is None:
+            log("⚠ could not stand up a listener on the aggregator, so reachability is UNTESTED — "
+                "continuing, because 'we could not test' is not 'they failed'")
+        else:
+            ok, why, unreachable = tip_lifecycle.reachability_verdict(
+                {c.cid: v for c, v in reach.items()})
+            log(f"reachability: {why}")
+            if not ok:
+                # ⛔ DROP THEM AND RE-PLAN, rather than run a fleet that does not exist. A card that
+                # cannot attach is not a slow card: it sits in its retry loop contributing nothing
+                # while the straggler, the projection and the cost are all computed against a size
+                # that includes it. reachability_verdict's own docstring asks for exactly this --
+                # "drop the card deliberately, and re-plan with the size you actually have".
+                bad = set(unreachable)
+                order = [c for c in order if c.cid not in bad]
+                log(f"dropping {sorted(bad)} and re-planning with {len(order)} card(s)")
+                for p in [x for x in created if x["name"] in bad]:
+                    sponsor_bot.terminate_confirmed(api, p["id"])
+                    log(f"  released {p['name']} — it could not reach the aggregate")
+                created = [x for x in created if x["name"] not in bad]
+                with open(rented_path, "w") as fh:
+                    json.dump(created, fh, indent=1)
+                if len(order) < 2:
+                    raise SystemExit(
+                        f"only {len(order)} card(s) can reach the aggregate — a distributed run "
+                        f"needs at least 2, and an aggregate with no workers is a single-card prove")
+                # ⚠ The feed was written for the fleet we rented; rewrite it for the one we have, or
+                # the dashboard shows cards that are no longer in the run at $0.00/hr.
+                joined = tip_dashboard.feed_records(order, fleet)
+                feed.start(joined["records"])
+                log(f"feed rewritten for {len(order)} card(s)")
+
+        # ── prepare ───────────────────────────────────────────────────────────────────────────────
+        for c in order:
+            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
+                raise SystemExit(f"{c.cid} could not be prepared")
+
+        # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
+        # minutes, and doing it one at a time would double that for no reason.
+        want = binary_size()
+        log(f"fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards before T0")
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
+        for c, ok, n in got:
+            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
+        bad = [c.cid for c, ok, _ in got if not ok]
+        if bad:
+            raise SystemExit(f"the prover never finished downloading on {bad} — "
+                             f"a card that starts the run without it spends the run fetching, and "
+                             f"the stall detector restarts it from zero every time")
+
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
         runner = tip_runner.FleetRunner(
@@ -422,8 +452,11 @@ def main():
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
                        "HAZYNC_ECMULT_WINDOW": "21"})
         os.makedirs(runner.stage_dir, exist_ok=True)
-        assignment = {i: order[i] for i in range(a.cards)}
-        log(f"proving {block_name} on {a.cards} cards, aggregate on {agg.cid} "
+        # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
+        # the requested count would either raise or silently prove a chunk count the fleet cannot
+        # cover -- the chunk count IS the fleet size.
+        assignment = {i: c for i, c in enumerate(order)}
+        log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
             f"(binds 9110, dialled on {agg_dial})")
 
         result = tip_run.run_block(block=a.block, cards=assignment, runner=runner,
