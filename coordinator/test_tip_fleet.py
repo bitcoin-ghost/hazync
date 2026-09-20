@@ -122,6 +122,59 @@ check(not tf.staging_complete(21, 22), "21 of 22 is NOT complete — the silent 
 check(tf.staging_complete(28, 27), "an extra file from a re-run does not refuse the aggregate")
 check(not tf.staging_complete(0, 0), "nothing expected and nothing staged is not a pass")
 
+# ── 8. the tick planner: one cycle's decisions ─────────────────────────────────────────────────────
+A = {0: "a", 1: "b", 2: "c"}
+
+# A finished chunk is staged immediately, not batched at the end (that cost 57 s in an earlier run).
+r = tf.plan_tick(assignments=A, probes={"a": "DONE", "b": BUSY, "c": BUSY},
+                 staged=set(), busy=set(), last_size={}, last_change={}, now=1000.0)
+check([x for x in r["actions"] if x["action"] == "stage"] == [{"action": "stage", "chunk": 0, "from": "a"}],
+      "a finished chunk is staged on the tick it finishes")
+check(r["chunks_done"] == {0}, "the finished chunk is recorded as done")
+
+# Staging happens once; a chunk already staged produces no further action.
+r = tf.plan_tick(assignments=A, probes={"a": "DONE", "b": BUSY, "c": BUSY},
+                 staged={0}, busy=set(), last_size={}, last_change={}, now=1000.0)
+check(r["actions"] == [], "an already-staged chunk is not staged twice")
+
+# ⛔ An unreachable card must not advance OR reset its timers — we learned nothing about it.
+r = tf.plan_tick(assignments=A, probes={"a": "", "b": BUSY, "c": BUSY},
+                 staged=set(), busy=set(),
+                 last_size={0: 500}, last_change={0: 100.0}, now=1000.0)
+check(r["actions"] == [], "an unreachable card produces no action")
+check(r["last_change"][0] == 100.0, "an unreachable card does not reset the stall clock")
+check(r["last_size"][0] == 500, "an unreachable card does not disturb the recorded progress")
+
+# Progress is the log CHANGING, never how fast. A card whose size moved has its clock reset.
+r = tf.plan_tick(assignments=A, probes={"a": "900:98:22460:1", "b": BUSY, "c": BUSY},
+                 staged=set(), busy=set(),
+                 last_size={0: 500}, last_change={0: 100.0}, now=1000.0)
+check(r["last_change"][0] == 1000.0, "a card whose log grew has its stall clock reset")
+check(r["actions"] == [], "a card making progress is left alone")
+
+# ⛔ A WORKING card is never recovered, however long its log has been static -- the cold-start case.
+r = tf.plan_tick(assignments=A, probes={"a": COLD_START, "b": BUSY, "c": BUSY},
+                 staged=set(), busy=set(),
+                 last_size={0: 0}, last_change={0: 0.0}, now=100000.0)
+check(r["actions"] == [], "a cold-starting card is never recovered, however long it has been silent")
+
+# A genuinely wedged card is recovered, onto a free card if one exists.
+r = tf.plan_tick(assignments=A, probes={"a": WEDGED, "b": IDLE_CARD, "c": BUSY},
+                 staged={1}, busy=set(),
+                 last_size={0: 104857}, last_change={0: 0.0}, now=1000.0)
+rec = [x for x in r["actions"] if x["action"] in ("reassign", "restart_in_place")]
+check(len(rec) == 1 and rec[0]["action"] == "reassign" and rec[0]["to"] == "b",
+      f"a wedged chunk moves to a finished, VRAM-released card ({rec})")
+check(r["last_change"][0] == 1000.0, "a recovered chunk restarts its stall clock")
+
+# ... and with no free card it restarts in place rather than stalling for ever.
+r = tf.plan_tick(assignments=A, probes={"a": WEDGED, "b": RECEIPT_HELD, "c": BUSY},
+                 staged={1}, busy=set(),
+                 last_size={0: 104857}, last_change={0: 0.0}, now=1000.0)
+rec = [x for x in r["actions"] if x["action"] in ("reassign", "restart_in_place")]
+check(len(rec) == 1 and rec[0]["action"] == "restart_in_place",
+      f"with only a VRAM-holding card available, the chunk restarts in place ({rec})")
+
 EXPECTED_CONTROL_FAILURES = {
     "a proving card is WORKING",
     "a COLD-STARTING card (silent log, holds VRAM) is WORKING, not idle",

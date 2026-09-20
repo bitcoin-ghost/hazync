@@ -178,3 +178,79 @@ def staging_complete(staged, expected):
     leave an extra file and that is not a reason to refuse.
     """
     return isinstance(staged, int) and staged >= expected > 0
+
+
+def probe_size(probe):
+    """The prove.log byte count a probe reports, or None when it reports nothing usable.
+
+    Progress is judged by this number MOVING, never by how fast it moves. The rate is the proxy that
+    killed healthy cards; the fact of change is evidence, its speed is not.
+    """
+    if card_state(probe) not in (WORKING, IDLE):
+        return None
+    try:
+        return int(float(probe.strip().split(":")[0]))
+    except (ValueError, IndexError):
+        return None
+
+
+def plan_tick(*, assignments, probes, staged, busy, last_size, last_change, now, stall_s=None):
+    """Decide everything for one poll cycle. Pure: it returns actions and the next state, and performs
+    nothing.
+
+    `assignments` maps chunk -> card. `staged` are chunks whose receipt is already collected. `busy` are
+    cards that have taken someone else's chunk. `last_size`/`last_change` carry per-chunk progress
+    between ticks.
+
+    ⛔ THE TICK MUST BE CHEAP. This was once 27 sequential ssh round-trips at ~0.7 s each, so a tick took
+    ~20 s and the last chunk of run 4 sat FINISHED and unnoticed for 24.9 s — the single largest
+    recoverable waste in that run, bigger than anything left in the chunk phase. The caller fans the
+    probes out in parallel and hands the results here all at once; this function never waits on anything.
+    """
+    stall_s = STALL_S if stall_s is None else stall_s
+    actions, finished = [], set(staged)
+    size, change = dict(last_size), dict(last_change)
+
+    # Which cards have finished their OWN chunk — the only ones that may take another.
+    for chunk, card in assignments.items():
+        if chunk in finished:
+            continue
+        if card_state(probes.get(card)) == DONE:
+            finished.add(chunk)
+
+    for chunk, card in assignments.items():
+        if chunk in staged:
+            continue
+        state = card_state(probes.get(card))
+
+        if state == DONE:
+            # ⛔ STAGE NOW, NOT AT THE END. Batching every receipt after the last chunk cost 57 s of dead
+            # time in an earlier run. Collecting each one as it appears overlaps the transfer with the
+            # cards still proving, which is why run 4 staged in 5.8 s after its chunk phase.
+            actions.append({"action": "stage", "chunk": chunk, "from": card})
+            continue
+
+        if state == UNREACHABLE:
+            # ⛔ LEAVE THE TIMERS ALONE. We learned nothing, so pretending we did — in either direction —
+            # is the mistake. Neither progress nor a stall may be inferred from a failed ssh.
+            continue
+
+        sz = probe_size(probes.get(card))
+        if sz is not None and sz != size.get(chunk):
+            size[chunk] = sz
+            change[chunk] = now
+
+        static_for = now - change.get(chunk, now)
+        if is_wedged(state, static_for, stall_s):
+            plan = plan_recovery(chunk, owner=card,
+                                 candidates=list(assignments.values()),
+                                 finished={assignments[c] for c in finished if c in assignments},
+                                 busy=busy, probes=probes)
+            plan["static_s"] = round(static_for, 1)
+            actions.append(plan)
+            # A recovered chunk starts its clock again, wherever it ended up.
+            change[chunk] = now
+            size[chunk] = 0
+
+    return {"actions": actions, "last_size": size, "last_change": change,
+            "chunks_done": finished}

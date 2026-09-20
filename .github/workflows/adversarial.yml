@@ -204,6 +204,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_tip_fleet.py --control
+      - name: The remote probe is never expanded on the orchestrator (Phase 5 tip driver)
+        run: cd coordinator && python3 test_tip_driver.py
+      - name: Tip driver POSITIVE CONTROL (body expanded locally — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_driver.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #
