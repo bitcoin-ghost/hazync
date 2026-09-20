@@ -87,8 +87,9 @@ check(not _shell_true, "no call in tip_driver passes shell=True (checked by AST,
 # ── 3. ssh hygiene: no stdin, batch mode, a timeout, and host keys checked ─────────────────────────
 check("-n" in argv, "ssh is given -n: a password prompt in a parallel fan-out would hang the fleet")
 check("BatchMode=yes" in joined, "ssh runs in batch mode")
-check("StrictHostKeyChecking=yes" in joined,
-      "host keys are checked — a rented fleet with an unknown key is a reason to stop")
+check("StrictHostKeyChecking=accept-new" in joined,
+      "host keys are checked on a trust-on-first-use basis — see the accept-new case below for why "
+      "`yes` made every freshly rented pod unreachable")
 
 # ── 4. a failed call is UNREACHABLE, never a stall ─────────────────────────────────────────────────
 def boom(cmd, **kw):
@@ -156,6 +157,20 @@ check(all(tf.card_state(probes.get(c)) != tf.UNREACHABLE for c in assign.values(
 # A Card is the same card wherever it came from, so a copy still finds its probe.
 copy = td.Card("a", "10.0.0.1", 22)
 check(probes.get(copy) is not None, "a Card compares and hashes by cid, so a copy is the same key")
+
+# ── ⛔ A FRESHLY RENTED POD HAS A HOST KEY NOBODY HAS EVER SEEN ────────────────────────────────
+# This was `StrictHostKeyChecking=yes`, and with BatchMode that makes a new pod unreachable: every
+# connection fails on an unknown key while the card is up and answering. Measured 2026-09-20 on two
+# live RTX 4090s -- by hand with `-o StrictHostKeyChecking=no` they returned READY instantly, and the
+# driver saw nothing for six minutes before the run gave up.
+opts = " ".join(td.SSH_OPTS)
+check("StrictHostKeyChecking=accept-new" in opts,
+      f"the host key policy is accept-new — a pod rented seconds ago has a key nobody has seen")
+check("StrictHostKeyChecking=yes" not in opts,
+      "⛔ and NOT `yes`, which cannot ever reach a new pod under BatchMode")
+check("StrictHostKeyChecking=no" not in opts,
+      "⛔ and NOT `no` — accept-new still REFUSES a CHANGED key for a known host, which is the "
+      "substitution the strict setting was there to stop; `no` would accept that too")
 
 EXPECTED_CONTROL_FAILURES = {
     "the probe reaches ssh with `$(stat …)` INTACT",

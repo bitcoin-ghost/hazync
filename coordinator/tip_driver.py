@@ -33,7 +33,17 @@ SSH_OPTS = [
     "-n",                                   # never read stdin: a prompt in a parallel fan-out hangs the lot
     "-o", "BatchMode=yes",                  # fail rather than ask for a password
     "-o", "ConnectTimeout=10",
-    "-o", "StrictHostKeyChecking=yes",      # a fleet is rented; an unknown host key is a reason to stop
+    # ⛔ accept-new, NOT yes. This said `yes`, and a fleet of freshly rented pods CANNOT be reached
+    # that way: a pod created thirty seconds ago has a host key nobody has ever seen, so with
+    # BatchMode every single connection fails and the run dies waiting for cards that are up and
+    # answering. Measured 2026-09-20 on two live RTX 4090s -- `ssh -o StrictHostKeyChecking=no`
+    # by hand returned READY instantly while the driver saw nothing for six minutes.
+    #
+    # `accept-new` keeps the protection that mattered: it trusts a key it has never seen (which is
+    # every new pod, unavoidably) but still REFUSES a key that has CHANGED for a host already known,
+    # which is the substitution `yes` was there to stop. `no` would accept a changed key too, and is
+    # the wrong fix.
+    "-o", os.environ.get("HAZYNC_TIP_HOSTKEY_OPT", "StrictHostKeyChecking=accept-new"),
 ]
 
 PROBE_TIMEOUT_S = float(os.environ.get("HAZYNC_TIP_PROBE_TIMEOUT_S", "25"))
