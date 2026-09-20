@@ -75,5 +75,5 @@ while true; do
   if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
     publish_once && last="$cur"
   fi
-  sleep 2
+  sleep 1
 done

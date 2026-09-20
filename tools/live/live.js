@@ -11,7 +11,7 @@
 (function () {
   // A frame older than this is no longer "live"; older than DEAD_S and the fleet has almost
   // certainly stopped. Both are generous next to a 1 Hz renderer.
-  var STALE_S = 30, DEAD_S = 300, POLL_MS = 2000;
+  var STALE_S = 30, DEAD_S = 300, POLL_MS = 1000;
 
   var img = document.getElementById('frame'),
       statusEl = document.getElementById('status'),
