@@ -41,13 +41,24 @@ while true; do
   # board mode writes $LOGDIR/worker_N.log; a milestone run writes /workspace/prove.log and, during
   # the fold, /workspace/agg.log. Take the newest of all of them, or a milestone run reports `idle`
   # for its whole duration while looking perfectly healthy.
-  L=$(ls -t "$LOGDIR"/*.log /workspace/prove.log /workspace/agg.log 2>/dev/null | head -1)
+  L=$(ls -t "$LOGDIR"/*.log /workspace/prove.log /workspace/agg.log /workspace/aggw.log 2>/dev/null | head -1)
   if [ -n "$L" ]; then
     TAIL=$(tail -c 40000 "$L" 2>/dev/null)
     # `chunk N: X inputs, Y segments at po2 Z` is prove-chunk's equivalent of "executed" — without it
     # a card reads `idle` for its whole CPU-only execute phase while sitting at full power.
-    M1=$(printf '%s' "$TAIL" | grep -oE 'segment [0-9]+/[0-9]+|executed, [0-9]+ segments|assembling [0-9]+ segment receipts|chunk [0-9]+: [0-9]+ inputs, [0-9]+ segments at po2 [0-9]+' | tail -1)
+    # ⛔ THE FOLD WAS INVISIBLE. The aggregate prints 'joins 34/34' and '18/34 segments' -- note the
+    # number comes FIRST there -- so none of the patterns below matched it, and a worker's own fold
+    # log was not even in the file list. Measured 2026-09-20: the word 'assembling' appeared ZERO
+    # times across a whole run, so kfold stayed 0, the join tree never lit, and the fold phase simply
+    # did not exist as far as the dashboard was concerned.
+    #   aggregator:  'joins N/M'                      <- the join tree advancing
+    #   worker:      '[w1] segment 7 in 2.45s'        <- this card taking fold work over the network
+    M1=$(printf '%s' "$TAIL" | grep -oE 'joins [0-9]+/[0-9]+|\[w[0-9]+\] segment [0-9]+|segment [0-9]+/[0-9]+|executed, [0-9]+ segments|assembling [0-9]+ segment receipts|chunk [0-9]+: [0-9]+ inputs, [0-9]+ segments at po2 [0-9]+' | tail -1)
     case "$M1" in
+      # 'assembling' is the phase word the renderer already keys the fold arc on; both fold signals
+      # report it so one card folding and many cards folding look the same to everything downstream.
+      joins*)      PHASE=assembling; N=${M1#joins }; TOT=${N#*/}; N=${N%%/*} ;;
+      \[w*)        PHASE=assembling; N=$(printf '%s' "$M1" | grep -oE '[0-9]+$'); TOT=0 ;;
       segment*)    PHASE=proving;    N=${M1#segment }; TOT=${N#*/}; N=${N%%/*} ;;
       executed*)   PHASE=executed;   TOT=$(printf '%s' "$M1" | grep -oE '[0-9]+' | head -1) ;;
       assembling*) PHASE=assembling; TOT=$(printf '%s' "$M1" | grep -oE '[0-9]+' | head -1) ;;

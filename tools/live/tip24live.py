@@ -125,7 +125,12 @@ def draw_live(snap, fo):
         c = cards[i]
         segt = c.get('seg_total') or 0
         p = min(1.0, (c.get('seg_n') or 0) / segt) if segt else 0.0
-        leaves.append((b0, p >= 1.0 or c.get('phase') == 'assembling'))
+        # ⛔ USE THE PEAK, NOT THE INSTANT. A card that has finished stops emitting `segment n/N`, so
+        # seg_total falls back to 0 and p reads 0.0 -- the leaf dot reverted to grey the moment the
+        # card succeeded, which looks exactly like a card that never started. collect.py carries the
+        # furthest this card got on the block it is on.
+        reached = max(p, float(c.get('peak') or 0.0))
+        leaves.append((b0, reached >= 1.0 or c.get('phase') == 'assembling'))
         if not c.get('up'):
             d.text((LX0 + 6, b0 - row + 3), c['name'][:18] + ' · down',
                    font=fo['tiny'] if 'tiny' in fo else fo['small'], fill=mix(RED, GROUND, .6))
@@ -282,6 +287,22 @@ def draw_live(snap, fo):
         d.rectangle([kx, GKEY_Y + 2, kx + 11, GKEY_Y + 12], fill=mix(c_, GROUND, .92))
         d.text((kx + 18, GKEY_Y), lbl, font=fo['small'], fill=hx(DIM))
         kx += 18 + d.textlength(lbl, font=fo['small']) + 28
+
+    # ---------------- the phase tile: what the run says it is doing
+    # ⛔ A LIVE FLEET DOING NOTHING LOOKS EXACTLY LIKE A DEAD FEED. Preparation is minutes of flat
+    # traces and an empty dial -- indistinguishable on the frame from an idle fleet or a broken
+    # collector. Three times in one evening the question was "why is the dashboard empty", and every
+    # time the answer was "it is preparing". When the run says what it is doing, the frame says it.
+    #
+    # ⚠ It sits on the SUBTITLE line, right-aligned. The first attempt put it above the footer, where
+    # it landed on top of the time-per-block bars and was unreadable against them.
+    phase_txt = (snap.get('phase') or '').strip()
+    if phase_txt:
+        tw = d.textlength(phase_txt, font=fo['lab'])
+        tx, ty = W - PAD - tw, 90
+        d.rectangle([tx - 12, ty - 5, tx + tw + 8, ty + 21], fill=mix(ACCENT, GROUND, .12))
+        d.rectangle([tx - 12, ty - 5, tx - 9, ty + 21], fill=mix(ACCENT, GROUND, .95))
+        d.text((tx, ty), phase_txt, font=fo['lab'], fill=mix(ACCENT, GROUND, .95))
 
     # ---------------- stats (cost is real: card-hours x RunPod price)
     if idle:
