@@ -1,0 +1,154 @@
+<!doctype html>
+<!--
+  The public live page: hazync.org/live/
+
+  Serves two files written by publish.sh next to it — frame.png and meta.json.
+
+  ⛔ A STALE FRAME LOOKS EXACTLY LIKE A LIVE ONE. The frame has a timestamp drawn into it, but a
+     viewer reads that as "now" unless something says otherwise. If the renderer or the publisher
+     dies, the last frame sits here indefinitely showing a fleet that stopped hours ago. meta.json
+     carries the render time and this page goes visibly stale against it.
+
+  ⛔ THE FRAME MUST NOT BE CACHED. It changes every second at the same URL, so every request carries
+     a cache-buster; without one the page shows one frame for ever and looks frozen rather than
+     broken.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hazync Live</title>
+<style>
+  :root {
+    --bg: #141414; --fg: #e8e8e8; --dim: #8a8a8a; --line: #2a2a2a;
+    --warn: #e08c3c; --bad: #d4553f; --ok: #5ac46e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    padding: 16px;
+  }
+  header { width: 100%; max-width: 1920px; display: flex; flex-wrap: wrap;
+           align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .04em; }
+  .sp { flex: 1 1 auto; }
+  #status { font-size: 13px; color: var(--dim); }
+  #status.live { color: var(--ok); }
+  #status.stale { color: var(--warn); }
+  #status.dead { color: var(--bad); }
+  .frame-wrap { width: 100%; max-width: 1920px; position: relative;
+                border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+                background: #0e0e0e; }
+  img { display: block; width: 100%; height: auto; }
+  #banner { display: none; position: absolute; left: 0; right: 0; top: 0;
+            padding: 8px 14px; font-size: 13px; text-align: center;
+            background: rgba(20,20,20,.94); border-bottom: 1px solid var(--line); }
+  #banner.show { display: block; }
+  #banner.stale { color: var(--warn); }
+  #banner.dead  { color: var(--bad); }
+  footer { width: 100%; max-width: 1920px; margin-top: 10px;
+           font-size: 12px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  a { color: inherit; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #fbfbfb; --fg: #1a1a1a; --dim: #666; --line: #ddd;
+    }
+    :root:not([data-theme="dark"]) .frame-wrap { background: #f0f0f0; }
+    :root:not([data-theme="dark"]) #banner { background: rgba(255,255,255,.94); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>HAZYNC &mdash; zkVM bitcoin block proofs, live</h1>
+  <span class="sp"></span>
+  <span id="status">connecting&hellip;</span>
+</header>
+
+<div class="frame-wrap">
+  <div id="banner"></div>
+  <img id="frame" alt="Live view of the Hazync proving fleet">
+</div>
+
+<footer>
+  <span>GPU power measured at 1&nbsp;Hz on each card.</span>
+  <span>Segment progress parsed from the worker's own output.</span>
+  <span id="rendered"></span>
+</footer>
+
+<script>
+(function () {
+  // A frame older than this is no longer "live"; older than DEAD_S and the fleet has almost
+  // certainly stopped. Both are generous next to a 1 Hz renderer.
+  var STALE_S = 30, DEAD_S = 300, POLL_MS = 2000;
+
+  var img = document.getElementById('frame'),
+      statusEl = document.getElementById('status'),
+      banner = document.getElementById('banner'),
+      renderedEl = document.getElementById('rendered'),
+      lastRendered = null;
+
+  function ago(s) {
+    if (s < 60) return Math.round(s) + 's ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return (s / 3600).toFixed(1) + ' hours ago';
+  }
+
+  function setState(cls, text, bannerText) {
+    statusEl.className = cls;
+    statusEl.textContent = text;
+    if (bannerText) {
+      banner.className = 'show ' + cls;
+      banner.textContent = bannerText;
+    } else {
+      banner.className = '';
+    }
+  }
+
+  function tick() {
+    // ⛔ Cache-bust BOTH. Without it the browser serves one frame for ever and the page looks
+    // frozen rather than broken -- the exact failure this page exists to make visible.
+    fetch('meta.json?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('meta ' + r.status);
+        return r.json();
+      })
+      .then(function (m) {
+        var age = Date.now() / 1000 - m.rendered_at;
+        renderedEl.textContent = 'frame rendered ' + new Date(m.rendered_at * 1000)
+          .toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+        if (age > DEAD_S) {
+          setState('dead', 'not live',
+            'This frame is ' + ago(age) + '. The fleet is not running, or the feed has stopped ' +
+            '— what you are looking at is the last frame produced, not the present.');
+        } else if (age > STALE_S) {
+          setState('stale', 'delayed',
+            'Last frame ' + ago(age) + ' — the feed is behind.');
+        } else {
+          setState('live', 'live · ' + ago(age), null);
+        }
+
+        if (m.rendered_at !== lastRendered) {
+          lastRendered = m.rendered_at;
+          img.src = 'frame.png?t=' + m.rendered_at;
+        }
+      })
+      .catch(function () {
+        // ⚠ A FAILED FETCH IS NOT PROOF THE FLEET IS DOWN — it is proof we cannot tell. Saying
+        // "offline" here would be asserting something we do not know.
+        setState('dead', 'no signal',
+          'Cannot reach the live feed from this browser. This says nothing about whether the ' +
+          'fleet is running.');
+      });
+  }
+
+  tick();
+  setInterval(tick, POLL_MS);
+})();
+</script>
+</body>
+</html>

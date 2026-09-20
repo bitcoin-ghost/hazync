@@ -30,3 +30,21 @@ BEFORE THE RUN
   * a tip run needs bundles at tip heights, and workers driven at EXPLICIT heights
     (`hazync run <h>`): pick()/claim() hand out the earliest open block, never the tip.
   * one hazync identity per pod, or 30 pods appear as one worker.
+
+PUBLISHING IT (hazync.org/live/)
+  On the TIP BOX, beside the renderer:
+    HAZYNC_PUBLISH_DEST=hazync-web:/var/www/hazync/live \
+    HAZYNC_PUBLISH_KEY=~/.ssh/hazync_publish ./publish.sh --loop frame.png
+
+  public.html is the page; install it as index.html in that directory.
+
+  * DO NOT run the collector or the streamer on the web box. They need ssh to every pod and the web
+    box is the most exposed machine there is. Keep the pod key on the tip box and push a PNG one way.
+  * publish.sh sends frame.png and meta.json ONLY. rsync renames into place -- nginx will serve a
+    half-written PNG if you "simplify" this to scp.
+  * --chmod=F644 is not optional: mktemp makes meta.json 600, nginx 403s it, and the page then shows
+    "no signal" for ever beside a frame.png that loads perfectly.
+  * meta.json carries the frame's mtime, so the page can go visibly stale. Without it a dead renderer
+    leaves the last frame on the page for ever, looking live -- the timestamp drawn into the image
+    reads as "now" to anyone who does not know better.
+  * The frame shows total spend and $/hr. That is public by decision (2026-09-20).
