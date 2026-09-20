@@ -9,6 +9,11 @@
      dies, the last frame sits here indefinitely showing a fleet that stopped hours ago. meta.json
      carries the render time and this page goes visibly stale against it.
 
+  ⛔ THE SCRIPT IS EXTERNAL BECAUSE hazync.org SENDS script-src 'self' WITH NO 'unsafe-inline'.
+     An inline script element here is silently blocked by the browser: the page renders, the styling is
+     fine (style-src DOES allow inline), and the only symptom is a status stuck on "connecting…"
+     beside a broken image, because nothing ever ran. Keep the JS in live.js.
+
   ⛔ THE FRAME MUST NOT BE CACHED. It changes every second at the same URL, so every request carries
      a cache-buster; without one the page shows one frame for ever and looks frozen rather than
      broken.
@@ -79,76 +84,6 @@
   <span id="rendered"></span>
 </footer>
 
-<script>
-(function () {
-  // A frame older than this is no longer "live"; older than DEAD_S and the fleet has almost
-  // certainly stopped. Both are generous next to a 1 Hz renderer.
-  var STALE_S = 30, DEAD_S = 300, POLL_MS = 2000;
-
-  var img = document.getElementById('frame'),
-      statusEl = document.getElementById('status'),
-      banner = document.getElementById('banner'),
-      renderedEl = document.getElementById('rendered'),
-      lastRendered = null;
-
-  function ago(s) {
-    if (s < 60) return Math.round(s) + 's ago';
-    if (s < 3600) return Math.round(s / 60) + ' min ago';
-    return (s / 3600).toFixed(1) + ' hours ago';
-  }
-
-  function setState(cls, text, bannerText) {
-    statusEl.className = cls;
-    statusEl.textContent = text;
-    if (bannerText) {
-      banner.className = 'show ' + cls;
-      banner.textContent = bannerText;
-    } else {
-      banner.className = '';
-    }
-  }
-
-  function tick() {
-    // ⛔ Cache-bust BOTH. Without it the browser serves one frame for ever and the page looks
-    // frozen rather than broken -- the exact failure this page exists to make visible.
-    fetch('meta.json?t=' + Date.now(), { cache: 'no-store' })
-      .then(function (r) {
-        if (!r.ok) throw new Error('meta ' + r.status);
-        return r.json();
-      })
-      .then(function (m) {
-        var age = Date.now() / 1000 - m.rendered_at;
-        renderedEl.textContent = 'frame rendered ' + new Date(m.rendered_at * 1000)
-          .toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-
-        if (age > DEAD_S) {
-          setState('dead', 'not live',
-            'This frame is ' + ago(age) + '. The fleet is not running, or the feed has stopped ' +
-            '— what you are looking at is the last frame produced, not the present.');
-        } else if (age > STALE_S) {
-          setState('stale', 'delayed',
-            'Last frame ' + ago(age) + ' — the feed is behind.');
-        } else {
-          setState('live', 'live · ' + ago(age), null);
-        }
-
-        if (m.rendered_at !== lastRendered) {
-          lastRendered = m.rendered_at;
-          img.src = 'frame.png?t=' + m.rendered_at;
-        }
-      })
-      .catch(function () {
-        // ⚠ A FAILED FETCH IS NOT PROOF THE FLEET IS DOWN — it is proof we cannot tell. Saying
-        // "offline" here would be asserting something we do not know.
-        setState('dead', 'no signal',
-          'Cannot reach the live feed from this browser. This says nothing about whether the ' +
-          'fleet is running.');
-      });
-  }
-
-  tick();
-  setInterval(tick, POLL_MS);
-})();
-</script>
+<script src="live.js"></script>
 </body>
 </html>
