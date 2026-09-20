@@ -1,0 +1,14 @@
+# Every minute. A tip block arrives about every ten, so this is not about speed -- it is about the gap
+# between a bundle being written and the coordinator being able to offer its block, which is dead time
+# in the under-ten-minute target.
+[Unit]
+Description=Push new tip bundles to the coordinator every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

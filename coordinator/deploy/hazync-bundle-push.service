@@ -1,0 +1,28 @@
+# Push new tip bundles to the coordinator (hazync-admin#2). Runs on the TIP-BRIDGE box, not here.
+#
+# ⛔ NOT ON THE COORDINATOR. Installing this beside the coordinator would push its bundle store into
+# itself. The pair is: this unit on the tip box, hazync-check-bundle-gap on the coordinator.
+[Unit]
+Description=Hazync: push new tip bundles to the coordinator
+Wants=network-online.target
+After=network-online.target hazync-bridge.service
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# The key is root-owned 0600 and its private half never leaves this box; only the public half is on the
+# coordinator, pinned there to a forced rrsync command that can only ADD files.
+Environment=BUNDLE_SYNC_KEY=/etc/hazync/bundlesync_ed25519
+Environment=HAZYNC_BRIDGE_OUT=/var/lib/hazync/tip_bundles
+Environment=BUNDLE_SYNC_STAMP=/var/lib/hazync/.bundle-push-stamp
+# ⛔ Set BUNDLE_SYNC_DEST in a drop-in, not here: the coordinator's address is per-deployment, and a
+# hardcoded one in the repo is how a box ends up pushing to the wrong place after a migration.
+ExecStart=/usr/local/sbin/hazync-bundle-push
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hazync
+TimeoutStartSec=900

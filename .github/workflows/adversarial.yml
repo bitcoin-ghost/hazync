@@ -192,6 +192,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_check_disk.py --control
+      - name: Tip bundles that never arrive are noticed (hazync-admin#2)
+        run: cd coordinator && python3 test_bundle_gap.py
+      - name: Bundle gap POSITIVE CONTROL (gap arithmetic removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_bundle_gap.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #

@@ -711,3 +711,64 @@ signs, set `CLAIM_REQUIRE_SIG=1` and restart: unsigned claims then get `403`.
   automatically as the bridge follows the chain — nothing to pre-generate. (The legacy
   `gen-witness-window.sh` per-block-witness path still works as a fallback when no bridge is configured,
   but is retired for the live party.)
+
+## Tip bundles: pushing them to the coordinator (hazync-admin#2)
+
+Since 2026-09-20 the tip bridge runs on its **own box**, while `server.py` still serves
+`bundle_<n>.json` from a directory it expects to be local. That is not only a serving matter:
+`/api/vranges` derives the work on offer from `bundle_path(h) is None`, so **a bundle that never reaches
+the coordinator makes its block silently unclaimable** — no error, the block is simply never offered.
+Bundles are therefore pushed to the coordinator, not fetched from it, which also keeps the sponsor bot
+working: it reads bundles from local disk.
+
+### The channel is deliberately one-way
+
+The tip box holds a key that the coordinator pins to a forced command:
+
+```
+from="<tip box ip>",command="/usr/bin/rrsync -wo -no-del -no-overwrite /srv/bulk/hazync/bridge_bundles",\
+no-agent-forwarding,no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding ssh-ed25519 AAAA...
+```
+
+It can **add a bundle and nothing else** — no reads, no deletes, no overwrites, no pty, no forwarding.
+Verified on 2026-09-20: a read returns `reading from write-only server is not allowed`, an overwrite
+leaves the original bytes, a plain `ssh` returns `SSH_ORIGINAL_COMMAND does not run rsync`.
+
+⛔ **The asymmetry is the security property, and it has a consequence: the sending box cannot verify its
+own work.** It cannot list what arrived, so it can never report a loss. That is why the check lives on
+the coordinator. Do not "fix" the push by granting it read access.
+
+### Receiving side (coordinator)
+
+```bash
+# a dedicated account -- NOT root (a misconfigured forced command would be a root shell) and NOT hazync
+# (it is /usr/sbin/nologin, so a key cannot land there at all)
+sudo useradd --system --create-home --home-dir /var/lib/bundlesync --shell /bin/sh --groups hazync bundlesync
+sudo chgrp hazync /srv/bulk/hazync/bridge_bundles
+sudo chmod 2775  /srv/bulk/hazync/bridge_bundles   # setgid: pushed files land group hazync and stay readable
+sudo install -d -m 700 -o bundlesync -g bundlesync /var/lib/bundlesync/.ssh
+# append the line above to /var/lib/bundlesync/.ssh/authorized_keys, mode 0600, owned by bundlesync
+
+sudo install -m 755 coordinator/deploy/hazync-check-bundle-gap.sh /usr/local/sbin/hazync-check-bundle-gap
+sudo install -m 644 coordinator/deploy/hazync-check-bundle-gap.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hazync-check-bundle-gap.timer
+```
+
+### Sending side (tip box)
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" -f /etc/hazync/bundlesync_ed25519   # private half NEVER leaves this box
+sudo install -m 755 coordinator/deploy/hazync-bundle-push.sh /usr/local/sbin/hazync-bundle-push
+sudo install -m 644 coordinator/deploy/hazync-bundle-push.{service,timer} /etc/systemd/system/
+# the coordinator's address is per-deployment, so it goes in a drop-in, never in the repo:
+printf '[Service]\nEnvironment=BUNDLE_SYNC_DEST=bundlesync@<coordinator ip>\n' \
+  | sudo tee /etc/systemd/system/hazync-bundle-push.service.d/dest.conf
+sudo systemctl daemon-reload && sudo systemctl enable --now hazync-bundle-push.timer
+```
+
+⚠ Add the coordinator's host key to the tip box's `/root/.ssh/known_hosts` **verified against the
+provisioning email**, not by accepting whatever answers — `StrictHostKeyChecking=yes` is set deliberately.
+
+⛔ `state.bin` lives in the same directory as the bundles and is ~14 GB. The push selects
+`bundle_*.json` by name for exactly that reason; a "copy this directory" rule would ship it every run
+and drop it into the coordinator's bundle store.
