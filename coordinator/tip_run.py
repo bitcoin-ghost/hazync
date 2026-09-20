@@ -55,7 +55,7 @@ def verify_fleet_empty(runner, cards):
 
 
 def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200, tick_s=3.0,
-              unreachable_limit=20, feed=None):
+              unreachable_limit=20, feed=None, on_event=None):
     """Drive one block to a verified receipt. Returns a summary dict.
 
     `cards` maps chunk -> card. `runner` supplies the remote actions. `now`/`sleep` are injected so a
@@ -64,6 +64,20 @@ def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200,
     n = len(cards)
     if n == 0:
         raise RunRefused("no cards")
+
+    # ⛔ A RECOVERY MUST BE VISIBLE WHEN IT HAPPENS, NOT IN THE RETURN VALUE. These were collected in
+    # `events` and handed back at the end, so while a run was in flight there was no way to see that a
+    # card had wedged and its chunk had been moved -- the operator watched an unexplained gap instead.
+    # Measured 2026-09-20: a card died on `cudaErrorNoDevice` and its chunk was restarted, and none of
+    # that reached the log until the run finished. The list is still returned; it is also reported live.
+    # ⚠ A card may be a Card or, in a test, a bare string. Name it either way rather than assuming.
+    def name(c):
+        return getattr(c, "cid", c)
+
+    def emit(msg):
+        events.append(msg)
+        if on_event:
+            on_event(msg)
 
     # ── phase 0 ────────────────────────────────────────────────────────────────────────────────────
     empty = verify_fleet_empty(runner, cards)
@@ -88,7 +102,7 @@ def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200,
         feed.mark_t0(t0)
         st = feed.staleness(now())
         if not st["ok"]:
-            events.append(
+            emit(
                 f"⚠ telemetry not live at T0 (stale={st['stale']} never-seen={st['never']}) — the "
                 f"dashboard will have gaps for those cards. Per-card telemetry CANNOT be "
                 f"reconstructed once a pod is gone, so this is not recoverable after the run.")
@@ -118,13 +132,15 @@ def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200,
                 cards[act["chunk"]] = target
                 busy.add(target)
                 reassigned.add(act["chunk"])
-                events.append(f"chunk {act['chunk']} reassigned after {act['static_s']}s static")
+                emit(f"chunk {act['chunk']} reassigned to {name(target)} after "
+                     f"{act['static_s']}s static")
             elif act["action"] == "restart_in_place":
                 runner.kill_provers(cards[act["chunk"]])
                 runner.relaunch(cards[act["chunk"]], act["chunk"], block=block, chunks=n,
                                 workdir_suffix=act["chunk"])
                 reassigned.add(act["chunk"])
-                events.append(f"chunk {act['chunk']} restarted in place after {act['static_s']}s static")
+                emit(f"chunk {act['chunk']} restarted in place on {name(cards[act['chunk']])} after "
+                     f"{act['static_s']}s static — no other card could take it")
 
         if len(staged) >= n:
             break

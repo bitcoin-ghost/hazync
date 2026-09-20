@@ -19,7 +19,8 @@ CONTROL = "--control" in sys.argv
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import tip_driver as td   # noqa: E402
+import tip_driver as td      # noqa: E402
+import tip_lifecycle as tl   # noqa: E402
 import tip_runner as trn  # noqa: E402
 
 fails = []
@@ -212,6 +213,60 @@ sl2 = SlowSSH()
 t0 = _t.time(); runner(sl2).launch_all(many, block="965500", chunks=12); launch_s = _t.time() - t0
 check(launch_s < 12 * 0.20 * 0.5,
       f"launch_all fans out: {launch_s:.2f} s, not {12*0.20:.2f} s")
+
+# ── 10. ⛔ CARD-TO-CARD REACHABILITY, TESTED FROM THE WORKERS ─────────────────────────────────────
+# Measured 2026-09-20 on two rented pods: the aggregate's published port answered from the
+# ORCHESTRATOR and the other pod got `connect: No route to host`. Testing from the driver proves only
+# that the port is open to the internet. Without this the run looks armed -- seg-serve listens,
+# autoattach loops, aa.log stays 0 bytes, and the aggregate sits at 0/N until the budget is spent.
+class ReachSSH(FakeSSH):
+    """Answers the listener check, then REACH/NOREACH per card."""
+
+    def __init__(self, listening=True, reach=None):
+        super().__init__()
+        self.listening, self.reach = listening, reach or {}
+        self.probed = []
+
+    def run(self, card, body, env=None, timeout=None):
+        self.cmds.append((card.cid, body))
+        if "base64 -d" in body:
+            return "OK\n"
+        if "ss -ltn" in body:
+            return ("1\n" if self.listening else "0\n")
+        if "/dev/tcp/" in body:
+            self.probed.append(card.cid)
+            return "REACH\n" if self.reach.get(card.cid, True) else "NOREACH\n"
+        return "OK\n"
+
+
+W1, W2 = td.Card("w1", "10.0.0.1", 22), td.Card("w2", "10.0.0.2", 22)
+ssh = ReachSSH(reach={"w1": True, "w2": False})
+r = trn.FleetRunner(ssh, AGG, stage_dir=tempfile.mkdtemp(), agg_port=9110, agg_dial=58231)
+res = r.check_reachability({0: AGG, 1: W1, 2: W2}, secs=2)
+check(res == {W1: True, W2: False},
+      f"each worker's own verdict is returned ({ {c.cid: v for c, v in (res or {}).items()} })")
+check("agg" not in ssh.probed, "⛔ the aggregator is NOT probed against itself")
+probe = [b for _, b in ssh.cmds if "/dev/tcp/" in b][0]
+check("bash -c" in probe,
+      "the dial test runs under bash — /dev/tcp is bash-only and /bin/sh is dash")
+check(f"/dev/tcp/{AGG.ip}/58231" in probe,
+      f"⛔ workers dial the aggregator's PUBLISHED port (58231), not the bound one")
+
+ok, why, un = tl.reachability_verdict({c.cid: v for c, v in res.items()})
+check(not ok and un == ["w2"], f"the verdict refuses and names the card ({un})")
+
+ssh2 = ReachSSH(reach={"w1": True, "w2": True})
+r2 = trn.FleetRunner(ssh2, AGG, stage_dir=tempfile.mkdtemp(), agg_port=9110, agg_dial=58231)
+ok2, _, _ = tl.reachability_verdict({c.cid: v for c, v in r2.check_reachability({0: AGG, 1: W1, 2: W2}).items()})
+check(ok2, "a fleet that can all reach the aggregate passes")
+
+# ⛔ A LISTENER THAT NEVER CAME UP WOULD CONDEMN A HEALTHY FLEET. Every card would read unreachable
+# and the run would discard cards that are perfectly fine. "We could not test" is not "they failed".
+ssh3 = ReachSSH(listening=False, reach={"w1": True, "w2": True})
+r3 = trn.FleetRunner(ssh3, AGG, stage_dir=tempfile.mkdtemp(), agg_port=9110, agg_dial=58231)
+check(r3.check_reachability({0: AGG, 1: W1, 2: W2}) is None,
+      "⛔ an unconfirmed listener returns None, not a fleet of failures")
+check(ssh3.probed == [], "and no card is probed at all once the listener cannot be confirmed")
 
 EXPECTED_CONTROL_FAILURES = {
     "⛔ a push the far side cannot confirm is NOT staged — the silent scp drop",

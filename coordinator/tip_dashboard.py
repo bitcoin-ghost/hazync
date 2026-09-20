@@ -175,6 +175,25 @@ def write_t0(rundir, t, once=True):
     return float(t)
 
 
+def write_phase(rundir, text):
+    """Say what the run is doing, for the frame's status tile.
+
+    ⛔ A LIVE FLEET DOING NOTHING LOOKS EXACTLY LIKE A DEAD FEED. Preparing a card means staging a
+    fixture and pulling a 407 MB prover: minutes of flat traces and an empty dial, which on the frame
+    is indistinguishable from an idle fleet or a broken collector. The question "why is the dashboard
+    empty" was asked three times in one evening and the answer was "it is preparing" every time.
+
+    Written atomically, because the collector reads it once a second and a half-written line would
+    render as a half-written line.
+    """
+    path = os.path.join(rundir, "phase")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(str(text).strip()[:80] + "\n")
+    os.replace(tmp, path)
+    return path
+
+
 def stream_cmd(rundir, action, *, script, key=None, log_dir=None):
     """argv for `tip-stream.sh {start,stop,status}`.
 

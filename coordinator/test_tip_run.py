@@ -293,6 +293,30 @@ except tr.RunRefused as e:
 
 # Under --control the gate never raises, so it is the `must` branch of each pair that records the
 # failure -- not the branch that inspects the exception message.
+# ── ⛔ A RECOVERY IS REPORTED WHEN IT HAPPENS, NOT IN THE RETURN VALUE ────────────────────────────
+# These were only ever handed back at the end, so while a run was in flight there was no way to see
+# that a card had wedged and its chunk had moved — the operator watched an unexplained gap. Measured
+# 2026-09-20: a card died on cudaErrorNoDevice and its chunk was restarted, and none of it reached
+# the log until the run had finished.
+cards, r = fresh(finish_after=2, wedge={1})
+seen, clk3 = [], Clock()
+res = tr.run_block(block="966256", cards=cards, runner=r, now=clk3.now, sleep=clk3.sleep,
+                   stall_s=0.0, on_event=seen.append)
+check(res["ok"], "a run with a wedged card still completes")
+check(any("chunk 1" in e for e in seen),
+      f"⛔ the recovery is reported LIVE through on_event ({seen[:2]})")
+check(seen == res["events"],
+      "and the live stream matches what the result returns — one record, two ways to read it")
+check(any("restarted in place on" in e or "reassigned to" in e for e in seen),
+      f"the event names WHERE the work went, not just that something happened ({seen[:1]})")
+
+cards, r = fresh(finish_after=2, wedge={1})
+clk4 = Clock()
+res2 = tr.run_block(block="966256", cards=cards, runner=r, now=clk4.now, sleep=clk4.sleep,
+                    stall_s=0.0)
+check(res2["ok"] and res2["events"],
+      "on_event is optional — without it the run behaves exactly as before")
+
 EXPECTED_CONTROL_FAILURES = {
     "a pod with leftovers must stop the run",
     "an unreachable pod must stop the run",

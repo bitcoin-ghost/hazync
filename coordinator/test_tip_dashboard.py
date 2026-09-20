@@ -275,6 +275,24 @@ check("notes.txt" in left, "and a non-.csv file is left alone")
 check(fd3.stale_removed == ["hz-GONE.csv"],
       f"what was removed is REPORTED, not silent ({fd3.stale_removed})")
 
+# ── 9f. the phase caption ─────────────────────────────────────────────────────────────────────────
+# ⛔ A LIVE FLEET DOING NOTHING LOOKS EXACTLY LIKE A DEAD FEED. Preparation is minutes of flat traces
+# and an empty dial — on the frame, indistinguishable from an idle fleet or a broken collector. The
+# question "why is the dashboard empty" was asked three times in one evening and the answer was "it
+# is preparing" every time.
+d5 = tempfile.mkdtemp(prefix="phase_")
+tdash.write_phase(d5, "PREPARING · fetching the prover onto 12 cards")
+check(open(os.path.join(d5, "phase")).read().strip() == "PREPARING · fetching the prover onto 12 cards",
+      "the phase is written where the collector reads it")
+check(not os.path.exists(os.path.join(d5, "phase.tmp")),
+      "written atomically — the collector reads this once a second and must never see half a line")
+tdash.write_phase(d5, "PROVING block 965500 on 12 cards")
+check(open(os.path.join(d5, "phase")).read().strip() == "PROVING block 965500 on 12 cards",
+      "and it is replaced, not appended")
+tdash.write_phase(d5, "x" * 500)
+check(len(open(os.path.join(d5, "phase")).read().strip()) <= 80,
+      "an over-long caption is truncated rather than running off the frame")
+
 # ── 10. cross-check against the REAL reader, when it is present ───────────────────────────────────
 # ⚠ tools/live/ arrives with #427. Until it merges this cannot run, and a silent skip would be a check
 # that cannot fail — so it reports its own status explicitly and is NOT counted as a pass.

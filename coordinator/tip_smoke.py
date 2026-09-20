@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
+import tip_lifecycle                   # noqa: E402
 import tip_run                          # noqa: E402
 import tip_runner                       # noqa: E402
 import tip_session                      # noqa: E402
@@ -49,7 +50,17 @@ class SmokeRunPod(sponsor_bot.RunPod):
     def deploy_listening(self, name, ssh_pubkey, gpu_types=sponsor_bot.GPU_TYPES):
         refused, answered = None, False
         for gt in gpu_types:
-            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: ALL, gpuCount: 1, "
+            # ⛔ SECURE, NOT ALL. `cloudType: ALL` includes community hosts, and those mostly never
+            # start at all -- RunPod never publishes a port for them, so the run waits out its full
+            # SSH timeout and then gives up having paid for pods that never existed.
+            #
+            # Measured 2026-09-20 across two runs, and the split is by PRICE, which is the tell:
+            #     $0.34/hr   1 of 6 started   (17%)
+            #     $0.49/hr   1 of 1 started
+            #     $0.74/hr  14 of 14 started  (100%)
+            # A 4-card run died outright on it: three of five never started, so only two came up and
+            # the run could not reach its minimum. The cheap listing is not cheaper, it is absent.
+            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, "
                  "volumeInGb: 0, containerDiskInGb: 40, "
                  f"gpuTypeId: {self._s(gt)}, name: {self._s(name)}, "
                  f"imageName: {self._s(sponsor_bot.IMAGE)}, ports: \"22/tcp,9110/tcp\", "
@@ -162,13 +173,57 @@ def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
         if got == want:
             ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
             return True, got
-        # nohup so the fetch survives this ssh session, -C - so a partial file continues.
+        # ⛔ NOT pgrep. `pgrep -f 'curl.*hazync-host'` MATCHES THE SSH SESSION CARRYING IT: the
+        # pattern is in our own command line on the remote, so the check always succeeded, the `||`
+        # always short-circuited, and curl NEVER RAN. Measured twice -- 0 bytes on every card after
+        # five minutes of "fetching", with no fetch.log and no lock file to show for it.
+        #
+        # ⛔ AND THIS FIX WAS LOST ONCE. It was applied live on the box and never committed, so a
+        # later deploy from the branch silently restored the pgrep version and a 12-card run stalled
+        # on it again. A fix that exists only on a machine is a fix that gets clobbered.
+        #
+        # `flock -n` needs no pattern at all: it either takes the lock or exits, so exactly one
+        # fetch runs per card and a retry here simply resumes it.
         ssh.run(card,
-                "pgrep -f 'curl.*hazync-host' >/dev/null 2>&1 || "
-                f"nohup curl -fsSL -C - -o /workspace/hazync-host-cuda {HOST_URL} "
+                "nohup flock -n /workspace/fetch.lock "
+                f"curl -fsSL -S -C - -o /workspace/hazync-host-cuda {HOST_URL} "
                 "> /workspace/fetch.log 2>&1 < /dev/null & disown; exit 0", timeout=60)
         time.sleep(wait_s)
     return False, got
+
+
+def gpu_smoke(ssh, card, timeout_s=300):
+    """Make the card actually PROVE something on its GPU, and verify it. (ok, detail)
+
+    ⛔ A BINARY THAT IS THE RIGHT SIZE IS NOT A CARD THAT CAN USE IT. Two of twelve cards in the
+    2026-09-20 run were duds, and neither was caught before the clock because nothing had ever asked
+    them to prove anything:
+
+      * `hz-smoke-13` had no usable CUDA device at all. It died one second into its chunk with
+        `cudaErrorNoDevice`, and every check before that passed -- the fixture landed, the 407 MB
+        prover was byte-exact, ssh answered, and it could reach the aggregator. `method-id` never
+        touches CUDA, so it proves nothing about the GPU.
+      * `hz-smoke-15` was worse, because it LOOKED busy: 100% reported utilisation while holding
+        723 MiB and drawing 87 W. A 4090 genuinely proving holds ~22 GB and pulls 300-400 W. It ran
+        fifteen minutes and produced no segments.
+
+    This is the boot check `fleet.sh` has always had and this path never did, and it is exactly what
+    my own notes demanded after a dud card claimed and abandoned 14 blocks: the boot check must
+    include a real GPU prove. `prove-block` is self-contained -- no fixture, no arguments -- and its
+    output must say VERIFIED. Nothing weaker distinguishes these two cards from a working one.
+    """
+    out = ssh.run(card,
+                  f"cd /workspace && timeout {int(timeout_s)} ./hazync-host-cuda prove-block "
+                  f"> gpu_smoke.log 2>&1; "
+                  f"if grep -q VERIFIED gpu_smoke.log; then echo GPU_OK; "
+                  f"else echo \"GPU_BAD $(tail -1 gpu_smoke.log 2>/dev/null | cut -c1-120)\"; fi",
+                  timeout=timeout_s + 60)
+    last = (out or "").strip().splitlines()
+    if not last:
+        # ⚠ An ssh we could not complete is not a bad card. Say so rather than discarding a good one.
+        return None, "unreachable during the GPU smoke"
+    line = last[-1].strip()
+    return (line == "GPU_OK"), line
 
 
 def prepare(ssh, card, *, block_path, block_name, repo_hint):
@@ -188,6 +243,10 @@ def prepare(ssh, card, *, block_path, block_name, repo_hint):
         f"fixture={'ok' if ok_blk else 'FAILED'} ({size} bytes on the card)")
     return ok_bin and ok_blk and size.isdigit() and int(size) > 0
 
+
+def assignment_preview(order):
+    """chunk -> card, as run_block will hold it. Used before the clock so the probe sees the fleet."""
+    return {i: c for i, c in enumerate(order)}
 
 def dash_chain(a):
     """The three processes that turn telemetry into a published frame.
@@ -288,6 +347,7 @@ def main():
 
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
+        phase(f"PREPARING · renting {a.cards} cards (+{a.spares} spare)")
         existing = {p["name"] for p in api.pods()}
         log(f"pods already on the account (untouched): {sorted(existing) or 'none'}")
         # ⛔ RENT SPARES. RunPod does not always start what it sells: on 2026-09-20 one of two pods
@@ -312,6 +372,7 @@ def main():
             log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
                 f"  (recorded in {rented_path})")
 
+        phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
         cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
         if len(cards) < a.cards:
             raise SystemExit(f"only {len(cards)} of {want} rented cards came up; needed {a.cards}")
@@ -334,27 +395,7 @@ def main():
             raise SystemExit("the aggregator has no published 9110 — workers could never attach")
         agg_dial = agg_ports[9110][1]
 
-        # ── prepare ───────────────────────────────────────────────────────────────────────────────
-        for c in order:
-            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
-                raise SystemExit(f"{c.cid} could not be prepared")
-
-        # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
-        # minutes, and doing it one at a time would double that for no reason.
-        want = binary_size()
-        log(f"fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards before T0")
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
-            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
-        for c, ok, n in got:
-            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
-        bad = [c.cid for c, ok, _ in got if not ok]
-        if bad:
-            raise SystemExit(f"the prover never finished downloading on {bad} — "
-                             f"a card that starts the run without it spends the run fetching, and "
-                             f"the stall detector restarts it from zero every time")
-
-        # ── the dashboard feed, BEFORE the clock ──────────────────────────────────────────────────
+        # ── the dashboard feed: started NOW, so the page is not dark through setup ───────────────
         os.makedirs(a.rundir, exist_ok=True)
         fleet = [{"id": p["name"], "price": p["price"], "gpu": p["gpu_type"], "pod_id": p["id"]}
                  for p in created]
@@ -385,7 +426,99 @@ def main():
             os.close(fd)
             helpers.append((name, pid))
             log(f"  started {name} -> {name}.log")
-        time.sleep(8)                      # let the streamer produce a sample before T0
+        time.sleep(4)                      # let the streamer produce a sample
+
+        # ── card-to-card reachability, BEFORE the clock ───────────────────────────────────────────
+        # ⛔ REACHING THE PORT FROM HERE PROVES NOTHING ABOUT THE WORKERS. Measured 2026-09-20: the
+        # aggregate's published port answered from this box while the other pod got `No route to
+        # host`. Pod-to-pod connectivity is not guaranteed and varies between rentals -- the first
+        # pair that day could reach each other and the second could not. Untested, the run looks
+        # armed and the aggregate sits at 0/N until the tick budget is spent.
+        probe_runner = tip_runner.FleetRunner(
+            ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
+            agg_port=9110, agg_dial=agg_dial)
+        reach = probe_runner.check_reachability(assignment_preview(order), secs=25)
+        if reach is None:
+            log("⚠ could not stand up a listener on the aggregator, so reachability is UNTESTED — "
+                "continuing, because 'we could not test' is not 'they failed'")
+        else:
+            ok, why, unreachable = tip_lifecycle.reachability_verdict(
+                {c.cid: v for c, v in reach.items()})
+            log(f"reachability: {why}")
+            if not ok:
+                # ⛔ DROP THEM AND RE-PLAN, rather than run a fleet that does not exist. A card that
+                # cannot attach is not a slow card: it sits in its retry loop contributing nothing
+                # while the straggler, the projection and the cost are all computed against a size
+                # that includes it. reachability_verdict's own docstring asks for exactly this --
+                # "drop the card deliberately, and re-plan with the size you actually have".
+                bad = set(unreachable)
+                order = [c for c in order if c.cid not in bad]
+                log(f"dropping {sorted(bad)} and re-planning with {len(order)} card(s)")
+                for p in [x for x in created if x["name"] in bad]:
+                    sponsor_bot.terminate_confirmed(api, p["id"])
+                    log(f"  released {p['name']} — it could not reach the aggregate")
+                created = [x for x in created if x["name"] not in bad]
+                with open(rented_path, "w") as fh:
+                    json.dump(created, fh, indent=1)
+                if len(order) < 2:
+                    raise SystemExit(
+                        f"only {len(order)} card(s) can reach the aggregate — a distributed run "
+                        f"needs at least 2, and an aggregate with no workers is a single-card prove")
+                # ⚠ The feed was written for the fleet we rented; rewrite it for the one we have, or
+                # the dashboard shows cards that are no longer in the run at $0.00/hr.
+                joined = tip_dashboard.feed_records(order, fleet)
+                feed.start(joined["records"])
+                log(f"feed rewritten for {len(order)} card(s)")
+
+        # ── prepare ───────────────────────────────────────────────────────────────────────────────
+        phase(f"PREPARING · staging the block onto {len(order)} cards")
+        for c in order:
+            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
+                raise SystemExit(f"{c.cid} could not be prepared")
+
+        # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
+        # minutes, and doing it one at a time would double that for no reason.
+        want = binary_size()
+        phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
+        for c, ok, n in got:
+            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
+        bad = [c.cid for c, ok, _ in got if not ok]
+        if bad:
+            raise SystemExit(f"the prover never finished downloading on {bad} — "
+                             f"a card that starts the run without it spends the run fetching, and "
+                             f"the stall detector restarts it from zero every time")
+
+        # ── the GPU smoke, BEFORE the clock ───────────────────────────────────────────────────────
+        phase(f"PREPARING · proving one block on each of {len(order)} GPUs")
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            smoke = list(pool.map(lambda c: (c, *gpu_smoke(ssh, c)), order))
+        duds = []
+        for c, ok, detail in smoke:
+            if ok:
+                log(f"  {c.cid}: GPU ok")
+            elif ok is None:
+                log(f"  ⚠ {c.cid}: {detail} — not judged a dud on an ssh failure")
+            else:
+                log(f"  ⛔ {c.cid}: {detail}")
+                duds.append(c.cid)
+        if duds:
+            # Same treatment as an unreachable card: drop it, release it, re-plan with what is left.
+            order = [c for c in order if c.cid not in set(duds)]
+            for p in [x for x in created if x["name"] in set(duds)]:
+                sponsor_bot.terminate_confirmed(api, p["id"])
+                log(f"  released {p['name']} — its GPU cannot prove")
+            created = [x for x in created if x["name"] not in set(duds)]
+            with open(rented_path, "w") as fh:
+                json.dump(created, fh, indent=1)
+            if len(order) < 2:
+                raise SystemExit(f"only {len(order)} card(s) have a working GPU")
+            joined = tip_dashboard.feed_records(order, fleet)
+            feed.start(joined["records"])
+            log(f"re-planned with {len(order)} card(s) after dropping {sorted(duds)}")
+
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
         runner = tip_runner.FleetRunner(
@@ -394,13 +527,22 @@ def main():
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
                        "HAZYNC_ECMULT_WINDOW": "21"})
         os.makedirs(runner.stage_dir, exist_ok=True)
-        assignment = {i: order[i] for i in range(a.cards)}
-        log(f"proving {block_name} on {a.cards} cards, aggregate on {agg.cid} "
+        # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
+        # the requested count would either raise or silently prove a chunk count the fleet cannot
+        # cover -- the chunk count IS the fleet size.
+        assignment = {i: c for i, c in enumerate(order)}
+        phase(f"PROVING block {a.block} on {len(order)} cards")
+        log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
             f"(binds 9110, dialled on {agg_dial})")
 
+        # ⚠ The fold caption is set from the run's own event stream, so it appears when the
+        # aggregate actually starts rather than when we guess it might.
         result = tip_run.run_block(block=a.block, cards=assignment, runner=runner,
                                    now=time.time, sleep=time.sleep, feed=feed,
+                                   on_event=lambda m: log(f"  {m}"),
                                    max_ticks=1200, tick_s=6.0)
+        phase(f"VERIFIED block {a.block} in {result.get('wall_s')}s on {len(order)} cards"
+              if result.get("ok") else f"FAILED on block {a.block}")
         log("RESULT " + json.dumps(result, indent=1))
         return 0 if result.get("ok") else 1
 
