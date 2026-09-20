@@ -236,6 +236,54 @@ res = tr.run_block(block="966256", cards=cards, runner=r, now=Clock().now, sleep
                    unreachable_limit=20)
 check(res["ok"], "a flaky probe does NOT abort the run — the counter resets on every answer")
 
+# ── 5c. the dashboard feed is marked at the CLOCK, and never fails a run ─────────────────────────
+class FakeFeed:
+    """Records WHERE in the phase order it was called, not just that it was."""
+
+    def __init__(self, st, runner=None):
+        self.st, self.runner = st, runner
+        self.marked, self.log_at_mark = None, None
+
+    def mark_t0(self, t):
+        self.marked = t
+        self.log_at_mark = list(self.runner.log) if self.runner else None
+
+    def staleness(self, now, limit_s=15.0):
+        return self.st
+
+
+cards, r = fresh()
+clk = Clock()
+feed = FakeFeed({"ok": True, "live": ["a", "b", "c"], "stale": [], "never": []}, runner=r)
+res = tr.run_block(block="966256", cards=cards, runner=r, now=clk.now, sleep=clk.sleep, feed=feed)
+check(res["ok"], "a run with a healthy feed completes")
+check(feed.marked is not None, "t0 is declared to the dashboard")
+
+# ⛔ t0 SITS BETWEEN THE CLEAR AND THE LAUNCH, and the position is what is asserted -- a timestamp
+# comparison would pass just as well if t0 were written during the clear. The clear is SETUP: a t0
+# written there back-dates the run by the whole of phase 0 and flatters every per-block figure on the
+# frame. Marking it after the launch would lose the launch itself from the graph.
+phases = [e[0] for e in (feed.log_at_mark or [])]
+check(phases == ["clear"],
+      f"t0 is marked AFTER the clear and BEFORE the launch -- the log at that moment is {phases}")
+
+# ⛔ A BLANK SCREEN MUST NOT THROW AWAY A WORKING FLEET. The receipt is the product.
+cards, r = fresh()
+feed = FakeFeed({"ok": False, "live": [], "stale": ["b"], "never": ["c"]})
+res = tr.run_block(block="966256", cards=cards, runner=r, now=Clock().now, sleep=lambda s: None,
+                   feed=feed)
+check(res["ok"], "⛔ a DEAD telemetry feed does not fail the run — the receipt is the product")
+check(any("telemetry not live" in e for e in res["events"]),
+      f"but it is RECORDED, not swallowed ({[e[:40] for e in res['events']]})")
+check(any("CANNOT be reconstructed" in e for e in res["events"]),
+      "and the event says it is unrecoverable after the run, which is the actionable part")
+
+# A run with no feed at all behaves exactly as before.
+cards, r = fresh()
+check(tr.run_block(block="966256", cards=cards, runner=r, now=Clock().now,
+                   sleep=lambda s: None)["ok"],
+      "feed=None is still a complete run — the dashboard is optional")
+
 # ── 6. an empty fleet is refused rather than dividing by zero ─────────────────────────────────────
 try:
     tr.run_block(block="966256", cards={}, runner=FakeRunner({}), now=Clock().now, sleep=lambda s: None)

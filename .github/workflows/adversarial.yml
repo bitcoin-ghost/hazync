@@ -228,6 +228,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_tip_runner.py --control
+      - name: A card cannot vanish from the dashboard (Phase 5 dashboard feed)
+        run: cd coordinator && python3 test_tip_dashboard.py
+      - name: Dashboard feed POSITIVE CONTROL (GPU escaping removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_dashboard.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #

@@ -55,7 +55,7 @@ def verify_fleet_empty(runner, cards):
 
 
 def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200, tick_s=3.0,
-              unreachable_limit=20):
+              unreachable_limit=20, feed=None):
     """Drive one block to a verified receipt. Returns a summary dict.
 
     `cards` maps chunk -> card. `runner` supplies the remote actions. `now`/`sleep` are injected so a
@@ -75,12 +75,29 @@ def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200,
 
     # ── phase 1: THE CLOCK STARTS ──────────────────────────────────────────────────────────────────
     t0 = now()
+    events = []
+
+    # The dashboard's elapsed clock counts from t0, so it is declared HERE and not a line earlier:
+    # writing it during the clear would back-date the run by the whole of phase 0 and flatter every
+    # per-block figure on the frame.
+    #
+    # ⚠ A DEAD FEED NEVER FAILS A RUN. The receipt is the product and the dashboard is a view of it;
+    # throwing away a fleet that is proving perfectly well because a screen is blank would be a far
+    # worse outcome than a gap in a graph. Missing telemetry is RECORDED and the run carries on.
+    if feed is not None:
+        feed.mark_t0(t0)
+        st = feed.staleness(now())
+        if not st["ok"]:
+            events.append(
+                f"⚠ telemetry not live at T0 (stale={st['stale']} never-seen={st['never']}) — the "
+                f"dashboard will have gaps for those cards. Per-card telemetry CANNOT be "
+                f"reconstructed once a pod is gone, so this is not recoverable after the run.")
+
     runner.launch_all(cards, block=block, chunks=n)
     runner.arm_auto_attach(cards)
 
     staged, busy, reassigned = set(), set(), set()
     last_size, last_change = {}, {c: t0 for c in cards}
-    events = []
 
     for _ in range(max_ticks):
         probes = runner.probe_all(cards, reassigned=reassigned)
