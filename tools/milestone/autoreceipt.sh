@@ -29,10 +29,22 @@ N=$(ls $D/receipts/*.bin 2>/dev/null | wc -l)
 say "gathered $N receipts"
 [ "$N" -lt 27 ] && { say "INCOMPLETE - cannot regenerate"; exit 1; }
 
-timeout 120 ssh -n -o ConnectTimeout=20 -i $K -p "$SPORT" root@"$SIP"  'for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done; ldconfig 2>/dev/null
+PREP=$(timeout 120 ssh -n -o ConnectTimeout=20 -i $K -p "$SPORT" root@"$SIP"  'for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done; ldconfig 2>/dev/null
   mkdir -p /workspace/agg3 && cd /workspace && ([ -x hazync-host-cuda ] || curl -fsSL -o hazync-host-cuda https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda) && chmod +x hazync-host-cuda
-  ([ -f block_966256.json ] || { curl -fsSLO https://hazync.org/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; })
-  cp hazync-host-cuda block_966256.json agg3/ && echo ready' >/dev/null 2>&1
+  ([ -f block_966256.json ] || { curl -fsSLO https://hazync.org/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; }) || true
+  for _d in "${HAZYNC_REPO:-}/prover" /hazync-zkvm/prover /repo/prover ./prover .; do
+    [ -n "$_d" ] && [ -f "$_d/block_966256.json" ] && { cp "$_d/block_966256.json" .; break; }
+  done
+  [ -f block_966256.json ] || { echo "NO block_966256.json"; exit 1; }
+  cp hazync-host-cuda block_966256.json agg3/ && echo ready' 2>&1)
+# ⛔ THIS USED TO END `>/dev/null 2>&1`, WHICH SWALLOWED THE ONE THING THAT MATTERS. The fixture URL
+#    (hazync.org/repro/) has been 404 since at least 2026-09-18 and block_966256.json is not committed,
+#    so the cp failed, `ready` was never printed -- and the script carried on staging receipts onto a
+#    card that had no fixture and no binary. Check for `ready` and say so.
+case "$PREP" in
+  *ready*) : ;;
+  *) say "REGEN CARD NOT READY: ${PREP:-no output}"; exit 1 ;;
+esac
 for f in $D/receipts/chunk_*.bin $D/receipts/chunk_*.hzk; do
   ( b=$(basename $f)
     for _ in 1 2 3; do

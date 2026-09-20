@@ -198,6 +198,48 @@ jobs:
         run: |
           cd coordinator
           python3 test_bundle_gap.py --control
+      - name: A healthy card is never mistaken for a wedged one (Phase 5 tip fleet)
+        run: cd coordinator && python3 test_tip_fleet.py
+      - name: Tip fleet POSITIVE CONTROL (idle guard removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_fleet.py --control
+      - name: The remote probe is never expanded on the orchestrator (Phase 5 tip driver)
+        run: cd coordinator && python3 test_tip_driver.py
+      - name: Tip driver POSITIVE CONTROL (body expanded locally — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_driver.py --control
+      - name: A card that cannot prove is never given a chunk (Phase 5 tip lifecycle)
+        run: cd coordinator && python3 test_tip_lifecycle.py
+      - name: Tip lifecycle POSITIVE CONTROL (METHOD_ID gate removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_lifecycle.py --control
+      - name: A stale receipt cannot poison a run (Phase 5 tip run)
+        run: cd coordinator && python3 test_tip_run.py
+      - name: Tip run POSITIVE CONTROL (phase-0 gate removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_run.py --control
+      - name: An unconfirmed push is not a staged receipt (Phase 5 fleet runner)
+        run: cd coordinator && python3 test_tip_runner.py
+      - name: Fleet runner POSITIVE CONTROL (far-side check removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_runner.py --control
+      - name: A card cannot vanish from the dashboard (Phase 5 dashboard feed)
+        run: cd coordinator && python3 test_tip_dashboard.py
+      - name: Dashboard feed POSITIVE CONTROL (GPU escaping removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_dashboard.py --control
+      - name: A session never re-proves or kills what is not its own (Phase 5 session)
+        run: cd coordinator && python3 test_tip_session.py
+      - name: Session POSITIVE CONTROL (fleet-ownership gate removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_tip_session.py --control
 
       # ── suites that existed but were never registered (hazync#382) ──────────────────────────────────
       #

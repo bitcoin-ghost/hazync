@@ -17,8 +17,24 @@ W=${HAZYNC_WORKDIR:-/workspace}; mkdir -p $W; cd $W || exit 1
 BIN=/workspace/hazync-host-cuda
 
 # ---- fetch (datacenter link, not the operator's uplink) ----------------------------------------
-if [ ! -x "$BIN" ]; then
-  curl -fsSL -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda || exit 1
+# ⛔ RESUME, AND SAY SO WHEN IT FAILS. This was a plain `curl -fsSL -o`, which TRUNCATES on every
+#    attempt and is SILENT about failure (-s). A card on a slow link therefore spends the run
+#    downloading 407 MB while its prove.log does not grow -- so the tick planner calls it stalled and
+#    restarts it, and the restart begins the download again from zero. Measured 2026-09-20: one pod
+#    pulled at ~1 MB/s and never passed 60 s before being restarted, leaving an EMPTY run.log and a
+#    card idle at 0% GPU while its twin proved in 15 s.
+#
+#    `-C -` continues a partial file, `-S` lets an error through -s, and the size is checked rather
+#    than assumed -- `chmod +x` on a half-downloaded file makes it look present and ready.
+#    The driver normally stages this BEFORE the clock; this path is the fallback.
+EXPECT_BIN_BYTES=407133112
+if [ ! -x "$BIN" ] || [ "$(stat -c%s "$BIN" 2>/dev/null || echo 0)" != "$EXPECT_BIN_BYTES" ]; then
+  curl -fsSL -S -C - -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda || {
+    echo "prover download failed (have $(stat -c%s "$BIN" 2>/dev/null || echo 0) of $EXPECT_BIN_BYTES bytes)" >&2
+    exit 1
+  }
+  GOT=$(stat -c%s "$BIN" 2>/dev/null || echo 0)
+  [ "$GOT" = "$EXPECT_BIN_BYTES" ] || { echo "prover is $GOT bytes, expected $EXPECT_BIN_BYTES" >&2; exit 1; }
   chmod +x "$BIN"
 fi
 # ⛔ THE FIXTURE COMES FROM THE CHECKOUT, NOT A URL. This used to
