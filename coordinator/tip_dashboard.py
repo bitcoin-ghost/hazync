@@ -279,6 +279,29 @@ class DashboardFeed:
             os.remove(os.path.join(self.rundir, "t0"))
         except OSError:
             pass                      # no previous session
+
+        # ⛔ A STREAM FILE FOR A CARD THAT IS NOT IN THIS RUN IS A PHANTOM CARD. collect.py walks
+        # `stream/*.csv`, not pods.txt, so any leftover .csv becomes a card on the frame -- with no
+        # pods.txt entry it reads gpu "?" and **cost_hr 0.0**, so the fleet count is too high and the
+        # spend is too low, both silently.
+        #
+        # It is not hypothetical: `tip-stream.sh stop` kills only the PIDs recorded in the rundir, so
+        # a streamer orphaned by a lost pid file (or a rundir deleted between runs) keeps looping
+        # against a terminated pod and RECREATES its file. Measured 2026-09-20: two orphaned
+        # subshells from an earlier run put an empty `hz-smoke-2.csv` back into a fresh rundir and the
+        # renderer drew "3 cards" for a two-card fleet.
+        keep = {str(c["cid"]) + ".csv" for c in cards}
+        sdir = os.path.join(self.rundir, "stream")
+        try:
+            stale = [f for f in os.listdir(sdir) if f.endswith(".csv") and f not in keep]
+        except OSError:
+            stale = []
+        for f in stale:
+            try:
+                os.remove(os.path.join(sdir, f))
+            except OSError:
+                pass
+        self.stale_removed = sorted(stale)
         self.names = [c["cid"] for c in cards]
         argv, env = stream_cmd(self.rundir, "start", script=self.script,
                                key=self.key, log_dir=self.log_dir)

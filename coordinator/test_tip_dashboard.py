@@ -254,6 +254,27 @@ check(j2["unassigned"] == ["hz-b"],
       f"being billed and will not show in the dashboard's cost")
 check(len(j2["records"]) == 1, "and it is not silently added to the run")
 
+# ── 9e. ⛔ A LEFTOVER STREAM FILE IS A PHANTOM CARD ───────────────────────────────────────────────
+# collect.py walks stream/*.csv, not pods.txt, so any leftover .csv becomes a card on the frame — and
+# with no pods.txt entry it reads gpu "?" and cost_hr 0.0, so the fleet count is too high and the
+# spend too low, both silently. Measured live: two orphaned tip-stream subshells from an earlier run
+# recreated a terminated pod's file in a fresh rundir and the renderer drew "3 cards" for 2.
+d3 = tempfile.mkdtemp(prefix="feed4_")
+os.makedirs(os.path.join(d3, "stream"))
+for name in ("hz-a", "hz-b", "hz-GONE"):
+    open(os.path.join(d3, "stream", f"{name}.csv"), "w").write("")
+open(os.path.join(d3, "stream", "notes.txt"), "w").write("not a stream")
+fd3 = tdash.DashboardFeed(d3, script="./s.sh", run=lambda a, e: None)
+fd3.start(CARDS)
+left = sorted(os.listdir(os.path.join(d3, "stream")))
+check("hz-GONE.csv" not in left,
+      f"⛔ a stream file for a card NOT in this run is removed ({left}) — it would render as a third "
+      f"card at $0.00/hr, inflating the fleet and understating the spend")
+check("hz-a.csv" in left and "hz-b.csv" in left, "the run's own streams are kept")
+check("notes.txt" in left, "and a non-.csv file is left alone")
+check(fd3.stale_removed == ["hz-GONE.csv"],
+      f"what was removed is REPORTED, not silent ({fd3.stale_removed})")
+
 # ── 10. cross-check against the REAL reader, when it is present ───────────────────────────────────
 # ⚠ tools/live/ arrives with #427. Until it merges this cannot run, and a silent skip would be a check
 # that cannot fail — so it reports its own status explicitly and is NOT counted as a pass.

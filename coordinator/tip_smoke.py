@@ -82,10 +82,11 @@ class SmokeRunPod(sponsor_bot.RunPod):
         return {}
 
 
-def wait_for_ssh(api, pods, ssh, timeout_s=420):
+def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
     """Poll RunPod for the mapped ports, then prove the card answers. Returns {name: Card}."""
     t0, ready, portmap = time.time(), {}, {}
-    while time.time() - t0 < timeout_s and len(ready) < len(pods):
+    target = need or len(pods)
+    while time.time() - t0 < timeout_s and len(ready) < target:
         for p in pods:
             if p["name"] in ready:
                 continue
@@ -106,8 +107,22 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420):
                 portmap[p["name"]] = ports
                 log(f"  {p['name']} up at {ip}:{port}"
                     + (f"  (9110 -> {ports[9110][1]})" if 9110 in ports else "  ⛔ NO 9110 MAPPING"))
-        if len(ready) < len(pods):
+        if len(ready) < target:
             time.sleep(10)
+    # ⚠ "only 1/2 came up" is not actionable. Say how far each one got: no mapping at all is a pod
+    # RunPod never started, a mapping with no ssh is a pod that is booting or broken.
+    # ⚠ REPORT THE TIME ACTUALLY WAITED, NOT THE BUDGET. Once `need` cards are up the loop exits
+    # early, and printing the configured timeout there claims a card was given 420 s when it was
+    # given 37 -- which would send the next reader hunting a dead pod that was merely slower than
+    # its twins.
+    waited = time.time() - t0
+    for p in pods:
+        if p["name"] not in ready:
+            got = api.ports_of(p["id"])
+            why = ("RunPod never published a port for it (the pod did not start)" if not got
+                   else f"ports {sorted(got)} were published but ssh never answered")
+            enough = "" if waited >= timeout_s - 1 else " (the run had enough cards and stopped waiting)"
+            log(f"  ⚠ {p['name']} had not answered after {waited:.0f}s{enough} — {why}")
     return ready, portmap
 
 
@@ -147,10 +162,36 @@ def dash_chain(a):
     return chain
 
 
+def cleanup(api, rented_path):
+    """Release whatever a dead driver left behind. Safe to run at any time."""
+    try:
+        with open(rented_path) as fh:
+            created = json.load(fh)
+    except (OSError, ValueError):
+        log(f"no rental record at {rented_path} — nothing to clean up")
+        return 0
+    ids = [p["id"] for p in created]
+    v = tip_session.terminable(ids, ids)
+    log(f"cleanup: releasing {v['terminate']} (protected={v['protected']} not-ours={v['not_ours']})")
+    for pid in v["terminate"]:
+        log(f"  {pid}: {'gone' if sponsor_bot.terminate_confirmed(api, pid) else '⛔ STILL LISTED'}")
+    live = {p["id"] for p in api.pods()}
+    left = [p["name"] for p in created if p["id"] in live]
+    log(f"account check: {'clean' if not left else '⛔ STILL PRESENT: ' + str(left)}")
+    if not left:
+        try:
+            os.unlink(rented_path)
+        except OSError:
+            pass
+    return 0 if not left else 1
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=2)
-    ap.add_argument("--block", default="block_130000.json")
+    ap.add_argument("--spares", type=int, default=1,
+                    help="extra pods to rent; the first --cards to answer run, the rest are released")
+    ap.add_argument("--block", default="130000",
+                    help="block HEIGHT, not a filename — FleetRunner builds block_<h>.json")
     ap.add_argument("--block-path", default="/repo/prover/block_130000.json")
     ap.add_argument("--rundir", default="/root/tiprun")
     ap.add_argument("--repo", default="/root/tipsmoke/milestone")
@@ -159,12 +200,24 @@ def main():
     ap.add_argument("--publish-dest", default="")
     ap.add_argument("--publish-key", default="/root/.ssh/hazync_publish")
     ap.add_argument("--keep", action="store_true", help="do NOT terminate (debugging only)")
+    ap.add_argument("--cleanup", action="store_true",
+                    help="release whatever rented.json records, and exit — for a driver that died hard")
     a = ap.parse_args()
 
     # publish.sh reads these from the environment; os.spawnv hands the child ours.
     if a.publish_dest:
         os.environ["HAZYNC_PUBLISH_DEST"] = a.publish_dest
         os.environ["HAZYNC_PUBLISH_KEY"] = a.publish_key
+
+    # ⛔ A HEIGHT, NOT A FILENAME. FleetRunner._launch sets HAZYNC_BLOCK_NAME=f"block_{block}.json",
+    # so passing "block_130000.json" asks every card for `block_block_130000.json.json`. pod-prove.sh
+    # says so clearly in its own run.log -- but the run itself only sees cards that produce no
+    # receipt, restarts them, and burns the fleet doing it. Measured: two RTX 4090s idle at 0% GPU
+    # for five minutes while the tick planner dutifully relaunched them.
+    if not str(a.block).isdigit():
+        raise SystemExit(f"--block takes a HEIGHT, not a filename: got {a.block!r}. "
+                         f"Try --block {''.join(c for c in str(a.block) if c.isdigit()) or '130000'}")
+    block_name = f"block_{a.block}.json"
 
     key_file = os.environ.get("RUNPOD_API_KEY_FILE", "/root/.hazync/runpod.key")
     with open(key_file) as fh:
@@ -173,12 +226,29 @@ def main():
 
     ssh = tip_driver.SSHRunner(a.key)
     created, helpers, t_start = [], [], time.time()
+    rented_path = os.path.join(a.rundir, "rented.json")
+    os.makedirs(a.rundir, exist_ok=True)
+
+    if a.cleanup:
+        return cleanup(api, rented_path)
+
+    # ⛔ SIGTERM MUST REACH THE finally. Python does not run finally blocks on a default SIGTERM --
+    # the process simply dies, and the cards go on billing. Turning it into an exception is what
+    # makes the teardown reachable at all from an outside `kill`.
+    import signal
+    def _bail(sig, _frm):
+        raise KeyboardInterrupt(f"signal {sig}")
+    signal.signal(signal.SIGTERM, _bail)
 
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
         existing = {p["name"] for p in api.pods()}
         log(f"pods already on the account (untouched): {sorted(existing) or 'none'}")
-        for i in range(a.cards):
+        # ⛔ RENT SPARES. RunPod does not always start what it sells: on 2026-09-20 one of two pods
+        # never published a port in 420 s while its twin answered in 30 s. Renting exactly N means one
+        # bad pod ends the run after the full wait, having paid for both the whole time.
+        want = a.cards + a.spares
+        for i in range(want):
             name = f"{PREFIX}{i+1}"
             if name in existing:
                 raise SystemExit(f"refusing: {name} already exists")
@@ -186,13 +256,32 @@ def main():
             if not p:
                 raise SystemExit(f"no capacity for {name}")
             created.append(p)
-            log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}")
+            # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
+            # that dies without releasing leaves cards billing until someone notices. A SIGINT during
+            # a probe fan-out did exactly that: ThreadPoolExecutor.__exit__ waits for every in-flight
+            # ssh, so the teardown did not run for minutes and the pods had to be killed by hand.
+            # `--cleanup` reads this file and releases whatever is in it, whatever happened.
+            with open(rented_path, "w") as fh:
+                json.dump(created, fh, indent=1)
+            log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
+                f"  (recorded in {rented_path})")
 
-        cards, portmap = wait_for_ssh(api, created, ssh)
-        if len(cards) != a.cards:
-            raise SystemExit(f"only {len(cards)}/{a.cards} cards came up")
+        cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
+        if len(cards) < a.cards:
+            raise SystemExit(f"only {len(cards)} of {want} rented cards came up; needed {a.cards}")
 
-        order = [cards[f"{PREFIX}{i+1}"] for i in range(a.cards)]
+        # The first `cards` that answered are the run; the rest are released straight away rather
+        # than billed for a run they are not in.
+        chosen = sorted(cards)[:a.cards]
+        order = [cards[n] for n in chosen]
+        spare = [p for p in created if p["name"] not in chosen]
+        if spare:
+            log(f"releasing {len(spare)} unused spare(s): {[p['name'] for p in spare]}")
+            for p in spare:
+                sponsor_bot.terminate_confirmed(api, p["id"])
+            created = [p for p in created if p["name"] in chosen]
+            with open(rented_path, "w") as fh:
+                json.dump(created, fh, indent=1)
         agg = order[0]
         agg_ports = portmap.get(agg.cid, {})
         if 9110 not in agg_ports:
@@ -201,7 +290,7 @@ def main():
 
         # ── prepare ───────────────────────────────────────────────────────────────────────────────
         for c in order:
-            if not prepare(ssh, c, block_path=a.block_path, block_name=a.block, repo_hint=a.repo):
+            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
                 raise SystemExit(f"{c.cid} could not be prepared")
 
         # ── the dashboard feed, BEFORE the clock ──────────────────────────────────────────────────
@@ -220,9 +309,21 @@ def main():
         # these three the telemetry lands on disk and the public page keeps showing whatever frame
         # was last published -- which on the first live run was a DEMO frame, while a real fleet was
         # proving. Each is started here and torn down in the finally.
+        # ⛔ EACH HELPER GETS ITS OWN LOG. They inherit this process's stdout otherwise, and the
+        # collector alone writes a line per second -- which buried the run's own progress in its log
+        # and made the failure that mattered (the renderer dying on a missing PIL) one line in a
+        # flood. A run's log should be the RUN.
         for name, argv in dash_chain(a):
-            helpers.append((name, os.spawnv(os.P_NOWAIT, argv[0], argv)))
-            log(f"  started {name}")
+            fd = os.open(os.path.join(a.live_rig, f"{name}.log"),
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            pid = os.fork()
+            if pid == 0:                                   # child
+                os.dup2(fd, 1); os.dup2(fd, 2); os.close(fd)
+                os.execv(argv[0], argv)
+                os._exit(127)
+            os.close(fd)
+            helpers.append((name, pid))
+            log(f"  started {name} -> {name}.log")
         time.sleep(8)                      # let the streamer produce a sample before T0
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
@@ -230,10 +331,10 @@ def main():
             ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
             agg_port=9110, agg_dial=agg_dial,
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
-                       "HAZYNC_ECMULT_WINDOW": "21", "HAZYNC_BLOCK_NAME": a.block})
+                       "HAZYNC_ECMULT_WINDOW": "21"})
         os.makedirs(runner.stage_dir, exist_ok=True)
         assignment = {i: order[i] for i in range(a.cards)}
-        log(f"proving {a.block} on {a.cards} cards, aggregate on {agg.cid} "
+        log(f"proving {block_name} on {a.cards} cards, aggregate on {agg.cid} "
             f"(binds 9110, dialled on {agg_dial})")
 
         result = tip_run.run_block(block=a.block, cards=assignment, runner=runner,
@@ -248,11 +349,14 @@ def main():
         spend = sum(p["price"] for p in created) * elapsed / 3600.0
         log(f"elapsed {elapsed/60:.1f} min, ~${spend:.3f} on {len(created)} cards")
         for name, pid in helpers:
+            # ⚠ A HELPER THAT ALREADY DIED IS WORTH SAYING. The renderer died on a missing PIL during
+            # the first run with the chain wired, and the only sign was a traceback in a flood of
+            # collector output -- meanwhile the public page kept serving the previous frame.
             try:
                 os.kill(pid, 15)
                 log(f"  stopped {name}")
             except OSError:
-                pass
+                log(f"  ⚠ {name} was ALREADY DEAD before teardown — check {name}.log")
         try:
             feed.stop()
         except Exception:
@@ -270,6 +374,11 @@ def main():
                 log(f"  {pid}: {'gone' if ok else '⛔ STILL LISTED — TERMINATE BY HAND'}")
             left = {p["name"] for p in api.pods()} & {p["name"] for p in created}
             log(f"account check: {'clean' if not left else '⛔ STILL PRESENT: ' + str(left)}")
+            if not left:
+                try:
+                    os.unlink(rented_path)     # nothing outstanding; the record would only mislead
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":
