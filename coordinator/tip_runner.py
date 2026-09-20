@@ -10,10 +10,15 @@ card is healthy, that logic belongs in `tip_fleet` where it can be tested withou
 does, reports, and refuses — it never judges.
 """
 
+import concurrent.futures
 import os
 import posixpath
 
 import tip_driver
+
+
+# How many cards to touch at once. 23 sequential ssh calls made phase 0 the longest part of a run.
+FANOUT = int(os.environ.get("HAZYNC_TIP_FANOUT", "32"))
 
 
 REMOTE_CLEAR = """\
@@ -59,16 +64,31 @@ class FleetRunner:
 
     # ── phase 0 ────────────────────────────────────────────────────────────────────────────────────
     def clear_and_check(self, cards):
-        """Wipe every pod and report what each one says it has left. None means we could not ask."""
+        """Wipe every pod and report what each one says it has left. None means we could not ask.
+
+        ⛔ IN PARALLEL. This was a serial loop, and at 23 cards that is 23 sequential ssh round-trips
+        before the clock even starts — minutes of dead time, and one slow pod holds up every other.
+        run_continuous.sh fans this out with `&`; measured 2026-09-20, the serial version made phase 0
+        and phase 1 the longest part of a 23-card run.
+        """
         out = {}
-        for _chunk, card in cards.items():
-            out[card] = _last_line(self.ssh.run(card, REMOTE_CLEAR))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=FANOUT) as pool:
+            futs = {pool.submit(self.ssh.run, card, REMOTE_CLEAR): card for card in cards.values()}
+            for fut in concurrent.futures.as_completed(futs):
+                try:
+                    out[futs[fut]] = _last_line(fut.result())
+                except Exception:
+                    out[futs[fut]] = None
         return out
 
     # ── phase 1 ────────────────────────────────────────────────────────────────────────────────────
     def launch_all(self, cards, *, block, chunks):
-        for chunk, card in cards.items():
-            self._launch(card, chunk, block=block, chunks=chunks, workdir=card.workdir)
+        """Launch every chunk at once. Serial here means the last card starts minutes after the first,
+        and the whole fleet's straggler is measured from a clock that started before it existed."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=FANOUT) as pool:
+            list(pool.map(lambda kv: self._launch(kv[1], kv[0], block=block, chunks=chunks,
+                                                  workdir=kv[1].workdir),
+                          list(cards.items())))
 
     def _launch(self, card, chunk, *, block, chunks, workdir):
         env = dict(self.prove_env, HAZYNC_BLOCK_NAME=f"block_{block}.json",
@@ -76,7 +96,13 @@ class FleetRunner:
         assigns = " ".join(f"{k}={v}" for k, v in sorted(env.items()))
         # ⛔ setsid + nohup + `< /dev/null` + disown. Without all four the prove dies with the ssh
         # session that started it, which looks exactly like a card that failed instantly.
-        body = (f"mkdir -p {workdir} && cd /workspace && {assigns} "
+        # ⛔ chmod FIRST, EVERY TIME. `scp` does NOT preserve the executable bit, so a staged
+        # pod-prove.sh lands 0644 and every card dies with
+        #     setsid: failed to execute ./pod-prove.sh: Permission denied
+        # -- a zero-byte prove.log, an idle GPU, and a run that sits in its poll loop believing the
+        # fleet is merely slow. Measured on 23 live cards 2026-09-20. It is one syscall; do it here
+        # rather than trusting whoever staged the file.
+        body = (f"chmod +x /workspace/pod-prove.sh 2>/dev/null; mkdir -p {workdir} && cd /workspace && {assigns} "
                 f"nohup setsid ./pod-prove.sh {chunk} > {workdir}/run.log 2>&1 < /dev/null & disown; exit 0")
         return self.ssh.run(card, body) is not None
 

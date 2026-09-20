@@ -179,6 +179,40 @@ check("#!/bin/bash" in aa, "and carries a bash shebang")
 check(f"{A.ip}" not in aa or "10.0.0.9:58231" in aa,
       "workers dial the aggregator's published address")
 
+# ── 8. ⛔ scp DOES NOT PRESERVE THE EXECUTABLE BIT ─────────────────────────────────────────────────
+# Measured on 23 live cards 2026-09-20: pod-prove.sh staged by scp landed 0644, and EVERY card died with
+#   setsid: failed to execute ./pod-prove.sh: Permission denied
+# giving a zero-byte prove.log, an idle GPU, and a run that sat in its poll loop believing the fleet was
+# merely slow. chmod is one syscall; do it rather than trust whoever staged the file.
+ssh = FakeSSH()
+runner(ssh).launch_all({0: A}, block="965500", chunks=1)
+launch = [b for _, b in ssh.cmds if "pod-prove.sh" in b][0]
+check("chmod +x /workspace/pod-prove.sh" in launch,
+      "every launch chmods pod-prove.sh first — scp does not preserve the bit")
+check(launch.index("chmod +x") < launch.index("setsid"),
+      "and does it BEFORE trying to execute it")
+
+# ── 9. phase 0 and phase 1 must touch the fleet IN PARALLEL ───────────────────────────────────────
+# Serial, 23 cards is 23 sequential ssh round-trips before the clock starts, and one slow pod holds up
+# every other. Asserted by timing a deliberately slow fake.
+import threading, time as _t  # noqa: E402
+
+class SlowSSH(FakeSSH):
+    def run(self, card, body, env=None, timeout=None):
+        _t.sleep(0.20)
+        return super().run(card, body, env, timeout)
+
+many = {i: td.Card(f"c{i}", f"10.0.0.{i}", 22) for i in range(12)}
+sl = SlowSSH(rules=[("LEFT:", "LEFT:0 REDIRS:0\n")])
+t0 = _t.time(); runner(sl).clear_and_check(many); clear_s = _t.time() - t0
+check(clear_s < 12 * 0.20 * 0.5,
+      f"clear_and_check fans out: 12 cards x 0.20 s took {clear_s:.2f} s, not {12*0.20:.2f} s")
+
+sl2 = SlowSSH()
+t0 = _t.time(); runner(sl2).launch_all(many, block="965500", chunks=12); launch_s = _t.time() - t0
+check(launch_s < 12 * 0.20 * 0.5,
+      f"launch_all fans out: {launch_s:.2f} s, not {12*0.20:.2f} s")
+
 EXPECTED_CONTROL_FAILURES = {
     "⛔ a push the far side cannot confirm is NOT staged — the silent scp drop",
 }
