@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""Build snapshot.json: one live picture of the tip run, from pod telemetry + the coordinator.
+
+INPUTS
+  $RUNDIR/stream/<card>.csv   one line per second, written by tip-stream.sh over a persistent ssh:
+                                epoch,util_pct,mem_mib,temp_c,power_w,sm_mhz,mem_mhz,phase,seg_n,seg_total,block
+                              phase/seg come from the worker's own log, parsed with the worker's
+                              regexes (dist/hazync-worker:636-640) so we cannot drift from it:
+                                executed, N segments  |  segment n/N  |  assembling N segment receipts
+  $RUNDIR/pods.txt            id name ip port cost gpu      (written by fleet.sh)
+  api.hazync.org              chain facts (tip, frontier, proven, pct) — slim, 9.5 KB
+
+OUTPUT  snapshot.json, rewritten atomically every tick. The renderer only ever reads this file.
+
+⛔ Nothing here is synthesised except under --demo, which exists so the renderer can be tested with
+no pods running. A card with no recent sample is reported up:false rather than given a plausible curve.
+"""
+import argparse, csv, json, math, os, time, urllib.request
+
+API = os.environ.get("COORD_URL", "https://api.hazync.org")
+WINDOW_S = 900          # rolling telemetry window kept per card (seconds)
+STALE_S = 15            # no sample for this long -> the card is not "up"
+
+
+def chain_facts():
+    try:
+        with urllib.request.urlopen(f"{API}/api/state?slim=1", timeout=10) as r:
+            d = json.load(r)
+        p = d.get("progress", {})
+        return {"tip": p.get("tip"), "frontier": p.get("frontier"), "proven": p.get("proven"),
+                "folded": p.get("folded"), "pct": p.get("pct"), "contributors": p.get("contributors"),
+                "ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def read_pods(rundir):
+    """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption."""
+    out = {}
+    p = os.path.join(rundir, "pods.txt")
+    if not os.path.exists(p):
+        return out
+    for line in open(p):
+        f = line.split()
+        if len(f) >= 6:
+            out[f[1]] = {"pod": f[0], "ip": f[2], "port": f[3],
+                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " ")}
+    return out
+
+
+def read_streams(rundir, now):
+    cards = []
+    sdir = os.path.join(rundir, "stream")
+    if not os.path.isdir(sdir):
+        return cards
+    pods = read_pods(rundir)
+    for fn in sorted(os.listdir(sdir)):
+        if not fn.endswith(".csv"):
+            continue
+        name = fn[:-4]
+        t, w, u = [], [], []
+        phase, seg_n, seg_total, block = "idle", 0, 0, None
+        secs, by_block = 0, {}
+        try:
+            with open(os.path.join(sdir, fn)) as fh:
+                allrows = fh.readlines()
+        except OSError:
+            continue
+        # WHOLE FILE, for money: each 1 Hz line IS a second this card was observed running. Counting
+        # samples rather than integrating a wall clock means the figure is correct on a one-shot run,
+        # on a replay of a finished capture, and across a collector restart.
+        for line in allrows:
+            f = line.rstrip("\n").split(",")
+            if len(f) < 11:
+                continue
+            secs += 1
+            h = f[10].strip()
+            if not h.isdigit():
+                continue
+            try:
+                ts = float(f[0])
+            except ValueError:
+                continue
+            e = by_block.get(h)
+            if e is None:
+                e = by_block[h] = {"n": 0, "t0": ts, "t1": ts, "segs": 0, "prove": 0, "asm": 0}
+            e["n"] += 1
+            e["t0"] = min(e["t0"], ts); e["t1"] = max(e["t1"], ts)
+            e["segs"] = max(e["segs"], int(f[9] or 0))
+            if f[7] == "assembling":
+                e["asm"] += 1
+            elif f[7] in ("proving", "executed"):
+                e["prove"] += 1
+        # WINDOW, for the traces: only what the waveform draws
+        for line in allrows[-WINDOW_S:]:
+            f = line.rstrip("\n").split(",")
+            if len(f) < 11:
+                continue
+            try:
+                ts = float(f[0])
+            except ValueError:
+                continue
+            if now - ts > WINDOW_S:
+                continue
+            t.append(round(ts, 1)); u.append(int(float(f[1] or 0))); w.append(float(f[4] or 0))
+            phase = f[7] or phase
+            seg_n = int(f[8] or 0); seg_total = int(f[9] or 0)
+            block = int(f[10]) if f[10].strip().isdigit() else block
+        meta = pods.get(name, {})
+        rate = meta.get("cost_hr", 0.0)
+        cards.append({"name": name, "gpu": meta.get("gpu", "?"), "cost_hr": rate,
+                      "up": bool(t) and (now - t[-1]) < STALE_S,
+                      "t": t, "w": w, "u": u,
+                      "phase": phase, "seg_n": seg_n, "seg_total": seg_total, "block": block,
+                      "observed_s": secs, "spend_usd": round(secs * rate / 3600.0, 4),
+                      "block_s": by_block})
+    return cards
+
+
+def blocks_from_cards(cards, state, now):
+    """One entry per height the fleet worked while we were watching, from the FULL stream history.
+
+    ⛔ It used to record only each card's CURRENT height, so a capture holding dozens of blocks
+    produced three entries and the chart had three bars. Every sample carries its height, so the
+    history is already on disk; this reads it.
+
+    ⚠ prove_s/fold_s are card-seconds divided by the number of cards seen on that height. With one
+    card per block (board mode) that IS wall time. With N cards sharing a block (the tip run) it is
+    an average, not a measured wall span — do not quote it as one.
+    """
+    agg = {}
+    since = state.get("since", 0.0)      # $RUNDIR/t0, when a run declares its own start
+    for c in cards:
+        rate = c.get("cost_hr", 0.0)
+        for h, e in (c.get("block_s") or {}).items():
+            # ⛔ Ignore heights whose samples all predate T0. A milestone run inherits the board
+            # worker's last blocks in the logs, and they were being counted as completed blocks —
+            # that is where "3 blocks" came from, not from the chunks.
+            # Drop heights that BEGAN before the run: one stale board sample landing just after T0
+            # was enough to keep block 75807 alive as a "completed block" when the filter tested t1.
+            if since and e["t0"] < since:
+                continue
+            a = agg.setdefault(h, {"n": 0, "t0": e["t0"], "t1": e["t1"], "segs": 0,
+                                   "prove": 0, "asm": 0, "cards": set(), "cost": 0.0})
+            a["n"] += e["n"]
+            a["t0"] = min(a["t0"], e["t0"]); a["t1"] = max(a["t1"], e["t1"])
+            a["segs"] = max(a["segs"], e["segs"])
+            a["prove"] += e["prove"]; a["asm"] += e["asm"]
+            a["cards"].add(c["name"])
+            a["cost"] += e["n"] * rate / 3600.0
+    out = []
+    for h, a in agg.items():
+        n_cards = max(1, len(a["cards"]))
+        out.append({"h": int(h), "arrive": a["t0"],
+                    "prove_s": round(a["prove"] / n_cards, 1) or None,
+                    "fold_s": round(a["asm"] / n_cards, 1) or None,
+                    "segs": a["segs"], "cards": len(a["cards"]),
+                    "done": (now - a["t1"]) > 5,      # nothing has reported this height for 5 s
+                    "cost": round(a["cost"], 4)})
+    out.sort(key=lambda x: x["h"])
+    return out
+
+
+def newest_sample(rundir):
+    """Epoch of the most recent sample on disk, or 0. Used by --replay so a FINISHED capture renders
+    as it looked live: wall-clock staleness would otherwise mark every card down."""
+    best, sdir = 0.0, os.path.join(rundir, "stream")
+    if not os.path.isdir(sdir):
+        return best
+    for fn in os.listdir(sdir):
+        if not fn.endswith(".csv"):
+            continue
+        try:
+            lines = open(os.path.join(sdir, fn)).readlines()[-5:]
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                best = max(best, float(line.split(",")[0]))
+                break
+            except (ValueError, IndexError):
+                continue
+    return best
+
+
+def demo(now, at=0.62, ncards=30):
+    """A faithful TIP-RUN preview: N cards on ONE block, a new block every ~10 min, 144 in a day.
+
+    The old demo modelled BOARD mode — 30 cards each on a different block — so the frame it produced
+    was not a preview of the thing we intend to stream. This models the tip shape, and its numbers
+    come from tonight's real 3-card capture rather than invention:
+        power 28..296 W · util 0..100 · ~2 s per segment on a 4090
+        prove:fold = 1040:359 s measured, so fold ≈ 0.35 x prove
+    `at` is the fraction of the 24-hour day to render, so any moment can be reviewed.
+    ⛔ Still synthetic — every frame drawn from it is stamped DEMO.
+    """
+    NB, PERIOD = 144, 600.0                       # blocks in a day, seconds between blocks
+    day_t = max(0.0, min(1.0, at)) * NB * PERIOD
+    done_n = int(day_t // PERIOD)                 # blocks finished before the one in flight
+    since = day_t - done_n * PERIOD               # seconds into the current block
+    h0 = 967_200
+
+    def shape(k):
+        """(total segments, prove seconds, fold seconds) for block k — varied but plausible."""
+        segs = 1700 + (k * 53) % 900
+        per_card = max(8, segs // max(1, ncards))
+        pv = per_card * 2.0
+        return segs, pv, pv * 0.35
+
+    segs, prove_s, fold_s = shape(done_n)
+    per_card = max(8, segs // max(1, ncards))
+
+    def phase_at(el, seed):
+        """Phase and per-card progress `el` seconds into the block. Cards finish at slightly
+        different times — the straggler spread measured tonight was 2.48 vs 1.96 s/segment."""
+        p = prove_s * (0.88 + 0.30 * seed)        # this card's own prove time
+        if el < 0:
+            return "idle", 0
+        if el < p:
+            return "proving", max(1, int(per_card * el / p))
+        if el < p + fold_s:
+            return "assembling", per_card
+        return "idle", per_card
+
+    cards = []
+    for i in range(ncards):
+        seed = ((i * 37) % 100) / 100.0
+        t, w, u = [], [], []
+        for s in range(300):                      # last 300 s, phase-aware so transitions show
+            el = since - (300 - s)
+            ph, _ = phase_at(el, seed)
+            if ph == "proving":
+                base, spread = 265.0, 30.0
+            elif ph == "assembling":
+                base, spread = 165.0, 45.0
+            else:
+                base, spread = 40.0, 12.0
+            t.append(now - 300 + s)
+            w.append(max(28.0, min(296.0, base + spread * math.sin(s / 6.0 + i * 1.7)
+                                   + 0.35 * spread * math.sin(s / 2.1 + i))))
+            u.append(0 if ph == "idle" else min(100, max(20, int(92 + 8 * math.sin(s / 5.0 + i)))))
+        ph, n = phase_at(since, seed)
+        cards.append({"name": f"hz-tip-{i}", "gpu": "NVIDIA GeForce RTX 4090", "cost_hr": 0.34,
+                      "up": True, "t": t, "w": w, "u": u, "phase": ph,
+                      "seg_n": n, "seg_total": per_card, "block": h0 + done_n})
+
+    rate = ncards * 0.34
+    blocks = []
+    for k in range(done_n):
+        s_k, pv_k, fd_k = shape(k)
+        blocks.append({"h": h0 + k, "arrive": now - (done_n - k) * PERIOD - since,
+                       "prove_s": round(pv_k, 1), "fold_s": round(fd_k, 1),
+                       "segs": s_k, "cards": ncards, "done": True,
+                       "cost": round(rate * (pv_k + fd_k) / 3600.0, 4)})
+    blocks.append({"h": h0 + done_n, "arrive": now - since, "prove_s": None, "fold_s": None,
+                   "segs": segs, "cards": ncards, "done": False,
+                   "cost": round(rate * since / 3600.0, 4)})
+    return cards, blocks
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rundir", default=os.environ.get("HAZYNC_RUNDIR", "."))
+    ap.add_argument("--out", default="snapshot.json")
+    ap.add_argument("--interval", type=float, default=1.0)
+    ap.add_argument("--once", action="store_true")
+    # Looping is the DEFAULT, but README.txt and dash.html both say `--loop`; without this the
+    # documented command dies on "unrecognized arguments" and the renderer silently keeps drawing
+    # whatever stale snapshot is lying next to it.
+    ap.add_argument("--loop", action="store_true", help="run continuously (the default)")
+    ap.add_argument("--demo", action="store_true", help="synthesise a snapshot; no pods needed")
+    ap.add_argument("--at", type=float, default=0.62,
+                    help="demo only: fraction (0..1) of the simulated 24-hour day to render")
+    ap.add_argument("--cards", type=int, default=30, help="demo only: fleet size")
+    ap.add_argument("--replay", action="store_true",
+                    help="anchor 'now' to the newest sample, so a finished capture renders as live")
+    a = ap.parse_args()
+    state = {}
+    while True:
+        now = time.time()
+        if a.replay and not a.demo:
+            ns = newest_sample(a.rundir)
+            if ns:
+                now = ns + 0.5          # just after the last sample: the fleet reads as live
+        if a.demo:
+            cards, blocks = demo(now, a.at, a.cards)
+            # the simulated chain tip IS the block in flight, or the grid mislabels its own window
+            # as BACKFILL once the simulated day runs past a hardcoded height
+            tip = blocks[-1]["h"]
+            chain = {"tip": tip, "frontier": 74927, "proven": 75443, "folded": 62306,
+                     "pct": 7.75, "contributors": 7, "ok": True}
+        else:
+            cards = read_streams(a.rundir, now)
+            chain = chain_facts()
+            t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
+            if os.path.exists(t0f) and "since" not in state:
+                try:
+                    state["since"] = float(open(t0f).read().strip())
+                except (ValueError, OSError):
+                    state["since"] = 0.0
+            blocks = blocks_from_cards(cards, state, now)
+        up = [c for c in cards if c["up"]]
+        rate = sum(c["cost_hr"] for c in up)
+        # Money is DERIVED FROM THE SAMPLES, not from a wall clock. The renderer used to sum each
+        # block's prove_s+fold_s, which are only set on an OBSERVED phase transition — so they were
+        # almost always None and the header read $0 while real cards billed by the second. A tick
+        # integrator would have been no better here: --replay pins `now` to the newest sample, so
+        # every dt is zero and the total would stay $0 in exactly the mode used to verify it.
+        if not a.demo:
+            spend_total = sum(c.get("spend_usd", 0.0) for c in cards)   # per-block cost is set in
+            pass                                                         # blocks_from_cards now
+        else:
+            spend_total = sum((b.get("cost") or 0) for b in blocks)
+        snap = {"t": now, "demo": bool(a.demo), "chain": chain, "cards": cards, "blocks": blocks,
+                "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
+                          "spend_usd": round(spend_total, 4)}}
+        tmp = a.out + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(snap, fh, separators=(",", ":"))
+        os.replace(tmp, a.out)          # atomic: the renderer never sees a half-written file
+        print(f"[{time.strftime('%H:%M:%S')}] {len(up)}/{len(cards)} up · "
+              f"{len(blocks)} blocks · ${rate:.2f}/hr · spent ${spend_total:.4f} · "
+              f"chain {'ok' if chain.get('ok') else chain.get('error')}",
+              flush=True)
+        if a.once:
+            return
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    main()

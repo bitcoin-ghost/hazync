@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hazync · live</title>
+<!--
+  The dashboard is the mp4's renderer, running live.
+
+  tip24live.py redraws frame.png once a second from snapshot.json, using tip24e's own layout
+  constants — so this is the same picture as the film, not a re-implementation that can drift.
+  This page is deliberately trivial: it shows that frame and nothing else.
+
+  Run (three terminals, or three backgrounded jobs):
+    HAZYNC_RUNDIR=~/tiprun ./tip-stream.sh start     # pods -> $RUNDIR/stream/*.csv
+    python3 collect.py --rundir ~/tiprun --loop      # -> snapshot.json
+    python3 tip24live.py --loop                      # -> frame.png
+
+  With no pods at all:
+    python3 collect.py --demo --once && python3 tip24live.py --once
+-->
+<style>
+  html,body{margin:0;height:100%;background:#0f1012;overflow:hidden}
+  #f{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;image-rendering:auto}
+  #s{position:fixed;left:10px;bottom:8px;font:12px "DejaVu Sans Mono",monospace;color:#55544f}
+</style>
+<img id="f" alt="hazync live frame">
+<div id="s"></div>
+<script>
+const img = document.getElementById('f'), st = document.getElementById('s');
+let ok = 0, fail = 0;
+function tick(){
+  const n = new Image();
+  n.onload = () => { img.src = n.src; ok++; st.textContent = `frame ${ok}`; };
+  n.onerror = () => { fail++; st.textContent = `waiting for frame.png (${fail})`; };
+  n.src = 'frame.png?t=' + Date.now();     // cache-bust; the renderer writes atomically
+}
+tick(); setInterval(tick, 1000);
+</script>
