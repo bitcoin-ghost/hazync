@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import tip_run                                      # noqa: E402
+import tip_session                                  # noqa: E402
 
 CONTROL = "--control" in sys.argv
 fails = []
@@ -144,6 +145,47 @@ got, which = r3.fetch_receipt(113537, dest)
 check(got and os.path.getsize(dest) > 0,
       f"⛔ the receipt is collected from the pod BEFORE it is terminated ({which}) — a proved block "
       f"whose receipt died with the fleet is an hour of TTL burned on work nobody can see")
+
+# ── 6. the budget stops the session BEFORE the block that would cross it ─────────────────────────
+st = tip_session.new_state(started_at=0.0, duration_s=3600.0)
+st["spend_usd"] = 4.90
+plan = tip_session.plan_next(st, 10.0, work={"range": "113537"}, budget_usd=5.00)
+check(plan["action"] == "prove", f"under budget -> prove ({plan['action']})")
+st["spend_usd"] = 5.01
+plan = tip_session.plan_next(st, 10.0, work={"range": "113537"}, budget_usd=5.00)
+check(plan["action"] == "stop" and "budget" in plan["why"],
+      f"⛔ over budget -> STOP before starting another block ({plan}) — checking after would mean "
+      f"the block that crosses the line has already been paid for")
+
+# ── 7. ⛔ NO CLAIM THE SESSION CANNOT FINISH (the orphaned claim of 2026-09-21) ───────────────────
+st2 = tip_session.new_state(started_at=0.0, duration_s=100.0)
+plan = tip_session.plan_next(st2, 95.0, work={"range": "114776"}, block_estimate_s=230.0)
+check(plan["action"] == "stop",
+      "⛔ 5 s left and a ~230 s block -> STOP. Without this the live session claimed 114776 in its "
+      "final second and orphaned it for a 60-minute TTL")
+plan = tip_session.plan_next(st2, 10.0, work={"range": "114776"}, block_estimate_s=30.0)
+check(plan["action"] == "prove", "plenty of time -> prove")
+
+# ── 8. spend accumulates per block, from the caller's own rate ───────────────────────────────────
+# ⚠ `now` MUST ADVANCE. A clock that returns a constant makes remaining_s() never fall, so an idle
+# session loops for ever -- which is exactly what the first draft of this test did.
+st3 = tip_session.new_state(started_at=0.0, duration_s=50.0)
+clock = {"t": 0.0}
+
+
+def _now():
+    clock["t"] += 20.0
+    return clock["t"]
+
+
+tip_session.run_session(
+    state=st3, path=os.path.join(tempfile.mkdtemp(prefix="sp_"), "s.json"),
+    prove=lambda rng: {"ok": True, "wall_s": 60.0},
+    work_fn=lambda: {"range": "1"},
+    now=_now, sleep=lambda s: None,
+    spend_fn=lambda w: 1.47 * (w / 3600.0), budget_usd=None, block_estimate_s=None)
+check(st3["spend_usd"] > 0, f"⛔ spend is RECORDED, not left at 0.0 ({st3['spend_usd']}) — the first "
+                            f"live session reported spend_usd 0.0 while the driver logged $0.535")
 
 print()
 EXPECTED = {"the workers are ARMED", "the beat fires ONLY"}

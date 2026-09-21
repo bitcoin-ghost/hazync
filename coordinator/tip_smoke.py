@@ -41,6 +41,10 @@ PREFIX = "hz-smoke-"
 # Mirrors HAZYNC_BRIDGE_EMIT_FROM on the bridge host — if that moves, this moves with it.
 TIP_FROM = int(os.environ.get("HAZYNC_TIP_FROM", "967500"))
 
+# Before any block has been measured, assume the slowest one seen on 2026-09-21 (226.7 s). Being
+# wrong high costs idle at the tail; being wrong low orphans a claim for an hour.
+DEFAULT_BLOCK_EST_S = float(os.environ.get("HAZYNC_BLOCK_EST_S", "230"))
+
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -355,6 +359,9 @@ def main():
     ap.add_argument("--session", type=float, default=0.0, metavar="HOURS",
                     help="keep the fleet and prove continuously for HOURS: the tip block when one is "
                          "waiting, board work otherwise (#367). Implies --claim.")
+    ap.add_argument("--budget-usd", type=float, default=0.0, metavar="USD",
+                    help="stop the session once this much GPU time has been spent (checked BEFORE "
+                         "starting each block, so the one that crosses the line is never started)")
     ap.add_argument("--cleanup", action="store_true",
                     help="release whatever rented.json records, and exit — for a driver that died hard")
     a = ap.parse_args()
@@ -771,11 +778,30 @@ def main():
                     proved_tip["h"] = int(rng)
                 return out
 
-            phase(f"SESSION · {a.session:.1f} h on {len(order)} cards")
+            # The fleet's hourly rate, from what RunPod actually charged for the cards we KEPT.
+            live = {c.cid for c in order}
+            rate_hr = sum(p["price"] for p in created if p["name"] in live)
+
+            def spend_fn(wall_s):
+                return rate_hr * (float(wall_s or 0.0) / 3600.0)
+
+            # ⛔ MAX, NOT MEDIAN. Measured over 18 blocks: median 30.0 s, max 226.7 s. A
+            # median-based guard let a claim be taken with 30 s left that then ran for nearly four
+            # minutes; the block finished but the claim for the NEXT one was taken and orphaned.
+            # Max never overruns; it costs at most one slow block's worth of idle at the tail.
+            def estimate_s():
+                seen = [b.get("wall_s") for b in state["blocks"].values()
+                        if b.get("ok") and b.get("wall_s")]
+                return max(seen) if seen else DEFAULT_BLOCK_EST_S
+
+            phase(f"SESSION · {a.session:.1f} h on {len(order)} cards"
+                  + (f", budget ${a.budget_usd:.2f}" if a.budget_usd else ""))
+            log(f"  fleet rate ${rate_hr:.3f}/hr across {len(live)} card(s)")
             summ = tip_session.run_session(state=state, path=spath, prove=prove_one,
                                            work_fn=work_fn, now=time.time, sleep=time.sleep,
                                            feed=feed, on_event=lambda m: log(f"  {m}"),
-                                           idle_s=30.0)
+                                           idle_s=30.0, block_estimate_s=estimate_s,
+                                           budget_usd=(a.budget_usd or None), spend_fn=spend_fn)
             log("SESSION " + json.dumps(summ, indent=1))
             return 0
 

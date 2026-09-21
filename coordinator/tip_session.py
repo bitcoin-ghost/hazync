@@ -125,7 +125,7 @@ def done_blocks(state):
     return {r: b for r, b in state["blocks"].items() if b.get("ok")}
 
 
-def plan_next(state, now, *, work, block_estimate_s=None):
+def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
     """What the session does next. `work` is `tip_controller.next_work(...)`'s verdict.
 
     Returns one of:
@@ -136,6 +136,11 @@ def plan_next(state, now, *, work, block_estimate_s=None):
     left = remaining_s(state, now)
     if left <= 0:
         return {"action": "stop", "why": f"the {state['duration_s']/3600:.0f}-hour session is over"}
+    # ⛔ THE BUDGET IS CHECKED BEFORE THE NEXT BLOCK, NOT AFTER IT. Checking afterwards means the
+    # block that crosses the line has already been paid for in full.
+    spent = float(state.get("spend_usd", 0.0))
+    if budget_usd and spent >= budget_usd:
+        return {"action": "stop", "why": f"budget spent: ${spent:.2f} of ${budget_usd:.2f}"}
 
     rng = (work or {}).get("range")
     if rng is None:
@@ -231,7 +236,8 @@ def resume_verdict(state, live_pod_ids, now):
 
 
 def run_session(*, state, path, prove, work_fn, now, sleep,
-                feed=None, idle_s=30.0, block_estimate_s=None, on_event=None):
+                feed=None, idle_s=30.0, block_estimate_s=None, on_event=None,
+                budget_usd=None, spend_fn=None):
     """Drive a whole session. Thin on purpose — every decision above is a pure function.
 
     `prove(rng)` proves one block and returns `tip_run.run_block`'s dict, or raises.
@@ -250,7 +256,11 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
 
     while True:
         t = now()
-        plan = plan_next(state, t, work=work_fn(), block_estimate_s=block_estimate_s)
+        # ⚠ A CALLABLE ESTIMATE IS RE-ASKED EVERY LOOP. A fixed number cannot learn: this session
+        # measured a median of 30.0 s and a MAX of 226.7 s, so a median-based guard would have let
+        # the slowest block overrun its window by minutes.
+        est = block_estimate_s() if callable(block_estimate_s) else block_estimate_s
+        plan = plan_next(state, t, work=work_fn(), block_estimate_s=est, budget_usd=budget_usd)
 
         if plan["action"] == "stop":
             emit(f"stopping: {plan['why']}")
@@ -281,6 +291,14 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
             emit(f"block {rng} failed: {type(exc).__name__}: {exc}")
 
         record_block(state, rng, result, at=now())
+        # ⛔ CHARGE PER BLOCK, ACCUMULATING. add_spend's own note says why a recomputed
+        # cards x rate x elapsed is wrong the moment the fleet changes size. `spend_fn(wall_s)`
+        # returns what THIS block cost; the caller owns the rate because it owns the fleet.
+        if spend_fn is not None:
+            try:
+                add_spend(state, spend_fn(result.get("wall_s") or 0.0))
+            except Exception:
+                pass                      # accounting must never fail a block
         save(path, state)
 
         if result.get("ok"):
