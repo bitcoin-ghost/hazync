@@ -79,6 +79,44 @@ def main():
               f"⛔ the fleet's prover pin {pin} is NOT older than the newest release in this repo "
               f"({pretty}) — a stale pin proves blocks correctly and produces no evidence")
 
+    # ── ⛔ EVERY COPY, NOT JUST THIS ONE ─────────────────────────────────────────────────────────
+    # Checking a single pin while two others sit in shell scripts is theatre. `pod-prove.sh` carried
+    # its own v0.21.0 URL *and* a hardcoded EXPECT_BIN_BYTES; when this driver moved to v0.21.7 the
+    # card fetched a correct 410,441,528-byte binary, the script called it short against 407,133,112,
+    # resumed past EOF and got HTTP 416. prove-chunk never ran and the fleet restart-looped for ever.
+    root = HERE.parent
+    older = []
+    for sub in ("tools", "coordinator", "scripts"):
+        d = root / sub
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if not p.is_file() or p.suffix not in (".sh", ".py"):
+                continue
+            try:
+                text = p.read_text(encoding="utf8", errors="replace")
+            except OSError:
+                continue
+            if CONTROL and p.name == "pod-prove.sh":
+                text = text.replace("/download/v0.21.7/", "/download/v0.21.0/")
+            for m in re.finditer(r"releases/download/(v\d+\.\d+\.\d+)/", text):
+                v = ver(m.group(1))
+                if v and pv and v < pv:
+                    older.append(f"{p.relative_to(root)} -> {m.group(1)}")
+    check(not older,
+          f"⛔ no tool pins a release OLDER than {pin} — one forgotten copy is what caused the 416 "
+          f"({sorted(set(older))[:4]})")
+
+    # A hardcoded byte count is a second place to forget; the size must come from the URL or the env.
+    pp = root / "tools" / "milestone" / "pod-prove.sh"
+    if pp.is_file():
+        body = pp.read_text(encoding="utf8", errors="replace")
+        # ⚠ Non-comment lines only: the explanation of this very bug quotes the old constant, and
+        # a check that its own documentation trips is a check nobody keeps.
+        live = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+        check(not re.search(r"EXPECT_BIN_BYTES=\d+", live),
+              "⛔ pod-prove.sh does not hardcode a byte count — it derives the size from the URL/env")
+
     print()
     if CONTROL:
         hit = [f for f in fails if "NOT older than" in f]

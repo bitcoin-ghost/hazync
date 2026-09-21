@@ -27,10 +27,40 @@ BIN=/workspace/hazync-host-cuda
 #    `-C -` continues a partial file, `-S` lets an error through -s, and the size is checked rather
 #    than assumed -- `chmod +x` on a half-downloaded file makes it look present and ready.
 #    The driver normally stages this BEFORE the clock; this path is the fallback.
-EXPECT_BIN_BYTES=407133112
-if [ ! -x "$BIN" ] || [ "$(stat -c%s "$BIN" 2>/dev/null || echo 0)" != "$EXPECT_BIN_BYTES" ]; then
-  curl -fsSL -S -C - -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda || {
-    echo "prover download failed (have $(stat -c%s "$BIN" 2>/dev/null || echo 0) of $EXPECT_BIN_BYTES bytes)" >&2
+# ⛔ THE URL AND THE SIZE MUST COME FROM ONE PLACE. This file used to hardcode BOTH a v0.21.0 URL and
+#    EXPECT_BIN_BYTES=407133112. When the driver's pin moved to v0.21.7 the card ended up with a
+#    perfectly good 410,441,528-byte binary that THIS script called short, so it tried to resume past
+#    the end of a complete file and the server answered 416:
+#
+#        curl: (22) The requested URL returned error: 416
+#        prover download failed (have 410441528 of 407133112 bytes)
+#
+#    prove-chunk then never ran, so there was no prove.log at all, the GPU sat at 0%, and the tick
+#    planner restarted the card every ~100 s for ever. A DOWNLOAD THAT SUCCEEDED REPORTED FAILURE.
+#    ⚠ The driver exports HAZYNC_HOST_URL/HAZYNC_HOST_BYTES so both ends agree by construction; the
+#    default below is only for the standalone callers (mile3.sh, run_continuous.sh).
+BIN_URL="${HAZYNC_HOST_URL:-https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.7/hazync-host-x86_64-linux-gnu-cuda}"
+# ⛔ SIZE DERIVED FROM THE URL, NOT A CONSTANT. A constant is a second place to forget.
+EXPECT_BIN_BYTES="${HAZYNC_HOST_BYTES:-$(curl -fsSLI "$BIN_URL" 2>/dev/null \
+  | awk 'BEGIN{IGNORECASE=1} /^content-length:/{v=$2} END{gsub(/\r/,"",v); print v}')}"
+case "$EXPECT_BIN_BYTES" in
+  ''|*[!0-9]*)
+    # ⛔ NEVER carry on with an unknown expected size: every comparison below would be against an
+    # empty string, so a truncated binary would pass and fail later as an unreadable ELF.
+    echo "cannot determine the prover's size from $BIN_URL (set HAZYNC_HOST_BYTES to skip the HEAD)" >&2
+    exit 1 ;;
+esac
+HAVE=$(stat -c%s "$BIN" 2>/dev/null || echo 0)
+# ⛔ A FILE LARGER THAN EXPECTED CAN NEVER BE RESUMED. `-C -` asks for a range starting past EOF and
+#    the server answers 416, which -f turns into a hard failure. Resume is only ever valid when what
+#    we have is SHORTER. Anything else is a different binary: start again.
+if [ "$HAVE" -gt "$EXPECT_BIN_BYTES" ]; then
+  echo "prover on disk is $HAVE bytes, expected $EXPECT_BIN_BYTES — a different build; re-fetching" >&2
+  rm -f "$BIN"; HAVE=0
+fi
+if [ ! -x "$BIN" ] || [ "$HAVE" != "$EXPECT_BIN_BYTES" ]; then
+  curl -fsSL -S -C - -o "$BIN" "$BIN_URL" || {
+    echo "prover download failed (have $(stat -c%s "$BIN" 2>/dev/null || echo 0) of $EXPECT_BIN_BYTES bytes from $BIN_URL)" >&2
     exit 1
   }
   GOT=$(stat -c%s "$BIN" 2>/dev/null || echo 0)

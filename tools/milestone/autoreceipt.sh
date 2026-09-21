@@ -30,7 +30,7 @@ say "gathered $N receipts"
 [ "$N" -lt 27 ] && { say "INCOMPLETE - cannot regenerate"; exit 1; }
 
 PREP=$(timeout 120 ssh -n -o ConnectTimeout=20 -i $K -p "$SPORT" root@"$SIP"  'for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done; ldconfig 2>/dev/null
-  mkdir -p /workspace/agg3 && cd /workspace && ([ -x hazync-host-cuda ] || curl -fsSL -o hazync-host-cuda https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda) && chmod +x hazync-host-cuda
+  mkdir -p /workspace/agg3 && cd /workspace && ([ -x hazync-host-cuda ] || curl -fsSL -o hazync-host-cuda "${HAZYNC_HOST_URL:-https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.7/hazync-host-x86_64-linux-gnu-cuda}") && chmod +x hazync-host-cuda
   ([ -f block_966256.json ] || { curl -fsSL -S -O https://hazync.org/repro/block_966256.json.gz && gunzip -f block_966256.json.gz; }) || true
   for _d in "${HAZYNC_REPO:-}/prover" /hazync-zkvm/prover /repo/prover ./prover .; do
     [ -n "$_d" ] && [ -f "$_d/block_966256.json" ] && { cp "$_d/block_966256.json" .; break; }

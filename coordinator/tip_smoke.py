@@ -576,8 +576,16 @@ def main():
         runner = tip_runner.FleetRunner(
             ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
             agg_port=9110, agg_dial=agg_dial,
+            # ⛔ TELL THE CARD WHICH BINARY WE MEAN. pod-prove.sh has its own fallback URL and used to
+            # have its own hardcoded size; when this driver's pin moved and the script's did not, the
+            # card fetched a correct 410,441,528-byte prover, the script called it short against
+            # 407,133,112, tried to resume past EOF and got HTTP 416. prove-chunk never ran, there was
+            # no prove.log at all, and the planner restarted the card every ~100 s for ever.
+            # ⇒ Both ends now read ONE value. `want` is the size this driver measured from the release
+            # with a HEAD, so the card never has to guess and never re-derives it.
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
-                       "HAZYNC_ECMULT_WINDOW": "21"})
+                       "HAZYNC_ECMULT_WINDOW": "21",
+                       "HAZYNC_HOST_URL": HOST_URL, "HAZYNC_HOST_BYTES": str(want)})
         os.makedirs(runner.stage_dir, exist_ok=True)
         # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
         # the requested count would either raise or silently prove a chunk count the fleet cannot
