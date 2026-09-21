@@ -666,8 +666,9 @@ def main():
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
         phase(f"PROVING block {a.block} on {len(order)} cards")
-        log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
-            f"(binds 9110, dialled on {agg_dial})")
+        if not a.claim:
+            log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
+                f"(binds 9110, dialled on {agg_dial})")
 
         if a.claim:
             # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
@@ -721,13 +722,34 @@ def main():
             tip_session.save(spath, state)
             proved_tip = {"h": 0}
 
+            def claim_fn():
+                """The board's next block, or None when the board is genuinely busy.
+
+                ⛔ AN ERROR IS NOT AN IDLE BOARD, AND THIS IS WHERE THAT GETS LOST. `tip_board.claim`
+                goes to some trouble to separate "nothing available / already holds / rate limit"
+                (benign, wait) from a refusal that retrying cannot fix (a signature the coordinator
+                will not verify, a clock it rejects, a reserved handle). Collapsing both to
+                `.get("range")` -- which is None either way -- made the first live session report
+                `idle: the board has nothing free right now` for 15 minutes while G H O S T held
+                0 of its 4 claims and the frontier sat at 113,536 with ~854k blocks unproven.
+                A session that spins on a fixable fault is worse than one that stops.
+                """
+                res = tip_board.claim(ident=ident) or {}
+                st = res.get("state")
+                if st == "claimed":
+                    log(f"  claimed {res['range']} (yours for {res.get('ttl', 3600) // 60} min)")
+                    return res["range"]
+                if st == "idle":
+                    log(f"  board busy: {res.get('why')}")
+                    return None
+                raise RuntimeError(f"claim refused and retrying cannot fix it: {res.get('why')}")
+
             def work_fn():
                 # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
                 # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
                 t = tip_board.highest_tip_bundle(a.bridge_host)
                 pending = t if (t and t > proved_tip["h"]) else None
-                return tip_controller.next_work(
-                    pending, lambda: (tip_board.claim(ident=ident) or {}).get("range"))
+                return tip_controller.next_work(pending, claim_fn)
 
             def prove_one(rng):
                 # ⚠ A tip height is simply one at or above EMIT_FROM: the bridge emits nothing below
