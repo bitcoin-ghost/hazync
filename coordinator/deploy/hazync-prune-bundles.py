@@ -60,9 +60,6 @@ def _find_prune():
     # to be right, which reads as a broken install rather than a naming mismatch.
     sys.exit(f"[prune] cannot find prune_bundles.py. Tried: {', '.join(tried)}. "
              f"Set HAZYNC_PRUNE to its path.")
-
-
-PRUNE = _find_prune()
 REPO = os.environ.get("HZ_REPO", "/opt/hazync")
 STORES = (("r2", os.environ.get("R2_KEYS", "/etc/hazync/backup/r2.keys"),
            os.environ.get("R2_BUCKET", "hazync-proofs")),
@@ -103,7 +100,11 @@ def confirm(off, log=print):
 def main(argv=None, off=None, prune=None, log=print):
     argv = list(sys.argv[1:] if argv is None else argv)
     off = off or _load(OFFSITE, "off")
-    prune = prune or _load(PRUNE, "prune")
+    # ⚠ RESOLVED HERE, NOT AT IMPORT. `_find_prune()` exits when it finds nothing, and running it at
+    # module level made merely IMPORTING this file fatal — which broke test_prune_caller.py, whose
+    # whole method is to load the caller from a temp directory and hand it a fake `prune` module.
+    # A caller that cannot be imported without its production dependency on disk cannot be tested.
+    prune = prune or _load(_find_prune(), "prune")
     confirmed = confirm(off, log=log)
     if confirmed is None:
         return 2
