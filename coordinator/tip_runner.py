@@ -14,6 +14,7 @@ import base64
 import concurrent.futures
 import os
 import posixpath
+import shlex
 import time
 
 import tip_driver
@@ -209,27 +210,10 @@ while time.time() < end:
         #
         # It now waits as long as the run does. `attach.stop` is how the run ends it deliberately,
         # and the day-long cap only exists so a pod kept alive by hand cannot spin for ever.
-        script = (
-            f"cat > /workspace/autoattach.sh <<'EOS'\n"
-            f"#!/bin/bash\n"
-            f"AGG=$1; WID=$2\n"
-            f"cd /workspace || exit 1\n"
-            f"rm -f /workspace/attach.stop\n"
-            f"for i in $(seq 1 86400); do\n"
-            f"  [ -f /workspace/attach.stop ] && exit 0\n"
-            # ⛔ bash, NOT sh. /dev/tcp is a BASH feature; /bin/sh is dash on the RunPod image and
-            # reports "cannot open /dev/tcp/...: No such file". Under sh this test NEVER succeeds, so
-            # the worker loops its full 600 s and never attaches even when the aggregate is perfectly
-            # reachable — an entire fleet that looks armed and proves nothing. run_continuous.sh used
-            # bash here for exactly this reason; changing it to sh silently broke attachment, and the
-            # first live run is what caught it.
-            f"  if timeout 3 bash -c \"</dev/tcp/${{AGG%%:*}}/${{AGG##*:}}\" 2>/dev/null; then\n"
-            f"    HAZYNC_WORKER_ID=$WID exec ./hazync-host-cuda seg-connect \"$AGG\" > aggw.log 2>&1\n"
-            f"  fi\n"
-            f"  sleep 1\n"
-            f"done\n"
-            f"EOS\nchmod +x /workspace/autoattach.sh; echo ARMED"
-        )
+        _lv = tip_lifecycle.lever_env()
+        if _lv:
+            print(f"    forwarding to every worker: {' '.join(sorted(_lv))}")
+        script = worker_attach_script(_lv)
         target = f"{self.agg.ip}:{self.agg_dial}"   # what a worker dials, not what seg-serve binds
         for chunk, card in cards.items():
             if card == self.agg:
@@ -421,6 +405,42 @@ while time.time() < end:
         joins = next((l[6:].strip() for l in out.splitlines() if l.startswith("JOINS:")), "")
         return {"alive": alive, "verified": "VERIFIED" in out, "digest": digest,
                 "joins": joins or None, "unreachable": False}
+
+
+def worker_attach_script(levers):
+    """The autoattach.sh a worker runs, with the operator's levers in front of the exec.
+
+    ⛔ A MODULE-LEVEL FUNCTION ON PURPOSE. When this lived inline in arm_auto_attach the only way
+    to test it was to rebuild the line in the test -- which proves the test right, not the code.
+    hazync#252 lost ten days to exactly that shape.
+    """
+    worker_levers = "".join(f"{k}={shlex.quote(v)} " for k, v in sorted(levers.items()))
+    return (
+        f"cat > /workspace/autoattach.sh <<'EOS'\n"
+        f"#!/bin/bash\n"
+        f"AGG=$1; WID=$2\n"
+        f"cd /workspace || exit 1\n"
+        f"rm -f /workspace/attach.stop\n"
+        f"for i in $(seq 1 86400); do\n"
+        f"  [ -f /workspace/attach.stop ] && exit 0\n"
+        # ⛔ bash, NOT sh. /dev/tcp is a BASH feature; /bin/sh is dash on the RunPod image and
+        # reports "cannot open /dev/tcp/...: No such file". Under sh this test NEVER succeeds, so
+        # the worker loops its full 600 s and never attaches even when the aggregate is perfectly
+        # reachable — an entire fleet that looks armed and proves nothing. run_continuous.sh used
+        # bash here for exactly this reason; changing it to sh silently broke attachment, and the
+        # first live run is what caught it.
+        f"  if timeout 3 bash -c \"</dev/tcp/${{AGG%%:*}}/${{AGG##*:}}\" 2>/dev/null; then\n"
+        # ⛔ THE LEVERS GO HERE OR THEY GO NOWHERE. This line carried HAZYNC_WORKER_ID and nothing
+        # else, so a worker ran with NO HAZYNC_* environment at all -- and HAZYNC_WORKER_LIFTS is
+        # read in the WORKER path (seg-connect, main.rs:5260). It was UNREACHABLE BY CONSTRUCTION:
+        # #148 built it, SEGDIST_TASKS.md measured it at 'undivided work 58% -> 2.1%', and no run
+        # could ever have switched it on.
+        f"    {worker_levers}HAZYNC_WORKER_ID=$WID exec ./hazync-host-cuda seg-connect \"$AGG\" > aggw.log 2>&1\n"
+        f"  fi\n"
+        f"  sleep 1\n"
+        f"done\n"
+        f"EOS\nchmod +x /workspace/autoattach.sh; echo ARMED"
+    )
 
 
 def _last_line(text):

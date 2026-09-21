@@ -224,6 +224,38 @@ PUBLIC_BIND = "0.0.0.0"
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
 
 
+# ⛔ KEYS THE DRIVER COMPUTES. These describe THIS run -- which block, which port, which card is the
+# aggregate -- and are derived per launch. If an operator has one of them lying around in their shell
+# (HAZYNC_BLOCK from a manual prove, say), forwarding it would silently retarget the run at a
+# different block while every log still named the one that was asked for. The driver always wins.
+RESERVED_ENV = frozenset({
+    "HAZYNC_AGG", "HAZYNC_AGG_OUT", "HAZYNC_BIND", "HAZYNC_BLOCK", "HAZYNC_BLOCK_NAME",
+    "HAZYNC_BRIDGE_OUT", "HAZYNC_CHUNK", "HAZYNC_CHUNKS", "HAZYNC_HOME", "HAZYNC_HOST_BYTES",
+    "HAZYNC_HOST_URL", "HAZYNC_OUT", "HAZYNC_PORT", "HAZYNC_PUBLISH_DEST", "HAZYNC_PUBLISH_KEY",
+    "HAZYNC_RANGE", "HAZYNC_SEG_REMOTE", "HAZYNC_TIP_FANOUT", "HAZYNC_WORKDIR", "HAZYNC_WORKER_ID",
+})
+
+
+def lever_env(environ=None):
+    """The HAZYNC_* levers the operator set, to be forwarded to the cards.
+
+    ⛔ WITHOUT THIS, NO LEVER CAN BE TESTED AT ALL. `prove_env` was a hardcoded dict of five keys, so
+    setting HAZYNC_RESOLVE_LOCAL=1 (or WORKER_LIFTS, or JOIN_LOCAL_MAX) in the driver's shell reached
+    nothing: BOTH arms of an A/B would run identically and the measurement would report "no
+    difference" -- a false negative that looks exactly like a lever that does not work.
+
+    ⚠ Three of the five keys that dict carried -- HAZYNC_LIFTX_HINT, HAZYNC_FIELD_BIGINT2,
+    HAZYNC_ECMULT_WINDOW -- are read ONLY in methods/build.rs and methods/guest/build.rs. They are
+    BUILD-time guest flags baked into the released binary, so passing them at runtime has never done
+    anything. They are kept here only because they are harmless and their absence would look like a
+    regression to anyone diffing a run's environment.
+    """
+    import os as _os
+    src = _os.environ if environ is None else environ
+    return {k: v for k, v in sorted(src.items())
+            if k.startswith("HAZYNC_") and k not in RESERVED_ENV}
+
+
 def effective_bind(env):
     """What seg-serve will actually listen on, by the prover's own rule.
 

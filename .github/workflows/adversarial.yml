@@ -136,6 +136,17 @@ jobs:
         # samples on EVERY run, and fails if any of them stops behaving.
         run: python3 prover/host/tests/no_proving_under_the_lock.py
 
+      - name: The operator's levers actually reach the cards (hazync#252)
+        # ⛔ prove_env was a hardcoded dict and the worker exec line carried only HAZYNC_WORKER_ID, so
+        # HAZYNC_RESOLVE_LOCAL reached no aggregate and HAZYNC_WORKER_LIFTS reached no worker at all.
+        # An A/B on an unreachable lever runs both arms identically and reports "no difference" --
+        # indistinguishable from a lever that does nothing, which would retire a real optimisation.
+        run: cd coordinator && python3 test_lever_env.py
+      - name: Lever plumbing POSITIVE CONTROL (levers unreachable again — must be caught)
+        run: |
+          cd coordinator
+          python3 test_lever_env.py --control
+
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)

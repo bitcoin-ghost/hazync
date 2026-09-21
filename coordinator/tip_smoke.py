@@ -674,8 +674,16 @@ def main():
             # no prove.log at all, and the planner restarted the card every ~100 s for ever.
             # ⇒ Both ends now read ONE value. `want` is the size this driver measured from the release
             # with a HEAD, so the card never has to guess and never re-derives it.
+            # ⛔ THE OPERATOR'S LEVERS, OR NO LEVER CAN EVER BE TESTED. This was a hardcoded dict and
+            # nothing else reached the cards, so HAZYNC_RESOLVE_LOCAL / WORKER_LIFTS / JOIN_LOCAL_MAX
+            # set in the driver's shell arrived NOWHERE -- both arms of an A/B would run identically
+            # and report "no difference", which is indistinguishable from a lever that does nothing.
+            # ⚠ The three tuning keys below are read ONLY in methods/build.rs and
+            # methods/guest/build.rs. They are BUILD-time guest flags baked into the released binary;
+            # passing them at runtime has never done anything and is kept only for continuity.
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
                        "HAZYNC_ECMULT_WINDOW": "21",
+                       **tip_lifecycle.lever_env(),
                        "HAZYNC_HOST_URL": HOST_URL, "HAZYNC_HOST_BYTES": str(want)})
         os.makedirs(runner.stage_dir, exist_ok=True)
         # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
