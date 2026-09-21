@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 
 import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
+import tip_board                        # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
 import tip_harvest                      # noqa: E402
@@ -325,6 +326,14 @@ def main():
     ap.add_argument("--publish-dest", default="")
     ap.add_argument("--publish-key", default="/root/.ssh/hazync_publish")
     ap.add_argument("--keep", action="store_true", help="do NOT terminate (debugging only)")
+    ap.add_argument("--claim", action="store_true",
+                    help="claim a block from the board and prove it from its BUNDLE (mode 6, #367) "
+                         "instead of proving a named fixture")
+    ap.add_argument("--claim-source", choices=("api", "ssh"), default="api",
+                    help="api: /api/witness (board heights, <=418,268). ssh: straight off the bridge "
+                         "host (TIP heights, once the walk passes EMIT_FROM)")
+    ap.add_argument("--bridge-host", default="hazync-coord",
+                    help="ssh host holding tip_bundles, for --claim-source=ssh")
     ap.add_argument("--cleanup", action="store_true",
                     help="release whatever rented.json records, and exit — for a driver that died hard")
     a = ap.parse_args()
@@ -339,10 +348,45 @@ def main():
     # says so clearly in its own run.log -- but the run itself only sees cards that produce no
     # receipt, restarts them, and burns the fleet doing it. Measured: two RTX 4090s idle at 0% GPU
     # for five minutes while the tick planner dutifully relaunched them.
+    # ── claim FIRST, before spending anything (#367) ──────────────────────────────────────────────
+    # ⛔ THE ORDER MATTERS. Renting takes ~2 minutes and costs money; a claim costs a POST. If the
+    # board has nothing free -- or this key is at its 4-unfinished cap -- the right answer is to exit
+    # having spent nothing, not to discover it with four cards already billing.
+    # ⚠ A claim's TTL starts here, and renting + staging + fetching the prover runs ~4 min against an
+    # hour, so the margin is wide.
+    claimed = None
+    if a.claim:
+        ident = tip_board.identity()
+        log(f"claiming as {ident[2]!r} ({ident[1][:10]}…)")
+        res = tip_board.claim(ident=ident)
+        if res["state"] == "idle":
+            log(f"nothing to claim right now: {res['why']} — nothing rented, nothing spent")
+            return 0
+        if res["state"] != "claimed":
+            raise SystemExit(f"claim refused: {res['why']}")
+        claimed = res["range"]
+        a.block = claimed
+        log(f"claimed block {claimed} (yours for {res['ttl'] // 60} min)")
+
     if not str(a.block).isdigit():
         raise SystemExit(f"--block takes a HEIGHT, not a filename: got {a.block!r}. "
                          f"Try --block {''.join(c for c in str(a.block) if c.isdigit()) or '130000'}")
     block_name = f"block_{a.block}.json"
+
+    # The BUNDLE, not the fixture. `looks_like_bundle` refuses the fixture shape by name, and a
+    # rejected fetch writes no file, so nothing downstream can pick one up by accident.
+    bundle_path = None
+    if a.claim:
+        os.makedirs(a.rundir, exist_ok=True)
+        bundle_path = os.path.join(a.rundir, f"bundle_{a.block}.json")
+        if a.claim_source == "ssh":
+            ok, why = tip_board.fetch_bundle_ssh(int(a.block), bundle_path, a.bridge_host)
+        else:
+            ok, why = tip_board.fetch_bundle(int(a.block), bundle_path)
+        if not ok:
+            raise SystemExit(f"no bundle for claimed block {a.block}: {why}\n"
+                             f"The claim reopens by itself; nothing was rented.")
+        log(f"bundle for {a.block}: {os.path.getsize(bundle_path)} bytes -> {bundle_path}")
 
     key_file = os.environ.get("RUNPOD_API_KEY_FILE", "/root/.hazync/runpod.key")
     with open(key_file) as fh:
@@ -594,6 +638,46 @@ def main():
         phase(f"PROVING block {a.block} on {len(order)} cards")
         log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
             f"(binds 9110, dialled on {agg_dial})")
+
+        if a.claim:
+            # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
+            hi = {"n": 0}
+
+            def _beat(progress):
+                # ⛔ PROGRESS-GATED, and the state lives HERE rather than inside tip_board: a claim
+                # kept alive by a timer while nothing happens is #256, and a wedged fleet must lose
+                # its block so someone else can take it.
+                hi["n"] = tip_board.beat(a.block, progress, hi["n"], ident=ident)
+                return hi["n"]
+
+            result = tip_run.run_range(height=int(a.block), cards=assignment, runner=runner,
+                                       bundle_path=bundle_path, now=time.time, sleep=time.sleep,
+                                       feed=feed, on_event=lambda m: log(f"  {m}"),
+                                       beat=_beat, max_ticks=1200, tick_s=6.0)
+            phase(f"VERIFIED claimed block {a.block} in {result.get('wall_s')}s")
+            log("RESULT " + json.dumps(result, indent=1))
+
+            # ⛔ THE RECEIPT IS THE PRODUCT, AND IT LIVES ON A POD THAT IS ABOUT TO BE TERMINATED.
+            # Collect it BEFORE the teardown, or the block is proved and unclaimable — an hour of TTL
+            # burned on work nobody can see.
+            rcpt = os.path.join(a.rundir, f"receipt_{a.block}.bin")
+            got, which = runner.fetch_receipt(int(a.block), rcpt)
+            if not got:
+                raise SystemExit(f"block {a.block} PROVED but the receipt could not be collected: "
+                                 f"{which}. The claim will reopen by itself.")
+            log(f"receipt {os.path.getsize(rcpt)} bytes (from {which})")
+
+            with open(rcpt, "rb") as fh:
+                sok, serr = tip_board.submit(a.block, fh.read(), ident=ident)
+            if sok:
+                phase(f"SUBMITTED block {a.block} as {ident[2]}")
+                log(f"✓ block {a.block} submitted and accepted for {ident[2]!r}")
+                return 0
+            # ⚠ A rejected submit is NOT a failed proof. The receipt is on disk and can be resubmitted
+            # by hand; say where it is rather than losing it with the pods.
+            log(f"⛔ submit rejected: {serr}")
+            log(f"   the receipt is kept at {rcpt} — resubmit without re-proving")
+            return 1
 
         # ⚠ The fold caption is set from the run's own event stream, so it appears when the
         # aggregate actually starts rather than when we guess it might.
