@@ -15,6 +15,16 @@ Run: python3 coordinator/test_rotation.py     (silent success, non-zero exit on 
 """
 import os, sys, time, tempfile
 
+# ⛔ POSITIVE CONTROL. `--control` makes the merged total the SUM of two keys' ranges instead of the
+# UNION. The suite MUST then fail: two keys belonging to one person prove interleaved ranges, so a
+# rotation that adds rather than unions silently mints blocks that were never proved, and the
+# leaderboard stops reconciling with the headline `proven` count. Of the three risks this file
+# names -- overlap, consent, moderation -- this is the one that fabricates work.
+CONTROL = "--control" in sys.argv
+EXPECTED_CONTROL_FAILURES = {
+    "merged total is the UNION",
+}
+
 _tmp = tempfile.NamedTemporaryFile(prefix="rotation_", suffix=".db", delete=False); _tmp.close()
 os.environ["COORD_DB"] = _tmp.name
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
@@ -107,7 +117,21 @@ add_range(b.pk, 150, 249)
 # silently and it has been failing on main since. Rotation is about the PROVED total following a key,
 # which is the `proved` member.
 def _proved_by_pubkey():
-    return {pk: v["proved"] for pk, v in server.contributions_by_pubkey().items()}
+    out = {pk: v["proved"] for pk, v in server.contributions_by_pubkey().items()}
+    if CONTROL:
+        # The union collapsed into a plain sum: every overlapping block counted twice.
+        out = {pk: sum(hi - lo + 1 for lo, hi in _raw_ranges(pk)) for pk in out}
+    return out
+
+
+def _raw_ranges(pk):
+    """Every range row for one key, unmerged — only the control uses this."""
+    con = server.db()
+    try:
+        return [(int(lo), int(hi)) for lo, hi in con.execute(
+            "SELECT lo, hi FROM ranges WHERE pubkey = ?", (pk,)).fetchall()]
+    except Exception:
+        return []
 
 before = _proved_by_pubkey()
 check(before.get(a.pk) == 100 and before.get(b.pk) == 100, "pre-rotation each key counts its own 100")
@@ -234,6 +258,19 @@ check("ROTATE_ENABLED False" in _p.stdout,
 for _f in (_tmp.name, _modf.name):
     try: os.remove(_f)
     except Exception: pass
+
+if CONTROL:
+    hit = {e for e in EXPECTED_CONTROL_FAILURES if any(e in f for f in FAILS)}
+    if hit == EXPECTED_CONTROL_FAILURES:
+        print("CONTROL OK — the union was replaced by a sum and the assertion that detects it "
+              "failed, as it must:")
+        for e in sorted(hit):
+            print(f"  - {e}")
+        sys.exit(0)
+    print("CONTROL FAILED — overlapping ranges were double-counted and nothing noticed.")
+    for e in sorted(EXPECTED_CONTROL_FAILURES - hit):
+        print(f"  should have failed and did not: {e}")
+    sys.exit(1)
 
 if FAILS:
     print(f"\nrotation: {len(FAILS)} FAILED")

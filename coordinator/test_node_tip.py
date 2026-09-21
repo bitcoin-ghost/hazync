@@ -10,11 +10,22 @@ Run: python3 coordinator/test_node_tip.py     (silent success, non-zero exit on 
 """
 import os, sys, time, tempfile, subprocess
 
+# ⛔ POSITIVE CONTROL. `--control` widens TIP_FILE_MAX_AGE to a century, so a tip file that has gone
+# stale is trusted again. The suite MUST then fail: without that guard a last-known height left on
+# disk by a writer that has stopped looks exactly like a live one, and chain_tip() freezes high
+# instead of falling back to the floor. That is the whole reason this file exists, and a suite that
+# cannot detect its own removal is a suite that proves nothing.
+CONTROL = "--control" in sys.argv
+EXPECTED_CONTROL_FAILURES = {
+    "a tip file older than TIP_FILE_MAX_AGE is not trusted",
+    "a stale file falls back to the floor rather than freezing high",
+}
+
 _d = tempfile.mkdtemp(prefix="nodetip_")
 os.environ["COORD_DB"]   = os.path.join(_d, "c.db")
 os.environ["TIP_FILE"]   = os.path.join(_d, "node_tip")
 os.environ["TIP_HEIGHT"] = "958301"
-os.environ["TIP_FILE_MAX_AGE"] = "3600"
+os.environ["TIP_FILE_MAX_AGE"] = "3153600000" if CONTROL else "3600"
 os.environ["HAZYNC_BRIDGE_OUT"] = os.path.join(_d, "bundles")
 os.environ["WITNESS_DIR"] = os.path.join(_d, "witnesses")
 os.environ.setdefault("COORD_WEB", os.path.dirname(__file__))
@@ -128,6 +139,20 @@ else:
     print("note: deploy/hazync-node-tip.sh not found — publisher checks skipped")
 
 import shutil; shutil.rmtree(_d, ignore_errors=True)
+
+if CONTROL:
+    hit = {e for e in EXPECTED_CONTROL_FAILURES if any(e in f for f in FAILS)}
+    if hit == EXPECTED_CONTROL_FAILURES:
+        print("CONTROL OK — the staleness guard was widened away and the assertions that detect it "
+              "failed, as they must:")
+        for e in sorted(hit):
+            print(f"  - {e}")
+        sys.exit(0)
+    print("CONTROL FAILED — a stale tip file was trusted and nothing noticed.")
+    for e in sorted(EXPECTED_CONTROL_FAILURES - hit):
+        print(f"  should have failed and did not: {e}")
+    sys.exit(1)
+
 if FAILS:
     print(f"\nnode tip: {len(FAILS)} FAILED")
     sys.exit(1)
