@@ -6027,6 +6027,20 @@ fn seg_connect_cmd(addr: &str) {
 /// position `npairs` of the next level, keeping its position so adjacency holds.
 ///
 /// Extracted so the equivalence test below exercises the shipped function rather than a copy of it.
+/// hazync#252 lever 2: should this join level be proved here rather than handed to a worker?
+///
+/// Narrow levels only. A level of `npairs` joins can occupy at most `npairs` workers, so once the
+/// tree is narrower than the fleet, distributing buys no parallelism -- and still pays the round
+/// trip, which is 77.8% of a join (measured 2026-09-21: 1596.0 ms rtt, 354.5 ms compute).
+///
+/// ⛔ `max` is a ceiling on the level's WIDTH, so this is `<=`, never `>=`. Inverted, it would keep
+/// the WIDE bottom levels local -- serialising the hundreds of joins that are the only part of the
+/// tree wide enough to use the fleet, which is far slower than shipping every one of them out.
+/// `max == 0` disables the lever entirely and is the default.
+fn join_stays_local(npairs: usize, max: usize) -> bool {
+    max > 0 && npairs <= max
+}
+
 fn join_tree_widths(n: usize) -> Vec<usize> {
     let mut widths = vec![n];
     let mut m = n;
@@ -6661,29 +6675,70 @@ come back by itself. Start one against this coordinator, or re-run.");
     }
     let mut published: Vec<Vec<bool>> = widths.iter().map(|w| vec![false; w / 2]).collect();
 
+    // hazync#252 lever 2: prove NARROW levels here instead of distributing them.
+    //
+    // MEASURED, not assumed (2026-09-21, 3 A40s, 2 remote workers, 38 [rtt] samples):
+    //     join     p50 rtt 1596.0 ms   compute 354.5 ms   => TRANSPORT 1241.5 ms   77.8%
+    // More than three quarters of a join is the round trip. Near the root the tree is narrower than
+    // the fleet, so distributing buys no parallelism at all and still pays that trip: the widths run
+    // 37, 19, 10, 5, 3, 2, 1, and each of those levels waits on the one below.
+    //
+    // ⚠ OFF BY DEFAULT, exactly as lever 1 shipped (HAZYNC_RESOLVE_LOCAL, #270). This changes where
+    // a join runs, never which two receipts meet or in which order -- `server.join(&a, &b)` is the
+    // same call a worker makes on the same pair -- but it is the prover's core and it earns its
+    // default the way lever 1 did: by being measured in the wild first.
+    let join_local_max: usize = std::env::var("HAZYNC_JOIN_LOCAL_MAX")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if join_local_max > 0 {
+        println!("    joining levels of <= {join_local_max} pair(s) locally (HAZYNC_JOIN_LOCAL_MAX)");
+    }
+    let mut local_joins = 0usize;
+    let mut local_join_s = 0.0f64;
+
     println!("    join tree: {} leaves, {depth} levels, widths {:?}", widths[0], widths);
     let njoins: usize = widths.iter().take(depth).map(|w| w / 2).sum();
     let mut harvested = 0usize;
 
     while depth > 0 && ready[depth][0].is_none() {
         // Publish every join whose two children have arrived and which has not been queued yet.
+        // ⛔ NOTHING IS PROVED WHILE THE JOBS LOCK IS HELD. A local join takes ~350 ms, and every
+        // connection thread takes work through this same mutex -- proving inside the lock would
+        // stall the whole fleet for the duration of each one. Decide here, prove below.
+        let mut local_todo: Vec<(usize, usize, SuccinctReceipt<ReceiptClaim>,
+                                 SuccinctReceipt<ReceiptClaim>)> = Vec::new();
         {
             let mut q = jobs.lock().unwrap();
             for l in 0..depth {
                 let npairs = widths[l] / 2;
+                let keep_local = join_stays_local(npairs, join_local_max);
                 for p in 0..npairs {
                     if published[l][p] {
                         continue;
                     }
                     let (a, b) = (&ready[l][p * 2], &ready[l][p * 2 + 1]);
                     if let (Some(a), Some(b)) = (a, b) {
-                        let ab = bincode::serialize(a).expect("ser a");
-                        let bb = bincode::serialize(b).expect("ser b");
-                        q.push_back((JOIN_TAG | ((l as u32) << 16) | p as u32, pack_pair(&ab, &bb)));
+                        if keep_local {
+                            local_todo.push((l, p, a.clone(), b.clone()));
+                        } else {
+                            let ab = bincode::serialize(a).expect("ser a");
+                            let bb = bincode::serialize(b).expect("ser b");
+                            q.push_back((JOIN_TAG | ((l as u32) << 16) | p as u32, pack_pair(&ab, &bb)));
+                        }
                         published[l][p] = true;
                     }
                 }
             }
+        }
+
+        for (l, p, a, b) in local_todo {
+            let t = std::time::Instant::now();
+            let j = server.join(&a, &b).expect("local join");
+            let took = t.elapsed().as_secs_f64();
+            local_join_s += took;
+            local_joins += 1;
+            ready[l + 1][p] = Some(j);
+            harvested += 1;
+            println!("    [local] join level {l} pos {p} in {took:.2}s ({harvested}/{njoins})");
         }
 
         // An odd receipt carries forward untouched, keeping its position so adjacency holds. It is
@@ -6749,6 +6804,14 @@ come back by itself. Start one against this coordinator, or re-run.");
     // OPT-IN, because it is only a win when this box has a GPU: a CPU-only segment coordinator would
     // trade 27 round trips for 27 CPU resolves. Default stays the measured behaviour until a GPU run
     // settles it (#252).
+    if local_joins > 0 {
+        // Report BOTH numbers. A local join's own compute time is the honest figure to compare
+        // against a worker's `compute_s`; the saving is the transport it did not pay, which shows up
+        // as a shorter critical path overall, not in this line.
+        println!("    {local_joins} of {njoins} joins proved locally, {:.2}s total ({:.2}s each)",
+                 local_join_s, local_join_s / local_joins as f64);
+    }
+
     let res_local = std::env::var("HAZYNC_RESOLVE_LOCAL").map(|v| v == "1").unwrap_or(false);
     let t_res = Instant::now();
     for (k, a) in assumptions.iter().enumerate() {
@@ -6991,7 +7054,7 @@ impl Drop for Report119OnExit {
 
 #[cfg(test)]
 mod join_tree_tests {
-    use super::{join_tree_widths, peer_job_timeout_s, no_peers_breached};
+    use super::{join_tree_widths, join_stays_local, JOIN_TAG, peer_job_timeout_s, no_peers_breached};
 
     /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
     #[derive(Clone, PartialEq, Eq, Debug)]
@@ -7032,6 +7095,114 @@ mod join_tree_tests {
             }
         }
         ready[depth][0].clone().expect("root")
+    }
+
+    /// hazync#252 lever 2 moves joins from a worker to this process. It must be invisible to the
+    /// PROOF: the same pairs, in the same order, whoever runs them. Build the tree with every
+    /// possible local/remote split and demand the root be identical to the pre-pipelining tree.
+    ///
+    /// ⛔ This models BOTH PATHS as `seg_serve_cmd` runs them -- local pairs proved straight after
+    /// the lock is dropped, remote pairs packed into a `JOIN_TAG | (level << 16) | pos` frame,
+    /// queued, and written back from that tag on harvest. A test that built one tree and merely
+    /// CALLED the predicate could not fail; the tag round trip is where an indexing bug lives.
+    #[test]
+    fn local_join_split_builds_an_identical_tree() {
+        for n in 1..=64usize {
+            let want = old_tree(n);
+            let widths = join_tree_widths(n);
+            // 0 = the shipped default (nothing local); widths[0] = every level local; and every
+            // ceiling in between, so no value of HAZYNC_JOIN_LOCAL_MAX is left untried.
+            for max in 0..=widths[0] {
+                let depth = widths.len() - 1;
+                let mut ready: Vec<Vec<Option<Node>>> =
+                    widths.iter().map(|w| vec![None; *w]).collect();
+                for i in 0..n { ready[0][i] = Some(Node::Leaf(i)); }
+                let mut n_local = 0usize;
+                for l in 0..depth {
+                    let npairs = widths[l] / 2;
+                    // The partition, from the SHIPPED predicate -- a copy of the rule here would
+                    // only prove the copy right.
+                    let keep_local = join_stays_local(npairs, max);
+                    let mut local_todo: Vec<(usize, usize, Node, Node)> = Vec::new();
+                    let mut remote_q: Vec<(u32, Node, Node)> = Vec::new();
+                    for p in 0..npairs {
+                        let a = ready[l][p * 2].clone().expect("left child");
+                        let b = ready[l][p * 2 + 1].clone().expect("right child");
+                        if keep_local {
+                            local_todo.push((l, p, a, b));
+                        } else {
+                            remote_q.push((JOIN_TAG | ((l as u32) << 16) | p as u32, a, b));
+                        }
+                    }
+                    // local path: proved here, written straight into the level above
+                    for (l, p, a, b) in local_todo {
+                        ready[l + 1][p] = Some(Node::Join(Box::new(a), Box::new(b)));
+                        n_local += 1;
+                    }
+                    // remote path: a worker answers out of order, so harvest by the TAG alone
+                    remote_q.reverse();
+                    for (tag, a, b) in remote_q {
+                        let lvl = ((tag & !JOIN_TAG) >> 16) as usize;
+                        let pos = (tag & 0xffff) as usize;
+                        ready[lvl + 1][pos] = Some(Node::Join(Box::new(a), Box::new(b)));
+                    }
+                    if widths[l] % 2 == 1 {
+                        ready[l + 1][npairs] = ready[l][widths[l] - 1].clone();
+                    }
+                }
+                assert_eq!(ready[depth][0].clone().expect("root"), want,
+                           "n={n} max={max}: the local/remote split changed the tree");
+                // ⛔ and the split must actually have HAPPENED -- otherwise every iteration above
+                // is the same all-remote tree and the loop over `max` proves nothing.
+                let njoins: usize = (0..depth).map(|l| widths[l] / 2).sum();
+                if max == 0 {
+                    assert_eq!(n_local, 0, "n={n}: the default took joins locally");
+                } else if max >= widths[0] {
+                    assert_eq!(n_local, njoins, "n={n} max={max}: not every join was local");
+                }
+            }
+        }
+    }
+
+    /// The lever must take the NARROW TOP and nothing else. Inverted (`>=`) it would keep the wide
+    /// bottom levels -- serialising the only part of the tree that can use the fleet.
+    #[test]
+    fn local_join_takes_the_narrow_top_only() {
+        // 512 leaves: pair counts run 256, 128, 64, 32, 16, 8, 4, 2, 1.
+        let widths = join_tree_widths(512);
+        let depth = widths.len() - 1;
+        let pairs: Vec<usize> = (0..depth).map(|l| widths[l] / 2).collect();
+
+        // Default: the lever is OFF and not one join is taken.
+        assert!(pairs.iter().all(|&np| !join_stays_local(np, 0)), "max=0 must take nothing");
+
+        // A taken set is correct when it is a contiguous run ending at the ROOT level, and no
+        // level in it is wider than the ceiling.
+        let top_anchored_and_narrow = |taken: &[usize], max: usize| -> bool {
+            !taken.is_empty()
+                && *taken.last().expect("taken") == depth - 1
+                && taken.windows(2).all(|w| w[1] == w[0] + 1)
+                && taken.iter().all(|&l| pairs[l] <= max)
+        };
+
+        for max in 1..=8usize {
+            let taken: Vec<usize> =
+                (0..depth).filter(|&l| join_stays_local(pairs[l], max)).collect();
+            assert!(top_anchored_and_narrow(&taken, max),
+                    "max={max} took {taken:?}, which is not the narrow top");
+
+            // ⛔ POSITIVE CONTROL: the inverted rule takes the WIDE BOTTOM and must be rejected --
+            // otherwise this test would pass just as happily on the bug it exists to catch.
+            let inverted: Vec<usize> = (0..depth).filter(|&l| pairs[l] >= max).collect();
+            assert!(!top_anchored_and_narrow(&inverted, max),
+                    "control did not fail: `>=` took {inverted:?} and passed at max={max}");
+        }
+
+        // Monotonic: raising the ceiling never takes FEWER joins.
+        let count = |max: usize| (0..depth).filter(|&l| join_stays_local(pairs[l], max)).count();
+        for max in 1..8usize {
+            assert!(count(max + 1) >= count(max), "raising max to {} took fewer levels", max + 1);
+        }
     }
 
     /// Pipelining may change WHEN a join runs; it must never change WHICH two receipts meet, or in
