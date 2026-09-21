@@ -363,11 +363,16 @@ def main():
     # ⚠ A claim's TTL starts here, and renting + staging + fetching the prover runs ~4 min against an
     # hour, so the margin is wide.
     claimed = None
+    ident = None
     if a.session:
         a.claim = True          # a session is claim-driven by definition
-    if a.claim and not a.session:
+    # ⛔ ident IS LOADED FOR BOTH PATHS. It used to be bound only in the single-block branch, so a
+    # --session run hit a NameError the first time the loop tried to claim -- after renting. The
+    # undefined-name check cannot see this: `ident` IS bound in the module, just not on every path.
+    if a.claim:
         ident = tip_board.identity()
         log(f"claiming as {ident[2]!r} ({ident[1][:10]}…)")
+    if a.claim and not a.session:
         res = tip_board.claim(ident=ident)
         if res["state"] == "idle":
             log(f"nothing to claim right now: {res['why']} — nothing rented, nothing spent")
@@ -385,8 +390,10 @@ def main():
 
     # The BUNDLE, not the fixture. `looks_like_bundle` refuses the fixture shape by name, and a
     # rejected fetch writes no file, so nothing downstream can pick one up by accident.
+    # ⚠ SINGLE-BLOCK ONLY. A session claims inside its loop, so fetching a bundle here would pull
+    # one for --block's DEFAULT height, which was never claimed and will never be proved.
     bundle_path = None
-    if a.claim:
+    if a.claim and not a.session:
         os.makedirs(a.rundir, exist_ok=True)
         bundle_path = os.path.join(a.rundir, f"bundle_{a.block}.json")
         if a.claim_source == "ssh":
