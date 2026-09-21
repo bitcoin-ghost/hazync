@@ -27,6 +27,7 @@ import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
+import tip_harvest                      # noqa: E402
 import tip_lifecycle                   # noqa: E402
 import tip_run                          # noqa: E402
 import tip_runner                       # noqa: E402
@@ -346,6 +347,11 @@ def main():
         raise KeyboardInterrupt(f"signal {sig}")
     signal.signal(signal.SIGTERM, _bail)
 
+    # ⚠ Bound BEFORE the try so the `finally` can always read them. The harvest runs on whatever the
+    # run got as far as — a fleet that died during staging still has a `run.log` worth keeping — and
+    # a NameError in teardown would leave the cards billing.
+    assignment, runner, agg = {}, None, None
+
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
         phase(f"PREPARING · renting {a.cards} cards (+{a.spares} spare)")
@@ -561,6 +567,28 @@ def main():
         return 0 if result.get("ok") else 1
 
     finally:
+        # ── harvest BEFORE release: this is the only chance ───────────────────────────────────────
+        # ⛔ EVERY PREVIOUS RUN THREW ITS EVIDENCE AWAY. The pods were terminated below with no logs
+        # fetched, so `agg.log`, every `aggw.log` and every `[rtt]` line died with them — which is the
+        # whole reason hazync#252 and hazync#253 still say "the instrumentation exists, nobody has run
+        # it". The instrumentation ran on every run; nothing kept the output.
+        # ⚠ Wrapped whole: a harvest that fails must never leave cards billing. Release is below.
+        try:
+            if assignment:
+                man = tip_harvest.harvest(ssh, assignment, agg, a.rundir)
+                log(f"harvested {man['files']} log file(s) from {man['cards']} card(s) "
+                    f"-> {os.path.join(a.rundir, 'logs')}")
+                if man["missing"]:
+                    log(f"  ⚠ not fetched (a dying pod refuses connections): {man['missing']}")
+                agg_text, worker_texts = tip_harvest.read_logs(a.rundir)
+                txt, blob = tip_harvest.report(agg_text, worker_texts,
+                                               getattr(runner, "agg_started_ms", None))
+                log("\n" + txt)
+                with open(os.path.join(a.rundir, "measurements.json"), "w", encoding="utf8") as fh:
+                    json.dump(blob, fh, indent=1)
+        except Exception as e:                       # noqa: BLE001 — teardown must not be blocked
+            log(f"  ⚠ harvest failed ({type(e).__name__}: {e}) — releasing the fleet regardless")
+
         # ── release, whatever happened ────────────────────────────────────────────────────────────
         elapsed = time.time() - t_start
         spend = sum(p["price"] for p in created) * elapsed / 3600.0

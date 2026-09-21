@@ -54,6 +54,9 @@ class FleetRunner:
         # simple case where they genuinely are the same.
         self.stage_dir, self.agg_port, self.workdir = stage_dir, int(agg_port), workdir
         self.agg_dial = int(agg_dial if agg_dial is not None else agg_port)
+        # Set by `start_aggregate`. None means the aggregate was never launched, and `tip_harvest`
+        # reports "NOT MEASURED" on that rather than measuring worker epochs against nothing.
+        self.agg_started_ms = None
         # The settings every 966,256 run used. LIFTX_HINT is not optional: without it the host omits the
         # pubkey hints the CORE guest expects and the guest dies with `DeserializeUnexpectedEnd`, which
         # reads as a corrupt fixture and sends you hunting the wrong thing.
@@ -298,6 +301,12 @@ while time.time() < end:
         body = (f"cd {self.workdir} && rm -f agg.log agg.err && {assigns} "
                 f"nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & "
                 f"disown; exit 0")
+        # ⚠ RECORDED HERE, NOT BY THE CALLER, and recorded BEFORE the ssh rather than after, so a slow
+        # ssh is charged to the aggregate's startup instead of silently shortening it. This is the one
+        # epoch every worker's first-segment timestamp is measured against (hazync#253): `seg-connect`
+        # timestamps its own lines, but nothing else knows when the listener was asked to come up.
+        # It is set even if the launch fails — `tip_harvest` needs it in the teardown path too.
+        self.agg_started_ms = int(time.time() * 1000)
         return self.ssh.run(self.agg, body) is not None
 
     def aggregate_status(self):
