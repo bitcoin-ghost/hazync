@@ -6,7 +6,7 @@ W=/workspace; mkdir -p $W; cd $W || exit 1
 for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done
 ldconfig 2>/dev/null
 BIN=$W/hazync-host-cuda
-[ -x "$BIN" ] || { curl -fsSL -o "$BIN" https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/hazync-host-x86_64-linux-gnu-cuda && chmod +x "$BIN"; }
+[ -x "$BIN" ] || { curl -fsSL -o "$BIN" "${HAZYNC_HOST_URL:-https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.7/hazync-host-x86_64-linux-gnu-cuda}" && chmod +x "$BIN"; }
 # ⛔ THE FIXTURE COMES FROM A CHECKOUT, NOT A URL -- the same fix pod-prove.sh already carries
 #    (hazync#395). This used to fetch https://hazync.org/repro/block_966280.json.gz, and that path has
 #    been 404 since at least 2026-09-18: the files AND the /repro/ directory return the 1358-byte error

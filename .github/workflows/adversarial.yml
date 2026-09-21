@@ -93,6 +93,25 @@ jobs:
         # Exits 1 when it finds nothing: that state means the harness has gone blind and every clean
         # run above is meaningless. A fuzzer is only evidence while its control still fires.
         run: cd coordinator && python3 seam_fuzz.py --control
+      - name: Every name used is bound somewhere in its module (#429)
+        # ⛔ #429 added seven phase(...) calls to tip_smoke.py and never defined `phase`, so every tip
+        # run died on the first one. Nothing here imports or invokes tip_smoke.main(), and py_compile
+        # accepts an undefined global — it is only an error when the line runs. This is the check that
+        # would have caught it, and it takes milliseconds.
+        run: cd coordinator && python3 test_undefined_names.py
+      - name: Undefined-name POSITIVE CONTROL (#429 bug re-introduced — must be caught)
+        run: |
+          cd coordinator
+          python3 test_undefined_names.py --control
+      - name: The fleet's prover pin is not behind this repo's releases (#252/#253)
+        # ⛔ HOST_URL pinned v0.21.0 for seven releases. Runs proved correctly and produced NONE of the
+        # instrumentation the fleet exists for (#236 streaming, #254 task timestamps, #402 reconnect).
+        # Offline: it compares against docs/history/releases/, never the network.
+        run: cd coordinator && python3 test_host_pin.py
+      - name: Prover pin POSITIVE CONTROL (pin set back to v0.21.0 — must be caught)
+        run: |
+          cd coordinator
+          python3 test_host_pin.py --control
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)

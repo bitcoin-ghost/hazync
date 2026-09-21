@@ -17,6 +17,7 @@ import posixpath
 import time
 
 import tip_driver
+import tip_lifecycle
 
 
 # How many cards to touch at once. 23 sequential ssh calls made phase 0 the longest part of a run.
@@ -296,7 +297,28 @@ while time.time() < end:
         env = dict(self.prove_env,
                    HAZYNC_BLOCK=f"{self.workdir}/block_{block}.json",
                    HAZYNC_CHUNKS=str(chunks), HAZYNC_AGG="1",
-                   HAZYNC_PORT=str(self.agg_port))
+                   HAZYNC_PORT=str(self.agg_port),
+                   # ⛔ WITHOUT THIS THE AGGREGATE BINDS LOOPBACK AND NO RENTED CARD CAN EVER ATTACH.
+                   # The prover's rule (seg_bind_addr): HAZYNC_BIND wins, else HAZYNC_SEG_REMOTE=1
+                   # means 0.0.0.0, else 127.0.0.1. A tip fleet is remote BY CONSTRUCTION — every card
+                   # is a rented pod — so loopback is never right here.
+                   # Measured 2026-09-21, a full run lost to it ($1.02, 27.6 min):
+                   #     listening on 127.0.0.1:9110
+                   #     ⚠ LOOPBACK ONLY — workers on OTHER machines cannot attach to this run.
+                   #     execution 6.4 s  35 segments, 15.8 MB (streamed)
+                   #       0/34 segments
+                   #     ⛔ no worker has been connected for 600s and 35 piece(s) of work are stranded
+                   # ⚠ The port is UNAUTHENTICATED. That is an accepted trade for a solo operator's own
+                   # rented fleet on an ephemeral pod: every receipt a peer returns is verified and
+                   # requeued if bad, so a stranger can waste work but cannot forge a proof.
+                   HAZYNC_SEG_REMOTE="1")
+        # ⛔ AND CHECK IT, rather than trusting the line above to stay. `tip_lifecycle.bind_verdict`
+        # has encoded this rule all along and NOTHING CALLED IT — which is why a loopback bind cost a
+        # whole run instead of being refused in the first second. accept_public is deliberate: the
+        # verdict rejects 0.0.0.0 on principle, and this caller is the case that has accepted it.
+        ok, why = tip_lifecycle.bind_verdict(env, cards_are_remote=True, accept_public=True)
+        if not ok:
+            raise RuntimeError(f"refusing to start the aggregate: {why}")
         assigns = " ".join(f"{k}={v}" for k, v in sorted(env.items()))
         body = (f"cd {self.workdir} && rm -f agg.log agg.err && {assigns} "
                 f"nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & "

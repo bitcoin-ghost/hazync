@@ -139,7 +139,25 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
     return ready, portmap
 
 
-HOST_URL = ("https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/"
+# ⛔ THIS PIN IS LOAD-BEARING, AND IT WAS SEVEN RELEASES STALE. Every tip run proved with v0.21.0 —
+# the release BEFORE the instrumentation the fleet exists to produce. Measured on a real run
+# 2026-09-21 (block 741,000, 3 cards, VERIFIED) whose harvest could answer nothing:
+#
+#   #253  execution 12.3 s, 35 segments, 15.8 MB, marker `, depth 4`   <- pre-#236 spelling
+#         ⚠ NOT a post-#236 binary — this log cannot speak to #253
+#   #252  [rtt]: NOT MEASURED (no [rtt] lines in agg.log)
+#
+# What v0.21.0 is missing, and what each one costs us:
+#   #236  v0.21.1  stream segments as they are produced   -> no `(streamed)` marker, #253 unanswerable
+#   #254  v0.21.2  every seg-connect task line timestamped -> no epochs, so no overlap can be computed
+#   #402  v0.21.7  seg-connect RECONNECTS instead of exiting on a dropped link
+#
+# ⚠ That last one is why a worker "not attaching" and a stale binary look identical from here: on
+# v0.21.0 a worker that loses its link is simply gone, and the run finishes on the coordinator alone.
+# ⇒ Track the CURRENT release. A tip run on an old binary still proves the block correctly — it just
+# produces none of the evidence, which is the expensive way to learn this.
+HOST_RELEASE = "v0.21.7"
+HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
 
 
@@ -352,6 +370,20 @@ def main():
     # a NameError in teardown would leave the cards billing.
     assignment, runner, agg = {}, None, None
 
+    # ⛔ #429 ADDED SEVEN `phase(...)` CALLS AND NEVER DEFINED IT. Every run since died on the FIRST
+    # one — `NameError: name 'phase' is not defined` at "PREPARING · renting …", before a single pod
+    # was rented. The teardown ran and reported "0 cards, account check: clean", so it cost nothing
+    # but a run; it just could not work at all.
+    # ⚠ It logs FIRST and writes the tile second: the phase is information the operator needs whether
+    # or not a dashboard is attached, and a run must never die for the sake of its status tile —
+    # `write_phase` touches the filesystem and the rundir may not exist yet.
+    def phase(text):
+        log(text)
+        try:
+            tip_dashboard.write_phase(a.rundir, text)
+        except Exception:
+            pass
+
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
         phase(f"PREPARING · renting {a.cards} cards (+{a.spares} spare)")
@@ -544,8 +576,16 @@ def main():
         runner = tip_runner.FleetRunner(
             ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
             agg_port=9110, agg_dial=agg_dial,
+            # ⛔ TELL THE CARD WHICH BINARY WE MEAN. pod-prove.sh has its own fallback URL and used to
+            # have its own hardcoded size; when this driver's pin moved and the script's did not, the
+            # card fetched a correct 410,441,528-byte prover, the script called it short against
+            # 407,133,112, tried to resume past EOF and got HTTP 416. prove-chunk never ran, there was
+            # no prove.log at all, and the planner restarted the card every ~100 s for ever.
+            # ⇒ Both ends now read ONE value. `want` is the size this driver measured from the release
+            # with a HEAD, so the card never has to guess and never re-derives it.
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
-                       "HAZYNC_ECMULT_WINDOW": "21"})
+                       "HAZYNC_ECMULT_WINDOW": "21",
+                       "HAZYNC_HOST_URL": HOST_URL, "HAZYNC_HOST_BYTES": str(want)})
         os.makedirs(runner.stage_dir, exist_ok=True)
         # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
         # the requested count would either raise or silently prove a chunk count the fleet cannot
