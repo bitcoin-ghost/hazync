@@ -175,6 +175,109 @@ def submit(rng, receipt, post_fn=None, ident=None):
     return False, err
 
 
+# The keys a real bridge bundle carries. The FIXTURE shape (block_<h>.json) has none of them:
+# bits/coinbase_hex/merkle/nonce/prev/txs and no accumulator state at all.
+BUNDLE_KEYS = ("height", "in_roots", "in_leaves", "in_tip", "witness")
+
+
+def looks_like_bundle(obj):
+    """(ok, why). A bundle proves a chain transition; a fixture cannot.
+
+    ⛔ THIS IS THE TRAP #367 SETS. `tip_smoke` proves `block_<h>.json` -- the FIXTURE -- through
+    build_full(), and prover/host/src/main.rs says in as many words that that path "serves the FIXTURE
+    shape and cannot produce a board block at all (#361)". The two files sit side by side with similar
+    names and the same height in them:
+
+        fixture  bits, coinbase_hex, height, merkle, nonce, prev, recent_times, time, txs, version
+        bundle   height, in_epoch_start, in_leaves, in_nbits, in_recent, in_roots, in_time, in_tip, witness
+
+    Only the bundle carries the utreexo pre-state (`in_roots`, `in_leaves`, `in_tip`), which is what
+    makes the proof commit to the REAL UTXO transition. Submitting a fixture-derived receipt to the
+    board wastes a claim and an hour of TTL.
+    """
+    if not isinstance(obj, dict):
+        return False, f"not a JSON object ({type(obj).__name__})"
+    missing = [k for k in BUNDLE_KEYS if k not in obj]
+    if missing:
+        extra = sorted(set(obj) & {"txs", "coinbase_hex", "merkle", "nonce", "prev"})
+        hint = f" — this looks like the FIXTURE shape ({', '.join(extra)})" if extra else ""
+        return False, f"missing {', '.join(missing)}{hint}"
+    return True, ""
+
+
+def fetch_bundle(height, dest, opener=None):
+    """Download the bridge bundle for `height` and REFUSE anything that is not one.
+
+    Returns (ok, why). Writes `dest` only on success, so a rejected download cannot be picked up by a
+    later step that merely checks the file exists.
+    """
+    import urllib.request
+    url = witness_url(height)
+    try:
+        op = opener or (lambda u: urllib.request.urlopen(
+            urllib.request.Request(u, headers={"User-Agent": UA}), timeout=300))
+        raw = op(url).read()
+    except Exception as e:                              # a 404 here is "no bundle for that height"
+        return False, f"{url}: {type(e).__name__}: {str(e)[:120]}"
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        return False, f"{url}: not JSON ({type(e).__name__})"
+    ok, why = looks_like_bundle(obj)
+    if not ok:
+        return False, f"{url}: {why}"
+    if str(obj.get("height")) != str(height):
+        # ⚠ A bundle for the WRONG height verifies fine and proves the wrong block.
+        return False, f"{url}: bundle says height {obj.get('height')}, asked for {height}"
+    return _write_bundle(raw, dest)
+
+
+def _write_bundle(raw, dest):
+    """Write validated bytes atomically. Split out so the ssh source shares the SAME validation."""
+    tmp = f"{dest}.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(raw)
+    os.replace(tmp, dest)
+    return True, ""
+
+
+def fetch_bundle_ssh(height, dest, host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
+    """Fetch a TIP bundle straight off the bridge host. Returns (ok, why).
+
+    ⛔ WHY NOT SYNC THE TWO SERVERS. The tip bridge writes to its own box and the coordinator serves
+    `/api/witness/<h>` from a different box and a different path, so the obvious fix is a server-to-
+    server sync. Measured 2026-09-21: neither direction has ssh trust
+    (`Permission denied (publickey)` both ways), so that fix starts by adding STANDING TRUST between
+    two production boxes — a real security change for a file the driver can simply read itself.
+
+    The driver already has ssh to both. So a tip height is fetched from the bridge host and a board
+    height from the coordinator's API, and nothing new is trusted.
+
+    ⚠ The bridge writes bundles ATOMICALLY (`write bundle_<h>.json.tmp` then `rename`,
+    main.rs:3914), so there is no partial-file window to guard against here.
+    ⚠ Until the walk passes HAZYNC_BRIDGE_EMIT_FROM (967,500; it was at ~861,857 on 2026-09-21) this
+    directory is EMPTY BY DESIGN. "not found" is the expected answer, not a fault.
+    """
+    import subprocess
+    remote = f"{remote_dir}/bundle_{int(height)}.json"
+    run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=600))
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, f"cat {remote}"])
+    if getattr(r, "returncode", 1) != 0:
+        err = (getattr(r, "stderr", b"") or b"").decode(errors="replace").strip()[:120]
+        return False, f"{host}:{remote}: {err or 'not found (the bridge may not have reached EMIT_FROM yet)'}"
+    raw = getattr(r, "stdout", b"") or b""
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        return False, f"{host}:{remote}: not JSON ({type(e).__name__})"
+    ok, why = looks_like_bundle(obj)
+    if not ok:
+        return False, f"{host}:{remote}: {why}"
+    if str(obj.get("height")) != str(height):
+        return False, f"{host}:{remote}: bundle says height {obj.get('height')}, asked for {height}"
+    return _write_bundle(raw, dest)
+
+
 def witness_url(height):
     """Where the fleet fetches the bundle for a claimed height.
 
@@ -198,7 +301,7 @@ def selftest(control=False):
     if control:
         # ⛔ The control removes the two guards a rewrite actually gets wrong: it mints a FRESH NONCE
         # per retry (#268) and it beats on every call regardless of progress (#256).
-        global claim, beat
+        global claim, beat, looks_like_bundle
         _real_claim = claim
 
         def claim(post_fn=None, ident=None, tries=3, sleep=time.sleep):      # noqa: F811
@@ -215,6 +318,9 @@ def selftest(control=False):
             if res and res.get("ok"):
                 return {"state": "claimed", "range": str(res["range"]), "ttl": 3600, "handle": handle}
             return {"state": "error", "why": str((res or {}).get("error"))}  # ⛔ busy board = error
+
+        def looks_like_bundle(obj):                                          # noqa: F811
+            return True, ""                                                # ⛔ accepts a fixture
 
         def beat(rng, progress, last_beaten, post_fn=None, ident=None):      # noqa: F811
             sk, pub, _ = ident or identity()
@@ -305,8 +411,61 @@ def selftest(control=False):
     check(sig_ok, "the submitted signature verifies against the receipt bytes under the public key")
     check(base64.b64decode(got["receipt"]) == b"abc", "the receipt travels base64, unmodified")
 
+    # ── the bundle-vs-fixture trap (#367) ────────────────────────────────────────────────────────
+    BUNDLE = {"height": 120000, "in_roots": [], "in_leaves": 1, "in_tip": "aa", "witness": {},
+              "in_nbits": 1, "in_time": 1, "in_epoch_start": 1, "in_recent": []}
+    FIXTURE = {"height": 120000, "bits": 1, "coinbase_hex": "00", "merkle": "aa", "nonce": 1,
+               "prev": "bb", "recent_times": [], "time": 1, "txs": [], "version": 1}
+    ok, why = looks_like_bundle(BUNDLE)
+    check(ok, "a real bridge bundle is accepted")
+    ok, why = looks_like_bundle(FIXTURE)
+    check(not ok and "FIXTURE" in why,
+          f"⛔ the FIXTURE shape is REFUSED and named as such — proving it cannot produce a board "
+          f"block at all (#361) ({why[:72]})")
+
+    import tempfile as _tf, json as _j
+    tdir = _tf.mkdtemp(prefix="bundle_")
+    dest = os.path.join(tdir, "bundle_120000.json")
+
+    class _Resp:
+        def __init__(self, b): self._b = b
+        def read(self): return self._b
+
+    ok, why = fetch_bundle(120000, dest, opener=lambda u: _Resp(_j.dumps(BUNDLE).encode()))
+    check(ok and os.path.exists(dest), f"a good bundle is fetched and written ({why})")
+    os.unlink(dest)
+    ok, why = fetch_bundle(120000, dest, opener=lambda u: _Resp(_j.dumps(FIXTURE).encode()))
+    check(not ok and not os.path.exists(dest),
+          "⛔ a FIXTURE download writes NO FILE — a rejected fetch must not be picked up later by a "
+          "step that merely checks the path exists")
+    ok, why = fetch_bundle(120000, dest, opener=lambda u: _Resp(_j.dumps(dict(BUNDLE, height=999)).encode()))
+    check(not ok and "height 999" in why,
+          "⚠ a bundle for the WRONG height is refused — it would verify fine and prove the wrong block")
+    ok, why = fetch_bundle(120000, dest, opener=lambda u: _Resp(b"<html>404</html>"))
+    check(not ok and "not JSON" in why, "a 404 page is not silently written as a bundle")
+
+    # ── the ssh source for TIP heights ───────────────────────────────────────────────────────────
+    class _R:
+        def __init__(self, rc, out=b"", err=b""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    dest2 = os.path.join(tdir, "bundle_967500.json")
+    ok, why = fetch_bundle_ssh(967500, dest2, "hazync-coord",
+                               runner=lambda c: _R(0, _j.dumps(dict(BUNDLE, height=967500)).encode()))
+    check(ok and os.path.exists(dest2), f"a tip bundle is fetched straight off the bridge host ({why})")
+    os.unlink(dest2)
+    ok, why = fetch_bundle_ssh(967500, dest2, "hazync-coord",
+                               runner=lambda c: _R(1, b"", b"cat: No such file or directory"))
+    check(not ok and not os.path.exists(dest2),
+          "⚠ an absent tip bundle is a clean 'not found' and writes nothing — EXPECTED until the walk "
+          "passes EMIT_FROM=967,500")
+    ok, why = fetch_bundle_ssh(967500, dest2, "hazync-coord",
+                               runner=lambda c: _R(0, _j.dumps(FIXTURE).encode()))
+    check(not ok and "FIXTURE" in why,
+          "⛔ the ssh source runs the SAME shape check — a fixture from the bridge host is refused too")
+
     print()
-    expected = {"ALL", "NO progress"}
+    expected = {"ALL", "NO progress", "FIXTURE shape is REFUSED"}
     if control:
         hit = {e for e in expected if any(e in f for f in fails)}
         if hit:
