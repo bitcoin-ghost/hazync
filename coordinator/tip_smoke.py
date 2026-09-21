@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
 import tip_board                        # noqa: E402
+import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
 import tip_harvest                      # noqa: E402
@@ -35,6 +36,10 @@ import tip_runner                       # noqa: E402
 import tip_session                      # noqa: E402
 
 PREFIX = "hz-smoke-"
+
+# Heights at or above this come from the TIP bridge; below it, from the coordinator's bundle set.
+# Mirrors HAZYNC_BRIDGE_EMIT_FROM on the bridge host — if that moves, this moves with it.
+TIP_FROM = int(os.environ.get("HAZYNC_TIP_FROM", "967500"))
 
 
 def log(msg):
@@ -334,6 +339,9 @@ def main():
                          "host (TIP heights, once the walk passes EMIT_FROM)")
     ap.add_argument("--bridge-host", default="hazync-coord",
                     help="ssh host holding tip_bundles, for --claim-source=ssh")
+    ap.add_argument("--session", type=float, default=0.0, metavar="HOURS",
+                    help="keep the fleet and prove continuously for HOURS: the tip block when one is "
+                         "waiting, board work otherwise (#367). Implies --claim.")
     ap.add_argument("--cleanup", action="store_true",
                     help="release whatever rented.json records, and exit — for a driver that died hard")
     a = ap.parse_args()
@@ -355,7 +363,9 @@ def main():
     # ⚠ A claim's TTL starts here, and renting + staging + fetching the prover runs ~4 min against an
     # hour, so the margin is wide.
     claimed = None
-    if a.claim:
+    if a.session:
+        a.claim = True          # a session is claim-driven by definition
+    if a.claim and not a.session:
         ident = tip_board.identity()
         log(f"claiming as {ident[2]!r} ({ident[1][:10]}…)")
         res = tip_board.claim(ident=ident)
@@ -641,19 +651,84 @@ def main():
 
         if a.claim:
             # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
-            hi = {"n": 0}
+            def prove_and_submit(rng, *, from_tip=False):
+                """Fetch the bundle, prove it as a range, collect the receipt, submit. Returns the
+                run dict. Shared by the single-block path and the session loop so there is exactly
+                ONE definition of what proving a claimed block means."""
+                bp = os.path.join(a.rundir, f"bundle_{rng}.json")
+                if not os.path.exists(bp):
+                    src = "ssh" if from_tip else a.claim_source
+                    if src == "ssh":
+                        bok, bwhy = tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host)
+                    else:
+                        bok, bwhy = tip_board.fetch_bundle(int(rng), bp)
+                    if not bok:
+                        raise RuntimeError(f"no bundle for {rng}: {bwhy}")
+                hi_l = {"n": 0}
 
-            def _beat(progress):
-                # ⛔ PROGRESS-GATED, and the state lives HERE rather than inside tip_board: a claim
-                # kept alive by a timer while nothing happens is #256, and a wedged fleet must lose
-                # its block so someone else can take it.
-                hi["n"] = tip_board.beat(a.block, progress, hi["n"], ident=ident)
-                return hi["n"]
+                def _b(progress):
+                    hi_l["n"] = tip_board.beat(rng, progress, hi_l["n"], ident=ident)
+                    return hi_l["n"]
 
-            result = tip_run.run_range(height=int(a.block), cards=assignment, runner=runner,
-                                       bundle_path=bundle_path, now=time.time, sleep=time.sleep,
-                                       feed=feed, on_event=lambda m: log(f"  {m}"),
-                                       beat=_beat, max_ticks=1200, tick_s=6.0)
+                res = tip_run.run_range(height=int(rng), cards=assignment, runner=runner,
+                                        bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
+                                        on_event=lambda m: log(f"  {m}"), beat=_b,
+                                        max_ticks=1200, tick_s=6.0)
+                rc = os.path.join(a.rundir, f"receipt_{rng}.bin")
+                gotr, which = runner.fetch_receipt(int(rng), rc)
+                if not gotr:
+                    raise RuntimeError(f"{rng} PROVED but the receipt could not be collected: {which}")
+                with open(rc, "rb") as fh:
+                    sok2, serr2 = tip_board.submit(rng, fh.read(), ident=ident)
+                res["submitted"] = sok2
+                if not sok2:
+                    # ⚠ A rejected submit is not a failed proof: the receipt is on disk and can be
+                    # resubmitted without re-proving. Say where, rather than losing it with the pods.
+                    log(f"  ⛔ submit rejected for {rng}: {serr2}  (receipt kept at {rc})")
+                return res
+
+        if a.session:
+            # ── keep the fleet and prove continuously (#367) ──────────────────────────────────────
+            # ⛔ THE FLEET IS RENTED ONCE AND HELD. Releasing between blocks pays rent + a 410 MB
+            # prover fetch + the GPU gate every time -- ~3 minutes of a ~10 minute tip window, for a
+            # fleet that is about to be rebuilt identically.
+            # ⚠ NO PREEMPTION, BY DECISION: a tip block that appears mid-proof waits for the current
+            # board block to finish. Splitting would need two concurrent aggregates, and a board block
+            # at the frontier is small (h=113,537 is a 595 KB bundle against 16 MB at h=418,268).
+            spath = os.path.join(a.rundir, "session.json")
+            state = tip_session.new_state(started_at=time.time(), duration_s=a.session * 3600.0,
+                                          fleet_ids=[p["id"] for p in created])
+            tip_session.save(spath, state)
+            proved_tip = {"h": 0}
+
+            def work_fn():
+                # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
+                # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
+                t = tip_board.highest_tip_bundle(a.bridge_host)
+                pending = t if (t and t > proved_tip["h"]) else None
+                return tip_controller.next_work(
+                    pending, lambda: (tip_board.claim(ident=ident) or {}).get("range"))
+
+            def prove_one(rng):
+                # ⚠ A tip height is simply one at or above EMIT_FROM: the bridge emits nothing below
+                # it, so a bundle can only come off the bridge host up there. Board work comes from
+                # the frontier (~113,537) and is fetched from /api/witness. No cleverness needed.
+                from_tip = str(rng).isdigit() and int(rng) >= TIP_FROM
+                out = prove_and_submit(rng, from_tip=from_tip)
+                if from_tip:
+                    proved_tip["h"] = int(rng)
+                return out
+
+            phase(f"SESSION · {a.session:.1f} h on {len(order)} cards")
+            summ = tip_session.run_session(state=state, path=spath, prove=prove_one,
+                                           work_fn=work_fn, now=time.time, sleep=time.sleep,
+                                           feed=feed, on_event=lambda m: log(f"  {m}"),
+                                           idle_s=30.0)
+            log("SESSION " + json.dumps(summ, indent=1))
+            return 0
+
+        if a.claim:
+            result = prove_and_submit(a.block)
             phase(f"VERIFIED claimed block {a.block} in {result.get('wall_s')}s")
             log("RESULT " + json.dumps(result, indent=1))
 

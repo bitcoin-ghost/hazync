@@ -241,6 +241,28 @@ def _write_bundle(raw, dest):
     return True, ""
 
 
+def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
+    """The highest tip height whose BUNDLE exists, or None. This is the tip-work signal.
+
+    ⛔ A BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking bitcoind for the chain height instead
+    would report a tip the fleet cannot prove: the bridge emits nothing below
+    HAZYNC_BRIDGE_EMIT_FROM (967,500), so for now the node is ~106k blocks ahead of anything
+    provable. Keying on the bundle makes "no tip work" true by construction rather than by a rule
+    somebody has to remember.
+
+    ⚠ `ls -U` and sort, never a shell glob: this directory grows to hundreds of thousands of entries
+    and `bundle_*` overflows the argument list (hazync: the bundle dir is too big to glob).
+    """
+    import subprocess
+    run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=120))
+    cmd = (f"ls -U {remote_dir} 2>/dev/null | sed 's/[^0-9]//g' | grep -v '^$' | sort -n | tail -1")
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, cmd])
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    out = (getattr(r, "stdout", b"") or b"").decode(errors="replace").strip()
+    return int(out) if out.isdigit() else None
+
+
 def fetch_bundle_ssh(height, dest, host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
     """Fetch a TIP bundle straight off the bridge host. Returns (ok, why).
 
@@ -463,6 +485,18 @@ def selftest(control=False):
                                runner=lambda c: _R(0, _j.dumps(FIXTURE).encode()))
     check(not ok and "FIXTURE" in why,
           "⛔ the ssh source runs the SAME shape check — a fixture from the bridge host is refused too")
+
+    # ── tip-work signal assertions ───────────────────────────────────────────────────────────────
+    _seen = []
+    ok_h = highest_tip_bundle("h", runner=lambda c: (_seen.extend(c), _R(0, b"967512\n"))[1])
+    check(ok_h == 967512, f"the highest tip bundle is what says tip work is waiting ({ok_h})")
+    check(highest_tip_bundle("h", runner=lambda c: _R(0, b"\n")) is None,
+          "⚠ an EMPTY tip bundle dir is None, not 0 — 'no tip work' rather than 'block zero'")
+    check(highest_tip_bundle("h", runner=lambda c: _R(255, b"", b"ssh: connect failed")) is None,
+          "an unreachable bridge host is None, not a crash")
+    _j = " ".join(_seen)
+    check("ls -U" in _j and "bundle_*" not in _j,
+          "⚠ it lists with `ls -U`, never a shell glob — the tip bundle dir grows past the arg limit")
 
     print()
     expected = {"ALL", "NO progress", "FIXTURE shape is REFUSED"}
