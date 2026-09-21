@@ -25,6 +25,8 @@ sys.path.insert(0, HERE)
 
 import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
+import tip_board                        # noqa: E402
+import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
 import tip_harvest                      # noqa: E402
@@ -34,6 +36,14 @@ import tip_runner                       # noqa: E402
 import tip_session                      # noqa: E402
 
 PREFIX = "hz-smoke-"
+
+# Heights at or above this come from the TIP bridge; below it, from the coordinator's bundle set.
+# Mirrors HAZYNC_BRIDGE_EMIT_FROM on the bridge host — if that moves, this moves with it.
+TIP_FROM = int(os.environ.get("HAZYNC_TIP_FROM", "967500"))
+
+# Before any block has been measured, assume the slowest one seen on 2026-09-21 (226.7 s). Being
+# wrong high costs idle at the tail; being wrong low orphans a claim for an hour.
+DEFAULT_BLOCK_EST_S = float(os.environ.get("HAZYNC_BLOCK_EST_S", "230"))
 
 
 def log(msg):
@@ -247,12 +257,25 @@ def gpu_smoke(ssh, card, timeout_s=300):
 
 
 def prepare(ssh, card, *, block_path, block_name, repo_hint):
-    """Stage the binary, the fixture and pod-prove.sh, and clear the CUDA compat trap."""
+    """Stage pod-prove.sh and (for the chunk path) the fixture; clear the CUDA compat trap.
+
+    ⚠ `block_path=None` MEANS MODE 6 AND IS NOT A FAILURE. A claimed block is proved from its BUNDLE,
+    which `start_range_aggregate` stages onto the aggregate later -- there is no fixture to push and
+    no per-card chunk phase to push it for. Staging one anyway is what failed the first live session:
+    `--block-path` still held its default container path, so every card reported
+    `fixture=FAILED (0 bytes)` and the run refused before claiming anything.
+    """
     # ⛔ CUDA ERROR 804 ON A CONSUMER CARD IS AN UNPREPARED CARD, NOT A BAD ONE. The driver's compat
     # libraries shadow the real ones; bootstrap2.sh moves them aside for exactly this reason.
     ssh.run(card, "for d in /usr/local/cuda*/compat; do [ -d \"$d\" ] && "
                   "mv \"$d\" \"${d}.disabled\"; done; ldconfig 2>/dev/null; true", timeout=120)
     ok_bin = ssh.push(card, os.path.join(repo_hint, "pod-prove.sh"), "/workspace/pod-prove.sh")
+    if block_path is None:
+        # ⛔ Say so out loud. A silently skipped stage is indistinguishable from one that worked.
+        log(f"  {card.cid}: pod-prove.sh={'ok' if ok_bin else 'FAILED'} "
+            f"fixture=n/a (mode 6 — the bundle is staged onto the aggregate)")
+        ssh.run(card, "chmod +x /workspace/pod-prove.sh", timeout=60)
+        return ok_bin
     ok_blk = ssh.push(card, block_path, f"/workspace/{block_name}")
     # ⛔ scp DOES NOT PRESERVE THE EXECUTABLE BIT. 0644 here killed all 23 cards on 2026-09-20 with
     # `setsid: failed to execute ./pod-prove.sh: Permission denied` and a zero-byte prove.log.
@@ -325,6 +348,20 @@ def main():
     ap.add_argument("--publish-dest", default="")
     ap.add_argument("--publish-key", default="/root/.ssh/hazync_publish")
     ap.add_argument("--keep", action="store_true", help="do NOT terminate (debugging only)")
+    ap.add_argument("--claim", action="store_true",
+                    help="claim a block from the board and prove it from its BUNDLE (mode 6, #367) "
+                         "instead of proving a named fixture")
+    ap.add_argument("--claim-source", choices=("api", "ssh"), default="api",
+                    help="api: /api/witness (board heights, <=418,268). ssh: straight off the bridge "
+                         "host (TIP heights, once the walk passes EMIT_FROM)")
+    ap.add_argument("--bridge-host", default="hazync-coord",
+                    help="ssh host holding tip_bundles, for --claim-source=ssh")
+    ap.add_argument("--session", type=float, default=0.0, metavar="HOURS",
+                    help="keep the fleet and prove continuously for HOURS: the tip block when one is "
+                         "waiting, board work otherwise (#367). Implies --claim.")
+    ap.add_argument("--budget-usd", type=float, default=0.0, metavar="USD",
+                    help="stop the session once this much GPU time has been spent (checked BEFORE "
+                         "starting each block, so the one that crosses the line is never started)")
     ap.add_argument("--cleanup", action="store_true",
                     help="release whatever rented.json records, and exit — for a driver that died hard")
     a = ap.parse_args()
@@ -339,10 +376,54 @@ def main():
     # says so clearly in its own run.log -- but the run itself only sees cards that produce no
     # receipt, restarts them, and burns the fleet doing it. Measured: two RTX 4090s idle at 0% GPU
     # for five minutes while the tick planner dutifully relaunched them.
+    # ── claim FIRST, before spending anything (#367) ──────────────────────────────────────────────
+    # ⛔ THE ORDER MATTERS. Renting takes ~2 minutes and costs money; a claim costs a POST. If the
+    # board has nothing free -- or this key is at its 4-unfinished cap -- the right answer is to exit
+    # having spent nothing, not to discover it with four cards already billing.
+    # ⚠ A claim's TTL starts here, and renting + staging + fetching the prover runs ~4 min against an
+    # hour, so the margin is wide.
+    claimed = None
+    ident = None
+    if a.session:
+        a.claim = True          # a session is claim-driven by definition
+    # ⛔ ident IS LOADED FOR BOTH PATHS. It used to be bound only in the single-block branch, so a
+    # --session run hit a NameError the first time the loop tried to claim -- after renting. The
+    # undefined-name check cannot see this: `ident` IS bound in the module, just not on every path.
+    if a.claim:
+        ident = tip_board.identity()
+        log(f"claiming as {ident[2]!r} ({ident[1][:10]}…)")
+    if a.claim and not a.session:
+        res = tip_board.claim(ident=ident)
+        if res["state"] == "idle":
+            log(f"nothing to claim right now: {res['why']} — nothing rented, nothing spent")
+            return 0
+        if res["state"] != "claimed":
+            raise SystemExit(f"claim refused: {res['why']}")
+        claimed = res["range"]
+        a.block = claimed
+        log(f"claimed block {claimed} (yours for {res['ttl'] // 60} min)")
+
     if not str(a.block).isdigit():
         raise SystemExit(f"--block takes a HEIGHT, not a filename: got {a.block!r}. "
                          f"Try --block {''.join(c for c in str(a.block) if c.isdigit()) or '130000'}")
     block_name = f"block_{a.block}.json"
+
+    # The BUNDLE, not the fixture. `looks_like_bundle` refuses the fixture shape by name, and a
+    # rejected fetch writes no file, so nothing downstream can pick one up by accident.
+    # ⚠ SINGLE-BLOCK ONLY. A session claims inside its loop, so fetching a bundle here would pull
+    # one for --block's DEFAULT height, which was never claimed and will never be proved.
+    bundle_path = None
+    if a.claim and not a.session:
+        os.makedirs(a.rundir, exist_ok=True)
+        bundle_path = os.path.join(a.rundir, f"bundle_{a.block}.json")
+        if a.claim_source == "ssh":
+            ok, why = tip_board.fetch_bundle_ssh(int(a.block), bundle_path, a.bridge_host)
+        else:
+            ok, why = tip_board.fetch_bundle(int(a.block), bundle_path)
+        if not ok:
+            raise SystemExit(f"no bundle for claimed block {a.block}: {why}\n"
+                             f"The claim reopens by itself; nothing was rented.")
+        log(f"bundle for {a.block}: {os.path.getsize(bundle_path)} bytes -> {bundle_path}")
 
     key_file = os.environ.get("RUNPOD_API_KEY_FILE", "/root/.hazync/runpod.key")
     with open(key_file) as fh:
@@ -399,7 +480,17 @@ def main():
                 raise SystemExit(f"refusing: {name} already exists")
             p = api.deploy_listening(name, pub)
             if not p:
-                raise SystemExit(f"no capacity for {name}")
+                # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
+                # raise on the first pod RunPod could not sell, which threw away every pod already
+                # rented. Measured 2026-09-21: five came up, the SIXTH (a spare) had no capacity, and
+                # the run released all five and failed. Renting spares to survive a bad pod, then
+                # failing because a spare was unavailable, is the opposite of the intent.
+                if len(created) >= a.cards:
+                    log(f"  no capacity for {name} — continuing with {len(created)} pod(s), "
+                        f"{a.cards} needed")
+                    break
+                raise SystemExit(f"no capacity for {name} — only {len(created)} pod(s) rented and "
+                                 f"{a.cards} are needed")
             created.append(p)
             # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
             # that dies without releasing leaves cards billing until someone notices. A SIGINT during
@@ -522,7 +613,7 @@ def main():
         phase(f"PREPARING · staging the block onto {len(order)} cards")
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             prepped = list(pool.map(
-                lambda c: (c, prepare(ssh, c, block_path=a.block_path,
+                lambda c: (c, prepare(ssh, c, block_path=(None if a.claim else a.block_path),
                                       block_name=block_name, repo_hint=a.repo)), order))
         unprepared = [c.cid for c, ok in prepped if not ok]
         if unprepared:
@@ -592,8 +683,163 @@ def main():
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
         phase(f"PROVING block {a.block} on {len(order)} cards")
-        log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
-            f"(binds 9110, dialled on {agg_dial})")
+        if not a.claim:
+            log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
+                f"(binds 9110, dialled on {agg_dial})")
+
+        if a.claim:
+            # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
+            def prove_and_submit(rng, *, from_tip=False):
+                """Fetch the bundle, prove it as a range, collect the receipt, submit. Returns the
+                run dict. Shared by the single-block path and the session loop so there is exactly
+                ONE definition of what proving a claimed block means."""
+                bp = os.path.join(a.rundir, f"bundle_{rng}.json")
+                if not os.path.exists(bp):
+                    src = "ssh" if from_tip else a.claim_source
+                    if src == "ssh":
+                        bok, bwhy = tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host)
+                    else:
+                        bok, bwhy = tip_board.fetch_bundle(int(rng), bp)
+                    if not bok:
+                        raise RuntimeError(f"no bundle for {rng}: {bwhy}")
+                hi_l = {"n": 0}
+
+                def _b(progress):
+                    hi_l["n"] = tip_board.beat(rng, progress, hi_l["n"], ident=ident)
+                    return hi_l["n"]
+
+                res = tip_run.run_range(height=int(rng), cards=assignment, runner=runner,
+                                        bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
+                                        on_event=lambda m: log(f"  {m}"), beat=_b,
+                                        max_ticks=1200, tick_s=6.0)
+                rc = os.path.join(a.rundir, f"receipt_{rng}.bin")
+                gotr, which = runner.fetch_receipt(int(rng), rc)
+                if not gotr:
+                    raise RuntimeError(f"{rng} PROVED but the receipt could not be collected: {which}")
+                with open(rc, "rb") as fh:
+                    sok2, serr2 = tip_board.submit(rng, fh.read(), ident=ident)
+                res["submitted"] = sok2
+                if not sok2:
+                    # ⚠ A rejected submit is not a failed proof: the receipt is on disk and can be
+                    # resubmitted without re-proving. Say where, rather than losing it with the pods.
+                    log(f"  ⛔ submit rejected for {rng}: {serr2}  (receipt kept at {rc})")
+                return res
+
+        if a.session:
+            # ── keep the fleet and prove continuously (#367) ──────────────────────────────────────
+            # ⛔ THE FLEET IS RENTED ONCE AND HELD. Releasing between blocks pays rent + a 410 MB
+            # prover fetch + the GPU gate every time -- ~3 minutes of a ~10 minute tip window, for a
+            # fleet that is about to be rebuilt identically.
+            # ⚠ NO PREEMPTION, BY DECISION: a tip block that appears mid-proof waits for the current
+            # board block to finish. Splitting would need two concurrent aggregates, and a board block
+            # at the frontier is small (h=113,537 is a 595 KB bundle against 16 MB at h=418,268).
+            spath = os.path.join(a.rundir, "session.json")
+            state = tip_session.new_state(started_at=time.time(), duration_s=a.session * 3600.0,
+                                          fleet_ids=[p["id"] for p in created])
+            tip_session.save(spath, state)
+            proved_tip = {"h": 0}
+
+            def claim_fn():
+                """The board's next block, or None when the board is genuinely busy.
+
+                ⛔ AN ERROR IS NOT AN IDLE BOARD, AND THIS IS WHERE THAT GETS LOST. `tip_board.claim`
+                goes to some trouble to separate "nothing available / already holds / rate limit"
+                (benign, wait) from a refusal that retrying cannot fix (a signature the coordinator
+                will not verify, a clock it rejects, a reserved handle). Collapsing both to
+                `.get("range")` -- which is None either way -- made the first live session report
+                `idle: the board has nothing free right now` for 15 minutes while G H O S T held
+                0 of its 4 claims and the frontier sat at 113,536 with ~854k blocks unproven.
+                A session that spins on a fixable fault is worse than one that stops.
+                """
+                res = tip_board.claim(ident=ident) or {}
+                st = res.get("state")
+                if st == "claimed":
+                    log(f"  claimed {res['range']} (yours for {res.get('ttl', 3600) // 60} min)")
+                    return res["range"]
+                if st == "idle":
+                    log(f"  board busy: {res.get('why')}")
+                    return None
+                raise RuntimeError(f"claim refused and retrying cannot fix it: {res.get('why')}")
+
+            def work_fn():
+                # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
+                # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
+                t = tip_board.highest_tip_bundle(a.bridge_host)
+                pending = t if (t and t > proved_tip["h"]) else None
+                return tip_controller.next_work(pending, claim_fn)
+
+            def prove_one(rng):
+                # ⚠ A tip height is simply one at or above EMIT_FROM: the bridge emits nothing below
+                # it, so a bundle can only come off the bridge host up there. Board work comes from
+                # the frontier (~113,537) and is fetched from /api/witness. No cleverness needed.
+                from_tip = str(rng).isdigit() and int(rng) >= TIP_FROM
+                out = prove_and_submit(rng, from_tip=from_tip)
+                if from_tip:
+                    proved_tip["h"] = int(rng)
+                return out
+
+            # The fleet's hourly rate, from what RunPod actually charged for the cards we KEPT.
+            live = {c.cid for c in order}
+            rate_hr = sum(p["price"] for p in created if p["name"] in live)
+
+            # ⛔ ELAPSED TIME, NOT BLOCK TIME. A pod bills from the moment it exists; claiming,
+            # fetching a bundle, submitting and waiting on a busy board are all billed and none of
+            # them is inside a block's wall_s. Charging block time undercounted by 17% over 42
+            # blocks. This returns what has accrued since the last call, so the rate in force at
+            # the time is the rate applied — which is what makes it survive a fleet resize.
+            billed_to = {"t": time.time()}
+
+            def spend_fn():
+                now_t = time.time()
+                delta, billed_to["t"] = now_t - billed_to["t"], now_t
+                return rate_hr * (delta / 3600.0)
+
+            # ⛔ MAX, NOT MEDIAN. Measured over 18 blocks: median 30.0 s, max 226.7 s. A
+            # median-based guard let a claim be taken with 30 s left that then ran for nearly four
+            # minutes; the block finished but the claim for the NEXT one was taken and orphaned.
+            # Max never overruns; it costs at most one slow block's worth of idle at the tail.
+            def estimate_s():
+                seen = [b.get("wall_s") for b in state["blocks"].values()
+                        if b.get("ok") and b.get("wall_s")]
+                return max(seen) if seen else DEFAULT_BLOCK_EST_S
+
+            phase(f"SESSION · {a.session:.1f} h on {len(order)} cards"
+                  + (f", budget ${a.budget_usd:.2f}" if a.budget_usd else ""))
+            log(f"  fleet rate ${rate_hr:.3f}/hr across {len(live)} card(s)")
+            summ = tip_session.run_session(state=state, path=spath, prove=prove_one,
+                                           work_fn=work_fn, now=time.time, sleep=time.sleep,
+                                           feed=feed, on_event=lambda m: log(f"  {m}"),
+                                           idle_s=30.0, block_estimate_s=estimate_s,
+                                           budget_usd=(a.budget_usd or None), spend_fn=spend_fn)
+            log("SESSION " + json.dumps(summ, indent=1))
+            return 0
+
+        if a.claim:
+            result = prove_and_submit(a.block)
+            phase(f"VERIFIED claimed block {a.block} in {result.get('wall_s')}s")
+            log("RESULT " + json.dumps(result, indent=1))
+
+            # ⛔ THE RECEIPT IS THE PRODUCT, AND IT LIVES ON A POD THAT IS ABOUT TO BE TERMINATED.
+            # Collect it BEFORE the teardown, or the block is proved and unclaimable — an hour of TTL
+            # burned on work nobody can see.
+            rcpt = os.path.join(a.rundir, f"receipt_{a.block}.bin")
+            got, which = runner.fetch_receipt(int(a.block), rcpt)
+            if not got:
+                raise SystemExit(f"block {a.block} PROVED but the receipt could not be collected: "
+                                 f"{which}. The claim will reopen by itself.")
+            log(f"receipt {os.path.getsize(rcpt)} bytes (from {which})")
+
+            with open(rcpt, "rb") as fh:
+                sok, serr = tip_board.submit(a.block, fh.read(), ident=ident)
+            if sok:
+                phase(f"SUBMITTED block {a.block} as {ident[2]}")
+                log(f"✓ block {a.block} submitted and accepted for {ident[2]!r}")
+                return 0
+            # ⚠ A rejected submit is NOT a failed proof. The receipt is on disk and can be resubmitted
+            # by hand; say where it is rather than losing it with the pods.
+            log(f"⛔ submit rejected: {serr}")
+            log(f"   the receipt is kept at {rcpt} — resubmit without re-proving")
+            return 1
 
         # ⚠ The fold caption is set from the run's own event stream, so it appears when the
         # aggregate actually starts rather than when we guess it might.

@@ -24,6 +24,7 @@ Injectable `runner`, `now` and `sleep` so the whole sequence can be driven by a 
 $1.39 and ten minutes.
 """
 
+import re
 import tip_fleet
 
 
@@ -52,6 +53,72 @@ def verify_fleet_empty(runner, cards):
     return {"clean": sorted(clean, key=key), "dirty": sorted(dirty, key=key),
             "silent": sorted(silent, key=key),
             "ok": not dirty and not silent and len(clean) == len(cards)}
+
+
+def _joins_done(joins):
+    """`joins 12/34` -> 12. The beat's progress signal, and None when there is nothing to read yet."""
+    if not joins:
+        return None
+    m = re.search(r"joins (\d+)/(\d+)", str(joins))
+    return int(m.group(1)) if m else None
+
+
+def run_range(*, height, cards, runner, bundle_path, now, sleep, feed=None, on_event=None,
+              beat=None, max_ticks=1200, tick_s=6.0, unreachable_limit=20):
+    """Prove ONE claimed board block from its bundle (mode 6). Returns a summary dict.
+
+    ⛔ THIS IS NOT `run_block` WITH A DIFFERENT FILE. `run_block` gives every card a chunk of the
+    FIXTURE to prove and then aggregates the chunk receipts; mode 6 executes the guest ONCE over the
+    bundle and pushes segments to whoever has dialled in. There is no per-card chunk phase here at
+    all, so the cards do nothing until they attach — which makes the auto-attach the load-bearing
+    step rather than a convenience.
+
+    `beat` is called as `beat(progress)` whenever the join count RISES, and only then: a claim must
+    not be kept alive by a timer while nothing is happening (#256). It returns the new high-water
+    mark, which is threaded back so the caller owns the state.
+    """
+    events = []
+
+    def emit(msg):
+        events.append(msg)
+        if on_event:
+            on_event(msg)
+
+    t0 = now()
+    ok, why = runner.start_range_aggregate(height=height, bundle_path=bundle_path)
+    if not ok:
+        raise RunRefused(f"could not start the range aggregate: {why}")
+    emit(f"serving block {height} as a range from its bundle")
+
+    # ⛔ ARM THE WORKERS, OR NOTHING ATTACHES. In mode 6 the cards are idle until they dial in, so a
+    # run whose auto-attach never fired looks exactly like a fleet that is merely slow.
+    runner.arm_auto_attach(cards)
+    emit(f"armed {len(cards)} card(s) to dial the aggregate")
+
+    gone, beaten = 0, 0
+    out = {}
+    for tick in range(max_ticks):
+        out = runner.aggregate_status()
+        prog = _joins_done(out.get("joins"))
+        if beat is not None and prog is not None and prog > beaten:
+            beaten = beat(prog)
+        if out.get("verified"):
+            return {"ok": True, "block": str(height), "cards": len(cards),
+                    "wall_s": round(now() - t0, 1), "digest": out.get("digest"),
+                    "joins": out.get("joins"), "events": events}
+        if out.get("unreachable"):
+            gone += 1
+            if gone >= unreachable_limit:
+                raise RunRefused(
+                    f"the aggregator has been unreachable for {gone} consecutive polls "
+                    f"(~{gone * tick_s:.0f}s). Not waiting out the remaining {max_ticks - tick} ticks.")
+        else:
+            gone = 0
+            if not out.get("alive", True):
+                raise RunRefused("the aggregate died before verifying — see agg.err on the card")
+        sleep(tick_s)
+    raise RunRefused(f"the range aggregate never verified within {max_ticks} ticks "
+                     f"(~{max_ticks * tick_s / 60:.0f} min); last joins={out.get('joins')}")
 
 
 def run_block(*, block, cards, runner, now, sleep, stall_s=None, max_ticks=1200, tick_s=3.0,

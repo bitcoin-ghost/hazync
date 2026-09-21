@@ -331,6 +331,65 @@ while time.time() < end:
         self.agg_started_ms = int(time.time() * 1000)
         return self.ssh.run(self.agg, body) is not None
 
+    # ── mode 6: prove ONE BOARD BLOCK from its bridge bundle (hazync#367) ─────────────────────────
+    def start_range_aggregate(self, *, height, bundle_path):
+        """Stage the bundle onto the aggregate and serve it as a range. Returns (ok, why).
+
+        ⛔ THIS IS A DIFFERENT PROOF FROM `start_aggregate`, NOT A VARIANT OF IT. The chunk path proves
+        `block_<h>.json` -- the FIXTURE -- through build_full(), and prover/host/src/main.rs says in as
+        many words that that path "serves the FIXTURE shape and cannot produce a board block at all
+        (#361)". The two files sit side by side with the same height in the name and prove entirely
+        different things:
+
+            fixture  bits, coinbase_hex, merkle, nonce, prev, txs, ...   no accumulator state
+            bundle   in_roots, in_leaves, in_tip, witness, ...           the real UTXO transition
+
+        Only the bundle commits to the chain's accumulator, which is what the board re-verifies. A
+        receipt from the chunk path would cost a claim and an hour of TTL and be rejected.
+
+        ⚠ NO per-card `prove-chunk` phase here. seg-serve executes the guest once and pushes segments
+        to whichever workers have dialled in, so the cards do nothing until they attach.
+        """
+        remote = posixpath.join(self.workdir, f"bundle_{height}.json")
+        if not self.ssh.push(self.agg, bundle_path, remote):
+            return False, f"could not stage {bundle_path} onto {self.agg.cid}"
+        # ⛔ CONFIRM IT LANDED. `scp` exiting 0 is not evidence -- the same silent-drop that once staged
+        # 21 of 22 chunks and left seg-serve panicking with nothing useful in any log.
+        size = (self.ssh.run(self.agg, f"stat -c%s {remote} 2>/dev/null || echo 0") or "0").strip()
+        size = (size.splitlines() or ["0"])[-1]
+        if not (size.isdigit() and int(size) > 0):
+            return False, f"bundle staged as {size} bytes on {self.agg.cid}"
+
+        env = dict(self.prove_env,
+                   HAZYNC_RANGE=str(height),
+                   HAZYNC_BRIDGE_OUT=self.workdir,
+                   HAZYNC_PORT=str(self.agg_port),
+                   HAZYNC_OUT=posixpath.join(self.workdir, f"range_{height}.hzk"),
+                   HAZYNC_SEG_REMOTE="1")
+        ok, why = tip_lifecycle.bind_verdict(env, cards_are_remote=True, accept_public=True)
+        if not ok:
+            return False, f"refusing to start the range aggregate: {why}"
+        assigns = " ".join(f"{k}={v}" for k, v in sorted(env.items()))
+        body = (f"cd {self.workdir} && rm -f agg.log agg.err && {assigns} "
+                f"nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & "
+                f"disown; exit 0")
+        self.agg_started_ms = int(time.time() * 1000)
+        if self.ssh.run(self.agg, body) is None:
+            return False, "the launch command did not come back"
+        return True, ""
+
+    def fetch_receipt(self, height, local_path):
+        """Bring the proved range receipt back. Returns (ok, why).
+
+        ⚠ The aggregate honours HAZYNC_OUT (main.rs:1505/3961) and otherwise writes
+        `aggregate_receipt.bin`; we set the former, and fall back to the latter so a run started by an
+        older driver is still collectable.
+        """
+        for name in (f"range_{height}.hzk", "aggregate_receipt.bin"):
+            if self.ssh.fetch(self.agg, posixpath.join(self.workdir, name), local_path):
+                return True, name
+        return False, "no receipt found on the aggregate (tried range_<h>.hzk, aggregate_receipt.bin)"
+
     def aggregate_status(self):
         """Verified? still alive? and the join-tree progress, which exists nowhere else.
 
