@@ -139,7 +139,25 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
     return ready, portmap
 
 
-HOST_URL = ("https://github.com/bitcoin-ghost/hazync/releases/download/v0.21.0/"
+# ⛔ THIS PIN IS LOAD-BEARING, AND IT WAS SEVEN RELEASES STALE. Every tip run proved with v0.21.0 —
+# the release BEFORE the instrumentation the fleet exists to produce. Measured on a real run
+# 2026-09-21 (block 741,000, 3 cards, VERIFIED) whose harvest could answer nothing:
+#
+#   #253  execution 12.3 s, 35 segments, 15.8 MB, marker `, depth 4`   <- pre-#236 spelling
+#         ⚠ NOT a post-#236 binary — this log cannot speak to #253
+#   #252  [rtt]: NOT MEASURED (no [rtt] lines in agg.log)
+#
+# What v0.21.0 is missing, and what each one costs us:
+#   #236  v0.21.1  stream segments as they are produced   -> no `(streamed)` marker, #253 unanswerable
+#   #254  v0.21.2  every seg-connect task line timestamped -> no epochs, so no overlap can be computed
+#   #402  v0.21.7  seg-connect RECONNECTS instead of exiting on a dropped link
+#
+# ⚠ That last one is why a worker "not attaching" and a stale binary look identical from here: on
+# v0.21.0 a worker that loses its link is simply gone, and the run finishes on the coordinator alone.
+# ⇒ Track the CURRENT release. A tip run on an old binary still proves the block correctly — it just
+# produces none of the evidence, which is the expensive way to learn this.
+HOST_RELEASE = "v0.21.7"
+HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
 
 
