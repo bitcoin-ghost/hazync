@@ -126,6 +126,16 @@ jobs:
         run: |
           cd coordinator
           python3 test_host_pin.py --control
+      - name: Nothing is proved while the jobs mutex is held (hazync#252 lever 2)
+        # ⛔ Lever 2 proves the narrow top join levels in seg_serve_cmd instead of distributing
+        # them. Every worker takes its next job through that one mutex, so a ~354 ms join inside
+        # the lock scope would stall the whole fleet -- silently, since the proof still comes out
+        # correct, only slower. The shipped code decides under the lock and proves after it, an
+        # ordering that reads as a tidy-up in a diff.
+        # ⚠ No separate --control step: this one plants the bug in main.rs and in five synthetic
+        # samples on EVERY run, and fails if any of them stops behaving.
+        run: python3 prover/host/tests/no_proving_under_the_lock.py
+
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)
