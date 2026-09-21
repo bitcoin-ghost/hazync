@@ -256,6 +256,17 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
 
     while True:
         t = now()
+        # ⛔ CHARGE BEFORE DECIDING, AND ON EVERY LOOP — NOT PER BLOCK. Pods bill continuously:
+        # claiming, fetching a bundle, submitting and waiting on a busy board all cost money, and
+        # none of it is inside any block's wall_s. Measured 2026-09-21: 42 blocks charged $0.961
+        # against ~$1.13 actually billed, a 17% undercount, so a $6.00 cap would have stopped at
+        # roughly $7.05 spent. `spend_fn()` now takes NO argument and returns what has accrued
+        # since it was last called, which is also what keeps it right when the fleet changes size.
+        if spend_fn is not None:
+            try:
+                add_spend(state, spend_fn())
+            except Exception:
+                pass                      # accounting must never stop a session
         # ⚠ A CALLABLE ESTIMATE IS RE-ASKED EVERY LOOP. A fixed number cannot learn: this session
         # measured a median of 30.0 s and a MAX of 226.7 s, so a median-based guard would have let
         # the slowest block overrun its window by minutes.
@@ -291,14 +302,6 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
             emit(f"block {rng} failed: {type(exc).__name__}: {exc}")
 
         record_block(state, rng, result, at=now())
-        # ⛔ CHARGE PER BLOCK, ACCUMULATING. add_spend's own note says why a recomputed
-        # cards x rate x elapsed is wrong the moment the fleet changes size. `spend_fn(wall_s)`
-        # returns what THIS block cost; the caller owns the rate because it owns the fleet.
-        if spend_fn is not None:
-            try:
-                add_spend(state, spend_fn(result.get("wall_s") or 0.0))
-            except Exception:
-                pass                      # accounting must never fail a block
         save(path, state)
 
         if result.get("ok"):

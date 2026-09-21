@@ -166,7 +166,7 @@ check(plan["action"] == "stop",
 plan = tip_session.plan_next(st2, 10.0, work={"range": "114776"}, block_estimate_s=30.0)
 check(plan["action"] == "prove", "plenty of time -> prove")
 
-# ── 8. spend accumulates per block, from the caller's own rate ───────────────────────────────────
+# ── 8. spend charges ELAPSED time, not block time, and on every loop ─────────────────────────────
 # ⚠ `now` MUST ADVANCE. A clock that returns a constant makes remaining_s() never fall, so an idle
 # session loops for ever -- which is exactly what the first draft of this test did.
 st3 = tip_session.new_state(started_at=0.0, duration_s=50.0)
@@ -178,14 +178,39 @@ def _now():
     return clock["t"]
 
 
+# Each loop charges 20 s of wall clock at $3.60/hr = $0.02, regardless of how long a block took.
+charges = []
+
+
+def _spend():
+    charges.append(1)
+    return 3.60 * (20.0 / 3600.0)
+
+
 tip_session.run_session(
     state=st3, path=os.path.join(tempfile.mkdtemp(prefix="sp_"), "s.json"),
-    prove=lambda rng: {"ok": True, "wall_s": 60.0},
+    prove=lambda rng: {"ok": True, "wall_s": 1.0},     # a ~free block: block time is NOT the cost
     work_fn=lambda: {"range": "1"},
     now=_now, sleep=lambda s: None,
-    spend_fn=lambda w: 1.47 * (w / 3600.0), budget_usd=None, block_estimate_s=None)
-check(st3["spend_usd"] > 0, f"⛔ spend is RECORDED, not left at 0.0 ({st3['spend_usd']}) — the first "
-                            f"live session reported spend_usd 0.0 while the driver logged $0.535")
+    spend_fn=_spend, budget_usd=None, block_estimate_s=None)
+check(charges and st3["spend_usd"] >= 0.02,
+      f"⛔ a 1-second block still costs 20 s of RENTAL ({st3['spend_usd']}) — pods bill "
+      f"continuously, and charging block time undercounted 42 real blocks by 17%")
+
+# ── 8b. the budget sees the charge made THIS loop, not the last one ──────────────────────────────
+st4 = tip_session.new_state(started_at=0.0, duration_s=10000.0)
+clock4 = {"t": 0.0}
+plans = []
+tip_session.run_session(
+    state=st4, path=os.path.join(tempfile.mkdtemp(prefix="sp2_"), "s.json"),
+    prove=lambda rng: (plans.append(rng), {"ok": True, "wall_s": 1.0})[1],
+    work_fn=lambda: {"range": "1"},
+    now=lambda: (clock4.__setitem__("t", clock4["t"] + 1.0), clock4["t"])[1],
+    sleep=lambda s: None, spend_fn=lambda: 0.60, budget_usd=1.00, block_estimate_s=None)
+check(len(plans) <= 2,
+      f"⛔ the budget stops within one block of the cap ({len(plans)} proved at $0.60/loop against "
+      f"$1.00) — charging before the decision is what prevents an overrun")
+
 
 print()
 EXPECTED = {"the workers are ARMED", "the beat fires ONLY"}

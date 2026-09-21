@@ -782,8 +782,17 @@ def main():
             live = {c.cid for c in order}
             rate_hr = sum(p["price"] for p in created if p["name"] in live)
 
-            def spend_fn(wall_s):
-                return rate_hr * (float(wall_s or 0.0) / 3600.0)
+            # ⛔ ELAPSED TIME, NOT BLOCK TIME. A pod bills from the moment it exists; claiming,
+            # fetching a bundle, submitting and waiting on a busy board are all billed and none of
+            # them is inside a block's wall_s. Charging block time undercounted by 17% over 42
+            # blocks. This returns what has accrued since the last call, so the rate in force at
+            # the time is the rate applied — which is what makes it survive a fleet resize.
+            billed_to = {"t": time.time()}
+
+            def spend_fn():
+                now_t = time.time()
+                delta, billed_to["t"] = now_t - billed_to["t"], now_t
+                return rate_hr * (delta / 3600.0)
 
             # ⛔ MAX, NOT MEDIAN. Measured over 18 blocks: median 30.0 s, max 226.7 s. A
             # median-based guard let a claim be taken with 30 s left that then ran for nearly four
