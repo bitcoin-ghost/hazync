@@ -31,8 +31,10 @@ and settings), [`THREAT_MODEL.md`](THREAT_MODEL.md) (who is trusted for what).
   vendored risc0 (`vendor/risc0-zkvm`) replaces the linear chain of joins with a balanced tree of depth
   `log2(N)` whose levels are published as work (`docs/history/HAZYNC_ARCHITECTURE.md`, "balanced join tree").
 - **resolve** — discharging an assumption (e.g. a chunk receipt the aggregate `env::verify`s) against a
-  conditional receipt; `seg-serve` sends resolves to workers one at a time under `RESOLVE_TAG`, or runs
-  them itself with `HAZYNC_RESOLVE_LOCAL=1` (`docs/FLEET_OPERATIONS.md`).
+  conditional receipt; `seg-serve` **runs them itself by default** since 2026-09-21 (hazync#446), or
+  sends them to workers one at a time under `RESOLVE_TAG` with `HAZYNC_RESOLVE_LOCAL=0`
+  (`docs/FLEET_OPERATIONS.md`). The chain is serial either way — each step consumes the previous
+  step's output — so distributing it bought no parallelism and paid a round trip per step.
   ⚠ The same word also names risc0's `SegmentRef::resolve()`, which merely loads a segment
   (`session.segments[..].resolve()` in `prover/host/src/main.rs`).
 

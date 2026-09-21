@@ -91,11 +91,81 @@ HAZYNC_WORKER_ID=w1 ./host seg-connect <coordinator-host>:9110
 | merge the session journal and assumptions into the last claim | segment coordinator |
 | lift the merged last segment | a worker (`LIFT_TAG`) |
 | join tree | workers (`JOIN_TAG`), `log2(N)` levels |
-| resolve assumptions (aggregate only) | workers (`RESOLVE_TAG`), one at a time, because each consumes the previous one's output; `HAZYNC_RESOLVE_LOCAL=1` runs them on the coordinator instead (#252, opt-in) |
+| resolve assumptions (aggregate only) | **the coordinator, by default** since #446 — the chain is serial (each step consumes the previous one's output), so distributing it bought no parallelism and paid a round trip per step. `HAZYNC_RESOLVE_LOCAL=0` sends them to workers under `RESOLVE_TAG` instead (#252) |
 | verify every returned receipt, assemble, verify against `METHOD_ID` | segment coordinator |
 
 Wire tags are bits of the job index: `JOIN_TAG` bit 31, `RESOLVE_TAG` bit 30, `NOLIFT_TAG` bit 29,
 `LIFT_TAG` bit 28. A worker tests resolve before join, because both bodies are pairs.
+
+## Renting the fleet: `coordinator/tip_smoke.py`
+
+Everything above assumes cards that already exist. `tip_smoke.py` is the driver that rents them,
+stages the prover and the block, runs the gates, proves, harvests the evidence and releases the pods.
+
+```sh
+python3 coordinator/tip_smoke.py --cards 3 --spares 3 \
+    --block 741000 --block-path prover/block_741000.json \
+    --rundir /tmp/run1 --repo tools/milestone --live-rig tools/live --key ~/.ssh/hz_smoke
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--cards` | 2 | cards the run needs. Fewer surviving the gates and the run fails rather than proving on a smaller fleet than asked for |
+| `--spares` | 1 | extra pods rented so one bad pod does not end the run. Unused spares are released immediately |
+| `--gpu-type` | `NVIDIA GeForce RTX 4090` | comma-separated, in preference order. **4090 only by default** — see below |
+| `--block` / `--block-path` | 130000 | the block, and the **local** path to its fixture. ⚠ `--block-path` is pushed from this machine; it is not a path on the card |
+| `--claim` | off | claim a board block and prove it from its bundle (mode 6) instead of a fixture |
+| `--session HOURS` / `--budget-usd` | off | keep claiming and proving until the time or money runs out |
+| `--cleanup` | — | release whatever `rented.json` records and exit, for a driver that died hard |
+
+### ⭐ Card type is the largest single lever on wall-clock
+
+Measured 2026-09-21, 9 runs on block 741000 (hazync#448):
+
+| fleet (3 cards) | times | mean | spread |
+|---|---|---|---|
+| **all 4090** | 267.9 / 271.7 / 276.9 s | **272.2 s** | **9.0 s** |
+| contains an A40 | 357.9 / 380.2 / 410.4 s | 382.8 s | 52.5 s |
+
+⛔ **And the slower fleet cost MORE**: the all-4090 run billed **$0.243**, the 4090+2×A40 run
+**$0.262**. The A40 is $0.49/hr against the 4090's $0.74/hr and is slow enough that the cheaper card
+loses on **price per proof**. Choosing on price per hour is the wrong objective.
+
+`deploy_listening` walks `--gpu-type` in order and takes the first RunPod will sell, so a list means
+**silent fallback**. That is how mixed fleets appeared. Pass
+`--gpu-type "NVIDIA GeForce RTX 4090,NVIDIA A40"` only when completing a run matters more than its
+wall-clock — and expect it to be slower and dearer when the fallback fires.
+
+⚠ **Check the `FLEET:` line before comparing any two runs.** A mixed fleet is flagged:
+
+```
+FLEET: 3x NVIDIA GeForce RTX 4090
+FLEET: 1x NVIDIA GeForce RTX 4090, 2x NVIDIA A40   ⚠ MIXED CARD TYPES — timings are NOT comparable
+```
+
+Until #449 nothing stated the composition, so a mixed fleet and a uniform one were identical in every
+log. 142 s of spread was published as a geography effect when it was card type all along.
+
+### Passing levers to the cards
+
+Any `HAZYNC_*` variable set in the driver's environment is forwarded to the aggregate **and every
+worker** (`tip_lifecycle.lever_env`, #445). Keys the driver computes per run — `HAZYNC_BLOCK`,
+`HAZYNC_PORT`, `HAZYNC_CHUNKS`, `HAZYNC_RANGE` and friends — are **reserved** and never taken from
+your shell, so a stray `HAZYNC_BLOCK` cannot retarget a run while the logs still name the block you
+asked for.
+
+```sh
+HAZYNC_JOIN_LOCAL_MAX=2 python3 coordinator/tip_smoke.py --cards 3 ...
+```
+
+⛔ Before #445 `prove_env` was a hardcoded five-key dict and the worker launch line carried only
+`HAZYNC_WORKER_ID`, so **no lever reached anything**. An A/B run against an unreachable lever does
+not fail loudly: both arms run identically and the result reads "no measurable difference", which is
+indistinguishable from a lever that does nothing.
+
+⚠ `HAZYNC_LIFTX_HINT`, `HAZYNC_FIELD_BIGINT2` and `HAZYNC_ECMULT_WINDOW` are read only in
+`methods/build.rs` and `methods/guest/build.rs`. They are **build-time guest flags** baked into the
+released binary; setting them at runtime does nothing.
 
 ## A board block across many cards (mode 6)
 
@@ -216,9 +286,13 @@ shape to optimise for — see the per-pod table in the record.
 | `HAZYNC_RECONNECT_MAX_S` | **600** | how long a worker keeps trying to reconnect after a dropped link before giving up, measured from the **current** outage. `0` restores the old behaviour (exit on drop) |
 | `HAZYNC_PUSH_DEPTH` | 4 | jobs in flight per worker |
 | `HAZYNC_PUSH_BYTES` | 64 MiB | in-flight byte budget; clamps the depth. Raise this, not the depth |
-| `HAZYNC_RESOLVE_LOCAL` | unset | `=1` resolves on the coordinator (#252) |
+| `HAZYNC_RESOLVE_LOCAL` | **on** | resolves on the coordinator. `=0` pushes them to workers. ⚠ Value-tested, not presence-tested: only an exact `0` disables it, and **unset means ON** (#252/#446) |
+| `HAZYNC_JOIN_LOCAL_MAX` | `0` (off) | proves join levels of `<= N` pairs on the aggregate rather than distributing them. The narrow top of the tree is serial, so those joins buy no parallelism and still pay a round trip. Measured worth ~0.4–1.6 s; off by default pending a fleet run (#252/#444) |
 | `HAZYNC_WORKER_ID` | `push1` | worker name in logs; set it per worker |
 | `HAZYNC_SEG_QUIET` | unset | worker prints the old sparse, undated lines instead of one timestamped line per task (#254). Presence-tested |
+
+⚠ **`HAZYNC_RESOLVE_LOCAL` is the exception to the rule below**: it is value-tested, defaults to ON,
+and only an exact `0` turns it off. An unset variable means the feature is ACTIVE.
 
 ⚠ **Presence-tested means `HAZYNC_AGG=0` still turns the aggregate ON.** These flags are checked with
 `env::var(..).is_ok()`, so only unsetting them disables them. Every presence-tested flag in `main.rs` behaves
