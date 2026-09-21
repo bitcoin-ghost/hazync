@@ -34,6 +34,16 @@ PROTECTED = frozenset({"hz370-a", "hz-board-5"})
 # failed and the session moves on -- the alternative is a 24-hour run that proves one block zero times.
 MAX_ATTEMPTS = 3
 
+# ⛔ A BAD BLOCK AND A BAD FLEET NEED DIFFERENT EVIDENCE. MAX_ATTEMPTS asks "is THIS block bad?" and
+# is right to keep going afterwards -- one bad block must not end a 24-hour run. Nothing asked "is
+# the FLEET bad?", and the answer is a different observation: N blocks in a row failing, whichever
+# blocks they are. Without it, a dead aggregate makes every block fail, each is retired after 3
+# tries, the loop claims another, and the session pays for a fleet that cannot prove anything --
+# taking a board claim each time and holding it for its TTL (hazync#443).
+# ⚠ Consecutive FAILURES, never slowness: the slowest legitimate block measured 226.7 s against a
+# 29.7 s median, and a session that gives up on a slow block is worse than one that waits.
+MAX_CONSECUTIVE_FAILS = int(os.environ.get("HAZYNC_MAX_CONSECUTIVE_FAILS", "3"))
+
 
 class SessionRefused(RuntimeError):
     """A session-level gate said no."""
@@ -254,6 +264,7 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
         if on_event:
             on_event(msg)
 
+    consecutive_fails = 0
     while True:
         t = now()
         # ⛔ CHARGE BEFORE DECIDING, AND ON EVERY LOOP — NOT PER BLOCK. Pods bill continuously:
@@ -303,6 +314,15 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
 
         record_block(state, rng, result, at=now())
         save(path, state)
+        # The fleet verdict, distinct from the per-block one above.
+        if result.get("ok"):
+            consecutive_fails = 0
+        else:
+            consecutive_fails += 1
+            if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+                emit(f"stopping: {consecutive_fails} blocks failed in a row — this is the FLEET, not "
+                     f"the blocks. Releasing rather than paying for cards that cannot prove.")
+                break
 
         if result.get("ok"):
             emit(f"block {rng} verified in {result.get('wall_s')}s "

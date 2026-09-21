@@ -212,6 +212,43 @@ check(len(plans) <= 2,
       f"$1.00) — charging before the decision is what prevents an overrun")
 
 
+# ── 9. ⛔ A DEAD FLEET STOPS THE SESSION (hazync#443) ─────────────────────────────────────────────
+st5 = tip_session.new_state(started_at=0.0, duration_s=100000.0)
+tried, c5 = [], {"t": 0.0}
+tip_session.run_session(
+    state=st5, path=os.path.join(tempfile.mkdtemp(prefix="fl_"), "s.json"),
+    prove=lambda rng: (tried.append(rng), {"ok": False, "events": ["boom"]})[1],
+    work_fn=lambda: {"range": str(1000 + len(tried))},      # a DIFFERENT block every time
+    now=lambda: (c5.__setitem__("t", c5["t"] + 1.0), c5["t"])[1],
+    sleep=lambda s: None, block_estimate_s=None)
+check(len(tried) == tip_session.MAX_CONSECUTIVE_FAILS,
+      f"⛔ {tip_session.MAX_CONSECUTIVE_FAILS} failures in a row stops the session "
+      f"({len(tried)} attempted) — each on a DIFFERENT block, so MAX_ATTEMPTS never fires and "
+      f"without this the loop claims and pays for ever on a fleet that cannot prove")
+
+# ⚠ …and a success in between RESETS it: an occasional bad block is not a dead fleet.
+st6 = tip_session.new_state(started_at=0.0, duration_s=100000.0)
+seq, c6 = [False, False, True, False, False], {"t": 0.0, "i": 0}
+done = []
+
+
+def _prove6(rng):
+    i = c6["i"]; c6["i"] += 1
+    done.append(rng)
+    return {"ok": seq[i], "wall_s": 1.0} if i < len(seq) else {"ok": False}
+
+
+tip_session.run_session(
+    state=st6, path=os.path.join(tempfile.mkdtemp(prefix="fl2_"), "s.json"),
+    prove=_prove6, work_fn=lambda: {"range": str(2000 + c6["i"])},
+    now=lambda: (c6.__setitem__("t", c6["t"] + 1.0), c6["t"])[1],
+    sleep=lambda s: None, block_estimate_s=None)
+# fail, fail, PASS (resets), fail, fail, fail -> the third consecutive failure is the SIXTH attempt.
+# Without the reset it would have stopped at the third attempt.
+check(len(done) == 6,
+      f"⚠ a success RESETS the counter: F,F,PASS,F,F,F stops on the 6th attempt, not the 3rd "
+      f"({len(done)}) — an occasional bad block is not a dead fleet")
+
 print()
 EXPECTED = {"the workers are ARMED", "the beat fires ONLY"}
 if CONTROL:
