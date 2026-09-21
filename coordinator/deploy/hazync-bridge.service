@@ -56,7 +56,25 @@ ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/var/lib/hazync/bitcoin-cl
 # the MAIN process's status and is never applied to an ExecStartPre failure (measured: it restarted
 # regardless). StartLimitBurst in [Unit] is what actually bounds the loop.
 ExecStartPre=/bin/sh -c 'test -d "${HAZYNC_BRIDGE_OUT}" || { echo "HAZYNC_BRIDGE_OUT=${HAZYNC_BRIDGE_OUT} is not a directory - every box must set it in a paths.conf drop-in" >&2; exit 78; }'
-ExecStart=/usr/local/bin/hazync-host bridge
+# ⛔ hazync-host-bridge, NOT hazync-host. They are DIFFERENT GUESTS, on purpose:
+#
+#     /usr/local/bin/hazync-host          METHOD_ID 37987b85…   canonical
+#     /usr/local/bin/hazync-host-bridge   METHOD_ID 05a5a279…   the bridge build
+#
+# A RISC0 image id absorbs the build's absolute paths, so a canonical guest can only come from the
+# fixed-path container build in reproduce/Dockerfile. That is fine here — the bridge walks blocks and
+# writes checkpoints, it NEVER proves. ⚠ The COORDINATOR keeps hazync-host (canonical) for HAZYNC_HOST
+# verification; do not point that at this binary.
+#
+# ⛔ THIS LINE USED TO NAME hazync-host, AND THE CORRECT BINARY WAS RESTORED ONLY BY zz-emit-from.conf
+# WINNING AN ALPHABETICAL SORT. Both the base unit and paths.conf named the wrong one, so the live
+# value depended on a `zz-` prefix outranking them. Rename that drop-in, lose it, or add one that
+# sorts after it, and the bridge silently falls back to a binary with the wrong guest AND no
+# HAZYNC_BRIDGE_EMIT_FROM support (that flag postdates it) — which means it resumes writing a bundle
+# per block. zz-emit-from.conf's own comment puts that at ~6.3 MB/block, filling /srv/bulk in ~31 h.
+# ⇒ Every layer now names the same binary, so nothing depends on sort order. The override in
+# zz-emit-from.conf is left in place deliberately: it is now belt-and-braces rather than load-bearing.
+ExecStart=/usr/local/bin/hazync-host-bridge bridge
 Restart=always
 RestartSec=10
 # generous startup: the first genesis->tip pass runs inside the process (checkpoints along the way)
