@@ -5257,6 +5257,14 @@ fn seg_work_cmd() {
         // assumption set are merged into its claim before it is lifted, and a worker has neither the
         // session nor any way to get it. So the last worker returns an unlifted SegmentReceipt and
         // the segment coordinator finishes that one itself.
+        // ⚠ THIS FLAG DOES NOT APPLY TO THE TIP FLEET, AND ITS 58% -> 2.1% IS ALREADY BANKED.
+        // It is read here (seg-work) and in seg_coordinate_tree_cmd -- both MANUAL commands. Every
+        // automated run uses the push path, seg_connect_cmd, where the lift is UNCONDITIONAL: every
+        // segment but the last is lifted on the worker that proved it, gated only by NOLIFT_TAG.
+        // Measured 2026-09-21 over 12 runs on block 741000: worker task kinds were
+        // `segment:34, segment_nolift:1` in EVERY arm including the baseline, with and without this
+        // variable set. Setting it changes nothing on a tip run.
+        // ⇒ Do not read SEGDIST_TASKS.md's table as a lever still waiting to be pulled (hazync#252).
         let lift_here = std::env::var("HAZYNC_WORKER_LIFTS").ok().as_deref() == Some("1") && i + 1 < count;
         if lift_here {
             let lifted = server.lift(&sr).expect("lift");
