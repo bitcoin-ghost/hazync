@@ -2,6 +2,18 @@
 Description=Hazync archive-node bridge (resident forest, emits per-block bundles)
 After=network-online.target bitcoind.service
 Wants=network-online.target
+# ⛔ BOUND THE RESTART LOOP. Restart=always with RestartSec=10 and no start limit thrashes for ever:
+# the 2026-09-18/19 OOM episode was 22 kills between 20:27 and 06:35 with ONE ALERT PER KILL, all
+# night, and made no progress. A fast-failing fault (a missing paths.conf drop-in fails ExecStartPre
+# in well under a second) burns these 10 starts in ~100 s and then stops FAILED, so it alerts ten
+# times rather than for ever.
+# ⚠ Deliberately generous enough NOT to change behaviour for a genuine slow crash loop: a bridge that
+# dies after minutes of work stays well under 10 restarts per 10 minutes and keeps retrying, which is
+# what you want for a multi-day walk that resumes from its checkpoint.
+# ⚠ Measured on a throwaway unit before shipping: 10 starts in ~30 s at RestartSec=2, then
+# ActiveState=failed and no further attempts; the passing case still reaches active.
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -13,13 +25,37 @@ Group=hazync
 # It only EMITS witness data — it never proves — so its guest METHOD_ID is irrelevant (provers use the
 # canonical release binary). CPU-only, no GPU.
 Environment=HAZYNC_BITCOIN_DATADIR=/var/lib/hazync/bitcoin-client
-Environment=HAZYNC_BRIDGE_OUT=/var/lib/hazync/bridge_bundles
+# ⛔ DELIBERATELY UNUSABLE. EVERY BOX MUST SET HAZYNC_BRIDGE_OUT IN ITS OWN paths.conf DROP-IN.
+# This used to read /var/lib/hazync/bridge_bundles, which is wrong on every box that runs this unit:
+#   bridge host (hazync-coord)  -> /var/lib/hazync/tip_bundles          (tip walk, EMIT_FROM=967500)
+#   coordinator (hazync-proof)  -> /srv/bulk/hazync/bridge_bundles      (the backfill set)
+# Both already override it, so the old value was never used — it sat there as a silent wrong default
+# that would take effect the moment a drop-in was lost or mistyped. On the bridge host that meant
+# quietly refilling a directory we had just emptied of 176,359 superseded bundles (95 GB, hazync#347),
+# with bundles below EMIT_FROM that nothing wants.
+# ⚠ Removing the line is NOT the fix: `prover/host/src/main.rs` falls back to "/root/bridge_bundles"
+# when the variable is unset, which is worse — ProtectHome/ProtectSystem make /root a trap, and that
+# path predates #58 moving everything out of /root.
+# ⇒ A sentinel plus the ExecStartPre below, so a missing drop-in FAILS THE UNIT instead of writing
+# somewhere wrong. Verified on a throwaway unit before shipping: with the sentinel the unit fails
+# (Result=exit-code); with a real path it starts (Result=success).
+Environment=HAZYNC_BRIDGE_OUT=/etc/hazync/UNSET-set-HAZYNC_BRIDGE_OUT-in-a-paths-drop-in
 Environment=HAZYNC_BRIDGE_FINALITY=100
 Environment=HAZYNC_BRIDGE_CKPT=2000
 Environment=HAZYNC_BRIDGE_POLL=30
 # Wait for the node to answer before starting (bridge panics -> restarts if bitcoind is down; this avoids
 # a noisy restart loop during the node's own startup).
 ExecStartPre=/bin/bash -c 'until bitcoin-cli -datadir=/var/lib/hazync/bitcoin-client getblockcount >/dev/null 2>&1; do sleep 5; done'
+# ⛔ REFUSE TO START WITHOUT A REAL OUTPUT DIRECTORY. systemd expands ${HAZYNC_BRIDGE_OUT} from this
+# unit's effective environment, so this sees whatever the drop-ins resolved to. The sentinel above
+# does not exist, so a lost or mistyped drop-in stops the bridge loudly at startup rather than
+# silently emitting bundles into the wrong tree.
+# ⚠ It PRINTS THE OFFENDING VALUE. A bare `test -d` fails with no message, which turns a one-line
+# config fault into a hunt through a unit file and six drop-ins.
+# ⚠ exit 78 is EX_CONFIG, for the reader — it is NOT load-bearing: RestartPreventExitStatus= consults
+# the MAIN process's status and is never applied to an ExecStartPre failure (measured: it restarted
+# regardless). StartLimitBurst in [Unit] is what actually bounds the loop.
+ExecStartPre=/bin/sh -c 'test -d "${HAZYNC_BRIDGE_OUT}" || { echo "HAZYNC_BRIDGE_OUT=${HAZYNC_BRIDGE_OUT} is not a directory - every box must set it in a paths.conf drop-in" >&2; exit 78; }'
 ExecStart=/usr/local/bin/hazync-host bridge
 Restart=always
 RestartSec=10
