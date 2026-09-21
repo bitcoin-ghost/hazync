@@ -6027,6 +6027,28 @@ fn seg_connect_cmd(addr: &str) {
 /// position `npairs` of the next level, keeping its position so adjacency holds.
 ///
 /// Extracted so the equivalence test below exercises the shipped function rather than a copy of it.
+/// hazync#252 lever 1: should the resolve chain run on the aggregate rather than the fleet?
+///
+/// ⭐ ON BY DEFAULT since 2026-09-21, on measurement. `HAZYNC_RESOLVE_LOCAL=0` restores pushing the
+/// chain to workers.
+///
+/// The chain is SERIAL by construction -- each step consumes the previous step's conditional
+/// receipt -- so distributing it buys no parallelism whatsoever and pays a full round trip per step,
+/// carrying a receipt out and back. Measured live on block 741000 (12 runs, 3x A40):
+///
+///     resolve   rtt p50 902.2 ms   compute p50 431.0 ms   =>  transport 471.2 ms   52%
+///
+/// and confirmed structurally: with the lever on, `resolve` tasks disappear from the distributed
+/// set entirely (`dist={join:34, lift:1}` against `{join:34, lift:1, resolve:3}` for the default).
+///
+/// ⚠ The saving is small in absolute terms -- ~1.4 s on this block -- but it is strictly positive
+/// and has no counterweight: local costs compute alone, remote costs compute PLUS the trip. Unlike
+/// lever 2 there is no serial-versus-parallel trade, because the chain was never parallel.
+fn resolve_runs_locally(v: Option<&str>) -> bool {
+    // Absent means ON. "0" is the only way off -- an unset variable must not read as disabled.
+    v.map(|x| x != "0").unwrap_or(true)
+}
+
 /// hazync#252 lever 2: should this join level be proved here rather than handed to a worker?
 ///
 /// Narrow levels only. A level of `npairs` joins can occupy at most `npairs` workers, so once the
@@ -6683,7 +6705,8 @@ come back by itself. Start one against this coordinator, or re-run.");
     // the fleet, so distributing buys no parallelism at all and still pays that trip: the widths run
     // 37, 19, 10, 5, 3, 2, 1, and each of those levels waits on the one below.
     //
-    // ⚠ OFF BY DEFAULT, exactly as lever 1 shipped (HAZYNC_RESOLVE_LOCAL, #270). This changes where
+    // ⚠ OFF BY DEFAULT. (Lever 1 shipped off too and was turned ON on 2026-09-21 once measured;
+    // this one is measured at ~0.4-1.6 s and stays off pending a fleet run.) This changes where
     // a join runs, never which two receipts meet or in which order -- `server.join(&a, &b)` is the
     // same call a worker makes on the same pair -- but it is the prover's core and it earns its
     // default the way lever 1 did: by being measured in the wild first.
@@ -6812,7 +6835,7 @@ come back by itself. Start one against this coordinator, or re-run.");
                  local_join_s, local_join_s / local_joins as f64);
     }
 
-    let res_local = std::env::var("HAZYNC_RESOLVE_LOCAL").map(|v| v == "1").unwrap_or(false);
+    let res_local = resolve_runs_locally(std::env::var("HAZYNC_RESOLVE_LOCAL").ok().as_deref());
     let t_res = Instant::now();
     for (k, a) in assumptions.iter().enumerate() {
         if res_local {
@@ -6846,7 +6869,7 @@ come back by itself. Start one against this coordinator, or re-run.");
     println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
     println!("  assembly       {asm_s:8.1} s   <- last segment + join tree + resolves");
     if nres > 0 {
-        println!("    of which resolves {res_s:6.1} s   <- {nres} {}", if res_local { "run locally (HAZYNC_RESOLVE_LOCAL)" } else { "pushed to workers" });
+        println!("    of which resolves {res_s:6.1} s   <- {nres} {}", if res_local { "run locally (the default)" } else { "pushed to workers (HAZYNC_RESOLVE_LOCAL=0)" });
     }
     println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
     println!();
@@ -7054,7 +7077,8 @@ impl Drop for Report119OnExit {
 
 #[cfg(test)]
 mod join_tree_tests {
-    use super::{join_tree_widths, join_stays_local, JOIN_TAG, peer_job_timeout_s, no_peers_breached};
+    use super::{join_tree_widths, join_stays_local, resolve_runs_locally, JOIN_TAG,
+                peer_job_timeout_s, no_peers_breached};
 
     /// A join tree over symbolic nodes, so two schedules can be compared for structural identity.
     #[derive(Clone, PartialEq, Eq, Debug)]
@@ -7095,6 +7119,32 @@ mod join_tree_tests {
             }
         }
         ready[depth][0].clone().expect("root")
+    }
+
+    /// hazync#252 lever 1 is ON by default as of 2026-09-21. The danger in a defaulted-on flag is
+    /// the UNSET case: `unwrap_or(false)` would silently disable it for every run that never sets
+    /// the variable, which is all of them -- and the only visible symptom would be the old, slower
+    /// behaviour, which looks like nothing at all.
+    #[test]
+    fn resolve_is_local_unless_explicitly_disabled() {
+        // ⛔ THE CASE THAT MATTERS: nothing set at all.
+        assert!(resolve_runs_locally(None), "unset must mean ON, or the default never applies");
+
+        // "0" is the one and only way off.
+        assert!(!resolve_runs_locally(Some("0")), "=0 must push the chain back to workers");
+
+        // Everything else is on, including the historical "=1" that used to be the only way ON.
+        for v in ["1", "", "true", "yes", "01", "00", " 0", "0 "] {
+            assert!(resolve_runs_locally(Some(v)),
+                    "{v:?} must not read as disabled -- only an exact \"0\" disables");
+        }
+
+        // ⛔ POSITIVE CONTROL: the OLD rule must fail the unset case, or this test would pass
+        // just as happily on the bug it exists to catch.
+        let old_rule = |v: Option<&str>| v.map(|x| x == "1").unwrap_or(false);
+        assert!(!old_rule(None), "control: the old rule did default to OFF");
+        assert!(old_rule(None) != resolve_runs_locally(None),
+                "control did not fail: the new rule is indistinguishable from the old one");
     }
 
     /// hazync#252 lever 2 moves joins from a worker to this process. It must be invisible to the
