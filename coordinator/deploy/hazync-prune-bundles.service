@@ -19,6 +19,14 @@ Environment=COORD_DB=/var/lib/hazync/coordinator.db
 Environment=COORD_SPINE=/var/lib/hazync/spine
 Environment=HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles
 Environment=HAZYNC_CKPT_ARCHIVE=/srv/bulk/hazync/checkpoints
+# ⛔ WITHOUT THIS THE TIMER DIED ON A MISSING FILE. RUNBOOK.md installs the module as
+# /usr/local/sbin/prune-bundles (hyphenated, no extension, like every other script there), and the
+# caller's old default looked for HERE/prune_bundles.py, which is never installed. The RUNBOOK's
+# dry-run line sets this explicitly, so hand-runs worked and only the unattended run was broken.
+# Measured 2026-09-21: the timer had never fired and would have failed if it had.
+# ⚠ The caller now resolves either name on its own, so this is belt-and-braces — but it is also the
+# line that makes the unit say out loud which file it runs.
+Environment=HAZYNC_PRUNE=/usr/local/sbin/prune-bundles
 # Two runs before paging: a store being briefly unreachable is an exit 2, not a problem to wake anyone for.
 Environment=CHECK_FAILS_BEFORE_ALERT=2
 StateDirectory=hazync-checks

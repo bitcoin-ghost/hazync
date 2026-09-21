@@ -30,7 +30,36 @@ from importlib.machinery import SourceFileLoader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OFFSITE = os.environ.get("HAZYNC_OFFSITE", "/usr/local/sbin/hazync-offsite-proofs")
-PRUNE = os.environ.get("HAZYNC_PRUNE", os.path.join(HERE, "prune_bundles.py"))
+
+def _find_prune():
+    """Locate prune_bundles.py, under EITHER name it is installed as.
+
+    ⛔ THE DEFAULT USED TO BE `HERE/prune_bundles.py` AND THAT FILE IS NEVER INSTALLED. RUNBOOK.md
+    installs the module as `/usr/local/sbin/prune-bundles` — hyphenated, no extension, like every
+    other script in that directory — so the timer's run died on a bare FileNotFoundError traceback:
+
+        FileNotFoundError: [Errno 2] No such file or directory: '/usr/local/sbin/prune_bundles.py'
+
+    The RUNBOOK's own dry-run line passes `HAZYNC_PRUNE=/usr/local/sbin/prune-bundles` explicitly, so
+    a hand-run worked and only the unattended timer was broken. Measured on the coordinator
+    2026-09-21: the timer had NEVER fired (`LAST PASSED: -`, first run due 2026-09-27) and would have
+    failed if it had. It fails safe — a crash deletes nothing — but it would never have pruned, and
+    the alert would have been the first anyone heard of it.
+
+    ⚠ Accepting both names rather than just changing the default: the two spellings now exist in the
+    wild, and a resolver that takes either cannot be desynchronised by an installer again.
+    """
+    env = os.environ.get("HAZYNC_PRUNE")
+    if env:
+        return env
+    tried = [os.path.join(HERE, n) for n in ("prune_bundles.py", "prune-bundles")]
+    for p in tried:
+        if os.path.exists(p):
+            return p
+    # ⚠ Name every path tried. The old failure was a traceback quoting ONE path that was never going
+    # to be right, which reads as a broken install rather than a naming mismatch.
+    sys.exit(f"[prune] cannot find prune_bundles.py. Tried: {', '.join(tried)}. "
+             f"Set HAZYNC_PRUNE to its path.")
 REPO = os.environ.get("HZ_REPO", "/opt/hazync")
 STORES = (("r2", os.environ.get("R2_KEYS", "/etc/hazync/backup/r2.keys"),
            os.environ.get("R2_BUCKET", "hazync-proofs")),
@@ -71,7 +100,11 @@ def confirm(off, log=print):
 def main(argv=None, off=None, prune=None, log=print):
     argv = list(sys.argv[1:] if argv is None else argv)
     off = off or _load(OFFSITE, "off")
-    prune = prune or _load(PRUNE, "prune")
+    # ⚠ RESOLVED HERE, NOT AT IMPORT. `_find_prune()` exits when it finds nothing, and running it at
+    # module level made merely IMPORTING this file fatal — which broke test_prune_caller.py, whose
+    # whole method is to load the caller from a temp directory and hand it a fake `prune` module.
+    # A caller that cannot be imported without its production dependency on disk cannot be tested.
+    prune = prune or _load(_find_prune(), "prune")
     confirmed = confirm(off, log=log)
     if confirmed is None:
         return 2
