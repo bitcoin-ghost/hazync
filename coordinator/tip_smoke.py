@@ -352,6 +352,20 @@ def main():
     # a NameError in teardown would leave the cards billing.
     assignment, runner, agg = {}, None, None
 
+    # ⛔ #429 ADDED SEVEN `phase(...)` CALLS AND NEVER DEFINED IT. Every run since died on the FIRST
+    # one — `NameError: name 'phase' is not defined` at "PREPARING · renting …", before a single pod
+    # was rented. The teardown ran and reported "0 cards, account check: clean", so it cost nothing
+    # but a run; it just could not work at all.
+    # ⚠ It logs FIRST and writes the tile second: the phase is information the operator needs whether
+    # or not a dashboard is attached, and a run must never die for the sake of its status tile —
+    # `write_phase` touches the filesystem and the rundir may not exist yet.
+    def phase(text):
+        log(text)
+        try:
+            tip_dashboard.write_phase(a.rundir, text)
+        except Exception:
+            pass
+
     try:
         # ── rent ──────────────────────────────────────────────────────────────────────────────────
         phase(f"PREPARING · renting {a.cards} cards (+{a.spares} spare)")
