@@ -15,7 +15,7 @@ Complete. Design: `SEGMENT_DISTRIBUTION.md` (this directory). Full measurement l
 | segment distribution (`seg-coordinate` / `seg-work`) | ✅ 3 gates — 1 proc, 2 proc, GPU |
 | balanced join tree, replacing risc0's **linear** fold | ✅ identical receipt, cost unchanged |
 | distributed join levels (`seg-join`) | ✅ 4 processes, identical digest |
-| worker-side lifts (`HAZYNC_WORKER_LIFTS`) | ✅ undivided work 58% → 2.1% |
+| worker-side lifts (`HAZYNC_WORKER_LIFTS`) | ✅ undivided work 58% → 2.1% — **already realised; see note below** |
 | push transport (`seg-serve` / `seg-connect`) | ✅ identical digest, 10% faster than pull |
 | distributed joins over push | ✅ both phases scale |
 | **mode-5 aggregate over push** (`HAZYNC_AGG=1`) | ✅ identical digest, 2- and 4-chunk partitions |
@@ -125,6 +125,20 @@ the guest modules under test. Verified by build, not by inspection -- restoring 
 wrong".)*
 
 ---
+
+> ## ⚠ 2026-09-21 — this is BANKED, not a lever awaiting a pull
+>
+> `HAZYNC_WORKER_LIFTS` is read only by `seg-work` and `seg-coordinate-tree`, both MANUAL commands.
+> Every automated run — the tip fleet, the sponsor bot — uses the push path `seg-connect`, where the
+> lift is **unconditional**: every segment but the last is lifted on the worker that proved it,
+> gated only by `NOLIFT_TAG`.
+>
+> Measured across 12 runs on block 741000: worker task kinds were `segment:34, segment_nolift:1` in
+> EVERY arm including the baseline, with and without the variable set. Setting it changes nothing on
+> a tip run.
+>
+> The 58% → 2.1% win is real and was captured when the push path landed. The flag is not a missed
+> optimisation, and the table above should not be read as one. See hazync#252.
 
 ## Step 2 — worker-side lifts (formerly `SEGDIST_STEP2.md`)
 
