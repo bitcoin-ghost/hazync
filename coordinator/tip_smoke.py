@@ -166,6 +166,27 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
 # v0.21.0 a worker that loses its link is simply gone, and the run finishes on the coordinator alone.
 # ⇒ Track the CURRENT release. A tip run on an old binary still proves the block correctly — it just
 # produces none of the evidence, which is the expensive way to learn this.
+# ⭐ THE FLEET'S CARD TYPE, AND IT IS 4090-ONLY BY DEFAULT ON MEASUREMENT (hazync#448).
+#
+# sponsor_bot.GPU_TYPES is ("NVIDIA GeForce RTX 4090", "NVIDIA A40") and deploy_listening walks it in
+# order, so 4090 was already PREFERRED -- but when 4090 capacity was short it silently fell back to an
+# A40 and produced a MIXED fleet. That fallback is not a cheaper run. Measured 2026-09-21, 9 runs on
+# block 741000:
+#
+#     all 4090          267.9 / 271.7 / 276.9 s   mean 272.2 s   spread  9.0 s
+#     contains an A40   357.9 / 380.2 / 410.4 s   mean 382.8 s   spread 52.5 s
+#
+# ⛔ AND THE SLOWER FLEET COST MORE: the all-4090 run billed $0.243, the 4090+2xA40 run $0.262. The
+# A40 is $0.49/hr against the 4090's $0.74/hr and is slow enough that the cheap card costs more PER
+# PROOF. Selecting on price per hour is the wrong objective outright.
+#
+# ⚠ It also explains away a "142 s of run-to-run variance" I published as a geography effect: control
+# for card type and the spread is 9.0 s. There was no variance mystery, only an unrecorded confound.
+#
+# `--gpu-type "NVIDIA GeForce RTX 4090,NVIDIA A40"` restores the old fallback for when a run matters
+# more than its wall-clock.
+DEFAULT_GPU_TYPES = ("NVIDIA GeForce RTX 4090",)
+
 HOST_RELEASE = "v0.21.7"
 HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
@@ -336,6 +357,10 @@ def cleanup(api, rented_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=2)
+    ap.add_argument("--gpu-type", default=",".join(DEFAULT_GPU_TYPES),
+                    help="comma-separated GPU types, in preference order. Default is 4090 ONLY: an "
+                         "A40 in the fleet measured 40%% slower AND dearer per proof (hazync#448). "
+                         "Pass a list to allow fallback.")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -473,12 +498,24 @@ def main():
         # ⛔ RENT SPARES. RunPod does not always start what it sells: on 2026-09-20 one of two pods
         # never published a port in 420 s while its twin answered in 30 s. Renting exactly N means one
         # bad pod ends the run after the full wait, having paid for both the whole time.
+        # ⛔ VALIDATE BEFORE RENTING. An unrecognised name is accepted by the GraphQL call and simply
+        # matches nothing, so the run would report "no capacity" for every pod and look like a RunPod
+        # outage rather than a typo. Fail here, having spent nothing.
+        gpu_types = tuple(t.strip() for t in a.gpu_type.split(",") if t.strip())
+        if not gpu_types:
+            raise SystemExit("--gpu-type is empty")
+        unknown = [t for t in gpu_types if t not in sponsor_bot.GPU_TYPES]
+        if unknown:
+            raise SystemExit(f"unknown --gpu-type {unknown}; known: {list(sponsor_bot.GPU_TYPES)}")
+        log(f"card type preference: {' > '.join(gpu_types)}"
+            + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
+
         want = a.cards + a.spares
         for i in range(want):
             name = f"{PREFIX}{i+1}"
             if name in existing:
                 raise SystemExit(f"refusing: {name} already exists")
-            p = api.deploy_listening(name, pub)
+            p = api.deploy_listening(name, pub, gpu_types=gpu_types)
             if not p:
                 # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
                 # raise on the first pod RunPod could not sell, which threw away every pod already
@@ -501,6 +538,17 @@ def main():
                 json.dump(created, fh, indent=1)
             log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
                 f"  (recorded in {rented_path})")
+
+        # ⛔ NAME THE FLEET'S COMPOSITION IN THE EVIDENCE. `pods.txt` carried it all along but nothing
+        # summarised it, so a mixed fleet looked identical to a uniform one in every log and summary.
+        # I published "all 3x A40, same card type" off runs that were actually mixed, and built an
+        # issue on the 142 s of "variance" that mix produced (hazync#448). One line would have stopped
+        # it. A run whose card types are not stated is a run whose results cannot be compared.
+        mix = {}
+        for c in created:
+            mix[c["gpu_type"]] = mix.get(c["gpu_type"], 0) + 1
+        log("FLEET: " + ", ".join(f"{n}x {g}" for g, n in sorted(mix.items()))
+            + (["", "   ⚠ MIXED CARD TYPES — timings are NOT comparable with a uniform fleet"][len(mix) > 1]))
 
         phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
         cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)

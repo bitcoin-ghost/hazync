@@ -147,6 +147,18 @@ jobs:
           cd coordinator
           python3 test_lever_env.py --control
 
+      - name: The fleet's card type is chosen, validated and recorded (hazync#448)
+        # ⛔ deploy_listening walks gpu_types in order and takes the first RunPod will sell. 4090 was
+        # already first, but A40 was in the list, so short 4090 capacity silently produced a MIXED
+        # fleet: 272.2 s mean all-4090 against 382.8 s with an A40 in it -- and the slower fleet cost
+        # MORE ($0.262 vs $0.243). Nothing named the composition in a run's evidence, so 142 s of
+        # spread was published as a geography effect when it was card type.
+        run: cd coordinator && python3 test_gpu_type.py
+      - name: Card-type POSITIVE CONTROL (fallback re-enabled, mix unreported — must be caught)
+        run: |
+          cd coordinator
+          python3 test_gpu_type.py --control
+
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)
