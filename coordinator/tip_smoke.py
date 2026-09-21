@@ -473,7 +473,17 @@ def main():
                 raise SystemExit(f"refusing: {name} already exists")
             p = api.deploy_listening(name, pub)
             if not p:
-                raise SystemExit(f"no capacity for {name}")
+                # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
+                # raise on the first pod RunPod could not sell, which threw away every pod already
+                # rented. Measured 2026-09-21: five came up, the SIXTH (a spare) had no capacity, and
+                # the run released all five and failed. Renting spares to survive a bad pod, then
+                # failing because a spare was unavailable, is the opposite of the intent.
+                if len(created) >= a.cards:
+                    log(f"  no capacity for {name} — continuing with {len(created)} pod(s), "
+                        f"{a.cards} needed")
+                    break
+                raise SystemExit(f"no capacity for {name} — only {len(created)} pod(s) rented and "
+                                 f"{a.cards} are needed")
             created.append(p)
             # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
             # that dies without releasing leaves cards billing until someone notices. A SIGINT during
