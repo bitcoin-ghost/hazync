@@ -23,6 +23,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
@@ -471,16 +472,29 @@ def main():
                 log(f"feed rewritten for {len(order)} card(s)")
 
         # ── prepare ───────────────────────────────────────────────────────────────────────────────
+        # ⛔ IN PARALLEL. This was a serial loop and it was the largest avoidable cost in a run.
+        # Measured 2026-09-20 on a 14-card fleet: the cards prepared ~40 s apart --
+        #     22:59:51  hz-smoke-10
+        #     23:00:32  hz-smoke-11   (+41s)
+        #     23:01:11  hz-smoke-12   (+39s)
+        # -- about NINE MINUTES of setup with the whole fleet up, idle and billing at $9.71/hr, and
+        # nothing on the dashboard but flat traces. The work is an scp and two short ssh calls per
+        # card: independent, I/O-bound, and exactly what the binary fetch and the GPU smoke already
+        # fan out. There was no reason for this one to be serial except that nobody had looked.
         phase(f"PREPARING · staging the block onto {len(order)} cards")
-        for c in order:
-            if not prepare(ssh, c, block_path=a.block_path, block_name=block_name, repo_hint=a.repo):
-                raise SystemExit(f"{c.cid} could not be prepared")
+        with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
+            prepped = list(pool.map(
+                lambda c: (c, prepare(ssh, c, block_path=a.block_path,
+                                      block_name=block_name, repo_hint=a.repo)), order))
+        unprepared = [c.cid for c, ok in prepped if not ok]
+        if unprepared:
+            raise SystemExit(f"could not prepare {unprepared} — see the per-card line above for "
+                             f"which half failed, the script or the fixture")
 
         # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
         # minutes, and doing it one at a time would double that for no reason.
         want = binary_size()
         phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
-        import concurrent.futures as _cf
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
         for c, ok, n in got:

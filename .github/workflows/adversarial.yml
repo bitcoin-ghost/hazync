@@ -294,6 +294,10 @@ jobs:
       # The only one of the twelve with no --control; registered plain.
       - name: Node tip (test_node_tip.py)
         run: cd coordinator && python3 test_node_tip.py
+      - name: Node tip POSITIVE CONTROL (staleness guard widened away — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_node_tip.py --control
       # ⛔ The sponsor bot RENTS GPUs AND SPENDS REAL MONEY. test_sponsor_bot.py is 1,004 lines and its
       # own docstring says a bug that leaves a pod running or launches past a cap "spends real money and
       # nothing on the board would show it". It has a positive control. None of it has ever run in CI.
@@ -491,6 +495,10 @@ jobs:
       # --control mode, so it runs once.
       - name: Key rotation carries a contributor's proved blocks to the new key (#113)
         run: cd coordinator && python3 test_rotation.py
+      - name: Rotation POSITIVE CONTROL (union replaced by a sum — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_rotation.py --control
       - name: Client versions are recorded and surfaced (#293)
         # Block 39,413 pinned the frontier for 5h and the server could only say "a live worker is
         # proving it". It was #286 — 757s of assembly against a 600s silence timeout that release
