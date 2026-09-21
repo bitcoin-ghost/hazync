@@ -253,12 +253,25 @@ def gpu_smoke(ssh, card, timeout_s=300):
 
 
 def prepare(ssh, card, *, block_path, block_name, repo_hint):
-    """Stage the binary, the fixture and pod-prove.sh, and clear the CUDA compat trap."""
+    """Stage pod-prove.sh and (for the chunk path) the fixture; clear the CUDA compat trap.
+
+    ⚠ `block_path=None` MEANS MODE 6 AND IS NOT A FAILURE. A claimed block is proved from its BUNDLE,
+    which `start_range_aggregate` stages onto the aggregate later -- there is no fixture to push and
+    no per-card chunk phase to push it for. Staging one anyway is what failed the first live session:
+    `--block-path` still held its default container path, so every card reported
+    `fixture=FAILED (0 bytes)` and the run refused before claiming anything.
+    """
     # ⛔ CUDA ERROR 804 ON A CONSUMER CARD IS AN UNPREPARED CARD, NOT A BAD ONE. The driver's compat
     # libraries shadow the real ones; bootstrap2.sh moves them aside for exactly this reason.
     ssh.run(card, "for d in /usr/local/cuda*/compat; do [ -d \"$d\" ] && "
                   "mv \"$d\" \"${d}.disabled\"; done; ldconfig 2>/dev/null; true", timeout=120)
     ok_bin = ssh.push(card, os.path.join(repo_hint, "pod-prove.sh"), "/workspace/pod-prove.sh")
+    if block_path is None:
+        # ⛔ Say so out loud. A silently skipped stage is indistinguishable from one that worked.
+        log(f"  {card.cid}: pod-prove.sh={'ok' if ok_bin else 'FAILED'} "
+            f"fixture=n/a (mode 6 — the bundle is staged onto the aggregate)")
+        ssh.run(card, "chmod +x /workspace/pod-prove.sh", timeout=60)
+        return ok_bin
     ok_blk = ssh.push(card, block_path, f"/workspace/{block_name}")
     # ⛔ scp DOES NOT PRESERVE THE EXECUTABLE BIT. 0644 here killed all 23 cards on 2026-09-20 with
     # `setsid: failed to execute ./pod-prove.sh: Permission denied` and a zero-byte prove.log.
@@ -583,7 +596,7 @@ def main():
         phase(f"PREPARING · staging the block onto {len(order)} cards")
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             prepped = list(pool.map(
-                lambda c: (c, prepare(ssh, c, block_path=a.block_path,
+                lambda c: (c, prepare(ssh, c, block_path=(None if a.claim else a.block_path),
                                       block_name=block_name, repo_hint=a.repo)), order))
         unprepared = [c.cid for c, ok in prepped if not ok]
         if unprepared:
