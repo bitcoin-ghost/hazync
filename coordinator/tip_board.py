@@ -42,7 +42,16 @@ import time
 import urllib.error
 import urllib.request
 
-COORD = os.environ.get("COORD_URL", "https://hazync.org").rstrip("/")
+# ⛔ THE API SUBDOMAIN, NOT THE WEBSITE. `hazync.org` is the site; it proxies GETs (so
+# /api/witness worked and everything looked fine) but the edge REFUSES POST /api/claim with an
+# nginx HTML 403. Measured 2026-09-21:
+#     POST https://api.hazync.org/api/claim -> {"error": "this coordinator accepts only signed claims..."}
+#     POST https://hazync.org/api/claim     -> <html>403 Forbidden</html>
+# The second is not the coordinator answering at all, which is why the error carried no JSON and
+# read as an opaque "coordinator error 403: Forbidden". `coordinator/hazync` has always used
+# DEFAULT_COORD = "https://api.hazync.org"; this file simply chose the wrong host.
+DEFAULT_COORD = "https://api.hazync.org"
+COORD = os.environ.get("COORD_URL", DEFAULT_COORD).rstrip("/")
 UA = "hazync-tip-board/1"
 
 # ⛔ Point HAZYNC_HOME somewhere else and YOU ARE A DIFFERENT CONTRIBUTOR. Same rule as the CLI, and
@@ -485,6 +494,18 @@ def selftest(control=False):
                                runner=lambda c: _R(0, _j.dumps(FIXTURE).encode()))
     check(not ok and "FIXTURE" in why,
           "⛔ the ssh source runs the SAME shape check — a fixture from the bridge host is refused too")
+
+    # ── the coordinator URL must match the CLI's ────────────────────────────────────────────────
+    # ⛔ A WRONG HOST LOOKS LIKE A WORKING ONE. hazync.org proxies GETs, so /api/witness returned 200
+    # and the bundle parsed; only the claim POST was refused, by the edge, with HTML that carried no
+    # JSON error at all. The two files must agree on where the coordinator is.
+    cli = pathlib.Path(__file__).with_name("hazync")
+    if cli.exists():
+        import re as _re
+        m = _re.search(r'DEFAULT_COORD\s*=\s*"([^"]+)"', cli.read_text(encoding="utf8", errors="replace"))
+        check(m is not None and m.group(1).rstrip("/") == DEFAULT_COORD.rstrip("/"),
+              f"⛔ DEFAULT_COORD matches the CLI's ({DEFAULT_COORD} vs "
+              f"{m.group(1) if m else '<not found>'}) — api.hazync.org, not the website")
 
     # ── tip-work signal assertions ───────────────────────────────────────────────────────────────
     _seen = []
