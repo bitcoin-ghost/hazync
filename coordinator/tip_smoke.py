@@ -29,6 +29,7 @@ import tip_board                        # noqa: E402
 import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
+import tip_economics                    # noqa: E402
 import tip_harvest                      # noqa: E402
 import tip_lifecycle                   # noqa: E402
 import tip_run                          # noqa: E402
@@ -906,6 +907,29 @@ def main():
         phase(f"VERIFIED block {a.block} in {result.get('wall_s')}s on {len(order)} cards"
               if result.get("ok") else f"FAILED on block {a.block}")
         log("RESULT " + json.dumps(result, indent=1))
+
+        # ⛔ RECORD WHAT THIS FLEET COST PER PROOF, OR THE 4090 DEFAULT STAYS AN ANECDOTE. #449's
+        # default rests on nine runs on one block on one night, and nothing kept that result in a
+        # form outliving the run -- so re-checking it meant re-reading a session transcript, which
+        # is how "142 s of geography variance" got published when it was card type (hazync#448).
+        # ⚠ Only a run that actually produced a proof is recorded; a failed run says nothing about
+        # cost per proof and would drag every mean toward whatever went wrong.
+        if result.get("ok"):
+            try:
+                row = tip_economics.record(
+                    block=a.block,
+                    gpu_types=[c.gpu_type for c in order],
+                    seconds=result.get("wall_s"),
+                    usd=tip_lifecycle.spend_so_far(
+                        [{"price": c.price} for c in order], result.get("wall_s") or 0))
+                if row:
+                    log(f"economics: {row['fleet']}  {row['seconds']}s  ${row['usd']:.3f} "
+                        f"(appended to the fleet ledger)")
+            # ⚠ Bookkeeping NEVER fails a finished run. The proof is made and verified by this
+            # point; losing a ledger row is a nuisance, losing the run's exit code is not.
+            except Exception as e:                       # noqa: BLE001
+                log(f"economics: not recorded ({e})")
+
         return 0 if result.get("ok") else 1
 
     finally:

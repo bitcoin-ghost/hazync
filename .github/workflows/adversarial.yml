@@ -159,6 +159,17 @@ jobs:
           cd coordinator
           python3 test_gpu_type.py --control
 
+      - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
+        # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a
+        # form outliving the run -- re-checking it meant re-reading a session transcript, which is
+        # how 142 s of CARD-TYPE spread got published as a geography effect. The ledger only helps
+        # if a mixed fleet never files under the same key as a uniform one.
+        run: cd coordinator && python3 test_tip_economics.py
+      - name: Fleet ledger POSITIVE CONTROL (mixed collides with uniform — must be caught)
+        run: |
+          cd coordinator
+          python3 test_tip_economics.py --control
+
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)
