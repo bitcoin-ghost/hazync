@@ -1,0 +1,12 @@
+[Unit]
+Description=Check every 20 minutes that the bridge is advancing
+
+[Timer]
+# ⚠ More often than the stall window, so a stall is caught within one window rather than two. UTC is
+# explicit: the bridge box is Europe/Berlin and a bare OnCalendar would drift with DST.
+OnCalendar=*-*-* *:00,20,40:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
