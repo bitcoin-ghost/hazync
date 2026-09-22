@@ -15,7 +15,7 @@ OUTPUT  snapshot.json, rewritten atomically every tick. The renderer only ever r
 ⛔ Nothing here is synthesised except under --demo, which exists so the renderer can be tested with
 no pods running. A card with no recent sample is reported up:false rather than given a plausible curve.
 """
-import argparse, csv, json, math, os, time, urllib.request
+import argparse, csv, json, math, os, re, time, urllib.request
 
 API = os.environ.get("COORD_URL", "https://api.hazync.org")
 WINDOW_S = 900          # rolling telemetry window kept per card (seconds)
@@ -256,7 +256,30 @@ def read_streams(rundir, now, cursors=None):
     return cards
 
 
-def blocks_from_cards(cards, state, now):
+RE_VERIFIED = re.compile(r"VERIFIED\s+block\s+(\d+)")
+
+
+def verified_heights(phase_text):
+    """Heights the RUN ITSELF has declared verified, from its own phase line.
+
+    ⛔ WHY THIS EXISTS. `done` was inferred from five seconds of silence -- "nothing has reported
+    this height for 5 s". The collector stops when the run ends, BEFORE its own grace period
+    elapses, so the LAST block of every run never counted. On a single-block run the headline read
+    "0 blocks" beside a banner reading "VERIFIED block 741000 in 267.9s" (captured 2026-09-21).
+
+    On a 24-hour run that is an off-by-one at the exact moment someone reads the final number, and
+    it is the headline figure.
+
+    The run already writes the authoritative answer to $RUNDIR/phase. Silence stays as a FALLBACK,
+    for a height that has scrolled out of the phase line -- it is not wrong, it is just late.
+    """
+    out = set()
+    for m in RE_VERIFIED.finditer(phase_text or ""):
+        out.add(int(m.group(1)))
+    return out
+
+
+def blocks_from_cards(cards, state, now, verified=()):
     """One entry per height the fleet worked while we were watching, from the FULL stream history.
 
     ⛔ It used to record only each card's CURRENT height, so a capture holding dozens of blocks
@@ -299,7 +322,8 @@ def blocks_from_cards(cards, state, now):
                     "prove_s": round(a["prove"] / n_cards, 1) or None,
                     "fold_s": round(a["asm"] / n_cards, 1) or None,
                     "segs": a["segs"], "cards": len(a["cards"]),
-                    "done": (now - a["t1"]) > 5,      # nothing has reported this height for 5 s
+                    # Authoritative first: the run said VERIFIED. Silence is the fallback.
+                      "done": int(h) in verified or (now - a["t1"]) > 5,
                     "cost": round(a["cost"], 4)})
     out.sort(key=lambda x: x["h"])
     return out
@@ -447,7 +471,7 @@ def main():
                     state["since"] = float(open(t0f).read().strip())
                 except (ValueError, OSError):
                     state["since"] = 0.0
-            blocks = blocks_from_cards(cards, state, now)
+            blocks = blocks_from_cards(cards, state, now, verified_heights(phase_label))
         up = [c for c in cards if c["up"]]
         rate = sum(c["cost_hr"] for c in up)
         # Money is DERIVED FROM THE SAMPLES, not from a wall clock. The renderer used to sum each
