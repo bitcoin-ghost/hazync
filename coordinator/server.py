@@ -255,6 +255,53 @@ _ENV_ERR = ("out of memory", "oom", "cudaerror", "cuda error", "hash_rows",
             # those would park good blocks purely for being unlucky enough to be mid-prove at the time.
             "received signal", "keyboardinterrupt", "systemexit")
 
+def record_submission_failure(c, rid, note):
+    """Count one failed submission against `rid`, and park it if the BLOCK is the suspect.
+
+    ⛔ A NAMED FUNCTION ON PURPOSE (hazync#460). Inline in the submit handler, the only way to test
+    this was to re-implement it in the test -- which proves the test right, not the code. That is the
+    shape that let the whole subsystem sit inert through 123,331 proven blocks.
+
+    ⚠ ONLY BLOCK-IMPLICATING FAILURES PARK. An environmental failure raises `env_failures` and NEVER
+    parks: an OOM on an oversubscribed GPU says nothing about the block -- 29664 failed that way
+    repeatedly on 2026-07-28 and then proved perfectly once workers dropped from 4 to 2. Parking on
+    capacity would take good blocks off the board during exactly the incident when the board can
+    least spare them.
+
+    Returns "parked", "env" or "counted", so a caller (and a test) can see which branch ran.
+    """
+    err = (note or "")[:500]
+    now = time.time()
+    if is_env_failure(err):
+        c.execute("UPDATE ranges SET env_failures=COALESCE(env_failures,0)+1, "
+                  "last_error=?, last_failed_at=? WHERE id=?", (err, now, rid))
+        # ⚠ SATURATION IS AN OPERATOR SIGNAL, NOT A PARK. Past MAX_ENV_FAILURES the block is not the
+        # suspect -- the fleet is. Say so, so a capacity incident is visible in the journal instead
+        # of being inferred from a frontier that quietly stopped.
+        env = c.execute("SELECT env_failures FROM ranges WHERE id=?", (rid,)).fetchone()
+        if env and (env["env_failures"] or 0) >= MAX_ENV_FAILURES:
+            print(f"[board] range {rid}: {env['env_failures']} ENVIRONMENTAL failures "
+                  f"(MAX_ENV_FAILURES={MAX_ENV_FAILURES}) -- this is the FLEET, not the block; it is "
+                  f"NOT parked. Last: {err[:120]}", flush=True)
+        return "env"
+
+    c.execute("UPDATE ranges SET attempts=COALESCE(attempts,0)+1, "
+              "last_error=?, last_failed_at=? WHERE id=?", (err, now, rid))
+    att = c.execute("SELECT attempts FROM ranges WHERE id=?", (rid,)).fetchone()
+    if att and (att["attempts"] or 0) >= MAX_ATTEMPTS:
+        # ⛔ AND ONLY FROM A NON-TERMINAL STATUS. A range that has since verified must not be dragged
+        # back to 'failed' by a late submission from a slow worker: the proof is on disk and the
+        # frontier may already have moved past it.
+        cur = c.execute("UPDATE ranges SET status='failed' WHERE id=? AND status!='verified'", (rid,))
+        if cur.rowcount:
+            print(f"[board] range {rid} PARKED after {att['attempts']} block-implicating failures "
+                  f"(MAX_ATTEMPTS={MAX_ATTEMPTS}). It keeps its interval and will not be offered "
+                  f"again. Recover with: hazync-unpark.py --unpark {rid} --reason '<why>'. "
+                  f"Last: {err[:120]}", flush=True)
+            return "parked"
+    return "counted"
+
+
 def is_env_failure(err):
     e = (err or "").lower()
     return any(s in e for s in _ENV_ERR)
@@ -3743,28 +3790,13 @@ def submit(body):
                 pass
             _sponsor_mark_proven(c, v_lo, v_hi)           # a sponsorship now fully covered ends its hold
         else:
-            # ⛔ hazync#460: RECORD THE FAILURE. Until now nothing did. `attempts`, `env_failures`,
-            # `last_error` and `last_failed_at` were created by the migration and only ever SELECTed,
-            # `is_env_failure()` had no callers, and MAX_ATTEMPTS/MAX_ENV_FAILURES were read into
-            # constants nothing used. Measured on the live board 2026-09-22: 0 failed ranges and
-            # attempts=0 across 123,331 proven blocks.
-            #
-            # The classification is the point, and its reasoning is already written above _ENV_ERR:
-            # an OOM on an oversubscribed GPU says nothing about the block, and counting it the same
-            # way would penalise good blocks during any capacity incident.
-            #
-            # ⚠ THIS RECORDS ONLY. It deliberately does NOT park at MAX_ATTEMPTS, because parking is
-            # currently a ONE-WAY DOOR: `live_ids()` counts 'failed' as live ("a parked range still
-            # owns its interval"), and NOTHING in this codebase ever sets a range back to 'open'. A
-            # parked range would hold its interval and block the frontier for ever with no operator
-            # recovery path. Parking needs an un-park route first -- see #460.
-            err = (note or "")[:500]
-            if is_env_failure(err):
-                c.execute("UPDATE ranges SET env_failures=COALESCE(env_failures,0)+1, "
-                          "last_error=?, last_failed_at=? WHERE id=?", (err, time.time(), rid))
-            else:
-                c.execute("UPDATE ranges SET attempts=COALESCE(attempts,0)+1, "
-                          "last_error=?, last_failed_at=? WHERE id=?", (err, time.time(), rid))
+            # ⛔ hazync#460: RECORD THE FAILURE, AND PARK IF THE BLOCK IS THE SUSPECT. Until #470
+            # nothing recorded it; until now nothing parked. Measured on the live board 2026-09-22:
+            # 0 failed ranges and attempts=0 across 123,331 proven blocks, with a whole scheme
+            # (MAX_ATTEMPTS, MAX_ENV_FAILURES, is_env_failure, four columns) sitting inert.
+            # The environmental/block distinction and why parking waited for an un-park route are
+            # documented on `record_submission_failure`; the operator side is in RUNBOOK.md.
+            record_submission_failure(c, rid, note)
         c.commit(); c.close()
         _frontier_invalidate()        # #265: a new verified range can move the frontier
         if ok:

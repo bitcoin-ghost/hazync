@@ -403,6 +403,49 @@ systemctl daemon-reload && systemctl start hazync-check-spine-remote.service
 systemctl enable --now hazync-check-spine-remote.timer
 ```
 
+## Parked blocks (hazync#460)
+
+A range that fails to verify **for reasons that implicate the block** is counted, and at
+`MAX_ATTEMPTS` (3) it is **parked**: `status='failed'`. A parked range keeps its interval — the
+overlap guard counts `failed` as live, so nothing can claim a wider range straight over the block
+that is failing — and it is never offered to a worker again. `/api/state` lists parked ranges under
+`failed`, with `attempts`, `last_error` and how long ago it last failed, and the journal says:
+
+```
+[board] range 29664 PARKED after 3 block-implicating failures (MAX_ATTEMPTS=3). ...
+```
+
+⛔ **An ENVIRONMENTAL failure never parks anything.** `is_env_failure()` classifies OOM, CUDA and
+`received signal` as evidence about the box rather than the block, and those raise `env_failures`
+instead. Block 29664 failed that way repeatedly on 2026-07-28 and then proved perfectly once worker
+count dropped from 4 to 2; parking on capacity would take good blocks off the board during exactly
+the incident when the board can least spare them. Past `MAX_ENV_FAILURES` (12) the coordinator says
+so in the journal — an operator signal that the *fleet* needs looking at — and still does not park:
+
+```
+[board] range 29664: 12 ENVIRONMENTAL failures (MAX_ENV_FAILURES=12) -- this is the FLEET, not the
+block; it is NOT parked.
+```
+
+### Un-parking
+
+Parking would be a one-way door without this, so the route exists first:
+
+```sh
+hazync-unpark.py                                   # what is parked, and why
+hazync-unpark.py --unpark 29664 --reason "the 4-worker OOM incident, not the block"
+hazync-unpark.py --unpark-all --reason "fleet-wide cause fixed: <what>"
+```
+
+⚠ `--reason` is **required** and is written into `last_error`, because un-parking discards the
+evidence that put the range there. If you cannot say what makes the block innocent, leave it parked
+and go and look. Both counters reset, deliberately: leaving `attempts` at 3 would re-park the range
+on its very next failure, which is an un-park that does not un-park.
+
+⚠ Run it **on the coordinator box, against the live DB, with the service running**. WAL makes a short
+write from a second process safe. Do not copy the DB, edit the copy and put it back — that silently
+discards every range proved while you were editing.
+
 ## Backup & restore
 
 The DB (`coordinator.db`, the signed ledger) **and** the `proofs/` directory (the re-verifiable STARK

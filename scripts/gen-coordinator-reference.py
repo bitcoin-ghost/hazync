@@ -195,9 +195,12 @@ ENV = {
                              "restart forgets them (#333).",
     "server:FOLD_CLAIM_CAP": "Live fold claims one key may hold at once; a further one is refused with 429 (#333).",
     "server:BEAT_SKEW": "Allowed distance in seconds between a beat's signed `ts` and server time.",
-    "server:MAX_ATTEMPTS": "Failure count at which `/api/state` flags the frontier blocker as needing "
-                           "attention.",
-    "server:MAX_ENV_FAILURES": "Intended cap for environmental failures.",
+    "server:MAX_ATTEMPTS": "Block-implicating failures after which a range is PARKED as `failed` "
+                           "(#460). A parked range keeps its interval and is never offered again; "
+                           "recover it with `coordinator/deploy/hazync-unpark.py`.",
+    "server:MAX_ENV_FAILURES": "Environmental failures after which the coordinator says so in the "
+                               "journal (#460). It never parks: an OOM on an oversubscribed GPU is "
+                               "evidence about the fleet, not about the block.",
     "server:CLAIM_WIDTH": "Second accepted claim-id grid in `parse_range`, beside `RANGE_SIZE`.",
     "server:MAX_BODY": "Maximum POST body and base64 receipt length, in bytes (`413` above it).",
     "server:MAX_HANDLE": "Handle length cap. A registered sponsor key gets room for `SPONSOR: ` plus a "
