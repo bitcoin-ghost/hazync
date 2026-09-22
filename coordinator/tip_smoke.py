@@ -201,7 +201,26 @@ def binary_size():
         return int(r.headers["Content-Length"])
 
 
-def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
+def _drop_cards(order, created, bad, why, *, release, record):
+    """Release the named cards and return the (order, created) that are left (hazync#479).
+
+    ⛔ ONE PLACE, because it was three. Reachability and the GPU smoke each open-coded this, the
+    staging and prover-fetch gates raised instead, and the difference was not a decision -- it was
+    which gate somebody happened to be looking at. A card that fails any pre-clock gate is released
+    and the run carries on with what is left; whether that is ENOUGH is a separate question, asked
+    once, after every gate has run.
+    """
+    bad = set(bad)
+    if not bad:
+        return order, created
+    for p in [x for x in created if x["name"] in bad]:
+        release(p)
+    kept = [x for x in created if x["name"] not in bad]
+    record(kept)
+    return [c for c in order if c.cid not in bad], kept
+
+
+def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400):
     """Pull the 407 MB prover onto the card BEFORE the clock starts, resuming if interrupted.
 
     ⛔ A 407 MB DOWNLOAD HAS NO BUSINESS INSIDE THE TIMED RUN. pod-prove.sh fetches it on first use,
@@ -216,15 +235,35 @@ def fetch_binary(ssh, card, want, *, tries=40, wait_s=15):
     ⚠ `-C -` RESUMES. Without it this has the same failure as pod-prove.sh, just earlier.
     ⚠ The card fetches from the CDN itself; pushing it from here would put 407 MB per card through
       the driver's uplink for no benefit.
+
+    ⛔ IT GIVES UP ON A STALL, NOT ON A CLOCK (hazync#479). This used to allow `tries=40` x 15 s =
+    600 s flat. Measured 2026-09-22: hz-smoke-1 pulled at 0.57 MB/s, so 410 MB needed 724 s; the
+    deadline expired with the card at 348 of 410 MB -- **116 seconds short** -- and killed a run that
+    had already spent 13 minutes and $0.48. The docstring above cites ~1 MB/s as the rate this guard
+    exists for, and at exactly 1 MB/s 410 MB fits in 600 s: the budget never covered its own worst
+    case, it only looked like it did.
+    ⚠ A BIGGER NUMBER IS NOT THE FIX. Raising it would make a genuinely dead card hold the fleet for
+    longer, which is the failure this guard was written to prevent. What separates "slow" from "dead"
+    is whether the byte count is still MOVING, so that is what is measured: keep waiting while it
+    climbs, abandon after `stall_polls` consecutive polls with no progress at all. `ceiling_s` is a
+    backstop for a card that trickles forever, not the normal exit.
     """
-    got = -1
-    for _ in range(tries):
+    got, last, stuck, t0 = -1, -1, 0, time.time()
+    while time.time() - t0 < ceiling_s:
         out = ssh.run(card, "stat -c%s /workspace/hazync-host-cuda 2>/dev/null || echo 0",
                       timeout=60) or "0"
         got = int((out.strip().splitlines() or ["0"])[-1] or 0)
         if got == want:
             ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
             return True, got
+        # ⚠ Progress resets the patience; no progress spends it. An ssh hiccup reads as `got == last`
+        # for one poll and costs one of the eight, which is the right price for not being able to see.
+        if got > last:
+            last, stuck = got, 0
+        else:
+            stuck += 1
+            if stuck >= stall_polls:
+                return False, got
         # ⛔ NOT pgrep. `pgrep -f 'curl.*hazync-host'` MATCHES THE SSH SESSION CARRYING IT: the
         # pattern is in our own command line on the remote, so the check always succeeded, the `||`
         # always short-circuited, and curl NEVER RAN. Measured twice -- 0 bytes on every card after
@@ -556,18 +595,33 @@ def main():
         if len(cards) < a.cards:
             raise SystemExit(f"only {len(cards)} of {want} rented cards came up; needed {a.cards}")
 
-        # The first `cards` that answered are the run; the rest are released straight away rather
-        # than billed for a run they are not in.
-        chosen = sorted(cards)[:a.cards]
-        order = [cards[n] for n in chosen]
-        spare = [p for p in created if p["name"] not in chosen]
-        if spare:
-            log(f"releasing {len(spare)} unused spare(s): {[p['name'] for p in spare]}")
-            for p in spare:
+        # ⛔ THE SPARES LIVE UNTIL THE GATES HAVE RUN (hazync#479). They used to be released here,
+        # immediately after the SSH gate -- 23 seconds before the three gates that actually find a bad
+        # card (staging, the 410 MB prover fetch, and the GPU smoke). So a card that answered ssh and
+        # then failed one of those killed the whole run with nothing left to swap in, which is the
+        # exact opposite of what --spares says it is for: "extra pods rented so one bad pod does not
+        # end the run".
+        #
+        # Measured 2026-09-22: three spares released at 20:31:30, hz-smoke-1 failed the prover fetch
+        # at 20:43:41, run over, 13.0 min and $0.483 spent, zero blocks proved. Three healthy pods
+        # were sitting right there when it happened and had already been terminated.
+        #
+        # ⚠ THE GATES NOW SELECT, RATHER THAN PASS OR FAIL A SET CHOSEN IN ADVANCE. Every card that
+        # answered goes through them -- they are already run in parallel, so this costs no extra wall
+        # clock, only the spares' own billing for the length of the gates (3 spares x $0.74 x ~0.2 h
+        # = ~$0.45, against a $2.20 run thrown away).
+        order = [cards[n] for n in sorted(cards)]
+        log(f"{len(order)} card(s) answered; ALL go through the gates and the survivors are the run")
+
+        def _drop(order_, created_, bad, why):
+            def release(p):
                 sponsor_bot.terminate_confirmed(api, p["id"])
-            created = [p for p in created if p["name"] in chosen]
-            with open(rented_path, "w") as fh:
-                json.dump(created, fh, indent=1)
+                log(f"  released {p['name']} — {why}")
+            def record(kept):
+                with open(rented_path, "w") as fh:
+                    json.dump(kept, fh, indent=1)
+            return _drop_cards(order_, created_, bad, why, release=release, record=record)
+
         agg = order[0]
         agg_ports = portmap.get(agg.cid, {})
         if 9110 not in agg_ports:
@@ -666,8 +720,12 @@ def main():
                                       block_name=block_name, repo_hint=a.repo)), order))
         unprepared = [c.cid for c, ok in prepped if not ok]
         if unprepared:
-            raise SystemExit(f"could not prepare {unprepared} — see the per-card line above for "
-                             f"which half failed, the script or the fixture")
+            # ⛔ DROP IT, DO NOT END THE RUN (hazync#479). This raised, so one card that could not be
+            # staged took the whole fleet down with it -- while its spares stood by. Reachability and
+            # the GPU smoke already drop-and-re-plan; this gate now does the same, and the surplus
+            # check below is what decides whether enough survived.
+            order, created = _drop(order, created, unprepared,
+                                   "it could not be staged (script or fixture)")
 
         # ⛔ THE BINARY, BEFORE THE CLOCK, AND VERIFIED BY SIZE. In parallel: on a slow card this is
         # minutes, and doing it one at a time would double that for no reason.
@@ -679,9 +737,12 @@ def main():
             log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
         bad = [c.cid for c, ok, _ in got if not ok]
         if bad:
-            raise SystemExit(f"the prover never finished downloading on {bad} — "
-                             f"a card that starts the run without it spends the run fetching, and "
-                             f"the stall detector restarts it from zero every time")
+            # ⛔ THE GATE THAT KILLED THE 2026-09-22 RUN. Its reasoning is right -- a card without the
+            # prover spends the run fetching and the stall detector restarts it from zero -- but the
+            # remedy was to end the run rather than to drop the card. With the spares still alive
+            # there is now something to carry on with.
+            order, created = _drop(order, created, bad,
+                                   "the prover never finished downloading")
 
         # ── the GPU smoke, BEFORE the clock ───────────────────────────────────────────────────────
         phase(f"PREPARING · proving one block on each of {len(order)} GPUs")
@@ -710,6 +771,29 @@ def main():
             joined = tip_dashboard.feed_records(order, fleet)
             feed.start(joined["records"])
             log(f"re-planned with {len(order)} card(s) after dropping {sorted(duds)}")
+
+        # ── the gates are done: now choose the run and release the surplus (hazync#479) ───────────
+        # ⛔ THIS IS THE QUESTION THAT USED TO BE ASKED FIRST. Every gate above now drops a bad card
+        # and carries on; whether enough survived is decided once, here, with all the evidence in.
+        if agg.cid not in {c.cid for c in order}:
+            # ⚠ Fatal on purpose. The reachability gate proved the workers could reach THIS
+            # aggregate; promoting a different card would silently throw that result away, and the
+            # honest answer is to say so rather than run on an untested topology.
+            raise SystemExit(f"the aggregate {agg.cid} failed a pre-clock gate — every worker was "
+                             f"checked against it, so the run cannot simply promote another card")
+        if len(order) < a.cards:
+            raise SystemExit(f"only {len(order)} of {want} rented cards passed every pre-clock gate; "
+                             f"needed {a.cards}. Rent more spares, or read the per-card lines above")
+        surplus = [c.cid for c in order[a.cards:]]
+        if surplus:
+            log(f"the run has its {a.cards} card(s); releasing {len(surplus)} that passed the gates "
+                f"but are not needed: {sorted(surplus)}")
+            order, created = _drop(order, created, surplus, "surplus to the run")
+            # ⚠ The feed was written for the fleet that went through the gates; rewrite it for the
+            # one actually running, or the dashboard shows cards nobody is paying for.
+            joined = tip_dashboard.feed_records(order, fleet)
+            feed.start(joined["records"])
+            log(f"feed rewritten for {len(order)} card(s)")
 
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
