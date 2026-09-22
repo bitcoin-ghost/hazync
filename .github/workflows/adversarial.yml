@@ -669,9 +669,12 @@ jobs:
         # card that died four hours ago is what they need to see.
         # ⚠ The $/hr must NOT drop when a card dies — a rented pod bills whether it answers or not,
         # so a reduced rate understates the real cost. That is the easy wrong fix, so it is pinned.
-        run: cd tools/live && python3 test_fleet_degraded.py
+        run: |
+          python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
+          cd tools/live && python3 test_fleet_degraded.py
       - name: Degraded-fleet POSITIVE CONTROL (one colour for every state — must be caught)
         run: |
+          python3 -m pip install --quiet Pillow
           cd tools/live
           python3 test_fleet_degraded.py --control
 
