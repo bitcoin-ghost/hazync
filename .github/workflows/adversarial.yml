@@ -668,9 +668,12 @@ jobs:
         # PIXEL-IDENTICAL at (235,140,25). A status readout with one colour cannot report status.
         # On an unattended 24-hour run the banner gets one glance, and that glance could not tell a
         # failure from normal progress.
-        run: cd tools/live && python3 test_phase_tone.py
+        run: |
+          python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
+          cd tools/live && python3 test_phase_tone.py
       - name: Phase-tone POSITIVE CONTROL (one colour for every phase — must be caught)
         run: |
+          python3 -m pip install --quiet Pillow
           cd tools/live
           python3 test_phase_tone.py --control
 
