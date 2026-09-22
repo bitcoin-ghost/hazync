@@ -5732,10 +5732,25 @@ fn seg_reconnect_backoff_s(attempt: u32) -> u64 {
 /// wildly, and what actually matters is "how long has this card been earning nothing". 600 s is the
 /// same floor HAZYNC_STALL_MIN and the #365 deadline already use -- reusing that judgement beats
 /// inventing a fourth one.
+/// ⛔ SPLIT IN TWO SO THE DECISION CAN BE TESTED WITHOUT THE PROCESS ENVIRONMENT (hazync#473).
+/// `should_retry` used to read the variable itself, so the only way to test it was for a test to
+/// `set_var` -- and libtest runs tests as THREADS IN ONE PROCESS. Two tests mutating one global,
+/// each reading it immediately after, is a data race: measured at 125 failures in 1000 runs with the
+/// box under load and 0 in 300 on an idle one, which is precisely why it only ever appeared on a
+/// busy CI runner and never locally.
+fn seg_reconnect_retry_within(elapsed_s: f64, cap_s: f64) -> bool {
+    cap_s > 0.0 && elapsed_s < cap_s
+}
+
+/// How an operator's value becomes a cap. Anything unparseable falls back to the default rather than
+/// disabling reconnect: a typo in a deploy script must not silently turn the feature off.
+fn seg_reconnect_cap_from(raw: Option<&str>) -> f64 {
+    raw.and_then(|s| s.parse::<f64>().ok()).unwrap_or(600.0)
+}
+
 fn seg_reconnect_should_retry(elapsed_s: f64) -> bool {
-    let cap = std::env::var("HAZYNC_RECONNECT_MAX_S")
-        .ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(600.0);
-    cap > 0.0 && elapsed_s < cap
+    let cap = seg_reconnect_cap_from(std::env::var("HAZYNC_RECONNECT_MAX_S").ok().as_deref());
+    seg_reconnect_retry_within(elapsed_s, cap)
 }
 
 /// A link failure is transient and worth reconnecting for. Anything else is not.
@@ -5783,7 +5798,8 @@ fn seg_reconnect(id: &str, addr: &str, s: &mut std::net::TcpStream,
 
 #[cfg(test)]
 mod seg_reconnect_tests {
-    use super::{seg_reconnect_backoff_s, seg_reconnect_is_link_failure, seg_reconnect_should_retry};
+    use super::{seg_reconnect_backoff_s, seg_reconnect_cap_from, seg_reconnect_is_link_failure,
+                seg_reconnect_retry_within};
 
     /// Backoff must GROW and must STOP growing. Unbounded doubling means a worker that has been down
     /// nine minutes sleeps another eight before noticing the coordinator came back.
@@ -5812,24 +5828,40 @@ mod seg_reconnect_tests {
     }
 
     /// The cap is on elapsed time, because backoff makes attempt count and wall-clock diverge.
+    ///
+    /// ⛔ NOT ONE `set_var` IN THIS MODULE (hazync#473). These tests used to install the cap in the
+    /// process environment, which libtest shares across every test THREAD; two of them writing it
+    /// and reading it back raced, and the loser saw the other's value. The cap is an argument now,
+    /// so the decision is tested directly and the parsing is tested separately.
     #[test]
     fn retry_until_the_elapsed_cap() {
-        std::env::remove_var("HAZYNC_RECONNECT_MAX_S");
-        assert!(seg_reconnect_should_retry(0.0));
-        assert!(seg_reconnect_should_retry(599.0));
-        assert!(!seg_reconnect_should_retry(600.0), "at the cap it stops");
-        assert!(!seg_reconnect_should_retry(6000.0));
+        let cap = seg_reconnect_cap_from(None);
+        assert_eq!(cap, 600.0, "an unset variable means the documented default");
+        assert!(seg_reconnect_retry_within(0.0, cap));
+        assert!(seg_reconnect_retry_within(599.0, cap));
+        assert!(!seg_reconnect_retry_within(600.0, cap), "at the cap it stops");
+        assert!(!seg_reconnect_retry_within(6000.0, cap));
     }
 
     /// An operator must be able to turn it off. 0 means "behave as before": never reconnect.
     #[test]
     fn zero_disables_reconnect_entirely() {
-        std::env::set_var("HAZYNC_RECONNECT_MAX_S", "0");
-        assert!(!seg_reconnect_should_retry(0.0), "0 must mean never, not an immediate cap breach");
-        std::env::set_var("HAZYNC_RECONNECT_MAX_S", "5");
-        assert!(seg_reconnect_should_retry(1.0));
-        assert!(!seg_reconnect_should_retry(9.0));
-        std::env::remove_var("HAZYNC_RECONNECT_MAX_S");
+        assert!(!seg_reconnect_retry_within(0.0, seg_reconnect_cap_from(Some("0"))),
+                "0 must mean never, not an immediate cap breach");
+        let five = seg_reconnect_cap_from(Some("5"));
+        assert!(seg_reconnect_retry_within(1.0, five));
+        assert!(!seg_reconnect_retry_within(9.0, five));
+    }
+
+    /// ⚠ A TYPO MUST NOT SILENTLY DISABLE RECONNECT. `HAZYNC_RECONNECT_MAX_S=six hundred` in a deploy
+    /// script should fall back to the default, not to 0 — off is a decision, not a parse error.
+    #[test]
+    fn an_unparseable_cap_falls_back_rather_than_disabling() {
+        for raw in ["", "six hundred", "600s", "--"] {
+            assert_eq!(seg_reconnect_cap_from(Some(raw)), 600.0, "{raw:?} must fall back");
+        }
+        assert_eq!(seg_reconnect_cap_from(Some("0")), 0.0, "an explicit 0 is still honoured");
+        assert_eq!(seg_reconnect_cap_from(Some("12.5")), 12.5, "and a real value is parsed");
     }
 }
 
