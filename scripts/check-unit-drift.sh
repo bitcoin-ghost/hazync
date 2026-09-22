@@ -43,6 +43,23 @@ cant() { echo "COULD NOT CHECK $*"; cannot=1; }
 
 # The remote side is read-only and answers in one round trip per unit: `systemctl show` rather than
 # `systemctl cat`, because cat prints the FILE and show prints what actually runs.
+# ⛔ DIRECTIVES THIS CHECK COULD NOT SEE AT ALL UNTIL 2026-09-22 (hazync#452).
+#
+# The probe read Environment, ExecStart, User and drop-in FILENAMES -- nothing else. So MemoryHigh,
+# MemoryMax and the hardening directives were invisible, and the check reported "no drift:
+# everything running on localhost is declared" while hazync-proof ran MemoryHigh=48G against a
+# declared 53G.
+#
+# That is not a cosmetic gap. A MemoryHigh below what the bridge needs is exactly what caused the
+# bridge to be OOM-killed 23 times and make ZERO progress overnight 2026-09-18/19 (#413) -- the
+# single most expensive incident this repo records. The setting whose drift costs the most was the
+# one nothing compared.
+#
+# Keep this list to directives where a wrong value BREAKS something, not every knob systemd has: a
+# check that reports noise gets muted, and a muted check is worse than none.
+GUARDED="MemoryHigh MemoryMax MemorySwapMax TasksMax LimitNOFILE Restart RestartSec ProtectSystem ProtectHome PrivateTmp NoNewPrivileges"
+export GUARDED
+
 for u in $UNITS; do
     echo
     echo "=== $u on $HOST ==="
@@ -54,6 +71,10 @@ for u in $UNITS; do
         systemctl show $u -p Environment --value | tr ' ' '\n' | grep -v '^\$' | sed 's/^/ENV /'
         systemctl show $u -p ExecStart --value | grep -oE 'argv\[\]=[^;]*' | sed 's/^/EXEC /'
         systemctl show $u -p User --value | sed 's/^/USER /'
+        for d in $GUARDED; do
+            v=\$(systemctl show $u -p \$d --value 2>/dev/null)
+            [ -n \"\$v\" ] && [ \"\$v\" != infinity ] && [ \"\$v\" != 0 ] && echo \"GUARD \$d=\$v\"
+        done
         ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | grep '\.conf\$' | sed 's/^/DROPIN /'
     "
     # ⛔ localhost IS NOT AN SSH HOST. The timer that runs this check runs ON the coordinator, and root
@@ -80,6 +101,58 @@ for u in $UNITS; do
             note "ok   drop-in $f is declared"
         fi
     done < <(printf '%s\n' "$remote" | grep '^DROPIN ')
+
+    # --- 1b. GUARDED directives: the VALUE must match, not merely the key ------------------------
+    # ⛔ A DIFFERING VALUE HERE IS A FAILURE, NOT A NOTE. For Environment (below) a per-box value is
+    # often legitimate -- paths and proxy lists genuinely differ. For MemoryHigh it is not: the box
+    # either has the cap the repo says it needs, or it is one incident away from #413 again.
+    #
+    # ⛔ BUT IT MUST NORMALISE FIRST, OR IT CRIES WOLF ON CORRECT CONFIG. systemd reports MemoryHigh
+    # in BYTES and the repo writes "53G"; it reports ProtectHome as "yes" where the repo writes
+    # "true". Comparing those raw marks every healthy unit as drift, and a check that always fails
+    # gets muted -- which is strictly worse than the blind spot this replaces.
+    #
+    # ⚠ A guarded directive the repo does NOT declare is a systemd DEFAULT (TasksMax=77099,
+    # LimitNOFILE=524288), not somebody's edit. Those are noted, never failed: we guard the values we
+    # have committed to, not every knob systemd exposes.
+    norm_val() {
+        local v="${1,,}"
+        case "$v" in
+            true|on|yes)  echo yes; return;;
+            false|off|no) echo no;  return;;
+        esac
+        case "$v" in
+            *g) echo $(( ${v%g} * 1024 * 1024 * 1024 ));;
+            *m) echo $(( ${v%m} * 1024 * 1024 ));;
+            *k) echo $(( ${v%k} * 1024 ));;
+            *)  echo "$v";;
+        esac
+    }
+    gdeclared=$( { cat "coordinator/deploy/$u.service" 2>/dev/null
+                   cat "$DROPINS_DIR/$u-"*.conf 2>/dev/null; } \
+                 | grep -E "^($(echo "$GUARDED" | tr ' ' '|'))=" | sort -u )
+    while read -r _ kv; do
+        [ -n "${kv:-}" ] || continue
+        gk="${kv%%=*}"; gv=$(norm_val "${kv#*=}")
+        # ⚠ ANY declared value may be the winning one. systemd's drop-in precedence is alphabetical
+        # and this check deliberately does not simulate it (see "Union, not precedence" below), so a
+        # directive set in two files must not be called drift just because the first one differs.
+        wants=$(printf '%s\n' "$gdeclared" | grep "^$gk=" | sed "s/^$gk=//")
+        if [ -z "$wants" ]; then
+            note "note $gk=${kv#*=} is a systemd default (not declared, not guarded)"
+        else
+            hit=no
+            while read -r w; do
+                [ -n "$w" ] || continue
+                [ "$gv" = "$(norm_val "$w")" ] && { hit=yes; break; }
+            done < <(printf '%s\n' "$wants")
+            if [ "$hit" = yes ]; then
+                note "ok   $gk matches the repo (${kv#*=})"
+            else
+                bad "$u: $gk is ${kv#*=} on the box but the repo declares $(printf '%s\n' "$wants" | paste -sd'|' -)"
+            fi
+        fi
+    done < <(printf '%s\n' "$remote" | grep '^GUARD ')
 
     # --- 2. effective settings the repo cannot account for --------------------------------------
     # Union, not precedence: we are asking "could the repo have produced this value at all", which
