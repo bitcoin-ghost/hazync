@@ -82,6 +82,33 @@ def phase_tone(phase_txt):
     return ACCENT
 
 
+# ⛔ THE RING'S CENTRE IS A CIRCLE, SO ITS USABLE WIDTH SHRINKS AS YOU MOVE AWAY FROM THE MIDDLE
+# (hazync#481). Nothing checked that, and "BOARD BLOCK · AWAITING TIP" — 219 px on a line with 222 px
+# of chord — ran straight into the inner arc and read as cut off. Three pixels of clearance is not
+# clearance, and it is worse while that arc is lit, because the text then ends against a bright band.
+CENTRE_MARGIN = 14          # px of daylight required between the text and the inner arc
+
+
+def centre_fits(d, text, font, dy, rin):
+    """Does `text` fit on the chord `dy` px from the ring's centre, with margin to spare?"""
+    r = rin - 6 - CENTRE_MARGIN                     # 6 = half the inner arc's own width
+    chord = 2.0 * math.sqrt(max(1.0, r * r - dy * dy))
+    return d.textlength(text, font=font) <= chord
+
+
+def centre_text(d, forms, font, dy, rin):
+    """The first of `forms` that fits, longest first; the last is the fallback and always drawn.
+
+    ⚠ MEASURED, NOT GUESSED. A shorter string was the obvious fix, but the next label somebody adds
+    would hit the same wall silently. Asking the geometry means a label that does not fit degrades to
+    a shorter one instead of being clipped.
+    """
+    for t in forms:
+        if centre_fits(d, t, font, dy, rin):
+            return t
+    return forms[-1]
+
+
 def fleet_colour(up, total):
     """⛔ A DEGRADED FLEET MUST NOT LOOK LIKE A HEALTHY ONE.
 
@@ -139,11 +166,43 @@ def draw_live(snap, fo):
 
     live_h = next((c.get('block') for c in up if c.get('block')), None)
     cur = next((b for b in blocks if b['h'] == live_h), None)
-    proving = [c for c in up if c.get('phase') == 'proving']
-    assembling = [c for c in up if c.get('phase') == 'assembling']
-    prog = (sum(min(1.0, (c['seg_n'] / c['seg_total'])) for c in up if c.get('seg_total'))
-            / max(1, len([c for c in up if c.get('seg_total')]))) if up else 0.0
-    kfold = (len(assembling) / len(up)) if up else 0.0
+    # ⚠ `executed` IS WORKING. tip-stream.sh reports it for the window between the block's banner
+    # appearing and its first segment landing — the CPU execute phase, which on a large block is
+    # minutes. Leaving it out made `working` false there, which made the frame read `idle` and zero
+    # both arcs at the very start of every block.
+    proving = [c for c in up if c.get('phase') in ('proving', 'executed')]
+    assembling = [c for c in up if c.get('phase') in ('assembling', 'done')]
+
+    # ⛔ THE FOLD ARC WAS A HEADCOUNT (hazync#481). `kfold = len(assembling) / len(up)` is the
+    # fraction of CARDS in the fold phase, not how far the fold has got — on three cards it could
+    # only ever read 0, 33, 67 or 100, so it "never finished folding" whenever fewer than all of them
+    # happened to be folding at the sampled instant. The real number was already on the wire and
+    # thrown away: the aggregate prints `joins N/M` and tip-stream.sh now reports it per card.
+    def _frac(n_key, t_key):
+        """The furthest any card has got, as a fraction. MAX, not mean.
+
+        ⚠ The aggregate reports the BLOCK's totals (`7/15 segments`, `joins 5/5`) while a worker
+        reports only its own finished-task count with no total. A mean over those two shapes is not a
+        quantity — it is two different things averaged. The card that knows the totals is the one to
+        believe, and taking the max is how it wins without having to identify it.
+        """
+        best = 0.0
+        for c in up:
+            tot = c.get(t_key) or 0
+            if tot > 0:
+                best = max(best, min(1.0, (c.get(n_key) or 0) / tot))
+        return best
+
+    kfold = _frac('fold_n', 'fold_total')
+
+    # ⛔ AND PROVING COLLAPSED THE MOMENT IT SUCCEEDED. It was the MEAN of seg_n/seg_total over cards
+    # that still had a total; a card that finishes stops emitting segments, drops out of the mean,
+    # and the arc FELL exactly where it should have latched. Proving is complete once the fold has
+    # started — the fold cannot begin until every segment exists — so the fold's own existence is the
+    # evidence that holds it at 100%.
+    prog = _frac('seg_n', 'seg_total')
+    if kfold > 0:
+        prog = 1.0
     # ⛔ The readout used to key on `cur` (does a block record exist?) rather than on what the cards
     # are DOING, so the gap between blocks rendered "PROVING 8:48" with 30/30 cards at rest.
     # MEASURED: 30 cards finish a 1,900-segment block in ~194 s of a 600 s block period, so the
@@ -278,13 +337,30 @@ def draw_live(snap, fo):
     d.text((RCX - d.textlength(cnt, font=fo['ring']) / 2, RCY - 76), cnt, font=fo['ring'], fill=hx(OK))
     # 'NONE LATE' meant nothing to a viewer. The centre now says what the fleet is doing right now:
     # a live block timer while working, a countdown to the next block while idle.
-    if idle:
+    # ⚠ TIP WORK OR BOARD WORK, JUDGED BY HEIGHT (hazync#481). A tip-following session claims the
+    # tip block when one is waiting and BOARD work the rest of the time (#367), and those are very
+    # different states for a viewer: one is the fleet doing the job, the other is the fleet filling
+    # in while it waits. The frame already drew this distinction on the grid's own caption
+    # ("AT THE TIP" / "BACKFILL") and told the ring nothing, so an hour of board work looked exactly
+    # like an hour of tip work.
+    # ⛔ Only claimed when the chain tip is actually known. With `tip` unavailable every height
+    # looks like backfill, and announcing "awaiting tip" on a run that is not tip-following would be
+    # inventing a state.
+    on_board = bool(tip) and bool(cur) and cur['h'] <= tip - WINDOW
+    if cur and cur.get('done'):
+        # ⚠ The receipt exists and has verified — say so, instead of leaving the last fold frame up
+        # reading FOLDING at 100%. It is brief in a real run, and it is the moment worth naming.
+        mid_s, mid_c = 'VERIFIED', mix(OK, GROUND, .95)
+        low_s = f"BLOCK {cur['h']:,}"
+    elif idle:
         mid_s, mid_c = 'AHEAD OF THE CHAIN', mix(OK, GROUND, .95)
         low_s = f'NEXT BLOCK IN {mmss(eta)}'
     elif cur:
         mid_s, mid_c = ('FOLDING' if kfold > 0 else 'PROVING'), mix(
             MAP_FOLDING if kfold > 0 else MAP_PROVING, GROUND, .95)
-        low_s = f'{mmss(el)} ON THIS BLOCK'
+        low_s = (centre_text(d, ['BOARD BLOCK · AWAITING TIP', 'BOARD · AWAITING TIP',
+                                 'BOARD BLOCK'], fo['small'], 78, RIN)
+                 if on_board else f'{mmss(el)} ON THIS BLOCK')
     else:
         mid_s, mid_c, low_s = 'STANDING BY', hx(DIM), 'WAITING FOR A BLOCK'
     for s, f_, dy, c_ in ((f'/ {WINDOW} TODAY', 'lab', 22, mix(TEXT, GROUND, .7)),
@@ -319,18 +395,40 @@ def draw_live(snap, fo):
     level, xx = ([y for y, _ in leaves] or [RCY]), TX0
     depth = max(1, math.ceil(math.log2(max(2, len(leaves) or 2))))
     dx = (TX1 - TX0) / depth
+
+    # ⛔ ONE BRANCH PER COMPLETED JOIN (hazync#481). This lit on `kfold >= (lv + …) / depth`, an even
+    # spread of what was then a HEADCOUNT across the tree — so with three cards the branches came up
+    # in thirds and "the fold lines never all activated". The aggregate says exactly how many joins
+    # are done (`joins 5/5`); count the joins out in the order they are drawn and light the k-th one
+    # when k of them have finished.
+    # ⚠ The total drawn here and the total the prover reports can differ by one on an odd fleet, so
+    # the fraction is taken against what the FRAME draws. Using the prover's total would leave a
+    # branch permanently dark on any fleet whose tree is not a perfect power of two.
+    n_drawn = 0
+    _lv, _l = 0, list(level)
+    while _lv < depth:
+        n_drawn += max(1, (len(_l) + 1) // 2)
+        _l = [0] * max(1, (len(_l) + 1) // 2)
+        _lv += 1
+    joins_done = int(round(kfold * n_drawn))
+
+    k = 0
     for lv in range(depth):
         nxt, pull = [], (lv + 1) / depth
-        njoin = max(1, math.ceil(len(level) / 2))
         for i in range(0, len(level), 2):
             pair = level[i:i + 2]
             ym = sum(pair) / len(pair) * (1 - pull) + RCY * pull
             x2 = xx + dx
-            lit = kfold >= (lv + (i / 2 + 1) / njoin) / depth
+            k += 1
+            lit = k <= joins_done
             for y in pair:
                 d.line([xx, y, x2, ym],
                        fill=mix(FOLD, GROUND, .8) if lit else mix(RULE, GROUND, .40),
                        width=2 if lit else 1)
+                # ⚠ A DOT AT BOTH ENDS. Only the landing node was drawn, so every branch had a joint
+                # where it arrived and nothing where it left, and the tree read as unattached.
+                d.ellipse([xx - 4, y - 4, xx + 4, y + 4],
+                          fill=mix(FOLD, GROUND, .95) if lit else mix(RULE, GROUND, .55))
             d.ellipse([x2 - 4, ym - 4, x2 + 4, ym + 4],
                       fill=mix(FOLD, GROUND, .95) if lit else mix(RULE, GROUND, .55))
             nxt.append(ym)

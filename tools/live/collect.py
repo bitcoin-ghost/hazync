@@ -125,6 +125,7 @@ def read_streams(rundir, now, cursors=None):
         path = os.path.join(sdir, fn)
         t, w, u = [], [], []
         phase, seg_n, seg_total, block = "idle", 0, 0, None
+        fold_n, fold_total = 0, 0
 
         cur = None
         if cursors is not None:
@@ -244,12 +245,19 @@ def read_streams(rundir, now, cursors=None):
             phase = f[7] or phase
             seg_n = int(f[8] or 0); seg_total = int(f[9] or 0)
             block = int(f[10]) if f[10].strip().isdigit() else block
+            # ⚠ APPENDED COLUMNS, READ DEFENSIVELY (hazync#481). tip-stream.sh now reports the FOLD's
+            # own progress beside the prove's, so the frame can hold proving at 100% while the fold
+            # climbs instead of swapping one readout for the other. A row written by an older
+            # streamer simply has 11 fields and keeps 0/0 here.
+            if len(f) >= 13:
+                fold_n = int(f[11] or 0); fold_total = int(f[12] or 0)
         meta = pods.get(name, {})
         rate = meta.get("cost_hr", 0.0)
         cards.append({"name": name, "gpu": meta.get("gpu", "?"), "cost_hr": rate,
                       "up": bool(t) and (now - t[-1]) < STALE_S,
                       "t": t, "w": w, "u": u,
                       "phase": phase, "seg_n": seg_n, "seg_total": seg_total, "block": block,
+                      "fold_n": fold_n, "fold_total": fold_total,
                       "observed_s": secs, "spend_usd": round(secs * rate / 3600.0, 4),
                       "peak": round(peak, 4),
                       "block_s": by_block})
@@ -310,6 +318,9 @@ def blocks_from_cards(cards, state, now, verified=()):
             a["prove"] += e["prove"]; a["asm"] += e["asm"]
             a["cards"].add(c["name"])
             a["cost"] += e["n"] * rate / 3600.0
+    # ⚠ PAIRED WITH THE HEIGHT THE CARD WAS ON, not taken as "some card is done, so all are".
+    finished_by_cards = {str(c.get("block")) for c in cards
+                         if c.get("phase") == "done" and c.get("block")}
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
@@ -322,8 +333,16 @@ def blocks_from_cards(cards, state, now, verified=()):
                     "prove_s": round(a["prove"] / n_cards, 1) or None,
                     "fold_s": round(a["asm"] / n_cards, 1) or None,
                     "segs": a["segs"], "cards": len(a["cards"]),
-                    # Authoritative first: the run said VERIFIED. Silence is the fallback.
-                      "done": int(h) in verified or (now - a["t1"]) > 5,
+                      # Authoritative first: the run said VERIFIED. Then the PROVER's own word —
+                      # tip-stream.sh reports phase=done when the aggregate writes `receipt written`
+                      # or `RECEIPT VERIFIED` (hazync#481). Silence is the last resort.
+                      # ⛔ THE TILE NEVER TURNED GREEN, AND THIS IS WHY. `verified` comes from the
+                      # run's phase line, which the driver writes only after it has submitted, and
+                      # the 5-second silence rule cannot fire while the card is still streaming the
+                      # block it just finished. Between the receipt existing and the driver saying
+                      # so, nothing could tell the cell to stop being orange.
+                      "done": (int(h) in verified or str(h) in finished_by_cards
+                               or (now - a["t1"]) > 5),
                     "cost": round(a["cost"], 4)})
     out.sort(key=lambda x: x["h"])
     return out
