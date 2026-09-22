@@ -23,6 +23,21 @@ from tip24e import (W, H, PAD, LX0, LX1, LTOP, LROW, LYTOP, LYBOT, RCX, RCY, ROU
                     fonts, bloom, cell_xy, hx, mix, mmss, NBLOCKS, LANES)
 
 WINDOW = GCOL * GROWS          # 144 cells, exactly as the film
+
+# ── the ring sits BESIDE the traces, not on top of them ──────────────────────────────────────────
+# Asked for 2026-09-22, and it supersedes the earlier "the ring stays IN FRONT OF the traces": a
+# 364px disc in the middle of a 738px band meant every lane ran behind it, and the parts of a
+# waveform a viewer most wants (the busy middle) were the parts hidden.
+#
+# ⚠ REBOUND HERE, NOT EDITED IN tip24e. That module is the geometry the v9 mp4 was rendered with and
+# the docstring above promises "the same picture" -- changing it would silently re-cut the film.
+# Overriding in the live renderer keeps the two honestly separate.
+#
+# ⚠ RCY IS DELIBERATELY UNTOUCHED. `GY0` and the join tree's root both derive from it, so moving it
+# would drag the block map and the tree off their shared centre line.
+RING_GAP = 44                       # breathing room between the ring's edge and the first lane
+RCX = PAD + ROUT                    # 274: the ring's left edge lands on the page's padding line
+LX0 = RCX + ROUT + RING_GAP         # 500: lanes start clear of it, and are narrower for it
 # Seconds a completed block spends crossing to its cell. The film used 70 because its
 # clock compressed a day into a minute; live, this is real seconds and the renderer
 # draws about once a second, so 6 gives roughly six frames of travel.
@@ -237,14 +252,15 @@ def draw_live(snap, fo):
     d.line([LX1, ytop, LX1, ytop + row * nlanes], fill=mix(OK, GROUND, .7), width=2)
 
     # ---------------- the ring
-    # The ring stays IN FRONT OF the traces (asked for explicitly), but a single 190-alpha disc left
-    # a grey smudge with trace ghosts swimming through it. Feathered opaque core instead: the lanes
-    # are cleanly occluded and it reads as a deliberate medallion rather than a smear.
+    # ⚠ THE RING NO LONGER OVERLAPS ANYTHING (see the geometry at the top of this file). It used to
+    # sit in front of the traces; the feathered backing below is what stopped that reading as a grey
+    # smudge with trace ghosts swimming through it. It is KEPT because it still gives the medallion
+    # its solid centre against the page, but it is no longer load-bearing: nothing is occluded now,
+    # and if the ring is ever moved back over the lanes this is the machinery that has to come with
+    # it. The two earlier notes about how far to feather (ROUT+74 erased 70% of the stage, and at
+    # 3 cards the lanes vanished entirely) are why it backs only from RIN.
     ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     od = ImageDraw.Draw(ov)
-    # ⛔ Feathering from ROUT+74 made a 512px opaque disc inside a 738px band — 70% of the stage
-    # erased, and at 3 cards the lanes vanished entirely. Back only the TEXT (from RIN) and let the
-    # ring's own arcs sit over the lanes: that is what "the ring in front of the traces" means.
     for pad, alpha in ((34, 55), (26, 120), (18, 195), (10, 240), (2, 255)):
         od.ellipse([RCX - RIN - pad, RCY - RIN - pad, RCX + RIN + pad, RCY + RIN + pad],
                    fill=(15, 16, 18, alpha))
