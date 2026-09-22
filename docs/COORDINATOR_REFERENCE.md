@@ -100,8 +100,8 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `FOLD_CLAIM_TTL` | `'60'` | constant `FOLD_CLAIM_TTL` | Seconds a fold claim (`POST /api/foldclaim`) holds its pair. Held in memory, so a restart forgets them (#333). |
 | `FOLD_CLAIM_CAP` | `'2'` | constant `FOLD_CLAIM_CAP` | Live fold claims one key may hold at once; a further one is refused with 429 (#333). |
 | `BEAT_SKEW` | `'120'` | constant `BEAT_SKEW` | Allowed distance in seconds between a beat's signed `ts` and server time. |
-| `MAX_ATTEMPTS` | `'3'` | constant `MAX_ATTEMPTS` | Failure count at which `/api/state` flags the frontier blocker as needing attention. |
-| `MAX_ENV_FAILURES` | `'12'` | constant `MAX_ENV_FAILURES` | Intended cap for environmental failures. ⚠ Read into a constant that nothing in the file uses. |
+| `MAX_ATTEMPTS` | `'3'` | constant `MAX_ATTEMPTS` | Block-implicating failures after which a range is PARKED as `failed` (#460). A parked range keeps its interval and is never offered again; recover it with `coordinator/deploy/hazync-unpark.py`. |
+| `MAX_ENV_FAILURES` | `'12'` | constant `MAX_ENV_FAILURES` | Environmental failures after which the coordinator says so in the journal (#460). It never parks: an OOM on an oversubscribed GPU is evidence about the fleet, not about the block. |
 | `CLAIM_WIDTH` | `'1'` | constant `CLAIM_WIDTH` | Second accepted claim-id grid in `parse_range`, beside `RANGE_SIZE`. |
 | `MAX_BODY` | `str(8 << 20)` | constant `MAX_BODY` | Maximum POST body and base64 receipt length, in bytes (`413` above it). |
 | `MAX_HANDLE` | `'48'` | constant `MAX_HANDLE` | Handle length cap. A registered sponsor key gets room for `SPONSOR: ` plus a 40-character name if that is longer (`handle_cap`). |

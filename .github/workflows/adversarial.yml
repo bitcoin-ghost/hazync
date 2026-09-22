@@ -180,6 +180,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_session_idle_cap.py --control
+      - name: A bad block parks, a capacity incident does not, and a park can be undone (hazync#460)
+        run: cd coordinator && python3 test_parking.py
+      - name: Parking POSITIVE CONTROL (the env/block distinction removed — a good block must be parked)
+        run: |
+          cd coordinator
+          python3 test_parking.py --control
       - name: A failed submission is recorded and classified (hazync#460)
         # ⛔ MAX_ATTEMPTS, MAX_ENV_FAILURES, is_env_failure() and four DB columns formed a complete
         # design for failed blocks and NONE of it ran: zero callers, columns only ever SELECTed.
