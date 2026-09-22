@@ -1,0 +1,21 @@
+[Unit]
+Description=Hazync: the bridge is still advancing (not merely alive)
+Wants=network-online.target
+After=network-online.target
+OnFailure=hazync-alert@%n.service
+
+[Service]
+Type=oneshot
+# ⚠ 70 min ~= 3 checkpoint intervals at the rate measured 2026-09-22 (0.638-0.699 s/blk, 2000-block
+# checkpoints). Generous on purpose: the walk rate is NOT flat, and a reload after a restart writes
+# no checkpoint for minutes. A check that cries wolf gets muted.
+Environment=HAZYNC_BRIDGE_STALL_S=4200
+# ⚠ Two consecutive failures before paging, as check-disk does — one missed window during a restart
+# is not news.
+Environment=CHECK_FAILS_BEFORE_ALERT=2
+StateDirectory=hazync-checks
+ExecStart=/usr/local/sbin/hazync-run-check check-bridge-progress /usr/local/sbin/hazync-check-bridge-progress
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=120

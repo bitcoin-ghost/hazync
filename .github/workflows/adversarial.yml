@@ -692,6 +692,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_pulse.py --control
+      - name: The bridge-progress check behaves on every path (hazync#467)
+        # ⛔ During catch-up the bridge emits NO bundles, so check-bundle-gap has nothing to compare
+        # and a stall is invisible: it does not crash, so alert.conf stays quiet. Measured 2026-09-22
+        # — 20 minutes at 0% CPU in D state and nothing could have noticed.
+        run: ./coordinator/deploy/test-bridge-progress.sh
+      - name: Bridge-progress POSITIVE CONTROL (stall guard removed — must be missed)
+        run: ./coordinator/deploy/test-bridge-progress.sh --control
+
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
