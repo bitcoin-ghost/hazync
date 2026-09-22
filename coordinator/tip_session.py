@@ -44,6 +44,21 @@ MAX_ATTEMPTS = 3
 # 29.7 s median, and a session that gives up on a slow block is worse than one that waits.
 MAX_CONSECUTIVE_FAILS = int(os.environ.get("HAZYNC_MAX_CONSECUTIVE_FAILS", "3"))
 
+# ⛔ AN IDLE THAT CANNOT END MUST NOT RUN THE CLOCK OUT ON A RENTED FLEET.
+# `plan_next` idles for two different reasons and only one of them can resolve itself:
+#
+#   kind="board"      the board has nothing free. Another contributor finishes, a claim expires,
+#                     the tip moves -- waiting is correct and this is NOT counted.
+#   kind="exhausted"  WE are refusing: the block is already proved this session, or it has hit
+#                     MAX_ATTEMPTS. Asking again cannot change the answer.
+#
+# The second is reachable and expensive. Attempt counts are LOCAL to the session, and the board
+# does not park failing blocks at all (hazync#460: 0 failed ranges across 123,331 proven blocks),
+# so it hands the same block back for ever. At 26x RTX 4090 = $19.24/hr a 24-hour session pinned
+# this way burns ~$462 for zero blocks. --budget-usd bounds it, and is OPTIONAL.
+MAX_CONSECUTIVE_EXHAUSTED_IDLES = int(
+    os.environ.get("HAZYNC_MAX_EXHAUSTED_IDLES", "5"))
+
 
 class SessionRefused(RuntimeError):
     """A session-level gate said no."""
@@ -154,17 +169,20 @@ def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
 
     rng = (work or {}).get("range")
     if rng is None:
-        return {"action": "idle", "why": "the board has nothing free right now"}
+        # ⚠ THE BOARD'S idle, not ours. This one can end on its own — another contributor
+        # finishes, a claim expires, the tip moves — so waiting is the right thing to do.
+        return {"action": "idle", "kind": "board", "why": "the board has nothing free right now"}
     rng = str(rng)
 
     # ⛔ NEVER RE-PROVE A BLOCK THIS SESSION ALREADY PROVED. On a resume the coordinator may hand back
     # the same block -- a claim that has not expired, or the tip not having moved -- and proving it
     # again costs a full block of GPU for a receipt that already exists.
     if state["blocks"].get(rng, {}).get("ok"):
-        return {"action": "idle", "why": f"block {rng} is already proved in this session"}
+        return {"action": "idle", "kind": "exhausted",
+                "why": f"block {rng} is already proved in this session"}
 
     if state["attempts"].get(rng, 0) >= MAX_ATTEMPTS:
-        return {"action": "idle",
+        return {"action": "idle", "kind": "exhausted",
                 "why": f"block {rng} has failed {MAX_ATTEMPTS} times and is not being retried — a "
                        f"session must not spend itself on one block"}
 
@@ -265,6 +283,7 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
             on_event(msg)
 
     consecutive_fails = 0
+    exhausted_idles = 0
     while True:
         t = now()
         # ⛔ CHARGE BEFORE DECIDING, AND ON EVERY LOOP — NOT PER BLOCK. Pods bill continuously:
@@ -290,6 +309,18 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
 
         if plan["action"] == "idle":
             emit(f"idle: {plan['why']}")
+            # ⛔ COUNT ONLY THE IDLES THAT CANNOT RESOLVE THEMSELVES. A board with nothing free is
+            # legitimate waiting and resets the counter; an idle caused by OUR OWN refusal cannot
+            # change on re-asking, and paying a fleet to re-ask is the failure (hazync#464).
+            if plan.get("kind") == "exhausted":
+                exhausted_idles += 1
+                if exhausted_idles >= MAX_CONSECUTIVE_EXHAUSTED_IDLES:
+                    emit(f"stopping: {exhausted_idles} idles in a row that cannot resolve — the "
+                         f"board keeps offering work this session has already exhausted, and the "
+                         f"fleet is billing to re-ask a question whose answer cannot change")
+                    break
+            else:
+                exhausted_idles = 0
             # ⛔ THE DEADLINE STILL APPLIES WHILE IDLE. An idle session whose board never frees a
             # block would otherwise sleep past its own window, holding a rented fleet for hours with
             # nothing to show. Re-checking the clock at the top of the loop is what makes that safe,
