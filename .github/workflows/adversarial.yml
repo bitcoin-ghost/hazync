@@ -170,6 +170,17 @@ jobs:
           cd coordinator
           python3 test_tip_economics.py --control
 
+      - name: A session stops on idles that cannot resolve (hazync#464)
+        # ⛔ plan_next idles for two reasons and only one can end on its own. An "exhausted" idle —
+        # already proved, or MAX_ATTEMPTS — cannot change on re-asking, and the board never parks
+        # failing blocks (#460), so it hands the same one back for ever. At 26x RTX 4090 that is
+        # ~$462 for a 24 h session and zero blocks. --budget-usd bounds it and is OPTIONAL.
+        run: cd coordinator && python3 test_session_idle_cap.py
+      - name: Idle-cap POSITIVE CONTROL (cap removed — the loop must never stop)
+        run: |
+          cd coordinator
+          python3 test_session_idle_cap.py --control
+
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000
       - name: SIGUSR1 dumps every thread and the coordinator keeps serving (#265)
