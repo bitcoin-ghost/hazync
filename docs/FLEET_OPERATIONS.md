@@ -146,6 +146,27 @@ FLEET: 1x NVIDIA GeForce RTX 4090, 2x NVIDIA A40   ⚠ MIXED CARD TYPES — timi
 Until #449 nothing stated the composition, so a mixed fleet and a uniform one were identical in every
 log. 142 s of spread was published as a geography effect when it was card type all along.
 
+### The fleet ledger
+
+Every finished run appends one line to `docs/history/fleet-economics.jsonl` — fleet composition,
+wall-clock and cost. `python3 coordinator/tip_economics.py` reports it:
+
+```
+fleet                   n   mean_s     min     max  spread   mean_$
+3x RTX 4090             3    272.2   267.9   276.9     9.0    0.255
+1x A40 + 2x RTX 4090    1    357.9   357.9   357.9     0.0    0.262
+2x A40 + 1x RTX 4090    2    395.3   380.2   410.4    30.2    0.261
+```
+
+⛔ The 4090-only default exists because of those rows, not the other way round. It rests on nine
+runs on one block on one night, which justifies a default and does not settle a question — so the
+ledger accumulates and the claim can be overturned by evidence rather than argued from memory. A run
+that produced no proof is **not** recorded: it says nothing about cost per proof.
+
+⚠ This ranks card types for **selection**. It does not rank rented cards for **keeping** — once a
+card is paid for, the run's wall-clock is set by the fleet, so `tip_lifecycle.rank` keeps the
+*fastest* cards and is right to ignore price.
+
 ### Passing levers to the cards
 
 Any `HAZYNC_*` variable set in the driver's environment is forwarded to the aggregate **and every

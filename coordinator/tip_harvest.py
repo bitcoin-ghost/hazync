@@ -52,8 +52,13 @@ RE_CONN = re.compile(r"^(\d{13})\s+\[(\w+)\]\s+connected to\s+(\S+)", re.M)
 
 # What to pull off each card. The aggregate and the workers write different files, and `run.log` /
 # `prove.log` exist on both. A file that is absent is RECORDED as absent — see `harvest`.
-AGG_LOGS = ("agg.log", "agg.err", "run.log", "prove.log")
-WORKER_LOGS = ("aggw.log", "aa.log", "run.log", "prove.log")
+# ⛔ `facts.json` IS ON BOTH LISTS AND IT IS THE ONLY RECORD OF WHERE A CARD PHYSICALLY WAS.
+# pod-prove.sh writes it per card with RUNPOD_DC_ID, the GPU's name and UUID, driver, clocks and the
+# host CPU. None of it can be reconstructed once the pod is released, and until now none of it was
+# fetched -- so every question of the form "was that slow card in a different datacenter?" was
+# answerable only by inferring from peer IPs. hazync#448 is exactly that question.
+AGG_LOGS = ("agg.log", "agg.err", "run.log", "prove.log", "facts.json")
+WORKER_LOGS = ("aggw.log", "aa.log", "run.log", "prove.log", "facts.json")
 
 
 def parse_execution(text):
