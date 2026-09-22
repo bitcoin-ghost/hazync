@@ -4,3 +4,38 @@
 #
 # Keep this list SHORT. It is an escape hatch, and every entry is a thing nobody can rebuild the
 # box from the repo without knowing. Prefer committing a drop-in to adding a key here.
+
+# ── added 2026-09-22 when the check widened from 2 units to all 32 (hazync#465) ──────────────────
+# Each of these is a PATH OR DESTINATION that genuinely differs per box, and each was already
+# documented as such in the drop-in that sets it. Committing one box's value would create drift on
+# the other, which is worse than declaring the key per-box.
+#
+#   BUNDLE_SYNC_DEST        "The coordinator is per-deployment, so it lives here and not in the repo"
+#   HAZYNC_BITCOIN_DATADIR   server 1 uses /var/lib/hazync/bitcoin-client; the old box used /root/.bitcoin
+#   HAZYNC_CKPT_ARCHIVE      the tip-bridge box has no block device, so this is on the root filesystem
+#   HAZYNC_BRIDGE_OUT        /srv/bulk on the coordinator, /var/lib on the bridge box
+#   TIP_FILE                 follows the datadir
+#   HAZYNC_DISK_PATHS        which filesystems exist differs per box
+BUNDLE_SYNC_DEST
+HAZYNC_BITCOIN_DATADIR
+HAZYNC_CKPT_ARCHIVE
+HAZYNC_BRIDGE_OUT
+TIP_FILE
+HAZYNC_DISK_PATHS
+# SPACING: how often a bridge checkpoint is archived. The coordinator has a block device
+# and the tip-bridge box does not, so how much history each can afford to keep differs.
+SPACING
+
+# ── MemoryHigh / MemoryMax are PER BOX, and treating them as drift is how this was nearly broken ──
+# ⛔ The widened check reported hazync-proof's MemoryHigh=48G against the repo's 53G as drift, and
+# "fixing" it by deploying the repo value set MemoryMax=60G on a box with 62 GB, NO SWAP, and
+# bitcoind at 11.6 GB RSS. 60 + 11.6 exceeds the machine with nothing to spill to. The bridge there
+# is disabled, so it was a loaded gun rather than an outage — but the premise was wrong:
+#
+#   hazync-coord (tip bridge)  62 GB, 24 GB swap, bitcoind 3.2 GB  ->  58G/60G
+#   hazync-proof (coordinator) 62 GB, NO swap,    bitcoind 11.6 GB ->  48G/52G
+#
+# The cap has to be sized against what ELSE lives on the box. A single repo value cannot be right
+# for both, and the box that looked "behind" was the one that was correct.
+MemoryHigh
+MemoryMax
