@@ -4,3 +4,21 @@
 #
 # Keep this list SHORT. It is an escape hatch, and every entry is a thing nobody can rebuild the
 # box from the repo without knowing. Prefer committing a drop-in to adding a key here.
+
+# ── added 2026-09-22 when the check widened from 2 units to all 32 (hazync#465) ──────────────────
+# Each of these is a PATH OR DESTINATION that genuinely differs per box, and each was already
+# documented as such in the drop-in that sets it. Committing one box's value would create drift on
+# the other, which is worse than declaring the key per-box.
+#
+#   BUNDLE_SYNC_DEST        "The coordinator is per-deployment, so it lives here and not in the repo"
+#   HAZYNC_BITCOIN_DATADIR   server 1 uses /var/lib/hazync/bitcoin-client; the old box used /root/.bitcoin
+#   HAZYNC_CKPT_ARCHIVE      the tip-bridge box has no block device, so this is on the root filesystem
+#   HAZYNC_BRIDGE_OUT        /srv/bulk on the coordinator, /var/lib on the bridge box
+#   TIP_FILE                 follows the datadir
+#   HAZYNC_DISK_PATHS        which filesystems exist differs per box
+BUNDLE_SYNC_DEST
+HAZYNC_BITCOIN_DATADIR
+HAZYNC_CKPT_ARCHIVE
+HAZYNC_BRIDGE_OUT
+TIP_FILE
+HAZYNC_DISK_PATHS

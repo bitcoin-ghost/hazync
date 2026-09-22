@@ -28,7 +28,32 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 HOST="${1:-}"
 [ -n "$HOST" ] || { echo "usage: $0 <ssh-host>   e.g. $0 hazync-proof   (or localhost, on the box)" >&2; exit 2; }
 DROPINS_DIR=coordinator/deploy/dropins
-UNITS="${HAZYNC_UNITS:-hazync-coordinator hazync-bridge}"
+# ⛔ DISCOVER THE UNITS, DO NOT HARDCODE TWO OF THEM.
+# This was `hazync-coordinator hazync-bridge` — two units — while the repo declares 30 service files
+# and the boxes carry 32. It then printed "no drift: everything running on localhost is declared in
+# this repo", which is a claim about the whole box made after checking 1/16th of it.
+#
+# The unchecked thirty are where quiet damage lives: hazync-coordinator-backup (a changed BACKUP_DIR
+# sends backups somewhere nobody looks), the hazync-offsite-*-b2 jobs, hazync-prune-bundles (first
+# real --apply 2026-09-27), hazync-sponsor-bot (spends money).
+#
+# ⚠ The discovery runs ON THE HOST, because that is the only side that knows what is installed. A
+# repo-side list would miss exactly the case this check exists for: a unit live on the box and
+# absent from the repo.
+discover_units() {
+    local probe='systemctl list-unit-files "hazync-*.service" --no-pager --plain 2>/dev/null | awk "/\\.service/{sub(/\\.service\$/,\"\",\$1); print \$1}"'
+    if [ "$HOST" = localhost ]; then bash -c "$probe" 2>/dev/null
+    else ssh -n -o ConnectTimeout=15 "$HOST" "$probe" 2>/dev/null; fi
+}
+UNITS="${HAZYNC_UNITS:-}"
+if [ -z "$UNITS" ]; then
+    UNITS="$(discover_units | sort -u | tr '\n' ' ')"
+    # ⛔ DISCOVERING NOTHING IS "COULD NOT CHECK", NOT "NOTHING TO CHECK". A host that answers with an
+    # empty list is one we failed to ask, and reporting "no drift" for it is the silent pass this
+    # whole script exists to prevent.
+    [ -n "${UNITS// /}" ] || { echo "COULD NOT CHECK: no hazync-* units discovered on $HOST"; exit 2; }
+fi
+N_UNITS=$(printf '%s\n' $UNITS | grep -c .)
 ALLOW="${HAZYNC_DRIFT_ALLOW:-coordinator/deploy/unit-drift-allow.txt}"
 
 fail=0
@@ -82,6 +107,11 @@ for u in $UNITS; do
             [ -n \"\$v\" ] && [ \"\$v\" != infinity ] && [ \"\$v\" != 0 ] && echo \"GUARD \$d=\$v\"
         done
         ls -1 /etc/systemd/system/$u.service.d/ 2>/dev/null | grep '\.conf\$' | sed 's/^/DROPIN /'
+        for c in /etc/systemd/system/$u.service.d/*.conf; do
+            [ -f \"\$c\" ] || continue
+            b=\$(basename \"\$c\")
+            echo \"DROPINBODY \$b\"; cat \"\$c\"; echo \"DROPINEND \$b\"
+        done
     "
     # ⛔ localhost IS NOT AN SSH HOST. The timer that runs this check runs ON the coordinator, and root
     # there has no authorized_key for root@localhost -- measured 2026-09-18: Permission denied
@@ -104,12 +134,35 @@ for u in $UNITS; do
     # A drop-in nobody has committed is config that exists only on one disk. `ratelimit.conf` was
     # exactly this: it is what holds RATE_MAX at 120 rather than the base unit's 1000000, and
     # rebuilding the box from this repo would have quietly restored the million.
+    # ⚠ A DROP-IN THAT SETS ONLY ALLOW-LISTED KEYS IS LEGITIMATE BY DEFINITION. The allow-list holds
+    # keys that genuinely differ per box (a datadir, a sync destination); a file whose whole purpose
+    # is to set them cannot be committed without creating drift on the OTHER box. Flagging it anyway
+    # left 6 permanent findings after the scope widened to every unit — and a check that is
+    # permanently red gets muted, which is the failure this whole script exists to prevent.
+    #
+    # ⛔ The exemption is narrow ON PURPOSE: EVERY Environment key in the file must be allow-listed.
+    # One unlisted key and the file is reported, because that key is exactly what would be lost.
+    dropin_is_all_allowed() {   # $1 = unit, $2 = drop-in filename
+        [ -f "$ALLOW" ] || return 1
+        local body keys k
+        body="$(printf '%s\n' "$remote" | sed -n "/^DROPINBODY $2\$/,/^DROPINEND $2\$/p")"
+        keys="$(printf '%s\n' "$body" | grep -E '^Environment=' | sed 's/^Environment=//' \
+                 | sed 's/^"//' | cut -d= -f1)"
+        [ -n "$keys" ] || return 1          # no Environment keys at all -> not an allow-list case
+        while read -r k; do
+            [ -n "$k" ] || continue
+            grep -qxF "$k" "$ALLOW" || return 1
+        done < <(printf '%s\n' "$keys")
+        return 0
+    }
     while read -r _ f; do
         [ -n "${f:-}" ] || continue
-        if [ ! -f "$DROPINS_DIR/$u-$f" ]; then
-            bad "$u: drop-in '$f' is on the box but NOT in $DROPINS_DIR/$u-$f"
-        else
+        if [ -f "$DROPINS_DIR/$u-$f" ]; then
             note "ok   drop-in $f is declared"
+        elif dropin_is_all_allowed "$u" "$f"; then
+            note "ok   drop-in $f sets only allow-listed per-box keys"
+        else
+            bad "$u: drop-in '$f' is on the box but NOT in $DROPINS_DIR/$u-$f"
         fi
     done < <(printf '%s\n' "$remote" | grep '^DROPIN ')
 
@@ -203,5 +256,8 @@ if [ "$cannot" != 0 ]; then
     echo "COULD NOT CHECK — no unit state was readable, so this says NOTHING about drift."
     exit 2
 fi
-echo "no drift: everything running on $HOST is declared in this repo."
+# ⛔ SAY WHAT WAS ACTUALLY CHECKED. "everything running on $HOST is declared" was printed after
+# inspecting two units out of thirty-two. A count is the difference between a verified claim
+# and a slogan, and it is what makes a narrowed run (HAZYNC_UNITS=...) obvious in a log.
+echo "no drift: $N_UNITS unit(s) checked on $HOST, all declared in this repo."
 exit 0
