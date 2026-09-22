@@ -67,7 +67,13 @@ for u in $UNITS; do
     # ⚠ ONLY *.conf. systemd loads drop-ins matching *.conf and ignores everything else, so a parked
     # copy like `height-cap.conf.parked.bak` (found on the bridge 2026-09-18) is inert -- reporting it
     # as drift is a false alarm, and false alarms are how a check like this gets muted.
+    # ⛔ A MASKED UNIT IS RETIRED, NOT DRIFTED. systemd reports Restart=no (and empty everything) for a
+    # masked unit, so hazync-coordinator on the retired coordinator box -- masked on purpose when the
+    # bridge took that machine over -- reported "Restart is no on the box but the repo declares always"
+    # on EVERY run. A permanent false positive on a deliberately retired service is precisely how a
+    # check like this gets muted, which costs more than the blind spot it was added to close.
     probe="
+        echo \"STATE \$(systemctl show $u -p LoadState --value 2>/dev/null)\"
         systemctl show $u -p Environment --value | tr ' ' '\n' | grep -v '^\$' | sed 's/^/ENV /'
         systemctl show $u -p ExecStart --value | grep -oE 'argv\[\]=[^;]*' | sed 's/^/EXEC /'
         systemctl show $u -p User --value | sed 's/^/USER /'
@@ -88,6 +94,11 @@ for u in $UNITS; do
         remote=$(ssh -n -o ConnectTimeout=15 "$HOST" "$probe" 2>/dev/null)
     fi
     if [ -z "$remote" ]; then cant "$u: no unit state from $HOST (unreachable, unit absent, or ssh refused)"; continue; fi
+
+    if printf '%s\n' "$remote" | grep -qx 'STATE masked'; then
+        note "skip $u is MASKED on $HOST — retired, not drifted"
+        continue
+    fi
 
     # --- 1. drop-in FILES the repo does not ship ------------------------------------------------
     # A drop-in nobody has committed is config that exists only on one disk. `ratelimit.conf` was
