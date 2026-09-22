@@ -66,6 +66,7 @@ def phase_tone(phase_txt):
         return OK
     return ACCENT
 
+
 def fleet_colour(up, total):
     """⛔ A DEGRADED FLEET MUST NOT LOOK LIKE A HEALTHY ONE.
 
@@ -85,6 +86,29 @@ def fleet_sub(up, total, cost_hr):
     """
     sub = f'${cost_hr:.2f}/hr'
     return sub if up >= total else f'{sub}  ·  {total - up} down'
+
+
+# A 1 Hz feed that has said nothing for this long is not slow, it is broken.
+STALE_S = 60
+
+
+def feed_age(snap, wall_now):
+    """Seconds since the collector last wrote, from the WALL clock.
+
+    ⚠ Falls back to 0 for a snapshot written before `wall` existed; such a snapshot cannot report
+    staleness at all, which is the old behaviour and no worse than it was.
+    """
+    stamp = snap.get('wall')
+    if stamp is None:
+        return 0.0
+    return max(0.0, wall_now - stamp)
+
+
+def feed_line(n_up, age):
+    """The footer's left-hand text. Says STALE loudly rather than quietly reading 0s."""
+    if age >= STALE_S:
+        return f'STALE — no update for {age / 60.0:.0f}m · the feed may be dead'
+    return f'live · {n_up} cards streaming · updated {age:.0f}s ago'
 
 
 def draw_live(snap, fo):
@@ -455,11 +479,18 @@ def draw_live(snap, fo):
                font=fo['lab'], fill=hx(FAINT))
 
     # ---------------- footer
-    age = now - (snap.get('t') or now)
+    # ⛔ AGE MUST COME FROM THE WALL CLOCK, NOT FROM THE SNAPSHOT'S OWN `t`.
+    # This read `now - snap['t']`, and `now` is SET to `snap['t']` at the top of draw_live -- so the
+    # age was ZERO by construction in every frame ever rendered. Twelve minutes after the collector
+    # died the footer still read "live · 3 cards streaming · updated 0s ago".
+    #
+    # On an unattended 24-hour run that is the worst failure the frame can have: a dead feed that
+    # looks perfectly healthy. Nobody checks a dashboard that always says it is fine.
+    age = feed_age(snap, time.time())
     left = ('DEMO DATA — no pods are running' if snap.get('demo')      # no emoji: DejaVu draws tofu
-            else f'live · {len(up)} cards streaming · updated {age:.0f}s ago')
+            else feed_line(len(up), age))
     d.text((PAD, FOOT_Y), left, font=fo['small'],
-           fill=mix(RED, GROUND, .85) if snap.get('demo') else hx(FAINT))
+           fill=mix(RED, GROUND, .85) if (snap.get('demo') or age >= STALE_S) else hx(FAINT))
     note = 'GPU power is measured at 1 Hz on each card'
     d.text((W - PAD - d.textlength(note, font=fo['small']), FOOT_Y), note,
            font=fo['small'], fill=hx(FAINT))
