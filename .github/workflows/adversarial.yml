@@ -663,18 +663,16 @@ jobs:
           cd tools/live
           python3 test_done_counts.py --control
 
-      - name: The publish loop reuses its ssh connection (tools/live)
-        # ⛔ MEASURED against the live web box with real 108 KB frames:
-        #     fresh connection per rsync   1.460 s per tick
-        #     one reused connection        0.645 s per tick
-        # Two cold handshakes (0.48-0.71 s each) is ~1.0 s of setup inside a `sleep 1` loop, before
-        # a byte of the frame moves — the page would fall to ~2.5 s per update and a 24-hour run
-        # would make ~172,800 handshakes for nothing.
-        run: cd tools/live && python3 test_publish_reuse.py
-      - name: Publish-reuse POSITIVE CONTROL (options stripped — must be caught)
+      - name: A failure does not look like progress (tools/live)
+        # ⛔ The phase banner was hardcoded to ACCENT, so FAILED / PROVING / VERIFIED rendered
+        # PIXEL-IDENTICAL at (235,140,25). A status readout with one colour cannot report status.
+        # On an unattended 24-hour run the banner gets one glance, and that glance could not tell a
+        # failure from normal progress.
+        run: cd tools/live && python3 test_phase_tone.py
+      - name: Phase-tone POSITIVE CONTROL (one colour for every phase — must be caught)
         run: |
           cd tools/live
-          python3 test_publish_reuse.py --control
+          python3 test_phase_tone.py --control
 
       - name: Share shares the frame's bytes, and never a stale frame as live (tools/live)
         # Runs the SHIPPED live.js against a mock browser, so it exercises the real handler rather
