@@ -67,9 +67,31 @@ def check_still_only_what_changed(control=False):
     return True, "the mtime guard is intact"
 
 
+def check_sleeps_the_remainder(control=False):
+    """⛔ `sleep 1` AFTER the work makes the period `work + 1s`, not 1s.
+
+    Measured: 1.65 s per update with connection reuse, 2.46 s without. The renderer writes a frame
+    every second, so roughly every other frame was skipped and the page ran up to 1.65 s behind
+    what had already been drawn.
+    """
+    s = body(control)
+    if control:
+        # the control restores the pre-fix loop: a flat sleep after the work
+        s = re.sub(r'rest=\$\(awk.*?sleep "\$rest"', "sleep 1", s, flags=re.S)
+    if re.search(r"^\s*sleep 1\s*$", s, re.M):
+        return False, "a flat `sleep 1` remains — the period is work + 1s, not 1s"
+    if 'sleep "$rest"' not in s:
+        return False, "the loop does not sleep a computed remainder"
+    if "d>0?d:0" not in s:
+        return False, "the remainder is not clamped — a negative sleep would error or spin"
+    return True, "sleeps the remainder, clamped at zero when a tick overruns"
+
+
 CHECKS = [check_reuse_options, check_socket_is_private,
-          check_master_is_closed, check_still_only_what_changed]
-CONTROL_MUST_FAIL = {check_reuse_options, check_master_is_closed}
+          check_master_is_closed, check_still_only_what_changed,
+          check_sleeps_the_remainder]
+CONTROL_MUST_FAIL = {check_reuse_options, check_master_is_closed,
+                     check_sleeps_the_remainder}
 
 
 def main():

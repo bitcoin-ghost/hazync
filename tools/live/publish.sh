@@ -91,11 +91,23 @@ fi
 
 # ⛔ PUBLISH ONLY WHAT CHANGED. The renderer writes a frame a second; re-uploading an identical one
 #    burns the tip box's uplink for nothing. mtime is the cheap test and it is the right one.
+# ⛔ SLEEP THE REMAINDER, NOT A FLAT SECOND. `sleep 1` ran AFTER the work, so the real period was
+# publish_time + 1 s -- measured 1.65 s per update with connection reuse, 2.46 s without. The
+# renderer writes a frame every second, so roughly every other frame was skipped and the public page
+# ran up to 1.65 s behind what had already been drawn.
+#
+# ⚠ A tick that overruns its interval sleeps ZERO and goes again immediately, which is correct: it
+# is already behind. It cannot spin, because a failed publish returns fast and the remainder is then
+# nearly the whole interval.
+INTERVAL=${HAZYNC_PUBLISH_INTERVAL:-1}
 last=""
 while true; do
+  t0=$(date +%s.%N)
   cur=$(stat -c %Y "$FRAME" 2>/dev/null || echo "")
   if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
     publish_once && last="$cur"
   fi
-  sleep 1
+  rest=$(awk -v a="$t0" -v b="$(date +%s.%N)" -v i="$INTERVAL" \
+             'BEGIN{d=i-(b-a); printf "%.3f", (d>0?d:0)}')
+  sleep "$rest"
 done
