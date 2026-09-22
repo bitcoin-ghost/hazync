@@ -180,6 +180,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_session_idle_cap.py --control
+      - name: A failed submission is recorded and classified (hazync#460)
+        # ⛔ MAX_ATTEMPTS, MAX_ENV_FAILURES, is_env_failure() and four DB columns formed a complete
+        # design for failed blocks and NONE of it ran: zero callers, columns only ever SELECTed.
+        # Live board 2026-09-22: 0 failed ranges, attempts=0, across 123,331 proven blocks.
+        run: cd coordinator && python3 test_failure_recording.py
+      - name: Failure-classification POSITIVE CONTROL (an OOM counted as a bad block — must be caught)
+        run: |
+          cd coordinator
+          python3 test_failure_recording.py --control
 
       - name: Coordinator input-handler fuzz (parse_range / clean_handle / is_hex)
         run: cd coordinator && python3 parse_fuzz.py 30000

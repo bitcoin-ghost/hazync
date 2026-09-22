@@ -3743,6 +3743,29 @@ def submit(body):
             except Exception:
                 pass
             _sponsor_mark_proven(c, v_lo, v_hi)           # a sponsorship now fully covered ends its hold
+        else:
+            # ⛔ hazync#460: RECORD THE FAILURE. Until now nothing did. `attempts`, `env_failures`,
+            # `last_error` and `last_failed_at` were created by the migration and only ever SELECTed,
+            # `is_env_failure()` had no callers, and MAX_ATTEMPTS/MAX_ENV_FAILURES were read into
+            # constants nothing used. Measured on the live board 2026-09-22: 0 failed ranges and
+            # attempts=0 across 123,331 proven blocks.
+            #
+            # The classification is the point, and its reasoning is already written above _ENV_ERR:
+            # an OOM on an oversubscribed GPU says nothing about the block, and counting it the same
+            # way would penalise good blocks during any capacity incident.
+            #
+            # ⚠ THIS RECORDS ONLY. It deliberately does NOT park at MAX_ATTEMPTS, because parking is
+            # currently a ONE-WAY DOOR: `live_ids()` counts 'failed' as live ("a parked range still
+            # owns its interval"), and NOTHING in this codebase ever sets a range back to 'open'. A
+            # parked range would hold its interval and block the frontier for ever with no operator
+            # recovery path. Parking needs an un-park route first -- see #460.
+            err = (note or "")[:500]
+            if is_env_failure(err):
+                c.execute("UPDATE ranges SET env_failures=COALESCE(env_failures,0)+1, "
+                          "last_error=?, last_failed_at=? WHERE id=?", (err, time.time(), rid))
+            else:
+                c.execute("UPDATE ranges SET attempts=COALESCE(attempts,0)+1, "
+                          "last_error=?, last_failed_at=? WHERE id=?", (err, time.time(), rid))
         c.commit(); c.close()
         _frontier_invalidate()        # #265: a new verified range can move the frontier
         if ok:
