@@ -42,6 +42,31 @@ def stat(d, fo, x, label, value, col, sub=None):
                font=fo['small'], fill=hx(DIM))
 
 
+# Words that mean the run is in trouble. Matched case-insensitively against the phase line the run
+# writes for itself, so the frame inherits the run's own vocabulary rather than guessing.
+BAD_WORDS = ('failed', 'fail', 'error', 'panic', 'stranded', 'refusing', 'aborted', 'stopping',
+             'could not', 'cannot', 'no capacity', 'timed out')
+GOOD_WORDS = ('verified', 'submitted')
+
+
+def phase_tone(phase_txt):
+    """RED for trouble, green for a finished proof, accent for work in progress.
+
+    ⛔ WHY. The banner was hardcoded to ACCENT, so FAILED, PROVING and VERIFIED rendered
+    pixel-identically -- measured (235,140,25) for all three. A status readout with one colour
+    cannot report status; it is decoration. That is the fourth such readout found on this frame.
+
+    ⚠ Trouble is checked FIRST. "FAILED on block 741000 after it verified 3 others" must read as a
+    failure, not as a success, and a phase line can easily contain both words.
+    """
+    low = (phase_txt or '').lower()
+    if any(w in low for w in BAD_WORDS):
+        return RED
+    if any(w in low for w in GOOD_WORDS):
+        return OK
+    return ACCENT
+
+
 def draw_live(snap, fo):
     base = Image.new('RGB', (W, H), hx(GROUND))
     d = ImageDraw.Draw(base)
@@ -331,9 +356,14 @@ def draw_live(snap, fo):
     if phase_txt:
         tw = d.textlength(phase_txt, font=fo['lab'])
         tx, ty = W - PAD - tw, 90
-        d.rectangle([tx - 12, ty - 5, tx + tw + 8, ty + 21], fill=mix(ACCENT, GROUND, .12))
-        d.rectangle([tx - 12, ty - 5, tx - 9, ty + 21], fill=mix(ACCENT, GROUND, .95))
-        d.text((tx, ty), phase_txt, font=fo['lab'], fill=mix(ACCENT, GROUND, .95))
+        # ⛔ THE BANNER MUST SAY WHICH KIND OF NEWS IT IS. This was hardcoded to ACCENT, so
+        # "FAILED on block 741000" rendered in exactly the same orange as "PROVING block 741000" --
+        # verified pixel-identical, (235,140,25) for all three. A failed run was indistinguishable
+        # from normal progress at a glance, which on an overnight run is the only glance it gets.
+        tone = phase_tone(phase_txt)        # ⚠ NOT `base`: that name is the PIL image
+        d.rectangle([tx - 12, ty - 5, tx + tw + 8, ty + 21], fill=mix(tone, GROUND, .12))
+        d.rectangle([tx - 12, ty - 5, tx - 9, ty + 21], fill=mix(tone, GROUND, .95))
+        d.text((tx, ty), phase_txt, font=fo['lab'], fill=mix(tone, GROUND, .95))
 
     # ---------------- stats (cost is real: card-hours x RunPod price)
     if idle:

@@ -676,6 +676,16 @@ jobs:
           cd tools/live
           python3 test_publish_reuse.py --control
 
+      - name: A failure does not look like progress (tools/live)
+        run: |
+          python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
+          cd tools/live && python3 test_phase_tone.py
+      - name: A failure does not look like progress (tools/live) — POSITIVE CONTROL (must be caught)
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live
+          python3 test_phase_tone.py --control
+
       - name: Share shares the frame's bytes, and never a stale frame as live (tools/live)
         # Runs the SHIPPED live.js against a mock browser, so it exercises the real handler rather
         # than a re-implementation that would pass while the page is broken.
