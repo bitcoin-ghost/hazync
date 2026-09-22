@@ -129,6 +129,15 @@ for u in $UNITS; do
         note "skip $u is MASKED on $HOST — retired, not drifted"
         continue
     fi
+    # ⛔ A UNIT THAT DOES NOT EXIST IS "COULD NOT CHECK", NOT "NO DRIFT". `systemctl show` answers for
+    # a name it has never heard of — empty values, exit 0 — so $remote is non-empty and the earlier
+    # cant() never fires. Caught by this script's own control (HAZYNC_UNITS=hazync-does-not-exist),
+    # which reported "no drift: 1 unit(s) checked, all declared" and exited 0. A check that passes
+    # on a unit it cannot see would pass on a whole box named wrongly.
+    if printf '%s\n' "$remote" | grep -qx 'STATE not-found'; then
+        cant "$u: not installed on $HOST (LoadState=not-found)"
+        continue
+    fi
 
     # --- 1. drop-in FILES the repo does not ship ------------------------------------------------
     # A drop-in nobody has committed is config that exists only on one disk. `ratelimit.conf` was
@@ -201,6 +210,15 @@ for u in $UNITS; do
         # ⚠ ANY declared value may be the winning one. systemd's drop-in precedence is alphabetical
         # and this check deliberately does not simulate it (see "Union, not precedence" below), so a
         # directive set in two files must not be called drift just because the first one differs.
+        # ⚠ AN ALLOW-LISTED GUARDED DIRECTIVE IS PER-BOX, NOT DRIFT. MemoryHigh/MemoryMax have to be
+        # sized against what ELSE lives on the box: the coordinator runs bitcoind at 11.6 GB with no
+        # swap and needs 48G/52G, while the tip-bridge box has 24 GB of swap and bitcoind at 3.2 GB
+        # and needs 58G/60G. Reporting one as drift led to "fixing" it by deploying the other value,
+        # which put MemoryMax=60G on a 62 GB box with nothing to spill to.
+        if [ -f "$ALLOW" ] && grep -qxF "$gk" "$ALLOW"; then
+            note "ok   $gk=${kv#*=} is an accepted per-box setting (see $(basename "$ALLOW"))"
+            continue
+        fi
         wants=$(printf '%s\n' "$gdeclared" | grep "^$gk=" | sed "s/^$gk=//")
         if [ -z "$wants" ]; then
             note "note $gk=${kv#*=} is a systemd default (not declared, not guarded)"

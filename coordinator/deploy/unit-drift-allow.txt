@@ -22,3 +22,20 @@ HAZYNC_CKPT_ARCHIVE
 HAZYNC_BRIDGE_OUT
 TIP_FILE
 HAZYNC_DISK_PATHS
+# SPACING: how often a bridge checkpoint is archived. The coordinator has a block device
+# and the tip-bridge box does not, so how much history each can afford to keep differs.
+SPACING
+
+# ── MemoryHigh / MemoryMax are PER BOX, and treating them as drift is how this was nearly broken ──
+# ⛔ The widened check reported hazync-proof's MemoryHigh=48G against the repo's 53G as drift, and
+# "fixing" it by deploying the repo value set MemoryMax=60G on a box with 62 GB, NO SWAP, and
+# bitcoind at 11.6 GB RSS. 60 + 11.6 exceeds the machine with nothing to spill to. The bridge there
+# is disabled, so it was a loaded gun rather than an outage — but the premise was wrong:
+#
+#   hazync-coord (tip bridge)  62 GB, 24 GB swap, bitcoind 3.2 GB  ->  58G/60G
+#   hazync-proof (coordinator) 62 GB, NO swap,    bitcoind 11.6 GB ->  48G/52G
+#
+# The cap has to be sized against what ELSE lives on the box. A single repo value cannot be right
+# for both, and the box that looked "behind" was the one that was correct.
+MemoryHigh
+MemoryMax
