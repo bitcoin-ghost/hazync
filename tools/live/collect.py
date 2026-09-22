@@ -484,7 +484,13 @@ def main():
             pass                                                         # blocks_from_cards now
         else:
             spend_total = sum((b.get("cost") or 0) for b in blocks)
-        snap = {"t": now, "demo": bool(a.demo), "phase": phase_label,
+        # ⛔ `wall` IS THE REAL CLOCK AT WRITE TIME, AND `t` IS NOT.
+        # Under --replay `t` is rewound to the capture's own epoch so a finished run renders as it
+        # looked live. The renderer therefore cannot use `t` to judge staleness -- and it did, which
+        # made "updated Ns ago" structurally ZERO in every frame ever rendered (see tip24live).
+        # `wall` always advances, so a collector that DIES stops advancing it and the frame can say
+        # so. In replay it is also the real clock, so a freshly replayed capture reads as fresh.
+        snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_label,
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}
