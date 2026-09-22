@@ -714,6 +714,16 @@ jobs:
           cd tools/live
           python3 test_publish_reuse.py --control
 
+      - name: A dead card is visible, and the cost does not lie (tools/live)
+        run: |
+          python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
+          cd tools/live && python3 test_fleet_degraded.py
+      - name: A dead card is visible, and the cost does not lie (tools/live) — POSITIVE CONTROL (must be caught)
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live
+          python3 test_fleet_degraded.py --control
+
       - name: A failure does not look like progress (tools/live)
         run: |
           python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
