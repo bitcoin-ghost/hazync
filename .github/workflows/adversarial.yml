@@ -730,6 +730,14 @@ jobs:
           cd tools/live
           python3 test_stale_feed.py --control
 
+      - name: A block renders as a cycle — prove to 100, hold, fold to 100 (hazync#481, #482)
+        run: |
+          python3 -m pip install --quiet Pillow   # renders frames through the real renderer
+          cd tools/live && python3 test_block_cycle.py
+      - name: Block-cycle POSITIVE CONTROL (fold arc back to counting cards — must stop climbing)
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live && python3 test_block_cycle.py --control
       - name: The ring sits beside the traces, not on top of them (tools/live)
         run: |
           python3 -m pip install --quiet Pillow   # imports tip24live for its geometry

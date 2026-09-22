@@ -37,40 +37,59 @@ remote_body() {
 LOGDIR="__LOGDIR__"
 while true; do
   read -r U M T P SM MM <<<"$(nvidia-smi --query-gpu=utilization.gpu,memory.used,temperature.gpu,power.draw,clocks.sm,clocks.mem --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | tr ',' ' ')"
-  PHASE=idle; N=0; TOT=0; BLK=
-  # board mode writes $LOGDIR/worker_N.log; a milestone run writes /workspace/prove.log and, during
-  # the fold, /workspace/agg.log. Take the newest of all of them, or a milestone run reports `idle`
-  # for its whole duration while looking perfectly healthy.
-  L=$(ls -t "$LOGDIR"/*.log /workspace/prove.log /workspace/agg.log /workspace/aggw.log 2>/dev/null | head -1)
-  if [ -n "$L" ]; then
-    TAIL=$(tail -c 40000 "$L" 2>/dev/null)
-    # `chunk N: X inputs, Y segments at po2 Z` is prove-chunk's equivalent of "executed" — without it
-    # a card reads `idle` for its whole CPU-only execute phase while sitting at full power.
-    # ⛔ THE FOLD WAS INVISIBLE. The aggregate prints 'joins 34/34' and '18/34 segments' -- note the
-    # number comes FIRST there -- so none of the patterns below matched it, and a worker's own fold
-    # log was not even in the file list. Measured 2026-09-20: the word 'assembling' appeared ZERO
-    # times across a whole run, so kfold stayed 0, the join tree never lit, and the fold phase simply
-    # did not exist as far as the dashboard was concerned.
-    #   aggregator:  'joins N/M'                      <- the join tree advancing
-    #   worker:      '[w1] segment 7 in 2.45s'        <- this card taking fold work over the network
-    M1=$(printf '%s' "$TAIL" | grep -oE 'joins [0-9]+/[0-9]+|\[w[0-9]+\] segment [0-9]+|segment [0-9]+/[0-9]+|executed, [0-9]+ segments|assembling [0-9]+ segment receipts|chunk [0-9]+: [0-9]+ inputs, [0-9]+ segments at po2 [0-9]+' | tail -1)
-    case "$M1" in
-      # 'assembling' is the phase word the renderer already keys the fold arc on; both fold signals
-      # report it so one card folding and many cards folding look the same to everything downstream.
-      joins*)      PHASE=assembling; N=${M1#joins }; TOT=${N#*/}; N=${N%%/*} ;;
-      \[w*)        PHASE=assembling; N=$(printf '%s' "$M1" | grep -oE '[0-9]+$'); TOT=0 ;;
-      segment*)    PHASE=proving;    N=${M1#segment }; TOT=${N#*/}; N=${N%%/*} ;;
-      executed*)   PHASE=executed;   TOT=$(printf '%s' "$M1" | grep -oE '[0-9]+' | head -1) ;;
-      assembling*) PHASE=assembling; TOT=$(printf '%s' "$M1" | grep -oE '[0-9]+' | head -1) ;;
-      chunk*)      PHASE=executed;   TOT=$(printf '%s' "$M1" | grep -oE '[0-9]+' | sed -n 3p) ;;
-    esac
-    BLK=$(printf '%s' "$TAIL" | grep -oE 'range \[[0-9]+\.\.[0-9]+\]' | tail -1 | grep -oE '[0-9]+' | head -1)
-  fi
-  # `range [n..n]` only appears in BOARD worker logs. A milestone chunk run has no such line, so the
-  # height would stay pinned at whatever the board last did — the dashboard would show the wrong
-  # block for the entire run while everything else looked healthy. Fall back to the block on disk.
+  # ── what is this card doing, RIGHT NOW ──────────────────────────────────────────────────────
+  # ⛔ POSITION WITHIN THE CURRENT BLOCK, NOT `tail -1` OF THE WHOLE FILE (hazync#481, #482).
+  # The old parse took the last line matching ANY pattern, anywhere in the log. On a 32-second block
+  # that cannot describe a cycle: before the first progress line it said `idle`, and after the last
+  # `joins` line it said `assembling` until the file was replaced — exactly the proving → folding →
+  # blank → proving flicker seen on a fleet that was in fact proving a block every 32 s cleanly.
+  #
+  # It was fragile in a second way that bit: `ls -t | head -1` picked ONE file, so which of agg.log,
+  # aggw.log or $LOGDIR/*.log happened to be newest decided whether a height was found at all.
+  # Measured 2026-09-22: 0 of 120 samples carried a height, while the identical grep run by hand on
+  # the same card against the same file returned 119498.
+  #
+  # Now: read EVERY candidate log, anchor on the last RANGE banner (where the current block begins),
+  # and take the phase from what appears AFTER it. Both progress numbers are reported, so the frame
+  # can hold proving at 100% while the fold climbs, instead of swapping one for the other.
+  PHASE=idle; N=0; TOT=0; BLK=; FN=0; FT=0
+  read -r PHASE N TOT BLK FN FT <<<"$(
+    for f in "$LOGDIR"/*.log /workspace/prove.log /workspace/agg.log /workspace/aggw.log; do
+      [ -f "$f" ] && tail -c 40000 "$f"
+    done 2>/dev/null | awk '
+      # ⚠ EVERY SHAPE THE PROVER ACTUALLY WRITES, captured from a live mode-6 block on 2026-09-22.
+      #   aggregate: "=== ... RANGE [119471..119471] ...", "execution 10.9 s   16 segments",
+      #              "7/15 segments  22s elapsed", "joins 5/5", "receipt written to ...range_N.hzk"
+      #   worker:    "<epoch_ms> [w1] task kind=segment idx=0 ... done=1", "... kind=join ... done=4"
+      # ⛔ THE NUMBER COMES FIRST in both "7/15 segments" and "joins 5/5". That trap was found once,
+      # for joins, and never generalised — which is why proving was invisible for a whole run.
+      tolower($0) ~ /range \[[0-9]+\.\.[0-9]+\]/ {
+        match($0, /\[[0-9]+/); blk = substr($0, RSTART + 1, RLENGTH - 1)
+        seg_n = 0; seg_t = 0; fold_n = 0; fold_t = 0; fin = 0; exec_t = 0; w_seg = 0; w_join = 0
+      }
+      /execution [0-9.]+ s/ && / segments/ { for (i = 1; i <= NF; i++) if ($i == "segments") exec_t = $(i-1) + 0 }
+      /^[ \t]*[0-9]+\/[0-9]+ segments/     { split($1, a, "/"); seg_n = a[1] + 0; seg_t = a[2] + 0 }
+      /joins [0-9]+\/[0-9]+/ { for (i = 1; i <= NF; i++) if ($i == "joins") { split($(i+1), b, "/"); fold_n = b[1] + 0; fold_t = b[2] + 0 } }
+      /task kind=segment/ { for (i = 1; i <= NF; i++) if ($i ~ /^done=/) { split($i, c, "="); seg_n = c[2] + 0; w_seg = 1 } }
+      /task kind=join/    { for (i = 1; i <= NF; i++) if ($i ~ /^done=/) { split($i, c, "="); fold_n = c[2] + 0; w_join = 1 } }
+      /receipt written|RECEIPT VERIFIED|PUSH DONE/ { fin = 1 }
+      END {
+        if (seg_t == 0 && exec_t > 0) seg_t = exec_t
+        # ⚠ THE PHASE IS HOW FAR THROUGH THE BLOCK WE ARE, not which line came last.
+        ph = "idle"
+        if (blk != "")            ph = "executed"
+        if (seg_n > 0 || w_seg)   ph = "proving"
+        if (fold_n > 0 || w_join) ph = "assembling"
+        if (fin)                  ph = "done"
+        printf "%s %d %d %s %d %d\n", ph, seg_n, seg_t, (blk == "" ? "-" : blk), fold_n, fold_t
+      }')"
+  [ "$BLK" = "-" ] && BLK=
+  # `RANGE [n..n]` only appears in mode-6/board logs. A milestone chunk run has none, so fall back to
+  # the fixture on disk rather than reporting no block at all.
   [ -z "$BLK" ] && BLK=$(ls /workspace/block_*.json 2>/dev/null | head -1 | sed 's/[^0-9]//g')
-  echo "$(date +%s.%N),${U:-0},${M:-0},${T:-0},${P:-0},${SM:-0},${MM:-0},$PHASE,$N,$TOT,$BLK"
+  # ⚠ THE TWO FOLD COLUMNS ARE APPENDED, NOT INSERTED. collect.py rejects a row with fewer than 11
+  # fields, so an older reader still parses a new row and simply does not see the fold numbers.
+  echo "$(date +%s.%N),${U:-0},${M:-0},${T:-0},${P:-0},${SM:-0},${MM:-0},$PHASE,$N,$TOT,$BLK,${FN:-0},${FT:-0}"
   sleep 1
 done
 EOS
