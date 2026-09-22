@@ -701,17 +701,24 @@ jobs:
           cd tools/live
           python3 test_done_counts.py --control
 
-      - name: A dead feed says so — "updated 0s ago" was structural (tools/live)
-        # ⛔ draw_live sets `now = snap['t']`, then the footer computed `age = now - snap['t']`.
-        # ZERO by construction, in every frame ever rendered. Twelve minutes after the collector
-        # stopped the footer still read "live · 3 cards streaming · updated 0s ago" — a dead feed
-        # that looks perfectly healthy, which on an unattended 24-hour run is the worst failure the
-        # display can have. The collector now stamps `wall` (the real clock); `t` is rewound under
-        # --replay and so cannot judge staleness.
+      - name: The publish loop reuses its ssh connection (tools/live)
+        # ⛔ MEASURED against the live web box with real 108 KB frames:
+        #     fresh connection per rsync   1.460 s per tick
+        #     one reused connection        0.645 s per tick
+        # Two cold handshakes (0.48-0.71 s each) is ~1.0 s of setup inside a `sleep 1` loop, before
+        # a byte of the frame moves — the page would fall to ~2.5 s per update and a 24-hour run
+        # would make ~172,800 handshakes for nothing.
+        run: cd tools/live && python3 test_publish_reuse.py
+      - name: Publish-reuse POSITIVE CONTROL (options stripped — must be caught)
+        run: |
+          cd tools/live
+          python3 test_publish_reuse.py --control
+
+      - name: A dead feed says so (tools/live)
         run: |
           python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
           cd tools/live && python3 test_stale_feed.py
-      - name: Stale-feed POSITIVE CONTROL (age from `t` again — must be caught)
+      - name: A dead feed says so (tools/live) — POSITIVE CONTROL (must be caught)
         run: |
           python3 -m pip install --quiet Pillow
           cd tools/live
