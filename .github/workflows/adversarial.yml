@@ -180,6 +180,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_session_idle_cap.py --control
+      - name: Spares outlive the gates, and a slow download is not a dead one (hazync#479)
+        run: cd coordinator && python3 test_spare_survival.py
+      - name: Spare-survival POSITIVE CONTROL (the flat 600 s clock — tonight's card must be dropped)
+        run: |
+          cd coordinator
+          python3 test_spare_survival.py --control
       - name: A bad block parks, a capacity incident does not, and a park can be undone (hazync#460)
         run: cd coordinator && python3 test_parking.py
       - name: Parking POSITIVE CONTROL (the env/block distinction removed — a good block must be parked)
