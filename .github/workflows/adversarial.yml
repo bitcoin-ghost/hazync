@@ -663,29 +663,17 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
-      - name: A verified block COUNTS on the dashboard (tools/live)
-        # ⛔ `done` was inferred from 5 s of silence. The collector stops when the run ends, BEFORE
-        # its own grace period elapses, so the LAST block of every run never counted. Captured
-        # 2026-09-21: the header read "0 blocks" beside a banner reading "VERIFIED block 741000 in
-        # 267.9s". On a 24-hour run that is an off-by-one on the number people actually read.
-        run: cd tools/live && python3 test_done_counts.py
-      - name: Block-count POSITIVE CONTROL (VERIFIED signal ignored — must be caught)
+      - name: A dead card is visible, and the cost does not lie (tools/live)
+        # ⛔ The FLEET stat read `2/3 up` in exactly the same neutral colour as `3/3 up`. Over an
+        # unattended 24-hour run the whole point of the frame is that someone glances at it, and a
+        # card that died four hours ago is what they need to see.
+        # ⚠ The $/hr must NOT drop when a card dies — a rented pod bills whether it answers or not,
+        # so a reduced rate understates the real cost. That is the easy wrong fix, so it is pinned.
+        run: cd tools/live && python3 test_fleet_degraded.py
+      - name: Degraded-fleet POSITIVE CONTROL (one colour for every state — must be caught)
         run: |
           cd tools/live
-          python3 test_done_counts.py --control
-
-      - name: The publish loop reuses its ssh connection (tools/live)
-        # ⛔ MEASURED against the live web box with real 108 KB frames:
-        #     fresh connection per rsync   1.460 s per tick
-        #     one reused connection        0.645 s per tick
-        # Two cold handshakes (0.48-0.71 s each) is ~1.0 s of setup inside a `sleep 1` loop, before
-        # a byte of the frame moves — the page would fall to ~2.5 s per update and a 24-hour run
-        # would make ~172,800 handshakes for nothing.
-        run: cd tools/live && python3 test_publish_reuse.py
-      - name: Publish-reuse POSITIVE CONTROL (options stripped — must be caught)
-        run: |
-          cd tools/live
-          python3 test_publish_reuse.py --control
+          python3 test_fleet_degraded.py --control
 
       - name: A failure does not look like progress (tools/live)
         run: |

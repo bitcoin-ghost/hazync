@@ -66,6 +66,26 @@ def phase_tone(phase_txt):
         return OK
     return ACCENT
 
+def fleet_colour(up, total):
+    """⛔ A DEGRADED FLEET MUST NOT LOOK LIKE A HEALTHY ONE.
+
+    This read `2/3 up` in exactly the same neutral colour as `3/3 up`. Over an unattended 24-hour run
+    the entire point of the frame is that someone glances at it, and a card that died four hours ago
+    is the thing they need to see. A named function so the rule is testable without rendering.
+    """
+    return hx(TEXT) if up >= total else mix(ACCENT, GROUND, .95)
+
+
+def fleet_sub(up, total, cost_hr):
+    """The $/hr, plus how many cards are down.
+
+    ⚠ THE RATE DOES NOT DROP WHEN A CARD DIES. A rented pod bills whether it answers or not, so a
+    reduced rate would understate what the run is actually costing -- the opposite of what a cost
+    readout is for.
+    """
+    sub = f'${cost_hr:.2f}/hr'
+    return sub if up >= total else f'{sub}  ·  {total - up} down'
+
 
 def draw_live(snap, fo):
     base = Image.new('RGB', (W, H), hx(GROUND))
@@ -377,8 +397,9 @@ def draw_live(snap, fo):
     # nobody was working on
     stat(d, fo, 372, 'LAST BLOCK' if idle else 'THIS BLOCK',
          f'${cost_now:.2f}' if cur else '—', hx(TEXT))
-    stat(d, fo, 700, 'FLEET', f'{len(up)}/{len(cards)} up', hx(TEXT),
-         sub=f'${fleet.get("cost_hr", 0):.2f}/hr')
+    stat(d, fo, 700, 'FLEET', f'{len(up)}/{len(cards)} up',
+         fleet_colour(len(up), len(cards)),
+         sub=fleet_sub(len(up), len(cards), fleet.get('cost_hr', 0)))
     # ⛔ was CHAIN pct/proven — the BACKFILL campaign's progress, which never moves during a tip run
     # and is hardcoded under --demo. The run's own headline instead, from measured block totals:
     # 30 cards close a block in ~194 s against bitcoin's 600 s.
