@@ -38,7 +38,24 @@ LOOP=0
 [ "${1:-}" = "--loop" ] && { LOOP=1; shift; }
 FRAME=${1:?usage: publish.sh [--loop] <frame.png>}
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+# ⛔ WITHOUT CONNECTION REUSE THIS LOOP CANNOT KEEP UP WITH ITSELF.
+# Each tick makes TWO rsync calls, and each one opened a fresh ssh. Measured to the live web box
+# 2026-09-22:
+#
+#     cold connection   0.48 - 0.71 s
+#     reused (control)  0.07 s
+#
+# Two cold handshakes is ~1.0 s of setup inside a `sleep 1` loop -- before a single byte of the
+# 108 KB frame moves. The public page would fall to ~2 s per update and the run would make ~172,800
+# handshakes over 24 hours, for no benefit.
+#
+# ControlMaster=auto opens one connection and reuses it; ControlPersist keeps it warm across ticks.
+# ⚠ The socket lives beside this script's own runtime, not in /tmp shared with anything else, and
+# the path is per-destination so two publishers cannot collide on one socket.
+CTL_DIR=${HAZYNC_PUBLISH_CTL_DIR:-${TMPDIR:-/tmp}/hazync-publish-$(id -u)}
+mkdir -p "$CTL_DIR" && chmod 700 "$CTL_DIR"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15
+          -o ControlMaster=auto -o "ControlPath=$CTL_DIR/%r@%h:%p" -o ControlPersist=60)
 [ -n "$KEY" ] && SSH_OPTS+=(-i "$KEY")
 
 publish_once() {
@@ -61,6 +78,11 @@ publish_once() {
   rsync -q --chmod=F644 -e "ssh ${SSH_OPTS[*]}" "$meta" "$DEST/meta.json"  || return 1
   echo "$(date -u +%H:%M:%S) published ${size} bytes (rendered $(date -u -d @"$mtime" +%H:%M:%S) UTC)"
 }
+
+# ⚠ Tear the shared connection down on the way out. A ControlPersist socket outliving the script
+# is a live authenticated channel to the web box with nothing watching it.
+cleanup_ctl() { ssh "${SSH_OPTS[@]}" -O exit "${DEST%%:*}" >/dev/null 2>&1 || true; }
+trap cleanup_ctl EXIT INT TERM
 
 if [ "$LOOP" = 0 ]; then
   publish_once
