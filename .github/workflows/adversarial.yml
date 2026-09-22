@@ -708,9 +708,12 @@ jobs:
         # that looks perfectly healthy, which on an unattended 24-hour run is the worst failure the
         # display can have. The collector now stamps `wall` (the real clock); `t` is rewound under
         # --replay and so cannot judge staleness.
-        run: cd tools/live && python3 test_stale_feed.py
+        run: |
+          python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
+          cd tools/live && python3 test_stale_feed.py
       - name: Stale-feed POSITIVE CONTROL (age from `t` again — must be caught)
         run: |
+          python3 -m pip install --quiet Pillow
           cd tools/live
           python3 test_stale_feed.py --control
 
