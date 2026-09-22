@@ -1,10 +1,17 @@
 #!/bin/bash
+# ⛔ pipefail ONLY — see tools/milestone/README.md § Shell posture (hazync#462). Not -e: these report
+# per card and must not abort the fleet over one bad one. Not -u YET: they carry single-quoted ssh
+# payloads whose variables the REMOTE shell expands, a static scan cannot tell those from local
+# reads, and -u added blind fails the first real run. pipefail is unconditional — it catches the
+# `cmd | grep -c` class, where $? reports the LAST command and a failed producer reads as success.
+set -o pipefail
+
 S=${HAZYNC_RUNDIR:?set HAZYNC_RUNDIR to a working directory for this run}
 K=~/.ssh/ghost_signet_ed25519
 while read -r _ IP PORT LOC CHUNK _ _; do
  ( RDIR=/workspace; grep -qx "$CHUNK" $S/_reassigned 2>/dev/null && RDIR=/workspace/re$CHUNK
    R=$(timeout 25 ssh -n -o ConnectTimeout=10 -i $K -p "$PORT" root@"$IP" \
-     "RDIR=$RDIR; CHUNK=$CHUNK; "'if [ -f $RDIR/chunk_$CHUNK.bin ]; then echo "DONE"; else P=$(grep -c "segments at po2" $RDIR/prove.log 2>/dev/null || echo 0); L=$(grep -oE "segment [0-9]+/[0-9]+" $RDIR/prove.log 2>/dev/null | tail -1); U=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits|head -1); V=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits|head -1); N=$(pgrep -cf hazync-host-cuda); echo "proving=$P seg=[$L] gpu=${U}% vram=${V} procs=$N"; fi' 2>/dev/null | tail -1)
+     "RDIR=$RDIR; CHUNK=$CHUNK; "'if [ -f $RDIR/chunk_$CHUNK.bin ]; then echo "DONE"; else P=$(grep -c "segments at po2" $RDIR/prove.log 2>/dev/null | head -1); P=${P:-0}; L=$(grep -oE "segment [0-9]+/[0-9]+" $RDIR/prove.log 2>/dev/null | tail -1); U=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits|head -1); V=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits|head -1); N=$(pgrep -cf hazync-host-cuda); echo "proving=$P seg=[$L] gpu=${U}% vram=${V} procs=$N"; fi' 2>/dev/null | tail -1)
    printf '%-3s %-4s %s\n' "$CHUNK" "$LOC" "${R:-NO-SSH}" ) &
 done < $S/assign_opt.txt
 wait

@@ -2,6 +2,10 @@
 # Fleet bootstrap + screening control run.
 # ⛔ compat removal is REQUIRED on consumer cards (CUDA Error 804) -- see stage 1.
 set -u
+# ⚠ pipefail added alongside the -u these two already carry (hazync#462). It cannot abort anything
+# on its own — there is no `set -e` here — it only stops a failed producer in `a | b` reading as
+# success. See tools/milestone/README.md § Shell posture.
+set -o pipefail
 W=/workspace; mkdir -p $W; cd $W || exit 1
 for d in /usr/local/cuda*/compat; do [ -d "$d" ] && mv "$d" "${d}.disabled"; done
 ldconfig 2>/dev/null

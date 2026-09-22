@@ -3,6 +3,13 @@
 # seg-serve (published v0.21.0) prints a digest and exits without writing anything; agg-chunks does
 # write, so the artifact is reconstructed from the chunk receipts. Fixed properly in 4cad145, but
 # this run uses the published binary, so the recovery is wired in rather than remembered.
+# ⛔ pipefail ONLY — see tools/milestone/README.md § Shell posture (hazync#462). Not -e: these report
+# per card and must not abort the fleet over one bad one. Not -u YET: they carry single-quoted ssh
+# payloads whose variables the REMOTE shell expands, a static scan cannot tell those from local
+# reads, and -u added blind fails the first real run. pipefail is unconditional — it catches the
+# `cmd | grep -c` class, where $? reports the LAST command and a failed producer reads as success.
+set -o pipefail
+
 S=${HAZYNC_RUNDIR:?set HAZYNC_RUNDIR to a working directory for this run}
 K=~/.ssh/ghost_signet_ed25519
 # the card that rebuilds the receipt: any GPU box that took no part in the run
