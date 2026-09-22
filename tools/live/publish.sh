@@ -38,7 +38,24 @@ LOOP=0
 [ "${1:-}" = "--loop" ] && { LOOP=1; shift; }
 FRAME=${1:?usage: publish.sh [--loop] <frame.png>}
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+# ⛔ WITHOUT CONNECTION REUSE THIS LOOP CANNOT KEEP UP WITH ITSELF.
+# Each tick makes TWO rsync calls, and each one opened a fresh ssh. Measured to the live web box
+# 2026-09-22:
+#
+#     cold connection   0.48 - 0.71 s
+#     reused (control)  0.07 s
+#
+# Two cold handshakes is ~1.0 s of setup inside a `sleep 1` loop -- before a single byte of the
+# 108 KB frame moves. The public page would fall to ~2 s per update and the run would make ~172,800
+# handshakes over 24 hours, for no benefit.
+#
+# ControlMaster=auto opens one connection and reuses it; ControlPersist keeps it warm across ticks.
+# ⚠ The socket lives beside this script's own runtime, not in /tmp shared with anything else, and
+# the path is per-destination so two publishers cannot collide on one socket.
+CTL_DIR=${HAZYNC_PUBLISH_CTL_DIR:-${TMPDIR:-/tmp}/hazync-publish-$(id -u)}
+mkdir -p "$CTL_DIR" && chmod 700 "$CTL_DIR"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15
+          -o ControlMaster=auto -o "ControlPath=$CTL_DIR/%r@%h:%p" -o ControlPersist=60)
 [ -n "$KEY" ] && SSH_OPTS+=(-i "$KEY")
 
 publish_once() {
@@ -62,6 +79,11 @@ publish_once() {
   echo "$(date -u +%H:%M:%S) published ${size} bytes (rendered $(date -u -d @"$mtime" +%H:%M:%S) UTC)"
 }
 
+# ⚠ Tear the shared connection down on the way out. A ControlPersist socket outliving the script
+# is a live authenticated channel to the web box with nothing watching it.
+cleanup_ctl() { ssh "${SSH_OPTS[@]}" -O exit "${DEST%%:*}" >/dev/null 2>&1 || true; }
+trap cleanup_ctl EXIT INT TERM
+
 if [ "$LOOP" = 0 ]; then
   publish_once
   exit $?
@@ -69,11 +91,23 @@ fi
 
 # ⛔ PUBLISH ONLY WHAT CHANGED. The renderer writes a frame a second; re-uploading an identical one
 #    burns the tip box's uplink for nothing. mtime is the cheap test and it is the right one.
+# ⛔ SLEEP THE REMAINDER, NOT A FLAT SECOND. `sleep 1` ran AFTER the work, so the real period was
+# publish_time + 1 s -- measured 1.65 s per update with connection reuse, 2.46 s without. The
+# renderer writes a frame every second, so roughly every other frame was skipped and the public page
+# ran up to 1.65 s behind what had already been drawn.
+#
+# ⚠ A tick that overruns its interval sleeps ZERO and goes again immediately, which is correct: it
+# is already behind. It cannot spin, because a failed publish returns fast and the remainder is then
+# nearly the whole interval.
+INTERVAL=${HAZYNC_PUBLISH_INTERVAL:-1}
 last=""
 while true; do
+  t0=$(date +%s.%N)
   cur=$(stat -c %Y "$FRAME" 2>/dev/null || echo "")
   if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
     publish_once && last="$cur"
   fi
-  sleep 1
+  rest=$(awk -v a="$t0" -v b="$(date +%s.%N)" -v i="$INTERVAL" \
+             'BEGIN{d=i-(b-a); printf "%.3f", (d>0?d:0)}')
+  sleep "$rest"
 done
