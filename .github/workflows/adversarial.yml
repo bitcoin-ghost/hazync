@@ -325,6 +325,24 @@ jobs:
         run: |
           cd coordinator
           python3 test_tip_runner.py --control
+      - name: A backup that cannot be verified fails loudly (hazync#461)
+        run: cd coordinator && ./test_backup_verifiable.sh
+      - name: Backup POSITIVE CONTROL (sha256sum sabotaged — the backup must REFUSE)
+        run: |
+          cd coordinator
+          ./test_backup_verifiable.sh --control
+      - name: The `grep -c` trap is demonstrated, banned and absent (hazync#462)
+        run: cd coordinator && python3 test_shell_posture.py
+      - name: Shell posture POSITIVE CONTROL (the original probe3.sh line — must be FLAGGED)
+        run: |
+          cd coordinator
+          python3 test_shell_posture.py --control
+      - name: The worker attach loop is ended, by a caller that exists (hazync#463)
+        run: cd coordinator && python3 test_attach_lifecycle.py
+      - name: Attach lifecycle POSITIVE CONTROL (stop guard and caller removed — must FAIL)
+        run: |
+          cd coordinator
+          python3 test_attach_lifecycle.py --control
       - name: A card cannot vanish from the dashboard (Phase 5 dashboard feed)
         run: cd coordinator && python3 test_tip_dashboard.py
       - name: Dashboard feed POSITIVE CONTROL (GPU escaping removed — must FAIL)

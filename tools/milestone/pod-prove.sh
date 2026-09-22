@@ -7,6 +7,10 @@
 #   prove.log        the host's own per-segment progress, so each segment is placeable in time
 #   result.json      the outcome and the phase boundaries
 set -u
+# ⚠ pipefail added alongside the -u these two already carry (hazync#462). It cannot abort anything
+# on its own — there is no `set -e` here — it only stops a failed producer in `a | b` reading as
+# success. See tools/milestone/README.md § Shell posture.
+set -o pipefail
 CHUNK="${1:?usage: pod-prove.sh <chunk-index>}"
 BLOCK="${HAZYNC_BLOCK_NAME:-block_962000.json}"
 NCH="${HAZYNC_CHUNKS:-16}"

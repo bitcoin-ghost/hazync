@@ -2,6 +2,13 @@
 # Run 4 final receipt. All 27 chunk receipts are ALREADY on the coordinator at /workspace, so
 # agg-chunks runs in place -- no staging. seg-serve verified but does not write a file on this
 # published binary, and losing a verified receipt has happened twice tonight; this closes it.
+# ⛔ pipefail ONLY — see tools/milestone/README.md § Shell posture (hazync#462). Not -e: these report
+# per card and must not abort the fleet over one bad one. Not -u YET: they carry single-quoted ssh
+# payloads whose variables the REMOTE shell expands, a static scan cannot tell those from local
+# reads, and -u added blind fails the first real run. pipefail is unconditional — it catches the
+# `cmd | grep -c` class, where $? reports the LAST command and a failed producer reads as success.
+set -o pipefail
+
 S=${HAZYNC_RUNDIR:?set HAZYNC_RUNDIR to a working directory for this run}
 K=~/.ssh/ghost_signet_ed25519
 CIP=80.15.7.37; CPORT=46144

@@ -473,6 +473,12 @@ def init_db():
       CREATE TABLE IF NOT EXISTS submissions(
         id INTEGER PRIMARY KEY AUTOINCREMENT, range_id TEXT, pubkey TEXT, handle TEXT,
         receipt_sha TEXT, sig TEXT, verified INTEGER, note TEXT, ts REAL);
+      -- ⚠ ONE WRITER, ON THE REQUEST'S OWN CONNECTION (hazync#463). The only live key is
+      -- `frontier_mark` (#281), written inline in the stall reading. There used to be `meta_get` /
+      -- `meta_set` helpers here; they were added in 5fee15a for a stored `frontier_hi`, orphaned
+      -- the same day by fe22580 when the frontier became a COMPUTED walk, and sat uncalled after.
+      -- They are gone rather than re-wired: each opened its OWN connection and committed, which
+      -- inside a handler that already holds `c` would commit that handler's other writes early.
       CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
       CREATE TABLE IF NOT EXISTS vranges(
         id TEXT PRIMARY KEY, lo INTEGER, hi INTEGER, in_tip TEXT, out_tip TEXT,
@@ -1053,13 +1059,6 @@ def resolve_pubkey(pk, rmap=None):
         seen.add(nxt)
         cur = nxt
     return cur
-
-def meta_get(k):
-    c = db(); r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone(); c.close()
-    return r["v"] if r else None
-
-def meta_set(k, v):
-    c = db(); c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v))); c.commit(); c.close()
 
 def verify_receipt(receipt: bytes, rng):
     """Verify a submitted range receipt on CPU — no folding, no GPU (the 'verify-only' coordinator).

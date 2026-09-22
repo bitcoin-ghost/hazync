@@ -99,8 +99,23 @@ fi
 # 3. Manifest + checksums so a restore can be verified.
 { echo "hazync backup $STAMP"; echo "db: $DB"; echo "proofs: $PROOFS";
   echo "receipts: $PROOF_COUNT"; } > "$DEST/MANIFEST.txt"
-( cd "$DEST" && sha256sum ./* > SHA256SUMS 2>/dev/null || true )
-echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1))"
+# ⛔ A BACKUP THAT CANNOT BE VERIFIED IS NOT A BACKUP (hazync#461). This was `|| true` with stderr
+# discarded, and nothing checked the result — so a failed sha256sum (disk full, a cd that did not
+# happen, a permission change) left SHA256SUMS empty or absent while the script printed
+# "[backup] wrote ..." and later "[backup] done". The only moment anyone would find out is a
+# restore, i.e. during an incident, which is the worst possible time to learn this.
+#
+# RUNBOOK.md:662 documents the restore check as `sha256sum -c SHA256SUMS`, so this file is
+# load-bearing, not decoration.
+if ! ( cd "$DEST" && sha256sum ./* > SHA256SUMS 2>/dev/null ); then
+    echo "[backup] FATAL: could not write $DEST/SHA256SUMS — this backup cannot be verified on restore" >&2
+    exit 1
+fi
+[ -s "$DEST/SHA256SUMS" ] || {
+    echo "[backup] FATAL: $DEST/SHA256SUMS is empty — nothing to verify a restore against" >&2
+    exit 1
+}
+echo "[backup] wrote $DEST ($(du -sh "$DEST" | cut -f1)), $(wc -l < "$DEST/SHA256SUMS") file(s) checksummed"
 
 # 4. Offsite copy (optional but strongly recommended — a same-disk backup dies with the box).
 #
@@ -141,7 +156,12 @@ if [ -n "$REMOTE" ]; then
         mkdir -p "$SRC"
         cp -- "$DEST/coordinator.db" "$SRC/" 2>/dev/null || { echo "[backup] FATAL: no ledger to ship offsite" >&2; exit 1; }
         cp -- "$DEST/MANIFEST.txt" "$SRC/" 2>/dev/null || true
-        ( cd "$SRC" && sha256sum ./coordinator.db > SHA256SUMS 2>/dev/null || true )
+        # ⚠ Same rule offsite: the remote copy is the one used when the box is gone, so an
+        # unverifiable ledger there is worse, not better.
+        if ! ( cd "$SRC" && sha256sum ./coordinator.db > SHA256SUMS 2>/dev/null ) || [ ! -s "$SRC/SHA256SUMS" ]; then
+            echo "[backup] FATAL: could not checksum the offsite ledger at $SRC" >&2
+            exit 1
+        fi
         echo "[backup] offsite copy is LEDGER-ONLY ($(du -h "$SRC/coordinator.db" | cut -f1)); proofs stay local"
     fi
 

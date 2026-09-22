@@ -82,3 +82,32 @@ on spaces rather than commas (`pod-prove.sh`, `read -r GNAME GUUID …`), so eve
 shifted by one fewer than the number of words in the GPU name — by three for `NVIDIA GeForce RTX
 4090` — and the last field swallows the rest of the line.
 `host.txt` carries the same data correctly.
+
+## Shell posture (hazync#462)
+
+Every script here now sets **`pipefail`**, and nothing here sets `-e`.
+
+`pipefail` is the one that was missing and the one that bites. Without it, `$?` after `a | b`
+reports **b**, so a producer that failed reads as success. The specific shape that got through:
+
+```sh
+P=$(grep -c "segments at po2" $RDIR/prove.log 2>/dev/null || echo 0)
+```
+
+`grep -c` prints `0` **and exits 1** when it matches nothing, so the `|| echo 0` fired *as well* and
+`$P` became the two-line string `"0\n0"` — after which every `[ "$P" = "0" ]` test is false for ever.
+It is now `… | head -1); P=${P:-0}`, which takes grep's own `0` and only defaults when grep produced
+nothing at all.
+
+**`-e` is deliberately absent.** These report per card across a whole fleet; aborting the run because
+one pod refused an ssh connection is the wrong behaviour, and the reporting loops are written to
+carry on and print `NO-SSH`.
+
+**`-u` is present in `bootstrap2.sh` and `pod-prove.sh` only, and that is a known gap.** It is wanted
+everywhere — an empty `$HAZYNC_BLOCK` proves nothing while the pod bills, and an empty path inside an
+`rm`/`rsync` argument is the destructive case. It is not added blind because these scripts carry
+single-quoted ssh payloads whose variables are expanded by the **remote** shell, and a static scan
+cannot distinguish those from local reads: a static pass over `run_continuous.sh` flagged 26
+variables it could not classify. Adding `-u` on that basis would turn a working fleet script into a
+hard failure on its first real run, which is worse than the gap it closes. Add it one script at a
+time, with a real run behind each.

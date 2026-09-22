@@ -228,11 +228,17 @@ while time.time() < end:
 
         ⚠ Best effort by design: a card we cannot reach is usually one about to be terminated, and
         failing the teardown over it would be worse than leaving a loop on a pod that is going away.
+        ⛔ PER CARD, not once around the whole loop (hazync#463). A dying pod refuses connections, and
+        one raise partway through would skip every card AFTER it while the teardown reported nothing —
+        the cards still looping would be exactly the ones nobody looked at.
         """
         for card in dict.fromkeys(cards.values() if hasattr(cards, "values") else cards):
             if card == self.agg:
                 continue
-            self.ssh.run(card, "touch /workspace/attach.stop; exit 0")
+            try:
+                self.ssh.run(card, f"touch {ATTACH_STOP}; exit 0")
+            except Exception:                              # noqa: BLE001
+                continue
 
     def probe_all(self, cards, reassigned=()):
         return tip_driver.probe_all(self.ssh, cards, reassigned=reassigned)
@@ -407,6 +413,13 @@ while time.time() < end:
                 "joins": joins or None, "unreachable": False}
 
 
+# ⛔ THE FILE THE ATTACH LOOP WATCHES, NAMED ONCE (hazync#463). `worker_attach_script` is module-level
+# and knows nothing about a FleetRunner's `workdir`, so the loop's path is fixed at /workspace. If
+# `stop_auto_attach` touched a workdir-relative path instead, a non-default workdir would make it
+# touch a file NOBODY READS — a teardown that reports success and stops nothing.
+ATTACH_STOP = "/workspace/attach.stop"
+
+
 def worker_attach_script(levers):
     """The autoattach.sh a worker runs, with the operator's levers in front of the exec.
 
@@ -420,9 +433,9 @@ def worker_attach_script(levers):
         f"#!/bin/bash\n"
         f"AGG=$1; WID=$2\n"
         f"cd /workspace || exit 1\n"
-        f"rm -f /workspace/attach.stop\n"
+        f"rm -f {ATTACH_STOP}\n"
         f"for i in $(seq 1 86400); do\n"
-        f"  [ -f /workspace/attach.stop ] && exit 0\n"
+        f"  [ -f {ATTACH_STOP} ] && exit 0\n"
         # ⛔ bash, NOT sh. /dev/tcp is a BASH feature; /bin/sh is dash on the RunPod image and
         # reports "cannot open /dev/tcp/...: No such file". Under sh this test NEVER succeeds, so
         # the worker loops its full 600 s and never attaches even when the aggregate is perfectly

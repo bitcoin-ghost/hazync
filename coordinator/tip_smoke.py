@@ -933,6 +933,19 @@ def main():
         return 0 if result.get("ok") else 1
 
     finally:
+        # ⛔ END THE WORKERS' ATTACH LOOP FIRST (hazync#463). `stop_auto_attach` documents itself as
+        # "Called when the run is done with them" and had NO CALLER — every worker kept polling
+        # /dev/tcp once a second for up to 86,400 iterations. Harmless when the pod is terminated
+        # seconds later, which is why nobody noticed; not harmless under --keep, or when a card is
+        # released without being terminated.
+        # ⚠ Before the harvest, so the loop is not competing for the ssh channel we are about to use,
+        # and best-effort by its own design: a card we cannot reach is one about to go away.
+        try:
+            if assignment and runner is not None:
+                runner.stop_auto_attach(assignment)
+        except Exception as e:                                     # noqa: BLE001
+            log(f"stop_auto_attach: {e}")
+
         # ── harvest BEFORE release: this is the only chance ───────────────────────────────────────
         # ⛔ EVERY PREVIOUS RUN THREW ITS EVIDENCE AWAY. The pods were terminated below with no logs
         # fetched, so `agg.log`, every `aggw.log` and every `[rtt]` line died with them — which is the
