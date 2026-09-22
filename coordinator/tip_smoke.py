@@ -613,6 +613,23 @@ def main():
         order = [cards[n] for n in sorted(cards)]
         log(f"{len(order)} card(s) answered; ALL go through the gates and the survivors are the run")
 
+        # ⛔ A POD THAT NEVER ANSWERED SSH IS NOT A SPARE, IT IS DEAD WEIGHT — release it NOW.
+        # Keeping the spares through the gates (above) accidentally kept these too, because the old
+        # release swept up "everything not chosen" and that set happened to include them. Measured
+        # 2026-09-22 on the very next run: hz-smoke-1 (ports published, ssh never answered) and
+        # hz-smoke-2 (never started) sat rented while four cards went through the gates — 2 x $0.74
+        # of pure waste, which on a one-hour $3.00 budget is half of it.
+        # ⚠ These are NOT candidates. The gates need a card that can be reached; one that never
+        # answered cannot be gated, cannot be promoted, and will not start answering later.
+        never_up = [p["name"] for p in created if p["name"] not in cards]
+        if never_up:
+            log(f"releasing {len(never_up)} pod(s) that never answered ssh: {sorted(never_up)}")
+            order, created = _drop_cards(
+                order, created, never_up, "it never answered ssh",
+                release=lambda p: (sponsor_bot.terminate_confirmed(api, p["id"]),
+                                   log(f"  released {p['name']} — it never answered ssh")),
+                record=lambda kept: json.dump(kept, open(rented_path, "w"), indent=1))
+
         def _drop(order_, created_, bad, why):
             def release(p):
                 sponsor_bot.terminate_confirmed(api, p["id"])
