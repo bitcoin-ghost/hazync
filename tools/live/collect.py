@@ -473,15 +473,39 @@ def main():
                     state["since"] = 0.0
             blocks = blocks_from_cards(cards, state, now, verified_heights(phase_label))
         up = [c for c in cards if c["up"]]
-        rate = sum(c["cost_hr"] for c in up)
+        # ⛔ EVERY RENTED CARD, NOT EVERY ANSWERING ONE (hazync#476). This summed only `up` cards, so
+        # a card that stopped streaming silently removed its own price: the frame read
+        # `0/3 up  $0.00/hr  ·  3 down` while three 4090s billed $2.22/hr. #455 added that `3 down`
+        # label precisely to stop the rate understating the run, and it was landing beside a number
+        # that had already subtracted the dead cards -- the two halves of one readout disagreeing.
+        # `pods.txt` is the list of cards being PAID FOR, which is why `tip_dashboard.pods_txt()`
+        # refuses to write a partial one: "the dashboard shows a fleet smaller than the one being
+        # paid for". A pod bills from create to terminate; answering telemetry in the last 15 s has
+        # nothing to do with it.
+        rate = sum(c["cost_hr"] for c in cards)
         # Money is DERIVED FROM THE SAMPLES, not from a wall clock. The renderer used to sum each
         # block's prove_s+fold_s, which are only set on an OBSERVED phase transition — so they were
         # almost always None and the header read $0 while real cards billed by the second. A tick
         # integrator would have been no better here: --replay pins `now` to the newest sample, so
         # every dt is zero and the total would stay $0 in exactly the mode used to verify it.
         if not a.demo:
-            spend_total = sum(c.get("spend_usd", 0.0) for c in cards)   # per-block cost is set in
-            pass                                                         # blocks_from_cards now
+            # ⛔ A CARD THAT STOPS STREAMING DOES NOT STOP BILLING (hazync#476, same root cause as
+            # the rate above). `spend_usd` accrues one second per SAMPLE, so a card that went quiet
+            # for ten minutes and came back left those ten minutes out of the total, and a card that
+            # died stopped accruing entirely -- the dashboard under-reporting the bill precisely when
+            # something has gone wrong and the operator most needs the real number.
+            #
+            # The run's own `t0` is the honest clock: the fleet is paid for from T0 until it is
+            # released. Where `t0` exists, bill the WHOLE fleet for the whole elapsed time, which is
+            # the shape the driver itself uses (`tip_smoke`: sum(price) * elapsed / 3600).
+            #
+            # ⚠ THE SAMPLE-DERIVED FIGURE REMAINS THE FALLBACK, and it has to: under `--replay`,
+            # `now` is pinned to the newest sample, so a wall-clock integrator would read zero in
+            # exactly the mode used to verify this. Here both ends come from the capture -- `t0` from
+            # the run and `now` from its last sample -- so a replay still reports the real elapsed.
+            observed = sum(c.get("spend_usd", 0.0) for c in cards)
+            since = state.get("since", 0.0)
+            spend_total = max(observed, round(rate * (now - since) / 3600.0, 4)) if since else observed
         else:
             spend_total = sum((b.get("cost") or 0) for b in blocks)
         # ⛔ `wall` IS THE REAL CLOCK AT WRITE TIME, AND `t` IS NOT.

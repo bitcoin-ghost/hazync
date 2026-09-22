@@ -730,6 +730,14 @@ jobs:
           cd tools/live
           python3 test_stale_feed.py --control
 
+      - name: A card that stops answering does not stop billing (hazync#476)
+        # ⚠ No Pillow here: this drives collect.py as a subprocess and reads the JSON, so it never
+        # imports tip24live. Installing it anyway would imply a dependency this test does not have.
+        run: cd tools/live && python3 test_fleet_cost.py
+      - name: Fleet-cost POSITIVE CONTROL (rate over `up` cards again — a dead fleet must read $0)
+        run: |
+          cd tools/live
+          python3 test_fleet_cost.py --control
       - name: A dead card is visible, and the cost does not lie (tools/live)
         run: |
           python3 -m pip install --quiet Pillow   # these tests import tip24live (PIL)
