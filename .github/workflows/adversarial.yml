@@ -652,6 +652,17 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
+      - name: A verified block COUNTS on the dashboard (tools/live)
+        # ⛔ `done` was inferred from 5 s of silence. The collector stops when the run ends, BEFORE
+        # its own grace period elapses, so the LAST block of every run never counted. Captured
+        # 2026-09-21: the header read "0 blocks" beside a banner reading "VERIFIED block 741000 in
+        # 267.9s". On a 24-hour run that is an off-by-one on the number people actually read.
+        run: cd tools/live && python3 test_done_counts.py
+      - name: Block-count POSITIVE CONTROL (VERIFIED signal ignored — must be caught)
+        run: |
+          cd tools/live
+          python3 test_done_counts.py --control
+
       - name: Share shares the frame's bytes, and never a stale frame as live (tools/live)
         # Runs the SHIPPED live.js against a mock browser, so it exercises the real handler rather
         # than a re-implementation that would pass while the page is broken.
