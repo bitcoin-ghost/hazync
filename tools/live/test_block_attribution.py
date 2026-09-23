@@ -152,6 +152,27 @@ check(bl[968257]["done"],
 check(not bl[968264]["done"],
       f"and the block it moved TO is not done (done={bl[968264]['done']})")
 
+# ── 3c. ⛔ A BLOCK COSTS WHAT THE FLEET COST, NOT WHAT THE COORDINATOR COST ───────────────────────
+# The charge used to be a sum of per-card SAMPLE COUNTS, so a block was billed only for cards that
+# named it -- and only the coordinator ever names a height. On 968,279 the frame showed THIS BLOCK
+# $1.08 against a true $4.45: one quarter, the coordinator's share of a 4-card fleet, while the
+# header (session spend) was right. Two money figures on one frame, disagreeing 4x.
+RATE = 2.09                                   # $/hr per card; 4 cards = $8.36/hr
+WALL = 1916.0
+fleet4 = [{"name": "hz-smoke-1", "cost_hr": RATE, "phase": "proving", "up": True, "block": 968279,
+           "block_s": {"968279": {"t0": NOW - WALL, "t1": NOW, "segs": 1517,
+                                  "prove": 1400, "asm": 300, "n": 1700}}}]
+# the three WORKERS never name a height -- exactly as the real telemetry behaves
+fleet4 += [{"name": f"hz-smoke-{i}", "cost_hr": RATE, "phase": "proving", "up": True,
+            "block": None, "block_s": {}} for i in (2, 3, 4)]
+b = collect.blocks_from_cards(fleet4, {"since": 0.0}, NOW, set())[0]
+expect = WALL * (RATE * 4) / 3600.0
+check(abs(b["cost"] - expect) < 0.02,
+      f"the block is charged the WHOLE fleet for its wall clock: ${b['cost']:.2f} vs ${expect:.2f} "
+      f"expected (the coordinator-only figure would be ${expect/4:.2f})")
+check(b["cost"] > expect * 0.9,
+      f"and is NOT a quarter of it — three silent workers were billed too (${b['cost']:.2f})")
+
 # ── 4. the end of a run: cards stopped, silence now DOES mean done (the rule's real purpose) ─────
 cards[0]["phase"], cards[0]["up"] = "idle", False
 b = collect.blocks_from_cards(cards, {"since": 0.0}, NOW, set())[0]

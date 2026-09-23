@@ -400,7 +400,6 @@ def blocks_from_cards(cards, state, now, verified=()):
             a["segs"] = max(a["segs"], e["segs"])
             a["prove"] += e["prove"]; a["asm"] += e["asm"]
             a["cards"].add(c["name"])
-            a["cost"] += e["n"] * rate / 3600.0
     # ⚠ PAIRED WITH THE HEIGHT THE CARD WAS ON, not taken as "some card is done, so all are".
     finished_by_cards = {str(c.get("block")) for c in cards
                          if c.get("phase") == "done" and c.get("block")}
@@ -422,6 +421,24 @@ def blocks_from_cards(cards, state, now, verified=()):
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
+        # ⛔ A BLOCK COSTS WHAT THE FLEET COST WHILE IT RAN. This used to sum `e["n"] * rate` --
+        # per-card SAMPLE COUNTS -- which charges a block only for cards that named it. Only the
+        # COORDINATOR ever names a height; every worker leaves the block field empty. So a block was
+        # charged the coordinator's share alone.
+        #
+        # Measured on 968,279: the frame showed THIS BLOCK $1.08 against a true $4.45 -- almost
+        # exactly one quarter, the coordinator's share of a 4-card fleet. The header (session spend)
+        # was right, so the two money figures on one frame disagreed by 4x.
+        #
+        # The fleet is rented as a unit: while a block is being proved, EVERY card is billed whether
+        # or not it named the height. So the charge is the fleet's rate across the block's own wall
+        # clock -- the same basis as the header, which is why they now reconcile.
+        #
+        # ⚠ THIS ASSUMES ONE BLOCK AT A TIME, which is true of today's serial session loop. If
+        # blocks are ever overlapped (hazync#502's leapfrog banks), two blocks would each be charged
+        # the whole fleet and the total would double-count. That change must split the rate.
+        fleet_rate = sum(c.get("cost_hr", 0.0) for c in cards)
+
         # ⛔ COMPUTE `done` FIRST, BECAUSE `done_at` IS ONLY MEANINGFUL IF IT IS TRUE.
         #
         # ⛔ SILENCE IS NOT COMPLETION WHILE CARDS ARE STILL WORKING (hazync#499). The 5-second rule
@@ -484,7 +501,7 @@ def blocks_from_cards(cards, state, now, verified=()):
                       # block it just finished. Between the receipt existing and the driver saying
                       # so, nothing could tell the cell to stop being orange.
                       "done": done_flag,
-                    "cost": round(a["cost"], 4)})
+                    "cost": round(max(0.0, a["t1"] - a["t0"]) * fleet_rate / 3600.0, 4)})
     out.sort(key=lambda x: x["h"])
     return out
 
