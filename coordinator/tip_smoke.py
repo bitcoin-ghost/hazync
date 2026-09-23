@@ -283,6 +283,21 @@ def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
         # offering one would rent a pod that is guaranteed to fail the GPU gate.
         if not gt.startswith("NVIDIA"):
             continue
+        # ⛔ NO MIG SLICES. `MIG 1g.24gb` / `2g.48gb` are Multi-Instance GPU PARTITIONS of one
+        # physical card, not cards. RunPod lists them beside whole GPUs with their own price, and
+        # this catalogue ranks unmeasured types by price per hour -- so a slice presents as a cheap
+        # 24GB card and sorts near the top while delivering a fraction of a GPU and sharing memory
+        # bandwidth with its neighbours. That is hazync#448's error in a new costume: buying the
+        # cheap-looking thing that costs more per proof.
+        #
+        # It nearly happened: on 2026-09-23 `PRO 6000 MIG 24GB` at $0.59 ranked FOURTH, above the
+        # RTX PRO 4500 that actually won the fleet. The tell is in the id, and `maxGpuCount` agrees
+        # (16 for the 48GB slice against 9 for the whole RTX PRO 6000).
+        #
+        # ⚠ Not banned outright -- `--gpu-type` still takes one by name if it is ever wanted. This
+        # only keeps them out of the AUTOMATIC ranking, where nobody chose them.
+        if " MIG " in gt:
+            continue
         q = ('query { gpuTypes(input:{id:%s}) { id displayName memoryInGb '
              'lowestPrice(input:{gpuCount:1, secureCloud:true}) '
              '{ uninterruptablePrice stockStatus } } }' % json.dumps(gt))

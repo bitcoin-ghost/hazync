@@ -72,6 +72,10 @@ class FakeAPI:
         ("NVIDIA GeForce RTX 3070",       "RTX 3070",      8, 0.20, "High"),    # too little VRAM
         ("NVIDIA A100 80GB PCIe",         "A100 PCIe",    80, 1.59, None),      # no stock
         ("AMD Instinct MI300X OAM",       "MI300X",      192, 0.99, "High"),    # cannot run CUDA
+        # ⛔ A MIG PARTITION, NOT A CARD. Priced BELOW every whole GPU here, so if it is not excluded
+        # it sorts near the top of the unmeasured tier on price alone.
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
+         "PRO 6000 MIG 24GB", 24, 0.59, "Low"),
     ]
 
     def _gql(self, q):
@@ -157,6 +161,9 @@ check("NVIDIA GeForce RTX 3070" not in ids,
       f"an 8GB card is excluded — below the {t.VRAM_FLOOR_GB}GB the 4090 proves at")
 check("NVIDIA A100 80GB PCIe" not in ids,
       "a card with no SECURE stock is excluded — it cannot be rented however it is listed")
+check(not any("MIG" in i for i in ids),
+      f"a MIG PARTITION is excluded — it is a slice of a card, and at $0.59 it would rank above "
+      f"every whole GPU here on price alone (got {[i for i in ids if 'MIG' in i]})")
 
 # ⚠ NAME EVERY ONE AND COUNT THEM. Listing a subset lets an unrelated breakage ride along inside a
 # "CONTROL OK". Attributing mixtures gives the A40 $0.259, which both invents a number for it AND
