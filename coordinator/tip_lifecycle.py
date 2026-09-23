@@ -16,8 +16,8 @@ something, and the aggregate fails at the end — after every other card's work 
 therefore a gate, not a preference, and the METHOD_ID check is its centre.
 
 ⚠ `CANONICAL_METHOD_ID` is the CORE prover guest. The bridge guest is a DIFFERENT image
-(`05a5a279…`) by design — two binaries, deliberately. A card reporting the bridge id is not broken; it
-is the wrong binary for proving, and it must not be kept.
+(`fb4d7352…`, measured on the live bridge host) by design — two binaries, deliberately. A card
+reporting the bridge id is not broken; it is the wrong binary for proving, and it must not be kept.
 
 Pure by construction: every function here takes plain data and returns plain data, so the gates can be
 tested without renting anything. Renting is `sponsor_bot.RunPod`, which already does deploy/list/
@@ -27,7 +27,23 @@ terminate and is reused rather than reimplemented.
 import os
 
 CANONICAL_METHOD_ID = "37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd"
-BRIDGE_METHOD_ID = "05a5a279"          # prefix; a different guest ON PURPOSE, never a proving card
+# ⛔ MEASURED, NOT REMEMBERED (2026-09-24):
+#
+#     ssh <bridge> /usr/local/bin/hazync-host-bridge method-id  ->  fb4d7352f9f0…
+#
+# This said "05a5a279" until then, and that was TRUE WHEN IT WAS WRITTEN — the 2026-09-16 drop-in
+# records the bridge being pointed at a build from main @ bffdbbf with that id. The bridge has been
+# rebuilt since, its id moved with it (an image id absorbs the build's absolute paths), and nothing
+# in the repo was tied to the binary, so three files went on quoting the old number for a week.
+#
+# ⚠ The VERDICT was never wrong — any non-canonical id is refused a line below either way. What was
+# wrong is the REASON, and giving a reason is this constant's only job: a card running the current
+# bridge binary was told "not canonical", which is precisely the hunt for a bug it exists to prevent.
+#
+# ⚠ Do not test this by looking for the string in reproduce/METHOD_ID. "05a5a279" is IN that file —
+# as the id a laptop build produces — so that test passes on the stale value. test_tip_lifecycle.py
+# requires the line to name `hazync-host-bridge`, which is the only form that tells them apart.
+BRIDGE_METHOD_ID = "fb4d7352"          # prefix; a different guest ON PURPOSE, never a proving card
 
 # A card must beat this fraction of the fleet's median rate to be worth keeping. Same default as
 # tip_controller's slow tail, and for the same reason: below it, a card costs more in straggler than it

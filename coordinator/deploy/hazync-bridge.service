@@ -59,7 +59,12 @@ ExecStartPre=/bin/sh -c 'test -d "${HAZYNC_BRIDGE_OUT}" || { echo "HAZYNC_BRIDGE
 # ⛔ hazync-host-bridge, NOT hazync-host. They are DIFFERENT GUESTS, on purpose:
 #
 #     /usr/local/bin/hazync-host          METHOD_ID 37987b85…   canonical
-#     /usr/local/bin/hazync-host-bridge   METHOD_ID 05a5a279…   the bridge build
+#     /usr/local/bin/hazync-host-bridge   METHOD_ID fb4d7352…   the bridge build
+#
+# ⚠ MEASURED 2026-09-24, not copied. This said 05a5a279… — correct for the 2026-09-16 build, and
+# stale from the next rebuild onwards, because an image id moves with the build and nothing here
+# was tied to the binary. If you rebuild the bridge, re-read `hazync-host-bridge method-id` and
+# update reproduce/METHOD_ID with it; coordinator/tip_lifecycle.py keys its message on that id.
 #
 # A RISC0 image id absorbs the build's absolute paths, so a canonical guest can only come from the
 # fixed-path container build in reproduce/Dockerfile. That is fine here — the bridge walks blocks and

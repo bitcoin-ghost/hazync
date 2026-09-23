@@ -426,6 +426,30 @@
 
 37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd
 
+# ── THE OTHER BINARY: the tip bridge's guest ──────────────────────────────────────────────────────
+#
+# fb4d7352f9f059863035a4920eaa4e4467d7fa825451576975f43838f744066b   hazync-host-bridge
+#
+# NOT part of the lineage above and NOT a superseded canonical id: it is a second guest that exists
+# at the same time, on purpose. `hazync-host-bridge` walks the chain and emits bundles; it never
+# produces a receipt anyone verifies, so it is free to be a different image and is.
+#
+# ⛔ IT IS WRITTEN DOWN HERE BECAUSE NOTHING TIED IT TO ANYTHING, AND IT WENT STALE. Measured on the
+# live bridge host 2026-09-24:
+#
+#     /usr/local/bin/hazync-host          37987b85…   canonical
+#     /usr/local/bin/hazync-host-bridge   fb4d7352…   the bridge guest
+#
+# `coordinator/tip_lifecycle.py` had carried `BRIDGE_METHOD_ID = "05a5a279"` since the re-baseline,
+# and 05a5a279 is not the bridge guest at all — it is a LAPTOP BUILD OF THE CANONICAL GUEST, whose
+# id absorbs $HOME/.cargo and $HAZYNC_BASE (see the reproducibility note above). So the one place
+# that claimed to know the bridge's id named a different thing entirely, and a card reporting the
+# real bridge id got "not canonical" instead of the explanation that constant exists to give.
+#
+# ⚠ Anything that verifies a RECEIPT must use the canonical id and refuse this one; that is what
+# coordinator/verify-receipts.sh guards. This entry is a record of what the second binary IS, not
+# permission to verify against it.
+#
 # ── 3867611d99044e24dd5fe8753e6158f1d7f7d86c24bacc4ce968c621faed4b15 ─ 2026-09-04 ────────────────
 #
 # THE WITNESS ENCODER, A COPROCESSOR FIELD BACKEND, AND A VERIFIED PUBKEY HINT.
