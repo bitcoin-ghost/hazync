@@ -124,8 +124,12 @@ def parse_pods_txt(text):
     for line in text.splitlines():
         f = line.split()
         if len(f) >= 6:
+            # ⚠ `role` MIRRORS collect.py: the FIRST line is the coordinator, because tip_smoke writes
+            # pods.txt from `order` and `agg = order[0]`. This mirror exists to prove we match the real
+            # reader field for field, so a field added there must be added here.
             out[f[1]] = {"pod": f[0], "ip": f[2], "port": f[3],
-                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " ")}
+                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " "),
+                         "role": "coordinator" if not out else "worker"}
     return out
 
 
@@ -293,6 +297,11 @@ class DashboardFeed:
         ⛔ Clearing t0 here is what makes `mark_t0` write-once safe. Without it a new session would
         inherit the last one's t0 and count its blocks as this session's.
         """
+        n = write_feed(self.rundir, cards)
+        # ⚠ AFTER write_feed, NEVER BEFORE. write_feed validates every card and RAISES on a bad
+        # one (pods_txt is all-or-nothing), so stopping first meant a REFUSED feed killed the
+        # streamer that was running perfectly well -- caught by test_tip_dashboard's "a refused
+        # feed never starts the streamer".
         # ⛔ STOP WHATEVER IS ALREADY STREAMING FIRST (hazync#500). `start` never did, and a run
         # calls it more
         # than once -- once when the fleet is rented, again after the gates pick the final cards
@@ -311,7 +320,6 @@ class DashboardFeed:
         except Exception:
             pass                      # nothing was streaming yet, which is the normal first call
 
-        n = write_feed(self.rundir, cards)
         try:
             os.remove(os.path.join(self.rundir, "t0"))
         except OSError:
