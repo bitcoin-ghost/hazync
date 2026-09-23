@@ -3176,7 +3176,7 @@ fn check_bip30() {
         let mut t = Smt::new();
         t.insert(cb_txid, cb_out.max(1));
         let root_in = t.root();
-        (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true))
+        (root_in, smt_advance(&mut t, cb_txid, cb_out, &[], true).0)
     };
     let mk = |bip30: Option<Bip30Overwrite>| BlockWitness {
         header: header.clone(), height, coinbase_tx: hx(cb_hex), txids: PackedHashes(vec![cb_txid]),
@@ -3274,7 +3274,7 @@ fn smt_witness_standalone(
         t.insert(*s, c + 1);
     }
     let root_in = t.root();
-    let w = smt_advance(&mut t, coinbase_txid, coinbase_outputs, coinbase_spends, false);
+    let w = smt_advance(&mut t, coinbase_txid, coinbase_outputs, coinbase_spends, false).0;
     (root_in, w)
 }
 
@@ -3309,13 +3309,17 @@ fn smt_advance(
     coinbase_outputs: u32,
     coinbase_spends: &[[u8; 32]],
     grandfathered: bool,
-) -> SmtBlockWitness {
+) -> (SmtBlockWitness, Vec<([u8; 32], Option<u32>)>) {
     // 1. Normally: absence, against the INCOMING root, before any of this block's own updates.
     //
     //    At 91842/91880 (audit#3 F-1) the duplicated coinbase is still UNSPENT — that is why BIP30
     //    exists and why Core exempts these two heights — so absence is unprovable and the witness
     //    carries a MEMBERSHIP proof of the prior count instead. The guest gates this on the block
     //    HASH it derives, so a spurious height match here is still rejected there.
+    // ⚠ CAPTURED BEFORE ANY MUTATION (hazync#484). One (key, prior) pair per key this function
+    // touches inverts all three of its shapes — the coinbase insert, the grandfathered remove, and
+    // each spend's decrement — without the rewind having to know which happened.
+    let mut prior: Vec<([u8; 32], Option<u32>)> = vec![(coinbase_txid, smt.get(&coinbase_txid))];
     let absence_proof = smt.prove(&coinbase_txid);
     let smt_overwrite = if grandfathered {
         let prior = smt.get(&coinbase_txid).unwrap_or_else(|| panic!(
@@ -3334,6 +3338,9 @@ fn smt_advance(
     let mut spends = Vec::with_capacity(coinbase_spends.len());
     for t in coinbase_spends {
         let cur = smt.get(t).unwrap_or(0);
+        // ⚠ FIRST TOUCH ONLY. A block may spend two outputs of the same coinbase; the second sees
+        // the first's decrement, so recording it too would restore the intermediate value.
+        if !prior.iter().any(|(k, _)| k == t) { prior.push((*t, smt.get(t))); }
         assert!(cur > 0,
             "bridge: a block spends coinbase {} which the SMT holds at zero — the tree and the UTXO \
              set have diverged, which is a bug here and not a property of the chain",
@@ -3341,7 +3348,7 @@ fn smt_advance(
         spends.push(SmtSpend { coinbase_txid: *t, current_count: cur, proof: smt.prove(t) });
         smt.insert(*t, cur - 1);
     }
-    SmtBlockWitness { coinbase_txid, coinbase_outputs, absence_proof, spends, smt_overwrite }
+    (SmtBlockWitness { coinbase_txid, coinbase_outputs, absence_proof, spends, smt_overwrite }, prior)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3641,12 +3648,25 @@ fn bridge_block_json(block: &bitcoin::Block, height: u32, utxo: &Utxo) -> serde_
 
 // Advance the UTXO map to mirror build_block_carried's forest transition (remove external spends, add new
 // spendable outputs not spent within this block).
-fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) {
+/// Returns (coins removed with their prior value, coins created) — the block's UTXO delta, captured
+/// by the code that applies it (hazync#484). ⚠ The removals carry the FULL prior value, because
+/// putting a coin back needs its amount, script, creation height and coinbase flag; the key alone
+/// would restore an entry that no longer says what the coin was.
+type UtxoDelta = (Vec<(([u8; 32], u32), (u64, Vec<u8>, u32, bool))>, Vec<([u8; 32], u32)>);
+
+fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) -> UtxoDelta {
     let mut spent: std::collections::HashSet<([u8; 32], u32)> = std::collections::HashSet::new();
     for t in block.txdata.iter().skip(1) {
         for inp in &t.input { spent.insert((inp.previous_output.txid.to_byte_array(), inp.previous_output.vout)); }
     }
-    for k in &spent { utxo.remove(k); }
+    let mut removed = Vec::new();
+    for k in &spent {
+        // ⚠ Only what was ACTUALLY there. A prevout created within this same block is in `spent` but
+        // was never in `utxo`; recording a removal for it would re-insert a coin on undo that the
+        // map never held.
+        if let Some(v) = utxo.remove(k) { removed.push((*k, v)); }
+    }
+    let mut created = Vec::new();
     for (ti, t) in block.txdata.iter().enumerate() {
         let txid = t.compute_txid().to_byte_array();
         let is_cb = ti == 0;
@@ -3654,8 +3674,10 @@ fn bridge_update_utxo(utxo: &mut Utxo, block: &bitcoin::Block, height: u32) {
             if !out_spendable(o.script_pubkey.as_bytes()) { continue; }
             if spent.contains(&(txid, v as u32)) { continue; }
             utxo.insert((txid, v as u32), (o.value.to_sat(), o.script_pubkey.as_bytes().to_vec(), height, is_cb));
+            created.push((txid, v as u32));
         }
     }
+    (removed, created)
 }
 
 // The resident forest + UTXO-metadata map + MTP/difficulty carry, checkpointed so the bridge resumes
@@ -3702,6 +3724,171 @@ struct BridgeState {
 /// ⛔ THREE OUTCOMES, NOT TWO (hazync#484). "I have no head to compare against" is not "no reorg" —
 /// a check that cannot fail is the thing `finality = 100` was already hiding behind. An old
 /// checkpoint with no sidecar must report that it cannot check, loudly, rather than pass.
+/// Everything needed to put the bridge back exactly as it was before one block (hazync#484).
+///
+/// ⛔ WHY THE BRIDGE COULD NEVER FOLLOW THE TIP. Four structures advance per block — the utreexo
+/// forest, the UTXO map, the coinbase SMT and the header window — and not one of them could go
+/// backwards. `HAZYNC_BRIDGE_FINALITY=100` is what that costs: stay so far from the tip that no
+/// reorg can reach you. The alternative is to record the inverse of each step, which is what this
+/// is, and it is small: measured against a 19.4 GB checkpoint, a block's undo is under a megabyte.
+///
+/// ⚠ NOTHING HERE IS RECONSTRUCTED. Each field is captured by the code that did the mutation, at the
+/// moment it did it. A rewind that re-derived "which coins did that block spend" would be a second
+/// implementation of consensus rules, betting it agrees with the first.
+#[derive(Serialize, Deserialize)]
+struct BlockUndo {
+    height: u32,
+    /// The block this undoes — so a rewind can prove it is unwinding the chain it thinks it is.
+    block_hash: String,
+    /// Forest mutations in the order they happened; inverted newest-first.
+    forest_ops: Vec<UndoForestOp>,
+    /// Coins the block spent, with everything needed to put them back.
+    utxo_spent: Vec<((([u8; 32], u32)), (u64, Vec<u8>, u32, bool))>,
+    /// Coins the block created — removing these is the inverse.
+    utxo_created: Vec<([u8; 32], u32)>,
+    /// Every coinbase-SMT key the block touched, with the value it held BEFORE. `None` = absent.
+    /// ⚠ One shape for all three mutations (insert, remove-on-grandfather, decrement-on-spend):
+    /// restoring a prior value inverts each of them without the rewind needing to know which it was.
+    smt_prior: Vec<([u8; 32], Option<u32>)>,
+    /// The header window as it stood before. `win` is capped at 11 entries and `block_mtp` only ever
+    /// grows by one, so this is bytes, not a copy of history.
+    prev_win: Vec<u32>,
+    prev_nbits: u32,
+    prev_time: u32,
+    prev_epoch_start: u32,
+}
+
+/// `ForestOp` is defined in the accumulator, which deliberately has no serde — it is linked by the
+/// guest, where every dependency is proving cost. This is its serialisable twin, converted at the
+/// boundary.
+#[derive(Serialize, Deserialize, Clone, Copy)]
+enum UndoForestOp {
+    Added,
+    Deleted { pos: usize, leaf: [u8; 32] },
+}
+
+impl From<&hazync_utreexo::ForestOp> for UndoForestOp {
+    fn from(o: &hazync_utreexo::ForestOp) -> Self {
+        match *o {
+            hazync_utreexo::ForestOp::Added => UndoForestOp::Added,
+            hazync_utreexo::ForestOp::Deleted { pos, leaf } => UndoForestOp::Deleted { pos, leaf },
+        }
+    }
+}
+
+impl From<&UndoForestOp> for hazync_utreexo::ForestOp {
+    fn from(o: &UndoForestOp) -> Self {
+        match *o {
+            UndoForestOp::Added => hazync_utreexo::ForestOp::Added,
+            UndoForestOp::Deleted { pos, leaf } => hazync_utreexo::ForestOp::Deleted { pos, leaf },
+        }
+    }
+}
+
+/// Write one block's undo and drop anything older than `keep` blocks (hazync#484).
+///
+/// ⚠ ONE FILE PER HEIGHT, not an append-only log. A rewind wants a specific height and a prune wants
+/// to drop the oldest; both are trivial on named files and fiddly on a single growing file that
+/// would also have to be rewritten to prune.
+///
+/// ⚠ BEST EFFORT, DELIBERATELY. A failed undo write must not stop the bridge: the consequence is a
+/// shorter rewind window, not a wrong accumulator. It is reported, not fatal.
+fn bridge_push_undo(dir: &str, u: &BlockUndo, keep: u32) {
+    let d = format!("{dir}/undo");
+    if std::fs::create_dir_all(&d).is_err() { return; }
+    let path = format!("{d}/{}.undo", u.height);
+    let tmp = format!("{path}.tmp");
+    match bincode::serialize(u) {
+        Ok(bytes) => {
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            } else {
+                println!("bridge: ⚠ could not write undo for {} — the rewind window is shorter by one", u.height);
+            }
+        }
+        Err(e) => println!("bridge: ⚠ could not serialise undo for {}: {e}", u.height),
+    }
+    // prune: heights more than `keep` behind this one can no longer be reached by a rewind
+    if u.height > keep {
+        let cutoff = u.height - keep;
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if let Some(h) = n.strip_suffix(".undo").and_then(|x| x.parse::<u32>().ok()) {
+                    if h < cutoff { let _ = std::fs::remove_file(e.path()); }
+                }
+            }
+        }
+    }
+}
+
+fn bridge_load_undo(dir: &str, height: u32) -> Option<BlockUndo> {
+    let b = std::fs::read(format!("{dir}/undo/{height}.undo")).ok()?;
+    bincode::deserialize(&b).ok()
+}
+
+/// The oldest height still reachable by a rewind, or `None` if nothing is stored.
+fn bridge_undo_floor(dir: &str) -> Option<u32> {
+    let rd = std::fs::read_dir(format!("{dir}/undo")).ok()?;
+    rd.flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".undo").and_then(|x| x.parse::<u32>().ok()))
+        .min()
+}
+
+/// Put the bridge back to the state it held at `target`, newest block first.
+///
+/// ⛔ NEWEST FIRST, AND ALL OR NOTHING. Each block's undo is the inverse of the state as it stood
+/// immediately after that block, so they only compose in reverse. And a rewind that gets halfway and
+/// stops leaves every structure at a height none of them agree on — worse than not starting, because
+/// the checkpoint would then persist it. The range is checked for completeness BEFORE anything is
+/// touched.
+#[allow(clippy::too_many_arguments)]
+fn bridge_rewind_to(
+    dir: &str, target: u32, done: &mut u32,
+    forest: &mut Forest, utxo: &mut Utxo, smt: &mut Smt,
+    win: &mut Vec<u32>, block_mtp: &mut Vec<u32>,
+    nbits: &mut u32, time: &mut u32, epoch_start: &mut u32,
+) -> Result<(), String> {
+    if target >= *done {
+        return Err(format!("rewind target {target} is not below the current height {done}"));
+    }
+    for h in (target + 1)..=*done {
+        if bridge_load_undo(dir, h).is_none() {
+            return Err(format!(
+                "no undo for height {h}: the rewind window reaches back to {:?}, and {target} is \
+                 beyond it — the state must be rebuilt from a checkpoint below the fork",
+                bridge_undo_floor(dir)));
+        }
+    }
+    for h in ((target + 1)..=*done).rev() {
+        let u = bridge_load_undo(dir, h).expect("checked above");
+        // forest: inverses, newest-first within the block too
+        let ops: Vec<hazync_utreexo::ForestOp> =
+            u.forest_ops.iter().map(hazync_utreexo::ForestOp::from).collect();
+        forest.undo_ops(&ops);
+        // utxo: remove what the block created, restore what it spent
+        for k in &u.utxo_created { utxo.remove(k); }
+        for (k, v) in &u.utxo_spent { utxo.insert(*k, v.clone()); }
+        // smt: put every touched key back to the value it held before
+        for (k, prior) in &u.smt_prior {
+            match prior {
+                Some(v) => smt.insert(*k, *v),
+                None => smt.remove(k),
+            }
+        }
+        // header window
+        *win = u.prev_win.clone();
+        block_mtp.pop();
+        *nbits = u.prev_nbits;
+        *time = u.prev_time;
+        *epoch_start = u.prev_epoch_start;
+        *done = h - 1;
+        let _ = std::fs::remove_file(format!("{dir}/undo/{h}.undo"));
+    }
+    Ok(())
+}
+
 fn bridge_reorg_seen(expect: Option<&str>, node_hash_at_done: &str) -> Option<bool> {
     let e = expect?;
     if e.len() != 64 || node_hash_at_done.len() != 64 { return None; }
@@ -3847,6 +4034,9 @@ fn cmd_bridge() {
     // shallower-than-FINALITY reorg leaves it untouched and every emitted bundle is on the final chain.
     let finality: u32 = std::env::var("HAZYNC_BRIDGE_FINALITY").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
     let ckpt_every: u32 = std::env::var("HAZYNC_BRIDGE_CKPT").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
+    // How many blocks of undo to keep. 288 is two days of chain at ten minutes a block — far past any
+    // reorg Bitcoin has had outside the 2013 fork, and under a megabyte a block it costs nothing.
+    let undo_keep: u32 = std::env::var("HAZYNC_BRIDGE_UNDO_KEEP").ok().and_then(|s| s.parse().ok()).unwrap_or(288);
     let poll: u64 = std::env::var("HAZYNC_BRIDGE_POLL").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
     let once = std::env::var("HAZYNC_BRIDGE_ONCE").is_ok();     // exit after catching up once (seeding / tests)
     let cap = std::env::var("HAZYNC_BRIDGE_TO").ok().and_then(|s| s.parse::<u32>().ok()); // optional hard height cap
@@ -3967,7 +4157,14 @@ fn cmd_bridge() {
                 let in_recent = win.clone();
                 let (in_nbits, in_time, in_epoch_start) = (nbits, time, epoch_start);
                 let in_tip = block.header.prev_blockhash.to_byte_array(); // internal order = tip of h-1
+                // ⚠ BEFORE push_mtp, which drains the front of `win` once it passes 11 — after it,
+                // the element that fell off is gone and the window cannot be restored.
+                let (prev_win, prev_nbits, prev_time, prev_epoch_start) =
+                    (win.clone(), nbits, time, epoch_start);
                 push_mtp(&j, &mut win, &mut block_mtp);
+                // The forest records its own mutations for this block; `take_journal` collects them
+                // below, which also turns recording back off.
+                forest.begin_journal();
                 let w = build_block_carried(&mut forest, &j, &block_mtp);
 
                 // #54 — advance the coinbase SMT, in the SAME order the guest's apply_block does:
@@ -3995,10 +4192,23 @@ fn cmd_bridge() {
                     }
                     smt_advance(&mut smt, cb, nout, &cb_spends, h == 91842 || h == 91880)
                 };
+                let (smt_witness, smt_prior) = smt_witness;
                 let mut w = w;
                 w.in_smt_root = smt_root_in;
                 w.smt = smt_witness;
-                bridge_update_utxo(&mut utxo, &block, h);
+                let (utxo_spent, utxo_created) = bridge_update_utxo(&mut utxo, &block, h);
+                // ⛔ EVERYTHING THIS BLOCK CHANGED, CAPTURED BY WHOEVER CHANGED IT (hazync#484).
+                // Assembled here only because this is where the four structures' deltas meet; not one
+                // of them is re-derived. `prev_*` were snapshotted above, before `push_mtp` moved
+                // them, and `block_mtp` needs nothing recorded since undoing it is a single pop.
+                let undo = BlockUndo {
+                    height: h,
+                    block_hash: hash.clone(),
+                    forest_ops: forest.take_journal().iter().map(UndoForestOp::from).collect(),
+                    utxo_spent, utxo_created, smt_prior,
+                    prev_win, prev_nbits, prev_time, prev_epoch_start,
+                };
+                bridge_push_undo(&out_dir, &undo, undo_keep);
                 // Below EMIT_FROM the state still advances — forest, utxo, smt, mtp window are all
                 // updated above this point, and the checkpoint below still persists them. Only the
                 // per-block file is skipped, so a later run can emit any skipped height by replaying
@@ -4596,7 +4806,7 @@ mod smt_bridge {
             } else { Vec::new() };
             // txid(h-10) has 2 outputs exactly when (h-10) % 5 == 0, i.e. when h % 5 == 0.
 
-            let w = smt_advance(&mut bridge, cb, nout, &spends, false);
+            let w = smt_advance(&mut bridge, cb, nout, &spends, false).0;
             guest_root = apply_block(&guest_root, &to_update(cb, nout, &w))
                 .unwrap_or_else(|e| panic!("guest refused the bridge's own block at height {h}: {e:?}"));
             assert_eq!(guest_root, bridge.root(), "roots diverged at height {h}");
@@ -4609,12 +4819,12 @@ mod smt_bridge {
     fn the_bridge_cannot_produce_a_witness_that_passes_a_real_bip30_violation() {
         let mut bridge = Smt::new();
         let cb = txid(1);
-        let w0 = smt_advance(&mut bridge, cb, 1, &[], false);
+        let w0 = smt_advance(&mut bridge, cb, 1, &[], false).0;
         let root0 = apply_block(&Smt::new().root(), &to_update(cb, 1, &w0)).unwrap();
 
         // Now try the same coinbase again while it is still unspent.
         let mut replay = bridge.clone();
-        let w1 = smt_advance(&mut replay, cb, 1, &[], false);
+        let w1 = smt_advance(&mut replay, cb, 1, &[], false).0;
         assert!(apply_block(&root0, &to_update(cb, 1, &w1)).is_err(),
                 "a duplicate of an UNSPENT coinbase was accepted");
     }
@@ -4633,7 +4843,7 @@ mod smt_bridge {
         bridge.insert(dup, 1);                       // present and UNSPENT — the real precondition
         let root = bridge.root();
 
-        let w = smt_advance(&mut bridge, dup, 1, &[], true);
+        let w = smt_advance(&mut bridge, dup, 1, &[], true).0;
         assert_eq!(w.smt_overwrite, Some(1), "the bridge did not emit an overwrite claim");
 
         let out = apply_block(&root, &to_update(dup, 1, &w))
@@ -4650,7 +4860,7 @@ mod smt_bridge {
         let mut bridge = Smt::new();
         bridge.insert(dup, 1);
         let root = bridge.root();
-        let w = smt_advance(&mut bridge.clone(), dup, 1, &[], false);
+        let w = smt_advance(&mut bridge.clone(), dup, 1, &[], false).0;
         assert!(apply_block(&root, &to_update(dup, 1, &w)).is_err(),
                 "a duplicate of an UNSPENT coinbase was accepted outside the two grandfathered blocks");
     }
@@ -4661,15 +4871,15 @@ mod smt_bridge {
     fn a_fully_spent_coinbase_can_be_duplicated_with_no_special_case() {
         let mut bridge = Smt::new();
         let dup = txid(91812);
-        let w0 = smt_advance(&mut bridge, dup, 1, &[], false);
+        let w0 = smt_advance(&mut bridge, dup, 1, &[], false).0;
         let mut root = apply_block(&Smt::new().root(), &to_update(dup, 1, &w0)).unwrap();
 
         // Spend it to zero via an ordinary later block.
-        let w1 = smt_advance(&mut bridge, txid(999), 1, &[dup], false);
+        let w1 = smt_advance(&mut bridge, txid(999), 1, &[dup], false).0;
         root = apply_block(&root, &to_update(txid(999), 1, &w1)).unwrap();
 
         // Now the duplicate is legal.
-        let w2 = smt_advance(&mut bridge, dup, 1, &[], false);
+        let w2 = smt_advance(&mut bridge, dup, 1, &[], false).0;
         root = apply_block(&root, &to_update(dup, 1, &w2))
             .expect("duplicating a fully-spent coinbase was rejected — this is legal under BIP30");
         assert_eq!(root, bridge.root());
@@ -5904,6 +6114,179 @@ fn seg_reconnect(id: &str, addr: &str, s: &mut std::net::TcpStream,
 }
 
 #[cfg(test)]
+mod bridge_undo_tests {
+    //! A rewind must restore EVERY structure, not most of them (hazync#484).
+    //!
+    //! ⛔ WHY THIS IS THE TEST THAT MATTERS. Four things advance per block — forest, UTXO map,
+    //! coinbase SMT, header window — and a rewind that restores three of them produces a bridge that
+    //! looks healthy and emits bundles built on a state no chain ever had. The failure would surface
+    //! days later as a proof the guest refuses, with nothing pointing back here. So every case walks
+    //! forward, snapshots all four, walks further, rewinds, and compares all four.
+    use super::*;
+
+    fn key(n: u64) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..8].copy_from_slice(&n.to_le_bytes());
+        k
+    }
+
+    /// The four structures, as a comparable whole.
+    fn snapshot(forest: &Forest, utxo: &Utxo, smt: &Smt, win: &[u32], mtp: &[u32],
+                nbits: u32, time: u32, epoch: u32)
+        -> (Vec<Option<[u8; 32]>>, usize, usize, [u8; 32], Vec<u32>, usize, u32, u32, u32) {
+        (forest.roots(), forest.leaves.len(), utxo.len(), smt.root(),
+         win.to_vec(), mtp.len(), nbits, time, epoch)
+    }
+
+    /// Advance all four the way the bridge does, and return the block's undo record.
+    fn step(h: u32, forest: &mut Forest, utxo: &mut Utxo, smt: &mut Smt,
+            win: &mut Vec<u32>, mtp: &mut Vec<u32>,
+            nbits: &mut u32, time: &mut u32, epoch: &mut u32) -> BlockUndo {
+        let (prev_win, prev_nbits, prev_time, prev_epoch_start) = (win.clone(), *nbits, *time, *epoch);
+        mtp.push(*time);
+        win.push(1_700_000_000 + h);
+        if win.len() > 11 { let n = win.len() - 11; win.drain(0..n); }
+
+        forest.begin_journal();
+        // a block's worth of forest work: spend two old coins, create three new ones
+        let mut utxo_spent = Vec::new();
+        let mut spent_positions: Vec<usize> = Vec::new();
+        for s in 0..2u64 {
+            if forest.leaves.len() > 4 {
+                let pos = ((h as u64 * 7 + s * 13) as usize) % forest.leaves.len();
+                if spent_positions.contains(&pos) { continue; }
+                spent_positions.push(pos);
+                let k = (key(pos as u64), 0u32);
+                if let Some(v) = utxo.remove(&k) { utxo_spent.push((k, v)); }
+                forest.delete(pos);
+            }
+        }
+        let mut utxo_created = Vec::new();
+        for c in 0..3u64 {
+            let leaf_id = h as u64 * 1000 + c;
+            let mut lb = [0u8; 32];
+            lb[..8].copy_from_slice(&leaf_id.to_le_bytes());
+            forest.add(hazync_utreexo::hash_leaf(&lb));
+            let k = (key(leaf_id), 0u32);
+            utxo.insert(k, (5_000_000_000, vec![0x51], h, c == 0));
+            utxo_created.push(k);
+        }
+
+        // smt: insert this block's coinbase, decrement one earlier one
+        let mut smt_prior = Vec::new();
+        let cb = key(900_000 + h as u64);
+        smt_prior.push((cb, smt.get(&cb)));
+        smt.insert(cb, 2);
+        if h > 3 {
+            let old = key(900_000 + h as u64 - 3);
+            if let Some(cur) = smt.get(&old) {
+                smt_prior.push((old, Some(cur)));
+                if cur > 0 { smt.insert(old, cur - 1); }
+            }
+        }
+        *nbits = 0x1d00_ffff + h;
+        *time = 1_700_000_000 + h;
+        if h % 2016 == 0 { *epoch = *time; }
+
+        BlockUndo {
+            height: h,
+            block_hash: format!("{h:064x}"),
+            forest_ops: forest.take_journal().iter().map(UndoForestOp::from).collect(),
+            utxo_spent, utxo_created, smt_prior,
+            prev_win, prev_nbits, prev_time, prev_epoch_start,
+        }
+    }
+
+    fn fresh() -> (Forest, Utxo, Smt, Vec<u32>, Vec<u32>, u32, u32, u32) {
+        let mut forest = Forest::new();
+        let mut utxo = Utxo::new();
+        for i in 0..40u64 {
+            let mut lb = [0u8; 32];
+            lb[..8].copy_from_slice(&i.to_le_bytes());
+            forest.add(hazync_utreexo::hash_leaf(&lb));
+            utxo.insert((key(i), 0), (1000 + i, vec![0x51], 1, false));
+        }
+        (forest, utxo, Smt::new(), vec![1_700_000_000], vec![1_700_000_000],
+         0x1d00_ffff, 1_700_000_000, 1_700_000_000)
+    }
+
+    #[test]
+    fn a_rewind_restores_all_four_structures() {
+        let d = std::env::temp_dir().join(format!("hzundo{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+
+        let (mut forest, mut utxo, mut smt, mut win, mut mtp, mut nbits, mut time, mut epoch) = fresh();
+        let mut done = 0u32;
+        for h in 1..=6u32 {
+            let u = step(h, &mut forest, &mut utxo, &mut smt, &mut win, &mut mtp,
+                         &mut nbits, &mut time, &mut epoch);
+            bridge_push_undo(dir, &u, 288);
+            done = h;
+        }
+        let mark = snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch);
+
+        for h in 7..=12u32 {
+            let u = step(h, &mut forest, &mut utxo, &mut smt, &mut win, &mut mtp,
+                         &mut nbits, &mut time, &mut epoch);
+            bridge_push_undo(dir, &u, 288);
+            done = h;
+        }
+        assert_ne!(snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch), mark,
+                   "the walk must actually have changed something, or the rewind proves nothing");
+
+        bridge_rewind_to(dir, 6, &mut done, &mut forest, &mut utxo, &mut smt,
+                         &mut win, &mut mtp, &mut nbits, &mut time, &mut epoch)
+            .expect("rewind");
+        assert_eq!(done, 6);
+        assert_eq!(snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch), mark,
+                   "ROOTS, UTXO count, SMT root and the header window must all come back");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_rewind_past_the_window_refuses_and_changes_nothing() {
+        // ⛔ ALL OR NOTHING. A partial rewind leaves four structures at four different heights and
+        // the next checkpoint persists that. The range is checked before anything is touched.
+        let d = std::env::temp_dir().join(format!("hzundo2{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+        let (mut forest, mut utxo, mut smt, mut win, mut mtp, mut nbits, mut time, mut epoch) = fresh();
+        let mut done = 0u32;
+        for h in 1..=5u32 {
+            let u = step(h, &mut forest, &mut utxo, &mut smt, &mut win, &mut mtp,
+                         &mut nbits, &mut time, &mut epoch);
+            bridge_push_undo(dir, &u, 2);        // keep only the last 2
+            done = h;
+        }
+        let before = snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch);
+        let r = bridge_rewind_to(dir, 1, &mut done, &mut forest, &mut utxo, &mut smt,
+                                 &mut win, &mut mtp, &mut nbits, &mut time, &mut epoch);
+        assert!(r.is_err(), "a rewind beyond the retained window must refuse");
+        assert_eq!(done, 5, "and must not have moved the height");
+        assert_eq!(snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch), before,
+                   "and must not have touched a single structure");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_ring_prunes_and_keeps_exactly_what_it_promises() {
+        let d = std::env::temp_dir().join(format!("hzundo3{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+        let (mut forest, mut utxo, mut smt, mut win, mut mtp, mut nbits, mut time, mut epoch) = fresh();
+        for h in 1..=20u32 {
+            let u = step(h, &mut forest, &mut utxo, &mut smt, &mut win, &mut mtp,
+                         &mut nbits, &mut time, &mut epoch);
+            bridge_push_undo(dir, &u, 5);
+        }
+        assert_eq!(bridge_undo_floor(dir), Some(15), "keep=5 at height 20 retains 15..20");
+        assert!(bridge_load_undo(dir, 20).is_some());
+        assert!(bridge_load_undo(dir, 14).is_none(), "older than the window is gone");
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
 mod bridge_reorg_tests {
     use super::{bridge_reorg_seen, bridge_save_head, bridge_load_head};
 

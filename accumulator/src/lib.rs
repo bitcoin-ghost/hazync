@@ -366,11 +366,34 @@ pub fn naive_prove(leaves: &[Hash], index: usize) -> Proof {
 
 // ------------------------------------------------------------------ Forest (bridge oracle) ----
 
+/// One mutation of the forest, recorded so it can be inverted (hazync#484).
+///
+/// ⛔ RECORDED BY THE FOREST ITSELF, not reconstructed by the caller. `build_block_carried` decides
+/// which coins are spent and created deep inside a walk over the block's transactions; a caller
+/// trying to rebuild that list afterwards would be writing a second implementation of the same rules
+/// and betting they agree. Here the log cannot drift from what happened, because `add` and `delete`
+/// are what append to it.
+// ⚠ NO serde HERE. This crate's only dependency is sha2 and the guest links it; pulling serde in
+// for the bridge's benefit would put it in the zkVM's dependency graph, where every byte of code is
+// proving cost. The bridge serialises these itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForestOp {
+    /// A leaf was appended. Inverting needs nothing but the fact.
+    Added,
+    /// `delete(pos)` removed this leaf. 36 bytes, and enough to invert completely: `delete` swaps
+    /// the last leaf into `pos`, so everything else is recoverable from the length.
+    Deleted { pos: usize, leaf: Hash },
+}
+
 /// The full accumulator: every leaf, in insertion order. Regenerates the exact same roots as a
 /// Stump, and can produce an inclusion [`Proof`] for any leaf. Host/bridge side only.
 #[derive(Clone, Debug, Default)]
 pub struct Forest {
     pub leaves: Vec<Hash>,
+
+    /// When `Some`, every `add`/`delete` appends its inverse-able record here. `None` (the default)
+    /// costs nothing, so the guest and every non-bridge caller are unaffected.
+    pub journal: Option<Vec<ForestOp>>,
 
     /// Cached internal nodes. `internals[k]` is tree level `k + 1`; `internals[k][i]` is the parent of
     /// `level(k)[2i]` and `level(k)[2i + 1]`. Length invariant: `internals[k].len() == level(k).len() / 2`.
@@ -432,7 +455,7 @@ pub struct Forest {
 
 impl Forest {
     pub fn new() -> Self {
-        Forest { leaves: Vec::new(), internals: Vec::new(), index: Default::default(), dups: Default::default() }
+        Forest { leaves: Vec::new(), internals: Vec::new(), index: Default::default(), dups: Default::default(), journal: None }
     }
 
     /// Smallest position holding `leaf`, or `None`. Exactly `leaves.iter().position(|x| *x == leaf)`,
@@ -534,7 +557,7 @@ impl Forest {
                 }
             }
         }
-        Forest { leaves, internals, index, dups }
+        Forest { leaves, internals, index, dups, journal: None }
     }
 
     /// Tree level `k`: level 0 is the leaves, level `k > 0` is `internals[k - 1]`.
@@ -547,6 +570,7 @@ impl Forest {
     }
 
     pub fn add(&mut self, leaf: Hash) {
+        if let Some(j) = self.journal.as_mut() { j.push(ForestOp::Added); }
         // appended at the end, so its position is larger than every existing one for this key —
         // `index_insert` therefore keeps the existing first position and files this one under `dups`
         self.index_insert(leaf, self.leaves.len());
@@ -565,11 +589,118 @@ impl Forest {
         }
     }
 
+    /// Start recording mutations. Any previous journal is returned.
+    pub fn begin_journal(&mut self) -> Option<Vec<ForestOp>> {
+        self.journal.replace(Vec::new())
+    }
+
+    /// Stop recording and take what was recorded.
+    pub fn take_journal(&mut self) -> Vec<ForestOp> {
+        self.journal.take().unwrap_or_default()
+    }
+
+    /// Invert a recorded run of mutations, restoring the forest to its state before them.
+    ///
+    /// ⛔ NEWEST FIRST, AND THAT IS NOT A STYLE CHOICE. Every `delete` moved whatever leaf was last
+    /// AT THE TIME, so the inverses only compose in reverse. Applied forwards they produce a forest
+    /// with the right leaf COUNT and the wrong contents — which compares equal on length, passes a
+    /// casual eye, and yields a different root.
+    ///
+    /// ⚠ Recording stays off afterwards: an undo is not itself a mutation to be undone, and leaving
+    /// the journal live would have the rewind record its own steps.
+    pub fn undo_ops(&mut self, ops: &[ForestOp]) {
+        let was = self.journal.take();
+        for op in ops.iter().rev() {
+            match *op {
+                ForestOp::Added => { self.undo_add(); }
+                ForestOp::Deleted { pos, leaf } => self.undo_delete(pos, leaf),
+            }
+        }
+        debug_assert!(was.is_none() || self.journal.is_none());
+    }
+
+    /// Undo the most recent [`add`], returning the leaf that was appended.
+    ///
+    /// ⛔ THE BRIDGE'S ACCUMULATOR IS RESIDENT AND HAS NEVER BEEN REWINDABLE (hazync#484). That is
+    /// the whole reason `HAZYNC_BRIDGE_FINALITY` exists: with no way back, the only defence against a
+    /// reorg was to stay 100 blocks away from one. Following the true tip needs the inverse of every
+    /// forward step, and these two are it.
+    ///
+    /// ⚠ `add` appends and then folds completed pairs upward; the inverse pops and drops any parent
+    /// that is no longer backed by a pair. Amortised O(1), same as `add`.
+    pub fn undo_add(&mut self) -> Option<Hash> {
+        let pos = self.leaves.len().checked_sub(1)?;
+        let leaf = self.leaves.pop()?;
+        self.index_remove(&leaf, pos);
+        // The parents `add` created were exactly those completing a pair. Shrinking each level to
+        // `len/2` drops precisely those and leaves every other cached node untouched.
+        for k in 0..self.internals.len() {
+            let want = self.level_len(k) / 2;
+            if self.internals[k].len() > want {
+                self.internals[k].truncate(want);
+            }
+        }
+        while self.internals.last().is_some_and(|v| v.is_empty()) {
+            self.internals.pop();
+        }
+        Some(leaf)
+    }
+
+    /// Undo a [`delete`] of position `i` whose removed leaf was `gone`.
+    ///
+    /// ⛔ THE ONLY TWO THINGS NEEDED ARE `i` AND `gone`, which is what makes a per-block undo log
+    /// cheap enough to be worth having: 36 bytes a deletion against a 19.4 GB checkpoint. `delete`
+    /// moves the LAST leaf into slot `i` and pops, so the inverse is fully determined — whether the
+    /// deletion was of the last slot is recoverable from the length, not something to record.
+    ///
+    /// ⚠ UNDO IN REVERSE ORDER. Each `delete` moves whatever was last at the time, so the inverses
+    /// only compose if they are applied newest first. The caller owns that ordering.
+    pub fn undo_delete(&mut self, i: usize, gone: Hash) {
+        let last = self.leaves.len();          // the position `delete` popped from
+        if i == last {
+            // it deleted the final slot: nothing was moved, so restoring is an append
+            self.index_insert(gone, i);
+            self.leaves.push(gone);
+        } else {
+            // slot `i` currently holds the leaf that was moved in from the end; send it back
+            let moved = self.leaves[i];
+            self.index_remove(&moved, i);
+            self.leaves[i] = gone;
+            self.index_insert(gone, i);
+            self.index_insert(moved, last);
+            self.leaves.push(moved);
+        }
+        // Growing the forest can complete pairs at several levels, exactly as `add` does.
+        let mut k = 0;
+        while self.level_len(k) % 2 == 0 && self.level_len(k) > 0 {
+            let n = self.level_len(k);
+            let par = parent(&self.level(k)[n - 2], &self.level(k)[n - 1]);
+            if self.internals.len() <= k {
+                self.internals.push(Vec::new());
+            }
+            if self.internals[k].len() < n / 2 {
+                self.internals[k].push(par);
+            } else {
+                self.internals[k][n / 2 - 1] = par;
+            }
+            k += 1;
+        }
+        // ⚠ ONLY `i` NEEDS REPAIRING. The restore writes at `i` and at the tail, and the tail looks
+        // like it needs one too — but the loop above already recomputed every parent a completed
+        // pair creates, and the tail is by definition the last position, so it has no other ancestor
+        // to fix. I had a `repair(last)` here with a comment asserting it was essential; a control
+        // that removed it passed every test, including roots at every size and 60 rounds of mixed
+        // operations. It was doing nothing, so it is gone rather than left to imply a hazard.
+        self.repair(i);
+    }
+
     /// Swap-and-shrink delete (ground-truth semantics): move the last leaf into slot `i`, drop the
     /// last. The [`Stump::delete`] above must reproduce the resulting roots from proofs alone.
     pub fn delete(&mut self, i: usize) {
         let last = self.leaves.len() - 1;
         let gone = self.leaves[i];
+        // ⚠ Recorded BEFORE the mutation: `gone` is read above and would be unreachable after.
+        if let Some(j) = self.journal.as_mut() { j.push(ForestOp::Deleted { pos: i, leaf: gone }); }
         let moved = self.leaves.pop().expect("delete from empty forest");
         // `i == last` means `gone == moved` and the single index entry has already been accounted
         // for by this one removal — removing twice would drop another copy of a duplicated leaf.
@@ -1425,5 +1556,211 @@ mod domain_separation_tests {
             h.finalize().into()
         };
         assert_eq!(raw_leaf, raw_node, "the untagged collision this defends against is real");
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    //! The forest must be rewindable, or the bridge can never follow the true tip (hazync#484).
+    //!
+    //! ⛔ WHY THIS EXISTS. `HAZYNC_BRIDGE_FINALITY=100` is not a safety margin anybody chose on its
+    //! merits — it is what you must do when the accumulator cannot go backwards. A reorg at or below
+    //! the bridge's height leaves the forest holding state from the abandoned chain, and the only
+    //! recovery was to rebuild from genesis: 19.4 GB of checkpoint and about eight days of walking.
+    //!
+    //! ⚠ AN INVERSE IS ONLY AN INVERSE IF THE ROOTS COME BACK. Comparing `leaves` is not enough:
+    //! `internals` is a cache of every ancestor, and a forest can carry the right leaves with stale
+    //! parents — it looks correct and produces the wrong root, which is exactly the failure that
+    //! would be discovered by a rejected proof days later. Every case below compares roots.
+    use super::*;
+
+    fn leaf(n: u64) -> Hash {
+        let mut h = [0u8; 32];
+        h[..8].copy_from_slice(&n.to_le_bytes());
+        hash_leaf(&h)
+    }
+
+    /// A tiny deterministic PRNG — a fixed seed means a failure is reproducible, which a
+    /// thread-seeded one is not.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn undo_add_restores_roots_at_every_size() {
+        // every size across two doublings: the tree decomposition changes shape at each power of two
+        // and that is where a truncation is most likely to be wrong
+        for n in 1..=40usize {
+            let mut f = Forest::new();
+            for i in 0..n {
+                f.add(leaf(i as u64));
+            }
+            let before_roots = f.roots();
+            let before_leaves = f.leaves.clone();
+            f.add(leaf(999));
+            let got = f.undo_add();
+            assert_eq!(got, Some(leaf(999)), "n={n}: undo_add returns the leaf it removed");
+            assert_eq!(f.leaves, before_leaves, "n={n}: leaves");
+            assert_eq!(f.roots(), before_roots, "n={n}: ROOTS — stale internals look correct by leaves");
+        }
+    }
+
+    #[test]
+    fn undo_delete_restores_roots_for_every_position() {
+        for n in 2..=24usize {
+            for i in 0..n {
+                let mut f = Forest::new();
+                for k in 0..n {
+                    f.add(leaf(k as u64));
+                }
+                let before_roots = f.roots();
+                let before_leaves = f.leaves.clone();
+                let gone = f.leaves[i];
+                f.delete(i);
+                f.undo_delete(i, gone);
+                assert_eq!(f.leaves, before_leaves, "n={n} i={i}: leaves");
+                assert_eq!(f.roots(), before_roots, "n={n} i={i}: ROOTS");
+                // ⚠ the index must come back too, or `find` — which BIP30 duplicate handling
+                // depends on — starts answering with a position that no longer holds that leaf
+                for (pos, lf) in before_leaves.iter().enumerate() {
+                    let found = f.find(lf).expect("every leaf still findable");
+                    assert!(found <= pos, "n={n} i={i}: find({pos}) gave {found}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_block_of_mixed_operations_inverts_in_reverse_order() {
+        // ⛔ REVERSE ORDER IS LOAD-BEARING. Each delete moves whatever was last AT THE TIME, so the
+        // inverses only compose newest-first. Applying them forwards silently produces a forest with
+        // the right leaf COUNT and the wrong contents.
+        let mut rng = Rng(0x5eed_1234_9abc_def0);
+        for round in 0..60 {
+            let mut f = Forest::new();
+            let base = 20 + (rng.next() % 60) as usize;
+            for k in 0..base {
+                f.add(leaf(k as u64));
+            }
+            let before_roots = f.roots();
+            let before_leaves = f.leaves.clone();
+
+            // a block's worth of work: some spends, some new outputs, interleaved
+            enum Op { Added, Deleted(usize, Hash) }
+            let mut log: Vec<Op> = Vec::new();
+            for step in 0..(3 + rng.next() % 25) as usize {
+                if f.leaves.len() > 1 && rng.next() % 2 == 0 {
+                    let i = (rng.next() as usize) % f.leaves.len();
+                    let gone = f.leaves[i];
+                    f.delete(i);
+                    log.push(Op::Deleted(i, gone));
+                } else {
+                    f.add(leaf(10_000 + (round * 1000 + step) as u64));
+                    log.push(Op::Added);
+                }
+            }
+            for op in log.iter().rev() {
+                match op {
+                    Op::Added => { f.undo_add(); }
+                    Op::Deleted(i, gone) => f.undo_delete(*i, *gone),
+                }
+            }
+            assert_eq!(f.leaves, before_leaves, "round {round}: leaves after a full inversion");
+            assert_eq!(f.roots(), before_roots, "round {round}: ROOTS after a full inversion");
+        }
+    }
+
+    #[test]
+    fn deleting_the_last_slot_inverts_too() {
+        // `delete(last)` moves nothing, so it takes the other branch of the inverse — and it is the
+        // case a random test can go a long time without hitting
+        for n in 1..=20usize {
+            let mut f = Forest::new();
+            for k in 0..n {
+                f.add(leaf(k as u64));
+            }
+            let before_roots = f.roots();
+            let before_leaves = f.leaves.clone();
+            let i = n - 1;
+            let gone = f.leaves[i];
+            f.delete(i);
+            f.undo_delete(i, gone);
+            assert_eq!(f.leaves, before_leaves, "n={n}: leaves");
+            assert_eq!(f.roots(), before_roots, "n={n}: ROOTS");
+        }
+    }
+
+    /// ⛔ THE JOURNAL IS THE POINT: the bridge must not have to reconstruct what happened.
+    #[test]
+    fn a_journalled_run_inverts_itself_without_the_caller_tracking_anything() {
+        let mut rng = Rng(0xfeed_face_0bad_c0de);
+        for round in 0..40 {
+            let mut f = Forest::new();
+            for k in 0..(30 + rng.next() % 50) as usize {
+                f.add(leaf(k as u64));
+            }
+            let before_roots = f.roots();
+            let before_leaves = f.leaves.clone();
+
+            // the bridge's whole interaction: turn it on, do a block's work, take the log, invert
+            f.begin_journal();
+            for step in 0..(2 + rng.next() % 20) as usize {
+                if f.leaves.len() > 1 && rng.next() % 2 == 0 {
+                    let i = (rng.next() as usize) % f.leaves.len();
+                    f.delete(i);
+                } else {
+                    f.add(leaf(50_000 + (round * 100 + step) as u64));
+                }
+            }
+            let ops = f.take_journal();
+            assert!(!ops.is_empty(), "round {round}: the journal recorded nothing");
+            f.undo_ops(&ops);
+            assert_eq!(f.leaves, before_leaves, "round {round}: leaves");
+            assert_eq!(f.roots(), before_roots, "round {round}: ROOTS");
+        }
+    }
+
+    /// ⚠ Recording must be OFF by default: the guest and every non-bridge caller link this crate and
+    /// must not pay for a log they never read.
+    #[test]
+    fn recording_is_off_unless_asked_for() {
+        let mut f = Forest::new();
+        f.add(leaf(1));
+        f.add(leaf(2));
+        f.delete(0);
+        assert!(f.journal.is_none(), "no journal without begin_journal()");
+        assert!(f.take_journal().is_empty());
+        // and an undo does not record itself
+        f.begin_journal();
+        f.add(leaf(3));
+        let ops = f.take_journal();
+        f.undo_ops(&ops);
+        assert!(f.journal.is_none(), "undo_ops must not leave recording on");
+    }
+
+    #[test]
+    fn a_duplicated_leaf_survives_the_round_trip() {
+        // ⚠ BIP30 put duplicate coinbases in the chain, and `index`/`dups` exist for them. An undo
+        // that dropped the wrong copy would break `find` for the survivor.
+        let mut f = Forest::new();
+        for k in 0..10u64 {
+            f.add(leaf(k));
+        }
+        f.add(leaf(3));                     // a genuine duplicate
+        let before_roots = f.roots();
+        let before_leaves = f.leaves.clone();
+        let i = 3;
+        let gone = f.leaves[i];
+        f.delete(i);
+        f.undo_delete(i, gone);
+        assert_eq!(f.leaves, before_leaves, "leaves");
+        assert_eq!(f.roots(), before_roots, "ROOTS");
+        assert_eq!(f.find(&leaf(3)), Some(3), "the SMALLEST position of a duplicate is restored");
     }
 }
