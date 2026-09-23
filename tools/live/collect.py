@@ -34,6 +34,35 @@ def chain_facts():
         return {"ok": False, "error": str(e)[:120]}
 
 
+# Bitcoin's mean inter-block time. The ring's denominator is a COUNT OF BLOCKS, and on a one-hour
+# run that count is ~6, not the 144 of a full day.
+BLOCK_PERIOD_S = 600.0
+
+
+def session_blocks(phase_text):
+    """Blocks this session can expect, parsed from its own `SESSION · X h ...` line.
+
+    ⛔ THE DENOMINATOR IS NOT ALWAYS 144. The frame showed `N / 144 TODAY` on every run, including a
+    0.9 h one -- so a flagship hour that proved 6 of its ~6 blocks rendered as 6/144, which reads as
+    a 4% success rate rather than a complete run. The run states its own length; use it.
+
+    Returns None when the phase line says nothing about a session, and the caller keeps the daily 144.
+    """
+    if not phase_text:
+        return None
+    import re as _re
+    m = _re.search(r"SESSION\s*\u00b7\s*([0-9.]+)\s*h", phase_text)
+    if not m:
+        return None
+    try:
+        hours = float(m.group(1))
+    except ValueError:
+        return None
+    if hours <= 0:
+        return None
+    return max(1, round(hours * 3600.0 / BLOCK_PERIOD_S))
+
+
 def read_phase(rundir):
     """What the run says it is doing, from `$RUNDIR/phase`. One short line, or None.
 
@@ -595,6 +624,12 @@ def main():
         else:
             cards = read_streams(a.rundir, now, cursors)
             phase_label = read_phase(a.rundir)
+            # ⚠ LATCH IT. The phase line is rewritten as the run proceeds ("PROVING block ..."), so
+            # the SESSION header is only visible for part of the run. Read it once and keep it, or
+            # the ring's denominator would flip back to the daily 144 mid-run.
+            sb = session_blocks(phase_label)
+            if sb:
+                state["session_blocks"] = sb
             chain = chain_facts()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
@@ -646,6 +681,7 @@ def main():
         # `wall` always advances, so a collector that DIES stops advancing it and the frame can say
         # so. In replay it is also the real clock, so a freshly replayed capture reads as fresh.
         snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_label,
+                "session_blocks": state.get("session_blocks"),
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}

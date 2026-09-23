@@ -384,7 +384,13 @@ def draw_live(snap, fo):
                  if on_board else f'{mmss(el)} ON THIS BLOCK')
     else:
         mid_s, mid_c, low_s = 'STANDING BY', hx(DIM), 'WAITING FOR A BLOCK'
-    for s, f_, dy, c_ in ((f'/ {WINDOW} TODAY', 'lab', 22, mix(TEXT, GROUND, .7)),
+    # ⛔ THE DENOMINATOR IS THE SESSION, NOT THE DAY. This was always `/ 144 TODAY`, so a one-hour
+    # run that proved all ~6 of its blocks rendered as `6 / 144` — a complete run looking like a 4%
+    # one. The run declares its own length in its SESSION line; collect.py parses and latches it.
+    # Falls back to the daily window when there is no session (board work, a replay).
+    _den = snap.get('session_blocks') or WINDOW
+    _lab = 'TODAY' if _den == WINDOW else 'THIS SESSION'
+    for s, f_, dy, c_ in ((f'/ {_den} {_lab}', 'lab', 22, mix(TEXT, GROUND, .7)),
                           (mid_s, 'mid', 48, mid_c),
                           (low_s, 'small', 78, hx(DIM))):
         d.text((RCX - d.textlength(s, font=fo[f_]) / 2, RCY + dy), s, font=fo[f_], fill=c_)

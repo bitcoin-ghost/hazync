@@ -570,6 +570,10 @@ def main():
                          "cost per proof, then by price for cards nobody has measured, and fills the "
                          "fleet from ONE type wherever capacity allows (hazync#493). Or pass a "
                          "comma-separated preference list to pin the choice.")
+    ap.add_argument("--fresh-tip", action="store_true",
+                    help="prove only blocks mined AFTER the fleet is ready: the claim floor starts "
+                         "at the current tip, so boot is paid while idle and each block is timed "
+                         "from a height that did not exist when the run began")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -1159,7 +1163,27 @@ def main():
             state = tip_session.new_state(started_at=time.time(), duration_s=a.session * 3600.0,
                                           fleet_ids=[p["id"] for p in created])
             tip_session.save(spath, state)
+            # ⭐ --fresh-tip: prove only blocks mined AFTER the fleet was ready.
+            #
+            # `proved_tip["h"]` is the floor for claiming a tip block, and starting it at 0 means the
+            # session grabs whatever bundle the bridge already holds -- a block that may have been
+            # mined minutes before we booted. Proving that measures our speed against a head start,
+            # not against the chain, and it is the wrong number to publish.
+            #
+            # With --fresh-tip the floor starts at the CURRENT tip, so the session sits idle until
+            # the chain produces a block it has never seen, then proves that. The measurement then
+            # runs from "this block did not exist" to "its proof is accepted", which is the only
+            # figure that supports a claim about following the tip. It also prices boot separately:
+            # renting and gating happen while waiting, so they cannot hide inside a block's time.
             proved_tip = {"h": 0}
+            if a.fresh_tip:
+                t0h = tip_board.highest_tip_bundle(a.bridge_host)
+                if t0h:
+                    proved_tip["h"] = int(t0h)
+                    log(f"FRESH TIP: floor set at {t0h} — waiting for the chain to mine a block "
+                        f"this fleet has never seen (boot cost is paid while waiting)")
+                else:
+                    log("⚠ --fresh-tip: no tip bundle on the bridge yet, so the floor stays at 0")
 
             def claim_fn():
                 """The board's next block, or None when the board is genuinely busy.
@@ -1183,10 +1207,36 @@ def main():
                     return None
                 raise RuntimeError(f"claim refused and retrying cannot fix it: {res.get('why')}")
 
+            # ⭐ THE TIP LEDGER — what turns "we followed the tip" into a measurement.
+            #
+            # session.log records when WE started and finished a block. It has never recorded what
+            # the CHAIN was doing at those moments, so the central claim of a tip run could only ever
+            # be asserted. One line per event, appended as it happens, so it survives a crash and can
+            # be read by anyone: when a height first became provable, when we claimed it, when its
+            # proof was accepted, and where the chain had got to by then.
+            #
+            # `appeared` is when the BUNDLE first existed, which is the earliest moment this fleet
+            # could have begun -- not the block's header timestamp, which a miner sets and which can
+            # run backwards. The lag that matters is measured from the former.
+            tipledger = os.path.join(a.rundir, "tip_ledger.jsonl")
+            seen_at = {}
+
+            def tip_note(event, **kv):
+                rec = {"event": event, "t": round(time.time(), 3),
+                       "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **kv}
+                try:
+                    with open(tipledger, "a") as fh:
+                        fh.write(json.dumps(rec) + "\n")
+                except OSError:
+                    pass          # a ledger that cannot be written must never stop a run
+
             def work_fn():
                 # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
                 # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
                 t = tip_board.highest_tip_bundle(a.bridge_host)
+                if t and t not in seen_at:
+                    seen_at[t] = time.time()
+                    tip_note("appeared", height=int(t))
                 pending = t if (t and t > proved_tip["h"]) else None
                 return tip_controller.next_work(pending, claim_fn)
 
@@ -1198,6 +1248,17 @@ def main():
                 out = prove_and_submit(rng, from_tip=from_tip)
                 if from_tip:
                     proved_tip["h"] = int(rng)
+                    # chain tip NOW, so the lag is against the real chain rather than our own clock
+                    try:
+                        tip_now = tip_board.highest_tip_bundle(a.bridge_host)
+                    except Exception:
+                        tip_now = None
+                    app = seen_at.get(int(rng))
+                    tip_note("accepted", height=int(rng),
+                             appeared_at=round(app, 3) if app else None,
+                             lag_s=round(time.time() - app, 1) if app else None,
+                             chain_tip_now=int(tip_now) if tip_now else None,
+                             blocks_behind=(int(tip_now) - int(rng)) if tip_now else None)
                 return out
 
             # The fleet's hourly rate, from what RunPod actually charged for the cards we KEPT.
@@ -1310,6 +1371,34 @@ def main():
                 runner.stop_auto_attach(assignment)
         except Exception as e:                                     # noqa: BLE001
             log(f"stop_auto_attach: {e}")
+
+        # ⭐ BILLED TIME, NOT rate x wall. Every cost figure this run reports is otherwise
+        # COMPUTED: the fleet rate multiplied by our own wall clock. That is close, but it is not
+        # what RunPod charges, and a published cost should be the billed one. Ask the API for each
+        # pod's real lifetime BEFORE it is released -- afterwards the pod is gone and so is the
+        # answer. Same discipline as the harvest below, for the same reason.
+        try:
+            billed = []
+            for p_ in created:
+                q = ('query { pod(input:{podId:%s}) { id name costPerHr '
+                     'runtime { uptimeInSeconds } } }' % api._s(p_["id"]))
+                try:
+                    pd = (api._gql(q) or {}).get("pod") or {}
+                    up = (pd.get("runtime") or {}).get("uptimeInSeconds")
+                    billed.append({"name": p_["name"], "id": p_["id"], "dc": p_.get("dc"),
+                                   "gpu": p_["gpu_type"], "price_hr": p_["price"],
+                                   "uptime_s": up,
+                                   "usd": round((up or 0) / 3600.0 * p_["price"], 4)})
+                except Exception as e:
+                    billed.append({"name": p_["name"], "id": p_["id"], "error": str(e)[:80]})
+            with open(os.path.join(a.rundir, "billing.json"), "w") as fh:
+                json.dump(billed, fh, indent=1)
+            tot = sum(b.get("usd") or 0 for b in billed)
+            known = sum(1 for b in billed if b.get("uptime_s"))
+            log(f"BILLED: ${tot:.2f} across {known}/{len(billed)} pod(s) with a known uptime "
+                f"-> {a.rundir}/billing.json")
+        except Exception as e:
+            log(f"⚠ billing snapshot failed ({str(e)[:70]}) — cost falls back to rate x wall")
 
         # ── harvest BEFORE release: this is the only chance ───────────────────────────────────────
         # ⛔ EVERY PREVIOUS RUN THREW ITS EVIDENCE AWAY. The pods were terminated below with no logs
