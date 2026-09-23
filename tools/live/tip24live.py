@@ -518,7 +518,7 @@ def draw_live(snap, fo):
         # object near the tree's convergence point rather than as motion, and it was mistaken for the
         # tree's root more than once. The faint line alone says the same thing -- this block just
         # landed in that cell -- without putting a moving object on a page that is mostly states.
-        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18))
+        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18), width=2)
 
     kx = GX0
     for lbl, c_ in (('proving', MAP_PROVING), ('folding', MAP_FOLDING), ('done', MAP_DONE)):
