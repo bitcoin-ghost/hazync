@@ -34,7 +34,32 @@ STAMP="${BUNDLE_SYNC_STAMP:-/var/lib/hazync/.bundle-push-stamp}"
 [ -d "$SRC" ]  || { echo "[bundle-push] cannot check: no bundle directory at $SRC" >&2; exit 2; }
 [ -r "$KEY" ]  || { echo "[bundle-push] cannot check: no readable key at $KEY" >&2; exit 2; }
 
+# ⛔ THE SERVICE CANNOT READ /root/.ssh — ProtectHome=yes. The unit is sandboxed with
+# ProtectHome=yes and ProtectSystem=strict, so /root is invisible to it. ssh therefore finds NO
+# known_hosts, and with StrictHostKeyChecking=yes it correctly refuses:
+#
+#   No ED25519 host key is known for <coordinator> and you have requested strict checking.
+#   Host key verification failed.
+#   [bundle-push] push of 781 bundle(s) FAILED; watermark not advanced
+#
+# ⚠ AND IT HIDES ITSELF. Run by hand as root the push works, because a root shell CAN read
+# /root/.ssh — so "it works when I run it" proves nothing here. Worse, once a manual run clears the
+# queue the next timer run has nothing to push, never opens a connection, and exits 0: a green run
+# that never exercised the failing path. Both of those happened on 2026-09-23 before the cause was
+# found.
+#
+# So the trust anchor is an explicit file inside /etc/hazync, beside the key this service already
+# uses, which the sandbox permits. StrictHostKeyChecking stays YES -- the fix is to give strict
+# checking something to read, never to turn it off.
+KNOWN="${BUNDLE_SYNC_KNOWN_HOSTS:-/etc/hazync/known_hosts}"
+if [ ! -r "$KNOWN" ]; then
+    echo "[bundle-push] cannot check: no readable known_hosts at $KNOWN — the service is sandboxed" >&2
+    echo "[bundle-push] populate it with: ssh-keyscan -H <coordinator> > $KNOWN   (verify the" >&2
+    echo "[bundle-push] fingerprints against a trusted source before trusting the result)" >&2
+    exit 1
+fi
 SSH_CMD="ssh -i $KEY -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes"
+SSH_CMD="$SSH_CMD -o UserKnownHostsFile=$KNOWN -o GlobalKnownHostsFile=/dev/null"
 
 # ⛔ TAKE THE WATERMARK *BEFORE* LISTING, NOT AFTER. A bundle written while this run is in flight would
 # otherwise fall between the listing and the stamp update and never be picked up by any run -- a
