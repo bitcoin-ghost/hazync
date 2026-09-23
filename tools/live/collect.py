@@ -51,7 +51,15 @@ def read_phase(rundir):
 
 
 def read_pods(rundir):
-    """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption."""
+    """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption.
+
+    ⛔ THE FIRST LINE IS THE COORDINATOR, AND THIS IS THE ONLY PLACE THAT STILL KNOWS IT.
+    tip_smoke.py does `agg = order[0]` and writes pods.txt from that same order, but read_streams
+    walks `sorted(os.listdir(stream))`, so by the time a card becomes a lane its position is gone.
+    Marking the role here is what lets the frame tell a coordinator's flat trace apart from a dead
+    card — they look identical otherwise, because the coordinator streams segments on the CPU and
+    leaves its GPU idle by design.
+    """
     out = {}
     p = os.path.join(rundir, "pods.txt")
     if not os.path.exists(p):
@@ -60,7 +68,8 @@ def read_pods(rundir):
         f = line.split()
         if len(f) >= 6:
             out[f[1]] = {"pod": f[0], "ip": f[2], "port": f[3],
-                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " ")}
+                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " "),
+                         "role": "coordinator" if not out else "worker"}
     return out
 
 
@@ -79,17 +88,21 @@ class StreamCursor:
     WINDOW_S samples and is read from the END of the file instead.
     """
 
-    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h")
+    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h", "last_h")
 
     def __init__(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
+        # ⚠ SURVIVES THE TICK. The height carried forward (found on the 968,243/968,255 tip run, 2026-09-23) must persist between reads,
+        # or it resets every second and carries nothing.
+        self.last_h = ""
 
     def reset(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
+        self.last_h = ""
 
 
 def _tail_lines(path, nbytes):
@@ -122,6 +135,23 @@ def read_streams(rundir, now, cursors=None):
         if not fn.endswith(".csv"):
             continue
         name = fn[:-4]
+        # ⛔ A RELEASED POD IS NOT A DOWN CARD (hazync#492). The card list came from whatever CSV
+        # files were lying in stream/, but a pod that is released keeps its capture file for ever.
+        # The run rents spares, picks the best --cards after the gates, and releases the rest on
+        # purpose; those releases then rendered as `hz-smoke-8 · down` in RED and inflated the
+        # denominator. Measured live on block 968,243: 23 CSV files, 16 entries in pods.txt, frame
+        # read `16/23 up · 7 down` -- every one of those 7 a deliberate release, none a failure.
+        #
+        # ⚠ pods.txt IS THE LIST OF CARDS BEING PAID FOR, and the driver rewrites it after selection
+        # ("feed rewritten for N cards"), so it is the authority on what the fleet IS. A card that is
+        # in it but has stopped streaming must STILL show as down and still cost money -- that is
+        # hazync#476 and it is deliberately untouched here. Only a card that is not rented at all
+        # drops out.
+        #
+        # ⚠ Fall back to showing everything when pods.txt is missing or empty: a capture replayed
+        # without its feed should still render rather than come up blank.
+        if pods and name not in pods:
+            continue
         path = os.path.join(sdir, fn)
         t, w, u = [], [], []
         phase, seg_n, seg_total, block = "idle", 0, 0, None
@@ -139,6 +169,7 @@ def read_streams(rundir, now, cursors=None):
                     newrows = fh.readlines()
                 secs, by_block = 0, {}
                 peak, peak_h = 0.0, None
+                last_h = ""
             else:
                 st = os.stat(path)
                 # ⛔ A SHRUNK OR REPLACED FILE MUST RESET THE CURSOR. tip-stream.sh truncates the
@@ -165,6 +196,7 @@ def read_streams(rundir, now, cursors=None):
                 newrows = blob[:cut].decode("utf8", "replace").splitlines(keepends=True)
                 secs, by_block = cur.secs, cur.by_block
                 peak, peak_h = cur.peak, cur.peak_h
+                last_h = cur.last_h
         except OSError:
             continue
 
@@ -193,6 +225,26 @@ def read_streams(rundir, now, cursors=None):
                     peak = max(peak, min(1.0, n_ / tot_))
 
             h = f[10].strip()
+            # ⛔ CARRY THE HEIGHT FORWARD WHILE THE CARD IS WORKING (found on the 968,243/968,255 tip run, 2026-09-23). tip-stream.sh reads
+            # the height off the `RANGE [n..n]` banner within `tail -c 40000` of the prover log. As
+            # the log grows that banner scrolls OUT of the 40 KB window, so the field goes empty
+            # part-way through a block and every later row is dropped here -- silently, because a row
+            # with no height simply `continue`s.
+            #
+            # Measured on this run: of 15,483 `assembling` rows, 19 named block 968,243 and 18 named
+            # 968,255. The other 15,446 named nothing. Proving is the same shape: 98,455 rows with no
+            # height against 5,736 with one. So fold time was accumulated from ~18 samples instead of
+            # thousands, and the folding bar rendered as nothing at all.
+            #
+            # ⚠ ONLY WHILE WORKING, AND NEVER ACROSS IDLE. A card that goes idle has finished with
+            # that height; carrying it forward there would re-open a closed block and hold it alive
+            # for the rest of the run -- which is the failure the `idle` guard below was added for.
+            if not h and last_h and f[7] in ("proving", "assembling", "done"):
+                h = last_h
+            if h.isdigit() and f[7] != "idle":
+                last_h = h
+            elif f[7] == "idle":
+                last_h = ""
             if not h.isdigit():
                 continue
             try:
@@ -223,6 +275,7 @@ def read_streams(rundir, now, cursors=None):
         if cur is not None:
             cur.secs, cur.by_block = secs, by_block
             cur.peak, cur.peak_h = peak, peak_h
+            cur.last_h = last_h
 
         # WINDOW, for the traces: only what the waveform draws. Read from the END of the file rather
         # than slicing the whole capture -- at 24 h that slice was the thing being paid for.
@@ -254,6 +307,7 @@ def read_streams(rundir, now, cursors=None):
         meta = pods.get(name, {})
         rate = meta.get("cost_hr", 0.0)
         cards.append({"name": name, "gpu": meta.get("gpu", "?"), "cost_hr": rate,
+                      "role": meta.get("role", "worker"),
                       "up": bool(t) and (now - t[-1]) < STALE_S,
                       "t": t, "w": w, "u": u,
                       "phase": phase, "seg_n": seg_n, "seg_total": seg_total, "block": block,
@@ -321,15 +375,59 @@ def blocks_from_cards(cards, state, now, verified=()):
     # ⚠ PAIRED WITH THE HEIGHT THE CARD WAS ON, not taken as "some card is done, so all are".
     finished_by_cards = {str(c.get("block")) for c in cards
                          if c.get("phase") == "done" and c.get("block")}
+    # ⚠ IS ANY CARD STILL WORKING? Judged from each card's CURRENT phase, which is what the silence
+    # rule below needs to know. `executed` counts as busy: the card has loaded the block and is about
+    # to prove it, so a gap there is a handover, not an ending.
+    fleet_busy = any(c.get("phase") in ("proving", "assembling", "executed")
+                     and c.get("up") for c in cards)
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
+        # ⛔ COMPUTE `done` FIRST, BECAUSE `done_at` IS ONLY MEANINGFUL IF IT IS TRUE.
+        #
+        # ⛔ SILENCE IS NOT COMPLETION WHILE CARDS ARE STILL WORKING (found on the 968,243/968,255 tip run, 2026-09-23). The 5-second rule
+        # exists for the END of a run: the collector stops before its own grace period elapses, so
+        # the last block would never count. But it also fired MID-BLOCK, during the handover from
+        # proving to assembling, when the coordinator briefly stops naming the height.
+        #
+        # Measured on block 968,255: done_at fired 09:55:14 UTC, the run logged `verified` at
+        # 09:56:56 -- the tile went green and the ring read VERIFIED 102 SECONDS EARLY, while the
+        # frame still showed FOLDING 89%. No card ever reported phase=done for that height (0 rows),
+        # so it was silence alone that said so.
+        #
+        # A fleet with cards still proving or assembling has not finished. Silence only means
+        # completion when nothing is working any more -- which is exactly the end-of-run case the
+        # rule was written for, and nothing else.
+        done_flag = (int(h) in verified or str(h) in finished_by_cards
+                     or ((now - a["t1"]) > 5 and not fleet_busy))
         out.append({"h": int(h), "arrive": a["t0"],
                     # ⛔ `done` is a BOOLEAN and the pulse needs a TIME. The renderer animates a
                     # block travelling from the join tree to its cell for PULSE seconds after it
                     # finished, so it has to know WHEN that was -- `(now - t1) > 5` cannot say.
                     # t1 is the last moment any card reported this height, which is that instant.
-                    "done_at": a["t1"],
+                    #
+                    # ⛔ ...BUT ONLY ONCE THE BLOCK IS ACTUALLY DONE. While it is still being proved,
+                    # t1 is simply the newest telemetry, so it advanced to ~now on EVERY tick. The
+                    # pulse fires for `0 <= now - done_at < PULSE_S`, so that condition was true
+                    # forever: the green dot re-launched from the join tree every frame and drifted
+                    # around instead of the tree's root sitting still. Measured live on block
+                    # 968,243 while proving: status=None, done_at=now-1.1s, refreshed every tick.
+                    # A block that has not finished has no finish time, and must report none.
+                    "done_at": a["t1"] if done_flag else None,
+                    # ⛔ WALL TIME, FROM TIMESTAMPS (found on the 968,243/968,255 tip run, 2026-09-23). The chain comparison must not be
+                    # derived by COUNTING SAMPLES: `prove` is incremented once per row, which equals
+                    # seconds only if the capture runs at exactly 1 Hz. It does not. The driver
+                    # started the feed twice on this run ("streaming 18 pods", then "streaming 16
+                    # pods") without stopping the first, so two streamers appended to every CSV and
+                    # the real rate was 1.87 rows/sec -- inflating every sample-counted duration by
+                    # 1.87x. Measured on block 968,243: 5,356 rows across 2,860 s.
+                    #
+                    # It must not be divided by n_cards either: a worker's row leaves the block
+                    # field EMPTY and only the coordinator names the height, so `cards` was 1 on a
+                    # 16-card fleet and prove_s was divided by one.
+                    #
+                    # t1 - t0 is the block's actual wall clock and answers neither question wrongly.
+                    "wall_s": round(a["t1"] - a["t0"], 1),
                     "prove_s": round(a["prove"] / n_cards, 1) or None,
                     "fold_s": round(a["asm"] / n_cards, 1) or None,
                     "segs": a["segs"], "cards": len(a["cards"]),
@@ -341,8 +439,7 @@ def blocks_from_cards(cards, state, now, verified=()):
                       # the 5-second silence rule cannot fire while the card is still streaming the
                       # block it just finished. Between the receipt existing and the driver saying
                       # so, nothing could tell the cell to stop being orange.
-                      "done": (int(h) in verified or str(h) in finished_by_cards
-                               or (now - a["t1"]) > 5),
+                      "done": done_flag,
                     "cost": round(a["cost"], 4)})
     out.sort(key=lambda x: x["h"])
     return out

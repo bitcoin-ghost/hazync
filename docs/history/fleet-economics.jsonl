@@ -4,3 +4,4 @@
 {"block": "741000", "cards": 3, "fleet": "1x A40 + 2x RTX 4090", "proofs_per_dollar": 3.82, "seconds": 357.9, "t": 1758501000, "usd": 0.262, "usd_per_proof": 0.262}
 {"block": "741000", "cards": 3, "fleet": "2x A40 + 1x RTX 4090", "proofs_per_dollar": 3.86, "seconds": 380.2, "t": 1758501600, "usd": 0.259, "usd_per_proof": 0.259}
 {"block": "741000", "cards": 3, "fleet": "2x A40 + 1x RTX 4090", "proofs_per_dollar": 3.82, "seconds": 410.4, "t": 1758502200, "usd": 0.262, "usd_per_proof": 0.262}
+{"block": "968243", "cards": 16, "fleet": "16x A40", "seconds": 3410.6, "segments": 10666, "usd": 7.428, "usd_per_proof": 7.428, "proofs_per_dollar": 0.135, "t": 1790156734, "note": "first uniform all-A40 fleet; tip block, mode 6, po2 21"}

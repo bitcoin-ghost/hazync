@@ -224,8 +224,15 @@ def draw_live(snap, fo):
     PERIOD = 600.0
     eta = max(0.0, PERIOD - el) if cur else 0.0
     # how far ahead of the chain the fleet actually is, from MEASURED block totals (not a claim)
-    tot = sorted((b.get('prove_s') or 0) + (b.get('fold_s') or 0)
-                 for b in blocks if b.get('prove_s'))
+    # ⛔ FINISHED BLOCKS ONLY, AND BY WALL CLOCK (found on the 968,243/968,255 tip run, 2026-09-23). This summed prove_s + fold_s over
+    # every block INCLUDING the one still being proved, so the headline raced downwards all run: a
+    # partial total was presented as a block's cost. Captured live on 968,243 as it proved:
+    # 0.2x -> 0.1x, "3156s per block" -> "4845s per block", while nothing had finished at all.
+    # A block that has not finished has not told us how long it takes.
+    #
+    # ⚠ And wall_s, not the sample-counted prove_s: see collect.py. At 1.87 rows/sec from a
+    # doubled feed, prove_s ran 1.87x high and was divided by a card count of 1.
+    tot = sorted(b['wall_s'] for b in blocks if b.get('done') and b.get('wall_s'))
     med = tot[len(tot) // 2] if tot else 0.0
     ahead = (PERIOD / med) if med > 0 else 0.0
 
@@ -282,6 +289,12 @@ def draw_live(snap, fo):
             d.text((LX0 + 6, b0 - row + 3), c['name'][:18] + ' · down',
                    font=fo['tiny'] if 'tiny' in fo else fo['small'], fill=mix(RED, GROUND, .6))
             continue
+        # ⚠ NAME THE COORDINATOR. Its GPU is idle BY DESIGN -- it streams segments to the
+        # workers on the CPU -- so its lane is a near-flat line that reads exactly like a card that
+        # stalled. Without the label, the only lane a viewer questions is the one working correctly.
+        if c.get('role') == 'coordinator':
+            d.text((LX0 + 6, b0 - row + 3), c['name'][:18] + ' · coordinator',
+                   font=fo['tiny'] if 'tiny' in fo else fo['small'], fill=mix(FAINT, GROUND, .75))
         w = c.get('w') or []
         if not w:
             continue
@@ -303,9 +316,17 @@ def draw_live(snap, fo):
         if len(pts) > 1:
             d.polygon([(pts[0][0], b0)] + pts + [(pts[-1][0], b0)], fill=mix(col, GROUND, .10))
             d.line(pts, fill=mix(col, GROUND, .95), width=2)
-        if p > 0:                       # progress is a MARKER now, not the axis
-            xp = LX0 + p * (LX1 - LX0)
-            d.line([xp, b0 - (row - 4), xp, b0], fill=mix(OK, GROUND, .85), width=2)
+        # ⛔ NO PER-LANE PROGRESS MARKER. It was drawn `if p > 0`, and p needs BOTH seg_n and
+        # seg_total on the card's OWN row. Only the coordinator ever carries seg_total -- it is the
+        # one that knows the block's segment count -- so on a 16-card fleet the marker appeared on
+        # exactly one lane, and that lane is the coordinator, whose trace is near-flat because it
+        # streams on the CPU with its GPU idle by design. The one card doing no GPU work was the
+        # only card showing progress.
+        #
+        # Measured live on block 968,243: hz-smoke-12 seg_n=3070 seg_total=10666 -> p=0.29; every
+        # one of the 15 proving cards seg_total=0 -> p=0.
+        #
+        # The RING carries progress for the block. The lanes carry ACTIVITY.
     # span the LANES, not the whole band: with the lane height capped, a 3-card fleet left a
     # full-height green rule with nothing attached to two thirds of it
     d.line([LX1, ytop, LX1, ytop + row * nlanes], fill=mix(OK, GROUND, .7), width=2)

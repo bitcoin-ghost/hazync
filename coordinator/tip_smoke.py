@@ -17,6 +17,7 @@ names are refused there by name as well.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -187,6 +188,123 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
 # `--gpu-type "NVIDIA GeForce RTX 4090,NVIDIA A40"` restores the old fallback for when a run matters
 # more than its wall-clock.
 DEFAULT_GPU_TYPES = ("NVIDIA GeForce RTX 4090",)
+
+# ⭐ AUTO: RANK THE WHOLE LIVE CATALOGUE, PREFER ONE TYPE, LEARN FROM EVERY RUN (found on the 968,243/968,255 tip run, 2026-09-23).
+#
+# The lesson of #448 was never "only ever rent a 4090". It was two narrower things: a MIXED fleet is
+# slower and dearer than a uniform one, and PRICE PER HOUR IS THE WRONG OBJECTIVE. Hard-coding one
+# card type satisfies both by accident and fails the moment that card is out of stock -- which is
+# exactly what happened on 2026-09-23: five attempts, 4090 secure stock "Low", the run never started.
+# Restricting the catalogue did not buy comparability, it bought an outage.
+#
+# So `--gpu-type auto` ranks every type RunPod ACTUALLY has, in two tiers:
+#
+#   MEASURED   a type with a clean uniform measurement in docs/history/fleet-economics.jsonl,
+#              ordered by usd_per_proof -- the objective that matters. Today that is the 4090 alone
+#              ($0.243-$0.262 over three runs on block 741000).
+#   UNMEASURED everything else with SECURE stock and enough VRAM, ordered by price per hour.
+#
+# ⛔ THE SECOND ORDERING IS A GUESS AND IS LABELLED AS ONE. Price per hour is the objective #448
+# proved wrong, so it is used ONLY to break ties between cards nobody has measured, never to rank a
+# measured card. A cheap card that proves slowly sorts high here and is still the wrong buy -- the
+# run finds that out and writes it down, which is the point of the tier existing at all.
+#
+# ⛔ NO INVENTED FACTORS. It is tempting to score an L40S from docs/history/BENCH_8xL40S_2026-09-08.md,
+# but that bench is a different block set on a different guest version; dividing its card-seconds by
+# the 741000 runs would manufacture a number that was never measured. An unmeasured card stays
+# unmeasured until a run measures it.
+#
+# ⚠ VRAM FLOOR IS EVIDENCE, NOT A SPEC. The 4090 has 24 GB and proves, so 24 GB is known-sufficient.
+# It is not known to be the minimum; it is the smallest card we have actually seen work.
+VRAM_FLOOR_GB = 24
+ECONOMICS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "docs", "history", "fleet-economics.jsonl")
+
+
+def measured_cost_per_proof(path=ECONOMICS):
+    """({display name: best usd_per_proof}, block) — from UNIFORM fleets, ON ONE BLOCK.
+
+    ⛔ UNIFORM ONLY. A '2x A40 + 1x RTX 4090' row measures a MIXTURE, and #448 is precisely the
+    finding that a mixture's cost cannot be attributed to either card in it. Charging that row's
+    $0.262 to the A40 would be inventing the very number this refuses to invent.
+
+    ⛔ AND ONE BLOCK ONLY (found on the 968,243/968,255 tip run, 2026-09-23). Cost per proof is not a property of the card, it is a
+    property of the card AND the block: block 968,243 is 10,666 segments and cost $7.43 on 16x A40,
+    while the 741,000 rows cost $0.243 on 3x RTX 4090. Ranking those against each other says the
+    A40 is 30x worse, when almost all of that gap is BLOCK SIZE. That is the same error as
+    attributing a mixture to one card, wearing a different hat -- so the comparison is confined to
+    a single block, and the block is named wherever the ranking is shown.
+
+    The block chosen is the one that compares the most card types; ties go to the one with the most
+    runs behind it. A card measured only on some other block stays UNMEASURED, because against this
+    block it genuinely is.
+    """
+    per_block = {}
+    try:
+        with open(path, encoding="utf8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                fleet, usd = r.get("fleet", ""), r.get("usd_per_proof")
+                blk = str(r.get("block") or "")
+                if usd is None or "+" in fleet or not blk:
+                    continue
+                m = re.match(r"\s*\d+x\s+(.+?)\s*$", fleet)
+                if not m:
+                    continue
+                name = m.group(1)
+                b = per_block.setdefault(blk, {"best": {}, "rows": 0})
+                b["rows"] += 1
+                if name not in b["best"] or usd < b["best"][name]:
+                    b["best"][name] = float(usd)
+    except FileNotFoundError:
+        pass
+    if not per_block:
+        return {}, None
+    blk = max(per_block, key=lambda k: (len(per_block[k]["best"]), per_block[k]["rows"]))
+    return per_block[blk]["best"], blk
+
+
+def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
+    """Every type with SECURE stock and enough VRAM, best-known-value first.
+
+    Returns [{id, display, vram, price, stock, usd_per_proof|None}], measured tier first.
+    """
+    ids = [g["id"] for g in api._gql("query { gpuTypes { id } }")["gpuTypes"]]
+    measured, measured_block = measured_cost_per_proof(economics)
+    out = []
+    for gt in ids:
+        # ⛔ CUDA ONLY. The prover is a risc0 CUDA build; an AMD card cannot run it at all, so
+        # offering one would rent a pod that is guaranteed to fail the GPU gate.
+        if not gt.startswith("NVIDIA"):
+            continue
+        q = ('query { gpuTypes(input:{id:%s}) { id displayName memoryInGb '
+             'lowestPrice(input:{gpuCount:1, secureCloud:true}) '
+             '{ uninterruptablePrice stockStatus } } }' % json.dumps(gt))
+        try:
+            g = api._gql(q)["gpuTypes"][0]
+        except Exception:
+            continue
+        lp = g.get("lowestPrice") or {}
+        price, stock = lp.get("uninterruptablePrice"), lp.get("stockStatus")
+        vram = g.get("memoryInGb") or 0
+        # No secure price or no stock means RunPod cannot sell it right now, whatever it lists.
+        if not price or not stock or vram < vram_floor:
+            continue
+        out.append({"id": gt, "display": g.get("displayName") or gt, "vram": vram,
+                    "price": float(price), "stock": stock,
+                    "usd_per_proof": measured.get(g.get("displayName") or gt),
+                    "measured_on": measured_block})
+    # Measured tier (by the objective that matters) ahead of the unmeasured tier (by the objective
+    # that does not, used only because nothing better exists for a card nobody has run).
+    out.sort(key=lambda c: (c["usd_per_proof"] is None,
+                            c["usd_per_proof"] if c["usd_per_proof"] is not None else c["price"]))
+    return out
 
 HOST_RELEASE = "v0.21.7"
 HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
@@ -397,10 +515,11 @@ def cleanup(api, rented_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=2)
-    ap.add_argument("--gpu-type", default=",".join(DEFAULT_GPU_TYPES),
-                    help="comma-separated GPU types, in preference order. Default is 4090 ONLY: an "
-                         "A40 in the fleet measured 40%% slower AND dearer per proof (hazync#448). "
-                         "Pass a list to allow fallback.")
+    ap.add_argument("--gpu-type", default="auto",
+                    help="'auto' (default) ranks every type RunPod has in SECURE stock by MEASURED "
+                         "cost per proof, then by price for cards nobody has measured, and fills the "
+                         "fleet from ONE type wherever capacity allows (found on the 968,243/968,255 tip run, 2026-09-23). Or pass a "
+                         "comma-separated preference list to pin the choice.")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -541,20 +660,97 @@ def main():
         # ⛔ VALIDATE BEFORE RENTING. An unrecognised name is accepted by the GraphQL call and simply
         # matches nothing, so the run would report "no capacity" for every pod and look like a RunPod
         # outage rather than a typo. Fail here, having spent nothing.
-        gpu_types = tuple(t.strip() for t in a.gpu_type.split(",") if t.strip())
-        if not gpu_types:
-            raise SystemExit("--gpu-type is empty")
-        unknown = [t for t in gpu_types if t not in sponsor_bot.GPU_TYPES]
-        if unknown:
-            raise SystemExit(f"unknown --gpu-type {unknown}; known: {list(sponsor_bot.GPU_TYPES)}")
-        log(f"card type preference: {' > '.join(gpu_types)}"
-            + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
+        if a.gpu_type.strip() == "auto":
+            catalogue = rank_card_types(api)
+            if not catalogue:
+                raise SystemExit("no NVIDIA type has SECURE stock and "
+                                 f"{VRAM_FLOOR_GB}GB+ right now — nothing to rent")
+            gpu_types = tuple(c["id"] for c in catalogue)
+            log(f"card catalogue ({len(catalogue)} types with SECURE stock and {VRAM_FLOOR_GB}GB+), "
+                "best known value first:")
+            for c in catalogue:
+                val = (f"${c['usd_per_proof']:.3f}/proof on block {c['measured_on']} MEASURED"
+                       if c["usd_per_proof"] is not None
+                       else "unmeasured — ordered by $/hr, which is NOT the objective (#448)")
+                log(f"    {c['display']:34} {c['vram']:>3}GB  ${c['price']:>5.2f}/hr  "
+                    f"stock={c['stock']:<7} {val}")
+        else:
+            # ⛔ VALIDATE AGAINST WHAT RUNPOD ACTUALLY OFFERS, not against a hard-coded pair. The old
+            # check refused any type outside sponsor_bot.GPU_TYPES, so naming a real, in-stock,
+            # perfectly capable card (an L40S, say) was rejected as "unknown" — a typo guard that had
+            # quietly become a policy. Typos still fail here; real cards no longer do.
+            gpu_types = tuple(t.strip() for t in a.gpu_type.split(",") if t.strip())
+            if not gpu_types:
+                raise SystemExit("--gpu-type is empty")
+            offered = {g["id"] for g in api._gql("query { gpuTypes { id } }")["gpuTypes"]}
+            unknown = [t for t in gpu_types if t not in offered]
+            if unknown:
+                raise SystemExit(f"unknown --gpu-type {unknown} — RunPod offers no such type")
+            log(f"card type preference: {' > '.join(gpu_types)}"
+                + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
 
         want = a.cards + a.spares
         for i in range(want):
             name = f"{PREFIX}{i+1}"
             if name in existing:
                 raise SystemExit(f"refusing: {name} already exists")
+
+        # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (found on the 968,243/968,255 tip run, 2026-09-23).
+        #
+        # deploy_listening walks the type list PER POD, so pod 1 took a 4090, pod 2 found none left
+        # and took an A40, and the fleet was mixed before anyone chose to mix it. That is the exact
+        # mechanism behind #448's 142 s of unexplained "variance".
+        #
+        # So try each type for the ENTIRE fleet, best-value first, and keep the first one that can
+        # field at least --cards. A type that comes up short is RELEASED, not topped up from the next
+        # type down: a partial fleet held while we try the next type costs seconds of billing, and a
+        # mixed fleet costs 40% of the run. Only when NO single type can field the minimum do we mix
+        # — deliberately, and labelled.
+        def rent_uniform(gt, upto):
+            got = []
+            for i in range(upto):
+                p = api.deploy_listening(f"{PREFIX}{i+1}", pub, gpu_types=(gt,))
+                if not p:
+                    break
+                got.append(p)
+                with open(rented_path, "w") as fh:
+                    json.dump(got, fh, indent=1)
+            return got
+
+        for gt in gpu_types:
+            got = rent_uniform(gt, want)
+            if len(got) >= a.cards:
+                created = got
+                log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
+                break
+            if got:
+                log(f"  {gt} could field only {len(got)} of the {a.cards} needed — releasing and "
+                    f"trying the next type (a mixed fleet costs more than these seconds do)")
+                for p in got:
+                    # ⛔ CONFIRMED, NOT FIRE-AND-FORGET. A terminate that silently failed here would
+                    # leave a pod billing for the whole run with nothing in `created` to release it.
+                    try:
+                        sponsor_bot.terminate_confirmed(api, p["id"])
+                    except Exception as e:
+                        log(f"  ⚠ could not release {p['name']}: {e}")
+                with open(rented_path, "w") as fh:
+                    json.dump([], fh, indent=1)
+            else:
+                log(f"  {gt}: no capacity")
+
+        # ⛔ MIXING IS THE LAST RESORT, AND IT IS STATED. Reaching here means no single type could
+        # field --cards, so the choice is a mixed fleet or no run at all. #448 says a mix is slower
+        # and dearer; it does not say a mix is wrong when the alternative is not proving the block.
+        #
+        # ⛔ AND ONLY WHEN THE FLEET IS EMPTY. Topping a uniform fleet up to its spare count from the
+        # next type down would mix it after the fact — a spare is promoted to a run card the moment
+        # one of the originals fails a gate, so a "spare" of another type is a mixed fleet on a delay.
+        mixed_fallback = not created
+        if mixed_fallback:
+            log(f"⚠ NO SINGLE TYPE can field {a.cards} cards — falling back to a MIXED fleet across "
+                f"{len(gpu_types)} types. Its wall-clock is NOT comparable with a uniform run.")
+        for i in range(len(created), want if mixed_fallback else len(created)):
+            name = f"{PREFIX}{i+1}"
             p = api.deploy_listening(name, pub, gpu_types=gpu_types)
             if not p:
                 # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
@@ -840,7 +1036,18 @@ def main():
         # the requested count would either raise or silently prove a chunk count the fleet cannot
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
-        phase(f"PROVING block {a.block} on {len(order)} cards")
+        # ⛔ DO NOT NAME A BLOCK THE RUN IS NOT PROVING (found on the 968,243/968,255 tip run, 2026-09-23). `a.block` is only assigned from
+        # a claim on the `a.claim and not a.session` path, so a SESSION run never updates it and this
+        # line printed the argparse default. Captured on the 968,243 run, one second apart:
+        #
+        #     [09:46:04] PROVING block 130000 on 16 cards
+        #     [09:46:05]   proving 968243 (attempt 1)
+        #
+        # 130,000 is a real fixture height, so the line reads as a true statement about the wrong
+        # block rather than as an obvious placeholder. A session claims its height per block inside
+        # the loop below, and at this point there is no height yet -- so say that instead.
+        phase(f"PROVING block {a.block} on {len(order)} cards" if not a.session else
+              f"READY · {len(order)} cards, claiming each block as it arrives")
         if not a.claim:
             log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
                 f"(binds 9110, dialled on {agg_dial})")

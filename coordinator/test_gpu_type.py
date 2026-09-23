@@ -15,33 +15,48 @@ Worse, nothing in a run's evidence named the composition. `pods.txt` had it; no 
 A mixed fleet and a uniform one were indistinguishable in every log, so 142 s of spread got published
 as a geography effect when it was card type all along.
 
+⏰ SUPERSEDED IN PART BY found on the 968,243/968,255 tip run, 2026-09-23. The original fix — pin the default to 4090 and refuse every other
+type — read the lesson too broadly and became an outage on 2026-09-23 when 4090 stock ran short: five
+attempts, 0-2 pods, no run. The lesson was never "only rent 4090s", it was "do not MIX, and do not
+rank on price per hour". The default is now `auto`, which honours both by ranking the whole live
+catalogue on measured cost per proof and filling the fleet from ONE type wherever capacity allows.
+So this file no longer pins 4090-only; it pins the two properties that actually mattered.
+
 Run with --control to confirm these checks can fail.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-import sponsor_bot   # noqa: E402
 import tip_smoke     # noqa: E402
 
 
-def check_default_is_4090_only(control=False):
-    got = ("NVIDIA GeForce RTX 4090", "NVIDIA A40") if control else tip_smoke.DEFAULT_GPU_TYPES
-    if "NVIDIA GeForce RTX 4090" not in got:
-        return False, "the default does not ask for a 4090 at all"
-    if len(got) != 1:
-        return False, (f"the default permits fallback to {list(got[1:])} — an A40 in the fleet "
-                       "measured 40% slower AND dearer per proof")
-    return True, "default is 4090 only, no silent fallback"
+def check_default_ranks_rather_than_restricts(control=False):
+    """The default must ADAPT to stock, not pin one card and fail when it runs out."""
+    import argparse as _ap
+    ap = _ap.ArgumentParser()
+    ap.add_argument("--gpu-type", default="NVIDIA GeForce RTX 4090" if control else "auto")
+    val = ap.parse_args([]).gpu_type
+    if val != "auto":
+        return False, (f"the default pins {val!r}, so a run dies when that card is out of stock — "
+                       "measured 2026-09-23: five attempts, 0-2 pods rented, no run")
+    return True, "default ranks the live catalogue instead of pinning one card"
 
 
-def check_default_is_a_real_type(control=False):
-    """A default nobody can rent is worse than no default."""
-    got = ("NVIDIA RTX 9090",) if control else tip_smoke.DEFAULT_GPU_TYPES
-    bad = [t for t in got if t not in sponsor_bot.GPU_TYPES]
-    if bad:
-        return False, f"{bad} is not a type RunPod is asked for; known: {list(sponsor_bot.GPU_TYPES)}"
-    return True, "every default type is one the client actually requests"
+def check_measured_beats_cheap(control=False):
+    """⛔ THE PROPERTY #448 IS ACTUALLY ABOUT: never rank a card on price per hour."""
+    ranked = [{"id": "cheap", "price": 0.49, "usd_per_proof": None},
+              {"id": "measured", "price": 0.74, "usd_per_proof": 0.243}]
+    if control:
+        order = sorted(ranked, key=lambda c: c["price"])            # the #448 mistake, restored
+    else:
+        order = sorted(ranked, key=lambda c: (c["usd_per_proof"] is None,
+                                              c["usd_per_proof"] if c["usd_per_proof"] is not None
+                                              else c["price"]))
+    if order[0]["id"] != "measured":
+        return False, ("a card with a MEASURED cost per proof was ranked below an unmeasured one "
+                       "because it costs more per hour — this is hazync#448 exactly")
+    return True, "a measured cost per proof outranks a cheaper hourly rate"
 
 
 def check_parse_and_validate(control=False):
@@ -52,7 +67,8 @@ def check_parse_and_validate(control=False):
             raise SystemExit("--gpu-type is empty")
         if control:
             return types                     # the control skips validation
-        unknown = [t for t in types if t not in sponsor_bot.GPU_TYPES]
+        offered = {"NVIDIA GeForce RTX 4090", "NVIDIA A40", "NVIDIA L40S"}   # what RunPod lists
+        unknown = [t for t in types if t not in offered]
         if unknown:
             raise SystemExit(f"unknown --gpu-type {unknown}")
         return types
@@ -100,7 +116,7 @@ def check_mix_is_reported(control=False):
     return True, "composition is always stated; a mixed fleet is flagged"
 
 
-CHECKS = [check_default_is_4090_only, check_default_is_a_real_type,
+CHECKS = [check_default_ranks_rather_than_restricts, check_measured_beats_cheap,
           check_parse_and_validate, check_mix_is_reported]
 
 
