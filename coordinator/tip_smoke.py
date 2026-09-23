@@ -574,6 +574,13 @@ def main():
                     help="prove only blocks mined AFTER the fleet is ready: the claim floor starts "
                          "at the current tip, so boot is paid while idle and each block is timed "
                          "from a height that did not exist when the run began")
+    # ⛔ AN ESCAPE HATCH, NOT THE DEFAULT. Filling the gaps between tip blocks with board work is
+    # what #367 asked for and what the flagship hour measured the cost of not doing -- 31.4 idle
+    # minutes, $5.81. This flag exists for the case where a run must be a clean measurement of tip
+    # latency alone, with nothing else touching the fleet.
+    ap.add_argument("--no-board-fill", action="store_true",
+                    help="with --fresh-tip, sit idle between tip blocks instead of proving board "
+                         "work; use when measuring tip latency with nothing else on the fleet")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -1123,7 +1130,7 @@ def main():
 
         if a.claim:
             # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
-            def prove_and_submit(rng, *, from_tip=False):
+            def prove_and_submit(rng, *, from_tip=False, abort=None):
                 """Fetch the bundle, prove it as a range, collect the receipt, submit. Returns the
                 run dict. Shared by the single-block path and the session loop so there is exactly
                 ONE definition of what proving a claimed block means."""
@@ -1160,7 +1167,7 @@ def main():
                 res = tip_run.run_range(height=int(rng), cards=assignment, runner=runner,
                                         bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
                                         on_event=lambda m: log(f"  {m}"), beat=_b,
-                                        max_ticks=1200, tick_s=6.0)
+                                        max_ticks=1200, tick_s=6.0, abort=abort)
                 rc = os.path.join(a.rundir, f"receipt_{rng}.bin")
                 gotr, which = runner.fetch_receipt(int(rng), rc)
                 if not gotr:
@@ -1273,18 +1280,60 @@ def main():
                 # fire on what it could see -- three consecutive failures DO usually mean the fleet.
                 # The fault was asking it to prove blocks this driver can never fetch.
                 #
-                # Waiting is the correct behaviour: the whole point of --fresh-tip is to sit idle
-                # until the chain produces a height that did not exist at boot.
-                if a.fresh_tip and pending is None:
+                # ⛔ THE REFUSAL ABOVE IS GONE, AND IT WAS ALWAYS A WORKAROUND (hazync#506). It read:
+                #
+                #     if a.fresh_tip and pending is None: return idle
+                #
+                # which kept a --fresh-tip run from ever touching the board. That was the right
+                # emergency measure when every board claim was unfetchable, and it is the wrong
+                # steady state: a 15-card fleet sat idle for 31.4 minutes of a 60-minute session,
+                # $5.81 of rented GPU doing nothing, while the board had work waiting. With the
+                # fetch fixed (board work now always comes from /api/witness) the gaps between tip
+                # blocks are the board's, which is what #367 intended all along.
+                #
+                # ⚠ --fresh-tip still means what it says about the TIP: `pending` is only ever a
+                # height that did not exist at boot. Board work does not weaken that, because the
+                # tip always wins -- see the `abort` in prove_one, which abandons a board block the
+                # moment a tip bundle lands.
+                if a.fresh_tip and pending is None and a.no_board_fill:
                     return {"source": "idle", "range": None}
                 return tip_controller.next_work(pending, claim_fn)
+
+            def tip_waiting():
+                """A tip bundle above what we have proved, or None. The board block's abort signal.
+
+                ⛔ COMPLETE BUNDLES ONLY, which is why highest_tip_bundle had to be fixed first: its
+                filter counted `bundle_<h>.json.tmp` -- the file the bridge is still writing -- as an
+                available tip. Abandoning a board block for a bundle that does not exist yet would
+                throw away real work and then fail to fetch the thing it was thrown away for.
+                """
+                try:
+                    t = tip_board.highest_tip_bundle(a.bridge_host)
+                except Exception:
+                    return None                      # ⚠ never abort a healthy block on an ssh blip
+                if t and int(t) > proved_tip["h"]:
+                    if int(t) not in seen_at:
+                        seen_at[int(t)] = time.time()
+                        tip_note("appeared", height=int(t))
+                    return f"tip block {t} is waiting and the tip comes first"
+                return None
 
             def prove_one(rng):
                 # ⚠ A tip height is simply one at or above EMIT_FROM: the bridge emits nothing below
                 # it, so a bundle can only come off the bridge host up there. Board work comes from
                 # the frontier (~113,537) and is fetched from /api/witness. No cleverness needed.
                 from_tip = str(rng).isdigit() and int(rng) >= TIP_FROM
-                out = prove_and_submit(rng, from_tip=from_tip)
+                # ⛔ ONLY BOARD WORK IS PREEMPTIBLE. A tip block is the thing everything else gives
+                # way to; making it interruptible would mean a later tip could abandon an earlier
+                # one mid-proof, and the fleet would chase the chain without ever finishing a block.
+                try:
+                    out = prove_and_submit(rng, from_tip=from_tip,
+                                           abort=(None if from_tip else tip_waiting))
+                except tip_run.RunAborted as exc:
+                    # ⚠ Returned, not raised: the session distinguishes "aborted" from "failed", and
+                    # a raise here would be caught by its generic handler and counted as a failure.
+                    return {"ok": False, "aborted": True, "block": str(rng),
+                            "why": exc.why, "wall_s": exc.elapsed_s}
                 if from_tip:
                     proved_tip["h"] = int(rng)
                     # chain tip NOW, so the lag is against the real chain rather than our own clock

@@ -250,6 +250,17 @@ def _write_bundle(raw, dest):
     return True, ""
 
 
+def highest_bundle_cmd(remote_dir):
+    """The shell pipeline that finds the highest COMPLETE bundle. Separate so it can be TESTED.
+
+    ⛔ THE FILTER IS SHELL, SO A PYTHON FAKE CANNOT TEST IT. Mocking the runner only proves that
+    whatever the fake returns comes back -- the part that decides which filenames count never runs.
+    Handing the command out lets the test execute this exact string against a real directory.
+    """
+    return (f"ls -U {remote_dir} 2>/dev/null | grep -E '^bundle_[0-9]+\\.json$' "
+            f"| sed 's/[^0-9]//g' | grep -v '^$' | sort -n | tail -1")
+
+
 def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
     """The highest tip height whose BUNDLE exists, or None. This is the tip-work signal.
 
@@ -261,10 +272,23 @@ def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=No
 
     ⚠ `ls -U` and sort, never a shell glob: this directory grows to hundreds of thousands of entries
     and `bundle_*` overflows the argument list (hazync: the bundle dir is too big to glob).
+
+    ⛔ COMPLETE BUNDLES ONLY — `bundle_<h>.json`, never `bundle_<h>.json.tmp`. The bridge writes the
+    temp file into THIS SAME DIRECTORY and renames it (prover/host/src/main.rs:4312), and the old
+    filter was `sed 's/[^0-9]//g'`, which strips every non-digit and turns `bundle_968317.json.tmp`
+    into `968317` — indistinguishable from a finished bundle. So for as long as the bridge was
+    serialising the next block (a 27 MB bundle), this function reported a height whose
+    `bundle_<h>.json` does not exist, and `fetch_bundle_ssh` then failed with "no bundle".
+
+    ⚠ That window is short, but it is exactly the wrong shape of bug: three such failures in a row
+    trip the fleet-fault guard and release the whole fleet (hazync#506 records that happening for a
+    different reason). It also makes this function useless as a "has a new tip landed?" signal,
+    which is what board work between tip blocks has to key on -- a fleet cannot abandon a board
+    block for a tip whose bundle is still being written.
     """
     import subprocess
     run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=120))
-    cmd = (f"ls -U {remote_dir} 2>/dev/null | sed 's/[^0-9]//g' | grep -v '^$' | sort -n | tail -1")
+    cmd = highest_bundle_cmd(remote_dir)
     r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, cmd])
     if getattr(r, "returncode", 1) != 0:
         return None

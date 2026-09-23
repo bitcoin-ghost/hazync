@@ -368,6 +368,40 @@ while time.time() < end:
             return False, "the launch command did not come back"
         return True, ""
 
+    def stop_range_aggregate(self, *, tries=5, wait_s=2.0):
+        """Kill the range aggregate and CONFIRM it is gone. Returns (ok, why).
+
+        ⛔ CONFIRMED, NOT REQUESTED. `seg-serve` is launched with `nohup setsid ... &` and holds port
+        9110; the next block's aggregate binds the same port. A stop that only issues a kill and
+        returns leaves the caller free to start the next one against a process that has not died
+        yet, and this codebase has already relaunched seg-serve on top of a healthy one -- the new
+        process died on `bind()` while the original kept working with its log unlinked, which looks
+        from the outside exactly like a fleet that has stopped making progress.
+
+        ⛔ `pkill -x`, MATCHING THE TRUNCATED `comm`, NEVER `pkill -f`. `pkill -f seg-serve` matches
+        the ssh command line carrying the pattern -- our own invocation -- so it kills the shell
+        that is asking and reports success. `comm` is truncated to 15 characters by the kernel, so
+        the name to match is `hazync-host-cud`, which is also what `aggregate_status` keys on.
+
+        ⚠ TERM first, then KILL. The aggregate holds an open receipt file; give it the chance to
+        close cleanly before taking the process out from under it.
+        """
+        alive_cmd = "ps -eo comm | grep -c '^hazync-host-cud'"
+        for attempt in range(tries):
+            sig = "-TERM" if attempt < tries - 2 else "-KILL"
+            # ⚠ `exit 0`: pkill exits non-zero when nothing matched, which is the SUCCESS case here.
+            self.ssh.run(self.agg, f"pkill {sig} -x hazync-host-cud; exit 0")
+            time.sleep(wait_s)
+            out = (self.ssh.run(self.agg, f"{alive_cmd}; exit 0") or "").strip()
+            n = (out.splitlines() or ["?"])[-1].strip()
+            if n == "0":
+                return True, f"no hazync-host-cud left on {self.agg.cid} after {attempt + 1} signal(s)"
+            if not n.isdigit():
+                # ⛔ AN UNREADABLE COUNT IS NOT A ZERO. If ssh gave us nothing we do not know what is
+                # running, and reporting "stopped" would be the absence-as-green failure exactly.
+                return False, f"could not read the process count on {self.agg.cid} (got {n!r})"
+        return False, f"{n} hazync-host-cud still running on {self.agg.cid} after {tries} signals"
+
     def fetch_receipt(self, height, local_path):
         """Bring the proved range receipt back. Returns (ok, why).
 

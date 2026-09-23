@@ -63,8 +63,22 @@ def _joins_done(joins):
     return int(m.group(1)) if m else None
 
 
+class RunAborted(Exception):
+    """The caller asked for this run to stop; it was not a failure.
+
+    ⛔ A DISTINCT TYPE BECAUSE A FAILURE COUNTER MUST NOT COUNT IT. The session stops a fleet after
+    three consecutive failed blocks -- correctly, because three in a row really is the fleet. Board
+    work that steps aside for a tip block would otherwise look exactly like that, and a fleet
+    proving the board perfectly well between tips would release itself after three tip arrivals.
+    """
+
+    def __init__(self, why, *, height=None, elapsed_s=None):
+        super().__init__(why)
+        self.why, self.height, self.elapsed_s = why, height, elapsed_s
+
+
 def run_range(*, height, cards, runner, bundle_path, now, sleep, feed=None, on_event=None,
-              beat=None, max_ticks=1200, tick_s=6.0, unreachable_limit=20):
+              beat=None, max_ticks=1200, tick_s=6.0, unreachable_limit=20, abort=None):
     """Prove ONE claimed board block from its bundle (mode 6). Returns a summary dict.
 
     ⛔ THIS IS NOT `run_block` WITH A DIFFERENT FILE. `run_block` gives every card a chunk of the
@@ -76,6 +90,19 @@ def run_range(*, height, cards, runner, bundle_path, now, sleep, feed=None, on_e
     `beat` is called as `beat(progress)` whenever the join count RISES, and only then: a claim must
     not be kept alive by a timer while nothing is happening (#256). It returns the new high-water
     mark, which is threaded back so the caller owns the state.
+
+    `abort` is an optional predicate asked once per tick. Returning a truthy value stops the run and
+    raises `RunAborted` -- this is how board work gives way the moment a tip block lands (hazync#506).
+
+    ⛔ THE AGGREGATE IS STOPPED BEFORE THE RAISE, AND THE WORKERS ARE DISARMED. `seg-serve` is a
+    detached process holding port 9110, and the cards sit in an attach loop dialling it. Raising
+    without tearing that down leaves the next block's aggregate to `bind()` on a port that is still
+    held -- which this codebase has already done once, relaunching seg-serve on top of a healthy one
+    and killing the new process while the original kept running with its log unlinked.
+
+    ⚠ The abort is asked AFTER the `verified` check, deliberately: a run that has already produced
+    its receipt is finished, and discarding it to start the tip six seconds sooner would throw away
+    the whole block. Give up work that is still in progress, never work that is already done.
     """
     events = []
 
@@ -106,6 +133,27 @@ def run_range(*, height, cards, runner, bundle_path, now, sleep, feed=None, on_e
             return {"ok": True, "block": str(height), "cards": len(cards),
                     "wall_s": round(now() - t0, 1), "digest": out.get("digest"),
                     "joins": out.get("joins"), "events": events}
+        # ⛔ ASKED EVERY TICK, AND THE TEARDOWN HAPPENS HERE — not in the caller's `except`. A caller
+        # that forgets leaves a detached seg-serve on port 9110 and a fleet still dialling it, and
+        # the next block cannot start. Tearing down on the way out makes that impossible to forget.
+        if abort is not None:
+            try:
+                why = abort()
+            except Exception as exc:                       # noqa: BLE001
+                # ⚠ A BROKEN ABORT MUST NOT KILL A HEALTHY RUN. This predicate reaches over the
+                # network to ask whether a tip has landed; an ssh blip is not a reason to throw away
+                # a block that is proving. Say so and carry on.
+                emit(f"⚠ the abort check failed ({type(exc).__name__}: {exc}) — continuing")
+                why = None
+            if why:
+                emit(f"abandoning block {height} after {now() - t0:.0f}s: {why}")
+                stop = getattr(runner, "stop_range_aggregate", None)
+                if stop is not None:
+                    sok, swhy = stop()
+                    emit(f"aggregate stopped: {swhy}" if sok
+                         else f"⚠ the aggregate would not stop ({swhy}) — the next block may not bind")
+                runner.stop_auto_attach(cards)
+                raise RunAborted(str(why), height=height, elapsed_s=round(now() - t0, 1))
         if out.get("unreachable"):
             gone += 1
             if gone >= unreachable_limit:
