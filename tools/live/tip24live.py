@@ -513,9 +513,12 @@ def draw_live(snap, fo):
         cx, cy = cell_xy(b['h'] - lo)
         tx_, ty_ = cx + GCELL / 2, cy + GCELL / 2
         px, py = TX1 + (tx_ - TX1) * f, RCY + (ty_ - RCY) * f
+        # ⛔ THE LINE, NOT A TRAVELLING DOT. The pulse used to draw a bright dot sliding from the
+        # join tree to the block's cell. Two problems with it: on a still frame it reads as a stray
+        # object near the tree's convergence point rather than as motion, and it was mistaken for the
+        # tree's root more than once. The faint line alone says the same thing -- this block just
+        # landed in that cell -- without putting a moving object on a page that is mostly states.
         d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18))
-        r_ = 7 - 3 * f
-        d.ellipse([px - r_, py - r_, px + r_, py + r_], fill=mix(OK, GROUND, .95))
 
     kx = GX0
     for lbl, c_ in (('proving', MAP_PROVING), ('folding', MAP_FOLDING), ('done', MAP_DONE)):
