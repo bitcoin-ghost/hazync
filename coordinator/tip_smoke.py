@@ -86,8 +86,26 @@ class SmokeRunPod(sponsor_bot.RunPod):
             except sponsor_bot.RunPodError as e:
                 refused, p = e, None
             if p and p.get("id"):
+                # ⛔ RECORD WHERE THE CARD IS. Geography is the one term in a fleet's throughput that
+                # has never been controlled for here, and it has already caused a published error
+                # once: 142 s of spread was attributed to geography when it was CARD TYPE
+                # (hazync#448), and controlling for the card collapsed it to 9.0 s. The lesson taken
+                # was "state the card mix" -- but the site was then left unrecorded entirely, so the
+                # rival explanation can still never be tested. The milestone tooling recorded a
+                # `site` column per chunk; tip_smoke never did.
+                #
+                # In mode 6 the coordinator PUSHES segments over the network to every worker, so RTT
+                # plausibly reaches per-card throughput. Whether it does is unmeasured -- which is
+                # exactly why it must be written down before anyone compares two fleets again.
+                dc = None
+                try:
+                    q2 = ('query { pod(input:{podId:%s}) { machine { dataCenterId } } }'
+                          % self._s(p["id"]))
+                    dc = ((self._gql(q2).get("pod") or {}).get("machine") or {}).get("dataCenterId")
+                except Exception:
+                    pass          # never fail a rental over a label
                 return {"id": p["id"], "name": name, "gpu_type": gt,
-                        "price": float(p.get("costPerHr") or 0)}
+                        "price": float(p.get("costPerHr") or 0), "dc": dc}
         if refused is not None and not answered:
             raise refused
         return None
@@ -815,8 +833,15 @@ def main():
         mix = {}
         for c in created:
             mix[c["gpu_type"]] = mix.get(c["gpu_type"], 0) + 1
+        sites = {}
+        for c in created:
+            sites[c.get("dc") or "?"] = sites.get(c.get("dc") or "?", 0) + 1
         log("FLEET: " + ", ".join(f"{n}x {g}" for g, n in sorted(mix.items()))
             + (["", "   ⚠ MIXED CARD TYPES — timings are NOT comparable with a uniform fleet"][len(mix) > 1]))
+        # ⚠ SITES, for the same reason the card mix is stated: a run whose geography is not recorded
+        # is a run whose throughput cannot be compared with any other.
+        log("SITES: " + ", ".join(f"{n}x {d}" for d, n in sorted(sites.items()))
+            + (["", "   ⚠ SPREAD ACROSS SITES — per-card rates mix card and network"][len(sites) > 1]))
 
         phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
         cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
