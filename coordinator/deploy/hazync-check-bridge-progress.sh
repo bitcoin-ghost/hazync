@@ -48,21 +48,45 @@ if ! systemctl is-active --quiet "$UNIT"; then
     exit 2
 fi
 
-# The last checkpoint line and WHEN it was written. -o short-unix because the heights must be paired
-# with a time; pairing by height alone cannot tell a slow bridge from a stopped one.
+# ⛔ TWO REGIMES, AND THIS CHECK ONLY KNEW ONE (hazync#487). While walking, the bridge writes
+# `checkpoint @ N` every HAZYNC_BRIDGE_CKPT (2000) blocks. Once it CATCHES UP it advances one block
+# at a time as each finalises and writes `caught up to N` — the next checkpoint is 2000 blocks away,
+# which at the tip is about a fortnight of chain. So from the moment the bridge started doing its
+# actual job, this check saw no progress line and paged hourly. Measured 2026-09-23: seven
+# consecutive FAILEDs against a bridge that was advancing normally, which is precisely the
+# cry-wolf-gets-muted failure the original comment warned about.
+#
+# `caught up to N` counts as progress. Both are read, and the newest wins.
 last="$(journalctl -u "$UNIT" -o short-unix --no-pager -n 4000 2>/dev/null \
-        | grep -oE '^[0-9]+\.[0-9]+ .*checkpoint @ [0-9]+' | tail -1)"
+        | grep -oE '^[0-9]+\.[0-9]+ .*(checkpoint @|caught up to) [0-9]+' | tail -1)"
 
 if [ -z "$last" ]; then
-    # ⚠ A bridge that has only just started, or one whose journal has rotated past its last
-    # checkpoint, is unknown -- not failing. Resuming from a 21 GB state file takes minutes before
-    # the first line appears, and calling that a stall would alert on every restart.
-    say "cannot check: no 'checkpoint @' line in the last 4000 journal entries for $UNIT"
+    # ⚠ A bridge that has only just started, or one whose journal has rotated past its last progress
+    # line, is unknown -- not failing. Resuming from a 19 GB state file takes minutes before the
+    # first line appears, and calling that a stall would alert on every restart.
+    say "cannot check: no 'checkpoint @' or 'caught up to' line in the last 4000 entries for $UNIT"
     exit 2
 fi
 
+# ⛔ AT THE TIP, "HOW LONG AGO" IS THE WRONG QUESTION. A caught-up bridge is idle by construction
+# between blocks, and Bitcoin's inter-block gaps are exponential — 70-minute quiet spells are normal
+# and would page every time. The honest question there is POSITIONAL: is the bridge where it is
+# supposed to be, i.e. at (node tip - finality)? If it is, it is not stalled however long it has sat
+# there. Only if it is BEHIND that does elapsed time mean anything.
+FINALITY="$(systemctl show "$UNIT" -p Environment --value 2>/dev/null \
+            | tr ' ' '\n' | sed -n 's/^HAZYNC_BRIDGE_FINALITY=//p' | head -1)"
+FINALITY="${FINALITY:-100}"
+NODE_TIP=""
+if command -v bitcoin-cli >/dev/null 2>&1; then
+    DD="$(systemctl show "$UNIT" -p Environment --value 2>/dev/null \
+          | tr ' ' '\n' | sed -n 's/^HAZYNC_BITCOIN_DATADIR=//p' | head -1)"
+    # ⚠ Failure here is not an answer. If the node cannot be asked, fall through to the time-based
+    # test rather than assuming the bridge is fine.
+    NODE_TIP="$(bitcoin-cli ${DD:+-datadir="$DD"} getblockcount 2>/dev/null | tr -dc '0-9')"
+fi
+
 ts="${last%%.*}"
-height="$(printf '%s' "$last" | grep -oE 'checkpoint @ [0-9]+' | grep -oE '[0-9]+')"
+height="$(printf '%s' "$last" | grep -oE '(checkpoint @|caught up to) [0-9]+' | grep -oE '[0-9]+')"
 now="$(date +%s)"
 age=$(( now - ts ))
 
@@ -71,6 +95,16 @@ age=$(( now - ts ))
 if [ "$age" -lt 0 ]; then
     say "cannot check: last checkpoint is ${age}s in the FUTURE (clock stepped?) — height $height"
     exit 2
+fi
+
+# The positional test, where it can be made: at the tip and nothing to do is HEALTHY.
+if [ -n "$NODE_TIP" ] && [ -n "$height" ]; then
+    want=$(( NODE_TIP - FINALITY ))
+    if [ "$height" -ge "$want" ]; then
+        say "ok: $UNIT is AT THE TIP — height $height, node tip $NODE_TIP, finality $FINALITY \
+(last progress $((age / 60))m ago; idle between blocks is how a caught-up bridge looks)"
+        exit 0
+    fi
 fi
 
 # ⚠ HAZYNC_BRIDGE_NO_STALL_GUARD exists ONLY for test-bridge-progress.sh --control, which

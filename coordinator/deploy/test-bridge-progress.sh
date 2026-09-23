@@ -25,10 +25,16 @@ SH
   cat > "$STUB/journalctl" <<SH
 #!/usr/bin/env bash
 [ "$2" = none ] && exit 0
-echo "\$(( \$(date +%s) - $2 )).000000 host hazync-host-bridge[1]: bridge: checkpoint @ 913457 (1 utxos, 1 leaves)"
+echo "\$(( \$(date +%s) - $2 )).000000 host hazync-host-bridge[1]: bridge: ${3:-checkpoint @} ${4:-913457}${5:- (1 utxos, 1 leaves)}"
 SH
   chmod +x "$STUB/systemctl" "$STUB/journalctl"
+  # ⚠ No bitcoin-cli by default, so the cases above still exercise the TIME-based path exactly as
+  # they did before. The tip-aware cases install one deliberately.
+  rm -f "$STUB/bitcoin-cli"
 }
+
+# A node that reports `tip`, so the positional test can be reached.
+mknode() { printf '#!/usr/bin/env bash\necho %s\n' "$1" > "$STUB/bitcoin-cli"; chmod +x "$STUB/bitcoin-cli"; }
 run() { PATH="$STUB:$PATH" bash "$CHK" >/dev/null 2>&1; echo $?; }
 
 # 1. healthy: checkpointed 5 minutes ago
@@ -60,6 +66,45 @@ echo "$(( $(date +%s) + 600 )).000000 host hazync-host-bridge[1]: bridge: checkp
 SH
 chmod +x "$STUB/journalctl"
 rc=$(run); [ "$rc" = 2 ] && ok "a future timestamp exits 2, not 0" || bad "future ts exited $rc, expected 2"
+
+# ── the caught-up regime (hazync#487) ─────────────────────────────────────────────────────────────
+# ⛔ THIS IS WHAT PAGED HOURLY. Once the bridge catches up it writes `caught up to N`, not
+# `checkpoint @ N`, and the next checkpoint is 2000 blocks away — a fortnight of chain at the tip.
+# The check saw no progress line at all and cried stall against a perfectly healthy bridge.
+
+# 6. a `caught up to` line is progress, even though it is not a checkpoint
+mkstub yes 300 "caught up to" 968118 ""
+rc=$(run); [ "$rc" = 0 ] && ok "a fresh 'caught up to' line exits 0" || bad "'caught up to' exited $rc, expected 0"
+
+# 7. ⛔ AT THE TIP, IDLE IS HEALTHY HOWEVER LONG. Bitcoin's inter-block gaps are exponential, so a
+#    70-minute quiet spell is normal and must not page.
+mkstub yes 7200 "caught up to" 968118 ""
+mknode 968218                       # tip - finality(100) == 968118, so the bridge is exactly where it belongs
+rc=$(run); [ "$rc" = 0 ] && ok "at the tip, two hours idle is NOT a stall" || bad "tip-idle exited $rc, expected 0"
+
+# 8. ⛔ AND IT MUST STILL BE ABLE TO FAIL. Same two hours, but the bridge is 5000 blocks BEHIND where
+#    the node says it should be — that is a real stall and the positional test must not mask it.
+mkstub yes 7200 "caught up to" 963118 ""
+mknode 968218
+rc=$(run)
+if [ "$CONTROL" = 1 ]; then
+    [ "$rc" = 1 ] && bad "CONTROL DID NOT FAIL: a behind-the-tip stall was still detected" \
+                  || ok "control: with the guard removed a behind-the-tip stall is missed (exit $rc)"
+else
+    [ "$rc" = 1 ] && ok "behind the tip and not advancing exits 1" || bad "behind-tip exited $rc, expected 1"
+fi
+
+# 9. ⚠ a node that cannot be asked falls through to the time test rather than assuming health
+mkstub yes 7200 "caught up to" 968118 ""
+printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB/bitcoin-cli"; chmod +x "$STUB/bitcoin-cli"
+rc=$(run)
+if [ "$CONTROL" = 1 ]; then
+    [ "$rc" = 1 ] && bad "CONTROL DID NOT FAIL: an unreachable node still detected the stall" \
+                  || ok "control: unreachable node + guard removed misses it (exit $rc)"
+else
+    [ "$rc" = 1 ] && ok "an unreachable node falls back to the time test, not to 'ok'" \
+                  || bad "unreachable-node exited $rc, expected 1"
+fi
 
 [ "$fails" = 0 ] && { echo; echo "bridge-progress check behaves on every path"; exit 0; }
 echo; echo "$fails case(s) wrong"; exit 1
