@@ -49,6 +49,8 @@ ECON = """\
 {"block":"741000","cards":3,"fleet":"1x A40 + 2x RTX 4090","seconds":357.9,"usd_per_proof":0.262}
 {"block":"741000","cards":3,"fleet":"2x A40 + 1x RTX 4090","seconds":380.2,"usd_per_proof":0.259}
 {"block":"968243","cards":16,"fleet":"16x A40","seconds":3410.6,"usd_per_proof":7.428}
+{"block":"741000","cards":3,"fleet":"3x RTX 4090","seconds":140.0,"usd_per_proof":0.120,"po2":22,"gpus_per_pod":1}
+{"block":"741000","cards":3,"fleet":"3x A40","seconds":300.0,"usd_per_proof":0.130,"po2":22,"gpus_per_pod":8}
 """
 
 
@@ -94,24 +96,41 @@ class FakeAPI:
 if CONTROL:
     _orig = t.measured_cost_per_proof
 
-    def attribute_mixtures(path=t.ECONOMICS):   # returns (mapping, block) like the real one
-        """CONTROL: charge a mixed fleet's cost to every card in it."""
+    def attribute_mixtures(path=t.ECONOMICS):
+        """CONTROL: charge a mixed fleet's cost to every card in it.
+
+        ⚠ ONE VARIABLE. This mirrors the real function's operating-point grouping exactly and
+        changes ONLY the mixture rule. An earlier version also flattened the grouping, so it failed
+        six assertions instead of three and proved nothing about which rule was load-bearing.
+        """
         import json
         import re as _re
-        best = {}
+        per = {}
         for line in open(path, encoding="utf8"):
             line = line.strip()
             if not line:
                 continue
             r = json.loads(line)
-            usd = r.get("usd_per_proof")
-            if usd is None:
+            usd, blk = r.get("usd_per_proof"), str(r.get("block") or "")
+            if usd is None or not blk:
                 continue
-            for part in r.get("fleet", "").split("+"):
+            point = (blk, r.get("po2"), r.get("gpus_per_pod"))
+            b = per.setdefault(point, {"best": {}, "rows": 0})
+            b["rows"] += 1
+            for part in r.get("fleet", "").split("+"):     # the mutation: mixtures attributed
                 m = _re.match(r"\s*\d+x\s+(.+?)\s*$", part)
-                if m and (m.group(1) not in best or usd < best[m.group(1)]):
-                    best[m.group(1)] = float(usd)
-        return best, "741000"
+                if m and (m.group(1) not in b["best"] or usd < b["best"][m.group(1)]):
+                    b["best"][m.group(1)] = float(usd)
+        if not per:
+            return {}, None
+        pt = max(per, key=lambda k: (len(per[k]["best"]), per[k]["rows"]))
+        blk, po2, gpp = pt
+        label = f"block {blk}"
+        if po2 is not None:
+            label += f", po2 {po2}"
+        if gpp is not None:
+            label += f", {gpp} GPU/pod"
+        return per[pt]["best"], label
 
     t.measured_cost_per_proof = attribute_mixtures
 
@@ -125,8 +144,16 @@ check(abs(m.get("RTX 4090", 0) - 0.243) < 1e-9,
 check("A40" not in m,
       f"the A40 stays UNMEASURED on this block — its only clean run is on ANOTHER block, and a "
       f"10,666-segment tip block is not comparable with 741,000 (got {m.get('A40')})")
-check(mblk == "741000",
-      f"the comparison is confined to ONE block, the one comparing the most cards (got {mblk})")
+check(mblk.startswith("block 741000"),
+      f"the comparison is confined to ONE operating point (got {mblk!r})")
+# ⛔ A po2-22 row on the SAME block and the SAME card is a DIFFERENT operating point. po2 22 halves
+# the segment count and needs a 48GB+ card, so crediting it to the silicon would buy the wrong card.
+# Likewise 8 GPUs per pod share a NIC and PCIe -- a deployment shape, not a card property.
+check("po2" not in mblk or "22" not in mblk,
+      f"the po2-22 rows did not merge into the po2-21 comparison (got {mblk!r})")
+check(abs(m.get("RTX 4090", 0) - 0.243) < 1e-9,
+      f"and the 4090's figure is still its po2-21 number, not the cheaper po2-22 one "
+      f"(got {m.get('RTX 4090')}, the po2-22 row is $0.120)")
 
 # ── 2. the ranking: measured tier first, ordered by cost per proof ────────────────────────────────
 ranked = t.rank_card_types(FakeAPI(), economics=ECON_PATH)

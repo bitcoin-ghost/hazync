@@ -228,16 +228,26 @@ def measured_cost_per_proof(path=ECONOMICS):
     finding that a mixture's cost cannot be attributed to either card in it. Charging that row's
     $0.262 to the A40 would be inventing the very number this refuses to invent.
 
-    ⛔ AND ONE BLOCK ONLY (hazync#497). Cost per proof is not a property of the card, it is a
-    property of the card AND the block: block 968,243 is 10,666 segments and cost $7.43 on 16x A40,
-    while the 741,000 rows cost $0.243 on 3x RTX 4090. Ranking those against each other says the
-    A40 is 30x worse, when almost all of that gap is BLOCK SIZE. That is the same error as
-    attributing a mixture to one card, wearing a different hat -- so the comparison is confined to
-    a single block, and the block is named wherever the ranking is shown.
+    ⛔ AND ONE OPERATING POINT ONLY (hazync#497). Cost per proof is not a property of the card. It
+    is a property of the card AND the conditions it ran under, and there are at least three:
 
-    The block chosen is the one that compares the most card types; ties go to the one with the most
-    runs behind it. A card measured only on some other block stays UNMEASURED, because against this
-    block it genuinely is.
+      block     968,243 is 10,666 segments and cost $7.43 on 16x A40; the 741,000 rows cost $0.243
+                on 3x RTX 4090. Rank those together and the A40 looks 30x worse, when nearly all of
+                that gap is BLOCK SIZE.
+      po2       HAZYNC_SEG_PO2 sets cycles-per-segment. po2 22 halves the segment count, but peak
+                VRAM at po2 21 was already 22,478 MiB on a 24GB card (milestone 966,256), so only
+                48GB+ cards can use it. A card that CAN is being credited for the setting, not for
+                the silicon.
+      pods      8 GPUs in one pod share a NIC and PCIe. That is a deployment shape, not a card
+                property, and recording `32x A40` for 4x8 hides it completely.
+
+    Each of those, left unrecorded, attributes a condition to the card -- the same error as
+    attributing a MIXTURE to one card, wearing a different hat three times over. So the comparison
+    is confined to rows sharing all three, and the point is named wherever the ranking is shown.
+
+    ⚠ Rows written before these fields existed carry None, which forms its own group. That is
+    deliberate: an unknown operating point is not evidence of a shared one, and guessing would be
+    the very thing this refuses to do.
     """
     per_block = {}
     try:
@@ -258,7 +268,8 @@ def measured_cost_per_proof(path=ECONOMICS):
                 if not m:
                     continue
                 name = m.group(1)
-                b = per_block.setdefault(blk, {"best": {}, "rows": 0})
+                point = (blk, r.get("po2"), r.get("gpus_per_pod"))
+                b = per_block.setdefault(point, {"best": {}, "rows": 0})
                 b["rows"] += 1
                 if name not in b["best"] or usd < b["best"][name]:
                     b["best"][name] = float(usd)
@@ -266,8 +277,14 @@ def measured_cost_per_proof(path=ECONOMICS):
         pass
     if not per_block:
         return {}, None
-    blk = max(per_block, key=lambda k: (len(per_block[k]["best"]), per_block[k]["rows"]))
-    return per_block[blk]["best"], blk
+    point = max(per_block, key=lambda k: (len(per_block[k]["best"]), per_block[k]["rows"]))
+    blk, po2, gpp = point
+    label = f"block {blk}"
+    if po2 is not None:
+        label += f", po2 {po2}"
+    if gpp is not None:
+        label += f", {gpp} GPU/pod"
+    return per_block[point]["best"], label
 
 
 def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
@@ -684,7 +701,7 @@ def main():
             log(f"card catalogue ({len(catalogue)} types with SECURE stock and {VRAM_FLOOR_GB}GB+), "
                 "best known value first:")
             for c in catalogue:
-                val = (f"${c['usd_per_proof']:.3f}/proof on block {c['measured_on']} MEASURED"
+                val = (f"${c['usd_per_proof']:.3f}/proof on {c['measured_on']} MEASURED"
                        if c["usd_per_proof"] is not None
                        else "unmeasured — ordered by $/hr, which is NOT the objective (#448)")
                 log(f"    {c['display']:34} {c['vram']:>3}GB  ${c['price']:>5.2f}/hr  "
