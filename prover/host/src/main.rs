@@ -3836,6 +3836,27 @@ fn bridge_undo_floor(dir: &str) -> Option<u32> {
         .min()
 }
 
+/// The highest height at which the undo log and the node still agree, or `None` (hazync#484).
+///
+/// ⛔ WALK DOWN UNTIL THEY AGREE, DO NOT GUESS A DEPTH. A reorg's depth is not known in advance and
+/// assuming one would be a number nobody can justify. The search is bounded by the undo window
+/// instead, which is the honest limit: below it there is nothing to rewind to, so a deeper search
+/// could only find a fork it cannot act on.
+///
+/// `at` returns the node's hash for a height; `undo_at` returns the hash the accumulator walked.
+/// Both are injected so the search can be driven without a node or a filesystem.
+fn bridge_fork_point<F, G>(floor: u32, done: u32, at: F, undo_at: G) -> Option<u32>
+where F: Fn(u32) -> Option<String>, G: Fn(u32) -> Option<String> {
+    for h in (floor..=done).rev() {
+        let ours = undo_at(h)?;          // no undo here: the window has ended, and so has the search
+        let theirs = at(h)?;
+        if ours == theirs {
+            return Some(h);              // h is common; divergence starts at h+1
+        }
+    }
+    None
+}
+
 /// Put the bridge back to the state it held at `target`, newest block first.
 ///
 /// ⛔ NEWEST FIRST, AND ALL OR NOTHING. Each block's undo is the inverse of the state as it stood
@@ -4030,9 +4051,20 @@ fn cmd_dump_snapshot(out_path: &str) {
 fn cmd_bridge() {
     let out_dir = std::env::var("HAZYNC_BRIDGE_OUT").unwrap_or_else(|_| "/root/bridge_bundles".into());
     std::fs::create_dir_all(&out_dir).unwrap();
-    // Only advance/emit up to tip-FINALITY: the resident forest never enters the re-org zone, so any
-    // shallower-than-FINALITY reorg leaves it untouched and every emitted bundle is on the final chain.
-    let finality: u32 = std::env::var("HAZYNC_BRIDGE_FINALITY").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    // ⛔ THE DEFAULT IS NOW 0: FOLLOW THE TIP (hazync#484). It was 100, and the comment here used to
+    // say the forest "never enters the re-org zone" — which was true only because it could not leave
+    // it either. A resident accumulator with no rewind has exactly one defence against a reorg, and
+    // that is distance; the cost was a bridge permanently ~16 hours behind the chain it exists to
+    // follow, which makes "tip following" a name rather than a property.
+    //
+    // ⚠ 0 IS ONLY SAFE BECAUSE OF THE TWO THINGS ABOVE IT. Detection notices when the chain moves
+    // under the accumulator, and the undo log puts it back. Running 0 without them would emit bundles
+    // that become wrong on the first 1-block reorg — which Bitcoin produces every few weeks — with
+    // nothing to notice and nothing to recover to short of a walk from genesis.
+    //
+    // ⚠ A reorg deeper than HAZYNC_BRIDGE_UNDO_KEEP (288, two days of chain) still halts: that is not
+    // a rewind this can do, and faking it would be worse than stopping.
+    let finality: u32 = std::env::var("HAZYNC_BRIDGE_FINALITY").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let ckpt_every: u32 = std::env::var("HAZYNC_BRIDGE_CKPT").ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
     // How many blocks of undo to keep. 288 is two days of chain at ten minutes a block — far past any
     // reorg Bitcoin has had outside the 2013 fork, and under a megabyte a block it costs nothing.
@@ -4120,18 +4152,76 @@ fn cmd_bridge() {
             if done > 0 && done <= tip {
                 let now_hash = bcli(&["getblockhash", &done.to_string()]);
                 if bridge_reorg_seen(Some(&expect), &now_hash) == Some(true) {
-                    if !halted {
-                        println!("bridge: ⛔⛔ REORG DETECTED AT OR BELOW HEIGHT {done}");
-                        println!("bridge:    the accumulator advanced over {expect}");
-                        println!("bridge:    the node now has            {now_hash}");
-                        println!("bridge:    STOPPING: the forest, UTXO set and coinbase SMT hold \
-                                  state from the abandoned chain. Advancing would emit bundles that \
-                                  claim new-chain heights over old-chain state.");
-                        println!("bridge:    recovery needs a rewind to the fork point (hazync#484); \
-                                  until that exists the state must be rebuilt from a checkpoint \
-                                  below the fork, or from genesis.");
+                    println!("bridge: ⛔ REORG AT OR BELOW HEIGHT {done}");
+                    println!("bridge:    the accumulator advanced over {expect}");
+                    println!("bridge:    the node now has            {now_hash}");
+
+                    // ── find the fork point ────────────────────────────────────────────────────
+                    // ⛔ WALK DOWN UNTIL THE CHAINS AGREE, do not guess a depth. The undo log is the
+                    // limit of how far we can go, so the search is bounded by it rather than by a
+                    // number somebody picked: below the window there is nothing to rewind to and a
+                    // deeper search would only find a fork it cannot act on.
+                    let floor = bridge_undo_floor(&out_dir).unwrap_or(done).max(1);
+                    let fork = bridge_fork_point(
+                        floor, done,
+                        |h| { let x = bcli(&["getblockhash", &h.to_string()]);
+                              if x.len() == 64 { Some(x) } else { None } },
+                        |h| bridge_load_undo(&out_dir, h).map(|u| u.block_hash));
+                    match fork {
+                        Some(common) => {
+                            // ⚠ CAPTURED BEFORE THE REWIND. `bridge_rewind_to` moves `done` down to
+                            // `common`, so anything computed from it afterwards describes a height
+                            // that no longer applies — the stale-bundle range in particular, which
+                            // would collapse to a single file.
+                            let was = done;
+                            println!("bridge:    chains agree at {common}; rewinding {} block(s)",
+                                     was - common);
+                            match bridge_rewind_to(&out_dir, common, &mut done,
+                                                   &mut forest, &mut utxo, &mut smt,
+                                                   &mut win, &mut block_mtp,
+                                                   &mut nbits, &mut time, &mut epoch_start) {
+                                Ok(()) => {
+                                    // ⛔ THE BUNDLES FOR THE ABANDONED BLOCKS MUST GO. They describe a
+                                    // chain that no longer exists, and a prover polling the directory
+                                    // cannot tell them from live work. The board re-proves the
+                                    // replacements once the bridge re-emits at those heights.
+                                    let mut dropped = 0;
+                                    for h in (common + 1)..=was {
+                                        let bp = format!("{out_dir}/bundle_{h}.json");
+                                        if std::fs::remove_file(&bp).is_ok() { dropped += 1; }
+                                    }
+                                    // the head must describe where we actually are now
+                                    head = bridge_load_undo(&out_dir, done)
+                                        .map(|u| u.block_hash)
+                                        .or_else(|| {
+                                            let h = bcli(&["getblockhash", &done.to_string()]);
+                                            if h.len() == 64 { Some(h) } else { None }
+                                        });
+                                    bridge_save_state(&out_dir, &BridgeStateRef {
+                                        height: done, leaves: &forest.leaves, utxo: &utxo, win: &win,
+                                        block_mtp: &block_mtp, nbits, time, epoch_start,
+                                        smt: smt.entries() });
+                                    if let Some(hh) = head.as_deref() { bridge_save_head(&out_dir, done, hh); }
+                                    last_ckpt = done;
+                                    println!("bridge:    ✅ rewound to {done}, dropped {dropped} stale \
+                                              bundle(s); re-advancing on the new chain");
+                                }
+                                Err(e) => {
+                                    println!("bridge:    ⛔ rewind refused: {e}");
+                                    halted = true;
+                                }
+                            }
+                        }
+                        None => {
+                            // ⚠ DEEPER THAN THE UNDO WINDOW. Not a rewind we can do, and not one to
+                            // fake: halting keeps the accumulator honest and says what it would take.
+                            println!("bridge:    ⛔ the fork is deeper than the undo window \
+                                      (oldest undo: {floor}). HALTING — the state must be rebuilt \
+                                      from a checkpoint below the fork, or from genesis. Raise \
+                                      HAZYNC_BRIDGE_UNDO_KEEP if this recurs.");
+                            halted = true;
+                        }
                     }
-                    halted = true;
                 }
             }
         }
@@ -6267,6 +6357,54 @@ mod bridge_undo_tests {
         assert_eq!(snapshot(&forest, &utxo, &smt, &win, &mtp, nbits, time, epoch), before,
                    "and must not have touched a single structure");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// ⛔ THE FORK SEARCH IS WHERE A REORG GOES WRONG QUIETLY. Rewinding one block too few leaves
+    /// the accumulator holding an abandoned block; one too many is merely wasteful, but a search
+    /// that returns the WRONG height looks exactly like a successful recovery.
+    #[test]
+    fn the_fork_point_is_the_highest_height_the_chains_still_share() {
+        // ours 1..=10; the node forked after 7, so 8,9,10 differ
+        let ours = |h: u32| Some(format!("{h:064x}"));
+        let node = |h: u32| Some(if h <= 7 { format!("{h:064x}") } else { format!("{:064x}", h + 500) });
+        assert_eq!(bridge_fork_point(1, 10, node, ours), Some(7));
+    }
+
+    #[test]
+    fn a_one_block_reorg_finds_the_block_below_it() {
+        // ⚠ THE COMMON CASE, and the one FINALITY=100 was really guarding against. Bitcoin produces
+        // these every few weeks.
+        let ours = |h: u32| Some(format!("{h:064x}"));
+        let node = |h: u32| Some(if h < 10 { format!("{h:064x}") } else { "ff".repeat(32) });
+        assert_eq!(bridge_fork_point(1, 10, node, ours), Some(9));
+    }
+
+    #[test]
+    fn no_divergence_at_all_reports_the_head() {
+        let same = |h: u32| Some(format!("{h:064x}"));
+        assert_eq!(bridge_fork_point(1, 10, same, same), Some(10));
+    }
+
+    #[test]
+    fn a_fork_deeper_than_the_window_is_not_found_and_not_guessed() {
+        // ⛔ THE ONE THAT MUST NOT RETURN A NUMBER. Below the undo window there is nothing to rewind
+        // to; answering anyway would hand the caller a fork point it cannot act on, and the rewind
+        // would then "succeed" against state that was never restored.
+        let ours = |h: u32| Some(format!("{h:064x}"));
+        let node = |_h: u32| Some("ff".repeat(32));        // differs everywhere in range
+        assert_eq!(bridge_fork_point(5, 10, node, ours), None);
+    }
+
+    #[test]
+    fn a_missing_undo_ends_the_search_rather_than_skipping_past_it() {
+        // ⚠ A HOLE IN THE LOG IS NOT A MISMATCH, and the difference only shows when the chains DO
+        // agree below the hole. Skipping past it would return 7 — a fork point the rewind can never
+        // reach, because undoing 10..8 needs the undo at 8 that is missing. Stopping at the hole
+        // reports "cannot", which is the truth.
+        let ours = |h: u32| if h == 8 { None } else { Some(format!("{h:064x}")) };
+        let node = |h: u32| Some(if h <= 7 { format!("{h:064x}") } else { "ff".repeat(32) });
+        assert_eq!(bridge_fork_point(1, 10, node, ours), None,
+                   "a hole must end the search, not be walked past to an unreachable fork point");
     }
 
     #[test]
