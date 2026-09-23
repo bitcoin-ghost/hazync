@@ -3687,6 +3687,43 @@ struct BridgeState {
     smt: Vec<([u8; 32], u32)>,
 }
 
+/// The hash of the block the accumulator last advanced over, stored BESIDE the checkpoint.
+///
+/// ⛔ NOT A FIELD ON `BridgeState`, AND THAT IS THE WHOLE POINT (hazync#484). The checkpoint is
+/// bincode, so adding a field makes every existing checkpoint undeserialisable — `bridge_load_state`
+/// swallows that as `None` and the bridge silently "starts from genesis". The live state.bin is
+/// 19.4 GB and took roughly EIGHT DAYS to build. A format change here does not cost a migration, it
+/// costs a week of walking, and the log line that announces it reads like a normal startup.
+///
+/// A sidecar file has none of that: an old checkpoint simply has no sidecar, which is honestly
+/// reported as "cannot check" until the next checkpoint writes one.
+/// Has the chain moved under the accumulator? `None` means the question cannot be answered.
+///
+/// ⛔ THREE OUTCOMES, NOT TWO (hazync#484). "I have no head to compare against" is not "no reorg" —
+/// a check that cannot fail is the thing `finality = 100` was already hiding behind. An old
+/// checkpoint with no sidecar must report that it cannot check, loudly, rather than pass.
+fn bridge_reorg_seen(expect: Option<&str>, node_hash_at_done: &str) -> Option<bool> {
+    let e = expect?;
+    if e.len() != 64 || node_hash_at_done.len() != 64 { return None; }
+    Some(!e.eq_ignore_ascii_case(node_hash_at_done))
+}
+
+fn bridge_save_head(dir: &str, height: u32, hash_hex: &str) {
+    let tmp = format!("{dir}/state.head.tmp");
+    if std::fs::write(&tmp, format!("{height} {hash_hex}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, format!("{dir}/state.head"));
+    }
+}
+
+fn bridge_load_head(dir: &str) -> Option<(u32, String)> {
+    let t = std::fs::read_to_string(format!("{dir}/state.head")).ok()?;
+    let mut it = t.split_whitespace();
+    let h: u32 = it.next()?.parse().ok()?;
+    let hash = it.next()?.to_string();
+    if hash.len() != 64 { return None; }
+    Some((h, hash))
+}
+
 fn bridge_load_state(dir: &str) -> Option<BridgeState> {
     std::fs::read(format!("{dir}/state.bin")).ok().and_then(|b| bincode::deserialize(&b).ok())
 }
@@ -3855,8 +3892,68 @@ fn cmd_bridge() {
              GENESIS_BITS, GENESIS_TIME, GENESIS_TIME, 0u32, Smt::new())
         };
     let mut last_ckpt = done;
+
+    // ⛔ THE ACCUMULATOR IS RESIDENT AND CANNOT BE REWOUND, SO IT MUST KNOW WHEN THE CHAIN MOVED
+    // UNDER IT (hazync#484). Nothing checked this: the loop asks the node for whatever block is at
+    // each height and walks it, so a reorg at or below `done` leaves the forest, UTXO set and
+    // coinbase SMT carrying state from the abandoned chain while the bundles claim heights on the
+    // new one. `finality = 100` has been standing in for the check — it makes the window so deep
+    // that no real reorg reaches it — but the failure it hides is SILENT, which is the wrong shape
+    // for a rare event.
+    //
+    // `head` is the hash of the block at `done`. Within a run it is tracked as we go; across a
+    // restart it comes from the sidecar. Where there is no sidecar (a checkpoint written before this
+    // existed) the answer is "cannot check", said out loud, rather than a check that always passes.
+    let mut head: Option<String> = match bridge_load_head(&out_dir) {
+        Some((h, hash)) if h == done => Some(hash),
+        Some((h, _)) => {
+            println!("bridge: ⚠ head sidecar is for height {h} but the checkpoint is at {done} — \
+                      reorg detection is OFF until the next checkpoint");
+            None
+        }
+        None if done > 0 => {
+            println!("bridge: ⚠ no head sidecar beside this checkpoint — reorg detection is OFF \
+                      until the next checkpoint writes one");
+            None
+        }
+        None => None,
+    };
+    let mut halted = false;
+
     loop {
         let tip: u32 = bcli(&["getblockcount"]).parse().expect("getblockcount");
+
+        // ⚠ ASK BEFORE ADVANCING, EVERY PASS. One `getblockhash` against a loop that otherwise does
+        // thousands of RPCs; the cost is nothing and it is the only moment the mismatch is cheap to
+        // act on.
+        if let Some(expect) = head.clone() {
+            if done > 0 && done <= tip {
+                let now_hash = bcli(&["getblockhash", &done.to_string()]);
+                if bridge_reorg_seen(Some(&expect), &now_hash) == Some(true) {
+                    if !halted {
+                        println!("bridge: ⛔⛔ REORG DETECTED AT OR BELOW HEIGHT {done}");
+                        println!("bridge:    the accumulator advanced over {expect}");
+                        println!("bridge:    the node now has            {now_hash}");
+                        println!("bridge:    STOPPING: the forest, UTXO set and coinbase SMT hold \
+                                  state from the abandoned chain. Advancing would emit bundles that \
+                                  claim new-chain heights over old-chain state.");
+                        println!("bridge:    recovery needs a rewind to the fork point (hazync#484); \
+                                  until that exists the state must be rebuilt from a checkpoint \
+                                  below the fork, or from genesis.");
+                    }
+                    halted = true;
+                }
+            }
+        }
+        // ⛔ HALT, DO NOT CRASH. `Restart=always` would turn an exit into a flap — restart, resume
+        // from the same checkpoint, detect the same reorg, exit — and a flapping unit is how an
+        // alert gets muted. The process stays up, emits nothing, and says why on every pass, so the
+        // progress check and the journal both show a bridge that has deliberately stopped.
+        if halted {
+            std::thread::sleep(std::time::Duration::from_secs(poll.max(30)));
+            continue;
+        }
+
         let mut target = tip.saturating_sub(finality);
         if let Some(c) = cap { target = target.min(c); }
         if target > done {
@@ -3918,10 +4015,19 @@ fn cmd_bridge() {
                 let bt = block.header.time; nbits = block.header.bits.to_consensus(); time = bt;
                 if h % 2016 == 0 { epoch_start = bt; }
                 done = h;
+                // ⚠ The hash we ACTUALLY walked, not the one the node offers next time round. This is
+                // the whole basis of the check: `hash` came from `getblockhash(h)` at the top of this
+                // iteration, and the accumulator has now absorbed that exact block.
+                head = Some(hash.clone());
                 if done - last_ckpt >= ckpt_every {
                     bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
                         utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start,
                         smt: smt.entries() });
+                    // ⚠ AFTER the checkpoint, never before. The sidecar claims "state.bin is at this
+                    // height with this hash"; written first, a crash in between would leave it
+                    // describing a checkpoint that does not exist, and the next start would compare
+                    // the node against a height the accumulator never reached.
+                    if let Some(hh) = head.as_deref() { bridge_save_head(&out_dir, done, hh); }
                     last_ckpt = done;
                     println!("bridge: checkpoint @ {done} ({} utxos, {} leaves)", utxo.len(), forest.leaves.len());
                 }
@@ -3937,6 +4043,7 @@ fn cmd_bridge() {
                 bridge_save_state(&out_dir, &BridgeStateRef { height: done, leaves: &forest.leaves,
                     utxo: &utxo, win: &win, block_mtp: &block_mtp, nbits, time, epoch_start,
                         smt: smt.entries() });
+                if let Some(hh) = head.as_deref() { bridge_save_head(&out_dir, done, hh); }
                 last_ckpt = done;
             }
             println!("bridge: caught up to {done} (node tip {tip})");
@@ -5797,6 +5904,61 @@ fn seg_reconnect(id: &str, addr: &str, s: &mut std::net::TcpStream,
 }
 
 #[cfg(test)]
+mod bridge_reorg_tests {
+    use super::{bridge_reorg_seen, bridge_save_head, bridge_load_head};
+
+    const A: &str = "00000000000000000001a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6";
+    const B: &str = "000000000000000000029f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a";
+
+    /// ⛔ "CANNOT CHECK" IS ITS OWN ANSWER. Folding it into "no reorg" is how `finality = 100` got to
+    /// stand in for a check for this long: a guard that cannot fail is not a guard.
+    #[test]
+    fn no_head_means_cannot_check_not_all_clear() {
+        assert_eq!(bridge_reorg_seen(None, A), None, "no head must NOT read as 'no reorg'");
+        assert_eq!(bridge_reorg_seen(Some("short"), A), None, "a malformed head cannot answer");
+        assert_eq!(bridge_reorg_seen(Some(A), "short"), None, "a malformed node hash cannot answer");
+    }
+
+    #[test]
+    fn same_block_is_no_reorg_and_a_different_one_is() {
+        assert_eq!(bridge_reorg_seen(Some(A), A), Some(false));
+        assert_eq!(bridge_reorg_seen(Some(A), B), Some(true), "a changed hash at `done` IS a reorg");
+        // ⚠ bitcoind prints lowercase; a future caller normalising differently must not read as a reorg
+        assert_eq!(bridge_reorg_seen(Some(&A.to_uppercase()), A), Some(false));
+    }
+
+    #[test]
+    fn the_head_sidecar_round_trips_and_a_missing_one_is_none() {
+        let d = std::env::temp_dir().join(format!("hzhead{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+        assert_eq!(bridge_load_head(dir), None, "no sidecar yet");
+        bridge_save_head(dir, 968_111, A);
+        assert_eq!(bridge_load_head(dir), Some((968_111u32, A.to_string())));
+        // a truncated sidecar is unreadable, not a silent pass
+        std::fs::write(format!("{dir}/state.head"), "968111\n").unwrap();
+        assert_eq!(bridge_load_head(dir), None, "a sidecar with no hash cannot answer");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// ⛔⛔ THE CHECKPOINT FORMAT MUST NOT CHANGE. `bridge_load_state` swallows a deserialize failure
+    /// as `None`, and the bridge then announces "no checkpoint — starting from genesis" and walks
+    /// from block 0. The live state.bin is 19.4 GB and took about EIGHT DAYS to build, so adding a
+    /// field to `BridgeState` does not cost a migration, it costs a week — and it looks like a normal
+    /// startup in the log. This is why the head lives in a sidecar.
+    #[test]
+    fn the_head_is_not_a_field_on_the_checkpoint() {
+        let src = include_str!("main.rs");
+        let start = src.find("struct BridgeState {").expect("BridgeState");
+        let body = &src[start..start + src[start..].find('}').unwrap()];
+        for forbidden in ["head", "hash", "block_hash"] {
+            assert!(!body.contains(forbidden),
+                    "BridgeState gained a `{forbidden}` field — every existing checkpoint becomes \
+                     unreadable and the bridge silently restarts from genesis");
+        }
+    }
+}
+
 mod seg_reconnect_tests {
     use super::{seg_reconnect_backoff_s, seg_reconnect_cap_from, seg_reconnect_is_link_failure,
                 seg_reconnect_retry_within};
