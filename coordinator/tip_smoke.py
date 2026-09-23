@@ -1238,6 +1238,22 @@ def main():
                     seen_at[t] = time.time()
                     tip_note("appeared", height=int(t))
                 pending = t if (t and t > proved_tip["h"]) else None
+                # ⛔ --fresh-tip MEANS TIP ONLY. Without this, next_work() falls through to BOARD
+                # work whenever no fresh tip is waiting -- and a driver configured with
+                # --claim-source ssh fetches from the bridge's tip_bundles, which holds nothing
+                # below EMIT_FROM. So it claimed board heights 123538/123541/123544, each failed
+                # instantly with "no bundle", and three in a row tripped the fleet-fault guard:
+                #
+                #   stopping: 3 blocks failed in a row — this is the FLEET, not the blocks.
+                #
+                # It released a 36-card fleet 17 seconds into a session, and the guard was right to
+                # fire on what it could see -- three consecutive failures DO usually mean the fleet.
+                # The fault was asking it to prove blocks this driver can never fetch.
+                #
+                # Waiting is the correct behaviour: the whole point of --fresh-tip is to sit idle
+                # until the chain produces a height that did not exist at boot.
+                if a.fresh_tip and pending is None:
+                    return {"source": "idle", "range": None}
                 return tip_controller.next_work(pending, claim_fn)
 
             def prove_one(rng):
