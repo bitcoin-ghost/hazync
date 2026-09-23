@@ -96,11 +96,34 @@ if [ "$STOP" = "--stop" ]; then
     # `pgrep -c` PRINTS 0 and EXITS 1 when nothing matches, so `|| echo 0` fires as well and the
     # variable becomes "0\n0" — which then fails `[ -gt ]` with "integer expression expected". Count
     # with wc instead, which always exits 0 and yields one clean integer.
-    _left=$(pgrep -f 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' 2>/dev/null | wc -l)
+    # ⛔⛔ EXCLUDE OURSELVES AND OUR ANCESTORS (hazync#491). `pgrep -f` matches the whole command
+    # LINE, so any shell whose ARGUMENTS mention these patterns matches -- including the shell
+    # running --stop. Observed 2026-09-23 switching hz-spine-1 from spine to fold:
+    #
+    #   stopped (remaining: 1)
+    #   WARNING: 1 process(es) survived --stop. They still take the GPU lock.
+    #   1108693 bash -c cd /workspace || exit 1 ... ./hazync-run-workers.sh 1 --stop ...
+    #
+    # 1108693 was the invoking shell. Every loop was gone; --stop exited 1 and sent the operator
+    # hunting PIDs that did not exist. The same trap bit a wrapper whose argv merely CONTAINED
+    # "hazync-fold-loop" inside a grep, and it is the family that makes `pkill -f` kill its own
+    # invoking shell. A process check that can see itself is not a check.
+    _mine=" $$ "
+    _p=$$
+    while [ "${_p:-1}" -gt 1 ]; do
+        _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')
+        [ -n "$_p" ] || break
+        _mine="$_mine $_p "
+    done
+    _survivors=$(pgrep -f 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' 2>/dev/null \
+        | while read -r _pid; do case "$_mine" in *" $_pid "*) ;; *) echo "$_pid" ;; esac; done)
+    # ⚠ grep -c on a possibly-empty string, not `pgrep -c`, which prints 0 AND exits 1.
+    _left=$(printf '%s' "$_survivors" | grep -c . || true)
+    _left=${_left:-0}
     echo "stopped (remaining: $_left)"
-    if [ "${_left:-0}" -gt 0 ]; then
+    if [ "$_left" -gt 0 ]; then
         echo "WARNING: $_left process(es) survived --stop. They still take the GPU lock." >&2
-        pgrep -af 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' >&2 2>/dev/null || true
+        for _pid in $_survivors; do ps -o pid=,args= -p "$_pid" 2>/dev/null >&2 || true; done
         echo "Kill them by PID before starting a new fleet." >&2
         exit 1
     fi
