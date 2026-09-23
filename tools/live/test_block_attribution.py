@@ -132,6 +132,26 @@ check(not b["done"],
 check(b["done_at"] is None,
       f"so nothing goes green and nothing claims VERIFIED (done_at={b['done_at']})")
 
+# ── 3b. ⛔ A FINISHED BLOCK MUST SURVIVE THE FLEET MOVING ON ──────────────────────────────────────
+# The first version of the #499 guard asked "is ANY card working", fleet-wide. So the moment the run
+# claimed the next height, the block it had just finished reverted to done=False: its tile went green
+# -> orange and "blocks today" fell 1 -> 0. Observed live on 968,257 (verified 11:14:43, reading
+# `0 blocks` by 11:18:41). The guard has to be about THIS block, not about the fleet.
+two = [{"name": "hz-smoke-1", "cost_hr": 0.72, "phase": "proving", "up": True, "block": 968264,
+        "block_s": {"968257": {"t0": NOW - 2000, "t1": NOW - 300, "segs": 7846,
+                               "prove": 1200, "asm": 240, "n": 1800},
+                    "968264": {"t0": NOW - 200, "t1": NOW - 0.5, "segs": 4184,
+                               "prove": 190, "asm": 0, "n": 200}}},
+       {"name": "hz-smoke-2", "cost_hr": 0.72, "phase": "proving", "up": True, "block": None,
+        "block_s": {"968264": {"t0": NOW - 200, "t1": NOW - 0.5, "segs": 4184,
+                               "prove": 190, "asm": 0, "n": 200}}}]
+bl = {b["h"]: b for b in collect.blocks_from_cards(two, {"since": 0.0}, NOW, set())}
+check(bl[968257]["done"],
+      f"the block the fleet has FINISHED stays done once it moves to the next "
+      f"(done={bl[968257]['done']})")
+check(not bl[968264]["done"],
+      f"and the block it moved TO is not done (done={bl[968264]['done']})")
+
 # ── 4. the end of a run: cards stopped, silence now DOES mean done (the rule's real purpose) ─────
 cards[0]["phase"], cards[0]["up"] = "idle", False
 b = collect.blocks_from_cards(cards, {"since": 0.0}, NOW, set())[0]

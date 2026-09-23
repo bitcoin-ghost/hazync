@@ -375,11 +375,21 @@ def blocks_from_cards(cards, state, now, verified=()):
     # ⚠ PAIRED WITH THE HEIGHT THE CARD WAS ON, not taken as "some card is done, so all are".
     finished_by_cards = {str(c.get("block")) for c in cards
                          if c.get("phase") == "done" and c.get("block")}
-    # ⚠ IS ANY CARD STILL WORKING? Judged from each card's CURRENT phase, which is what the silence
-    # rule below needs to know. `executed` counts as busy: the card has loaded the block and is about
-    # to prove it, so a gap there is a handover, not an ending.
-    fleet_busy = any(c.get("phase") in ("proving", "assembling", "executed")
-                     and c.get("up") for c in cards)
+    # ⚠ IS ANY CARD STILL WORKING, AND ON WHICH BLOCK? `executed` counts as busy: the card has
+    # loaded the block and is about to prove it, so a gap there is a handover, not an ending.
+    #
+    # ⛔ THIS MUST BE PER BLOCK, NOT PER FLEET. A global "is anything working" suppressed the silence
+    # rule for EVERY block, so the moment the fleet moved on to the next height, the block it had
+    # just finished reverted to done=False -- its tile went from green back to orange and the "blocks
+    # today" count fell from 1 to 0. Observed live: 968,257 verified at 11:14:43, and by 11:18:41 the
+    # frame read `0 blocks` with the cell orange again.
+    #
+    # ⚠ Only the COORDINATOR names a height; workers always report None. That is enough, because the
+    # coordinator is the one card that knows which block the fleet is on.
+    _active = [c for c in cards
+               if c.get("up") and c.get("phase") in ("proving", "assembling", "executed")]
+    _named = {str(c.get("block")) for c in _active if c.get("block")}
+    _newest = max((int(h) for h in agg), default=None)
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
@@ -398,8 +408,13 @@ def blocks_from_cards(cards, state, now, verified=()):
         # A fleet with cards still proving or assembling has not finished. Silence only means
         # completion when nothing is working any more -- which is exactly the end-of-run case the
         # rule was written for, and nothing else.
+        # ⚠ When nobody names a block we cannot tell which one the fleet is on, so only the NEWEST
+        # height gets the benefit of the doubt. An older block is never held open by activity that
+        # cannot possibly belong to it.
+        working_on_this = bool(_active) and (str(h) in _named
+                                             or (not _named and int(h) == _newest))
         done_flag = (int(h) in verified or str(h) in finished_by_cards
-                     or ((now - a["t1"]) > 5 and not fleet_busy))
+                     or ((now - a["t1"]) > 5 and not working_on_this))
         out.append({"h": int(h), "arrive": a["t0"],
                     # ⛔ `done` is a BOOLEAN and the pulse needs a TIME. The renderer animates a
                     # block travelling from the join tree to its cell for PULSE seconds after it
