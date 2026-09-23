@@ -1931,6 +1931,49 @@ def build_vranges(c, blk):
         out.append(v)
     return out
 
+def spine_absorption(n):
+    """How block `n` entered the spine: in one wide fold, or one block at a time.
+
+    ⛔ WHY THIS EXISTS (hazync#486). The block panel reported "Folded: No fold on record" beside
+    "Anchored: inside the single proof from block 1", which reads as a contradiction — a missing step
+    in a pipeline — and prompted exactly that question from the operator. Both lines were correct and
+    neither told the story.
+
+    A block reaches the spine one of two ways. Normally the spine swallows a node of the FOLD TREE:
+    `extend-spine` takes `[1..N] + [N+1..M]` for any M at the same cost, so a folded range moves the
+    head M-N blocks for the price of one. When the fold tree has not reached that height there is no
+    wide range to take, and `spine_chunks` falls back to the single-block path — one advance per
+    block. That block genuinely has no fold record, and saying so without saying WHY makes a healthy
+    fallback look like a fault.
+
+    Measured on the live board 2026-09-23: the spine sat 12,622 blocks past the end of the folded
+    region, so every block in that gap was absorbed individually at roughly one per 15 seconds.
+
+    Returns the advance that absorbed `n` — its width, and the range it carried — or None.
+    """
+    c = db()
+    try:
+        rows = c.execute("SELECT range_id,handle FROM submissions"
+                         " WHERE range_id LIKE 'spine:1-%' ORDER BY ts ASC, rowid ASC").fetchall()
+    finally:
+        c.close()
+    prev_hi = 0
+    for r in rows:
+        try:
+            hi = int(r["range_id"].split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if hi <= prev_hi:
+            continue                 # a re-advertised head or a lost race covers no new blocks
+        if prev_hi < n <= hi:
+            # ⚠ `lo` is the first block THIS advance carried, which is one past the previous head —
+            # not the `lo` of the spine receipt, which is always 1.
+            return {"lo": prev_hi + 1, "hi": hi, "width": hi - prev_hi,
+                    "handle": r["handle"], "folded_range": hi - prev_hi > 1}
+        prev_hi = hi
+    return None
+
+
 def spine_segments():
     """Who absorbed each block into the spine, as runs of [lo..hi] by one contributor.
 
@@ -2403,9 +2446,14 @@ def block_detail(n):
     else:
         status = "open"
     anchored_by = None
+    absorbed = None
     if 0 < n <= spine_hi:
         seg = next((sg for sg in spine_segments_cached() if sg["lo"] <= n <= sg["hi"]), None)
         anchored_by = seg["handle"] if seg else None
+        # ⛔ HOW it got in, not just who put it there (hazync#486). Without this the panel can only
+        # say "no fold on record" for a block the spine took one at a time, which reads as a fault
+        # rather than as the fold tree not having reached it yet.
+        absorbed = spine_absorption(n)
     # #333: a live fold claim covering this block, so its page can say it is being folded right now. Read fresh here
     # because a fold claim lasts a minute and the site refreshes /api/state only about once a minute.
     fc = next(({"result": k, "lo": v["lo"], "hi": v["hi"], "elapsed": int(now - v["at"]),
@@ -2415,6 +2463,7 @@ def block_detail(n):
                if v["lo"] <= n <= v["hi"]), None)
     return 200, {"block": n, "tip": tip, "frontier": fr, "spine_hi": spine_hi, "status": status,
                  "unbroken": 0 < n <= fr, "proofs": proofs, "claim": cl, "fold_claim": fc, "anchored_by": anchored_by,
+                 "absorbed": absorbed,
                  "sponsor": sponsor,
                  # A paid sponsorship keeps this block for the sponsor bot: normal workers are never offered it.
                  "held": ({"sponsorship": hold[0]["id"], "since": int(now - (hold[0]["paid_at"] or now))}
