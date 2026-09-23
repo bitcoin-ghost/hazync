@@ -1121,7 +1121,22 @@ def main():
                 ONE definition of what proving a claimed block means."""
                 bp = os.path.join(a.rundir, f"bundle_{rng}.json")
                 if not os.path.exists(bp):
-                    src = "ssh" if from_tip else a.claim_source
+                    # ⛔ BOARD WORK ALWAYS COMES FROM THE API, NEVER FROM THE BRIDGE. This read
+                    # `a.claim_source` for board heights, so a tip run started with
+                    # --claim-source ssh asked the BRIDGE for a board block -- and the bridge emits
+                    # nothing below EMIT_FROM, so it can never have one:
+                    #
+                    #   no bundle for 123538: .../tip_bundles/bundle_123538.json: No such file
+                    #
+                    # Three of those in a row tripped the fleet-fault guard and released a 36-card
+                    # fleet 17 seconds into a session (2026-09-23). It also silently disabled the
+                    # whole point of #367 -- filling the gaps between tip blocks with board work --
+                    # because every board claim was unfetchable. A 15-card fleet then sat idle for
+                    # 31.4 minutes of a 60-minute session, $5.81 of rented GPU doing nothing.
+                    #
+                    # --claim-source governs where a TIP bundle comes from. The board has exactly
+                    # one source, /api/witness, and it does not depend on that flag.
+                    src = "ssh" if from_tip else "api"
                     if src == "ssh":
                         bok, bwhy = tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host)
                     else:
