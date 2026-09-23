@@ -743,7 +743,11 @@ def main():
             log(f"card type preference: {' > '.join(gpu_types)}"
                 + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
 
-        want = a.cards + a.spares
+        # ⚠ `rented` NOT `want` (hazync#492). `want` is reused at the prover-fetch gate for the
+        # BINARY SIZE, so a message down there that reads `want` prints 410441528 where a card count
+        # belongs — which is what a real run reported: "only 2 of 410441528 rented cards".
+        rented = a.cards + a.spares
+        want = rented
         for i in range(want):
             name = f"{PREFIX}{i+1}"
             if name in existing:
@@ -1056,7 +1060,11 @@ def main():
             raise SystemExit(f"the aggregate {agg.cid} failed a pre-clock gate — every worker was "
                              f"checked against it, so the run cannot simply promote another card")
         if len(order) < a.cards:
-            raise SystemExit(f"only {len(order)} of {want} rented cards passed every pre-clock gate; "
+            # ⚠ len(created), not `rented`. `rented` is what we ASKED for (cards + spares); the
+            # run routinely gets fewer when capacity is thin -- 18 of a requested 60 on 2026-09-23.
+            # Reporting the request makes a healthy fleet look like a catastrophic shortfall.
+            raise SystemExit(f"only {len(order)} of {len(created)} rented cards "
+                             f"passed every pre-clock gate; "
                              f"needed {a.cards}. Rent more spares, or read the per-card lines above")
         surplus = [c.cid for c in order[a.cards:]]
         if surplus:
