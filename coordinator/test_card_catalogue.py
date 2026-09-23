@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank cards by what was MEASURED, and never attribute a mixture to one card (found on the 968,243/968,255 tip run, 2026-09-23).
+"""Rank cards by what was MEASURED, and never attribute a mixture to one card (hazync#493).
 
 ⛔ WHY THIS EXISTS. #448 found that a fleet containing an A40 took 382.8 s against an all-4090 fleet's
 272.2 s, AND cost more per proof ($0.262 vs $0.243) — so ranking cards by price per hour buys the
@@ -135,7 +135,7 @@ check(by.get("NVIDIA A40") is not None
       and ids.index("NVIDIA A40") > ids.index("NVIDIA GeForce RTX 4090"),
       "the A40 is still offered, but BELOW the 4090 — cheaper per hour is not cheaper per proof")
 check(by.get("NVIDIA L40S") is not None,
-      "the L40S is in the catalogue at all — it was refused outright before (found on the 968,243/968,255 tip run, 2026-09-23)")
+      "the L40S is in the catalogue at all — it was refused outright before (#493)")
 
 # ── 3. the unmeasured tier is ordered by price, and says so ──────────────────────────────────────
 unmeasured = [c for c in ranked if c["usd_per_proof"] is None]

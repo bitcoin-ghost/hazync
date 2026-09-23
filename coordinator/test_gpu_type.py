@@ -15,7 +15,7 @@ Worse, nothing in a run's evidence named the composition. `pods.txt` had it; no 
 A mixed fleet and a uniform one were indistinguishable in every log, so 142 s of spread got published
 as a geography effect when it was card type all along.
 
-⏰ SUPERSEDED IN PART BY found on the 968,243/968,255 tip run, 2026-09-23. The original fix — pin the default to 4090 and refuse every other
+⏰ SUPERSEDED IN PART BY hazync#493. The original fix — pin the default to 4090 and refuse every other
 type — read the lesson too broadly and became an outage on 2026-09-23 when 4090 stock ran short: five
 attempts, 0-2 pods, no run. The lesson was never "only rent 4090s", it was "do not MIX, and do not
 rank on price per hour". The default is now `auto`, which honours both by ranking the whole live

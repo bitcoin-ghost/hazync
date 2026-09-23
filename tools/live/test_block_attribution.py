@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A block is done when it is done, and its work belongs to it (found on the 968,243/968,255 tip run, 2026-09-23, #499).
+"""A block is done when it is done, and its work belongs to it (hazync#498, #499).
 
 ⛔ WHY THIS EXISTS. Two defects with one shape: the frame's per-block figures rest entirely on the
 `block` column of the telemetry, and that column is sparse.
@@ -62,7 +62,7 @@ if CONTROL:
     _orig_blocks = collect.blocks_from_cards
 
     def drop_unnamed(rundir, now, cursors=None):
-        """CONTROL (the empty-height defect, the 968,243/968,255 tip run, 2026-09-23): a row with no height is dropped instead of inheriting the last one."""
+        """CONTROL (#498): a row with no height is dropped instead of inheriting the last one."""
         cards = _orig_read_streams(rundir, now, cursors)
         for c in cards:
             bb = c.get("block_s") or {}
@@ -83,7 +83,7 @@ if CONTROL:
         return cards
 
     def silence_only(cards, state, now, verified=()):
-        """CONTROL (the silence defect, the 968,243/968,255 tip run, 2026-09-23): silence alone marks a block done, whatever the fleet is doing."""
+        """CONTROL (#499): silence alone marks a block done, whatever the fleet is doing."""
         out = _orig_blocks(cards, state, now, verified)
         for b in out:
             for c in cards:

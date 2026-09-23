@@ -189,7 +189,7 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
 # more than its wall-clock.
 DEFAULT_GPU_TYPES = ("NVIDIA GeForce RTX 4090",)
 
-# ⭐ AUTO: RANK THE WHOLE LIVE CATALOGUE, PREFER ONE TYPE, LEARN FROM EVERY RUN (found on the 968,243/968,255 tip run, 2026-09-23).
+# ⭐ AUTO: RANK THE WHOLE LIVE CATALOGUE, PREFER ONE TYPE, LEARN FROM EVERY RUN (hazync#493).
 #
 # The lesson of #448 was never "only ever rent a 4090". It was two narrower things: a MIXED fleet is
 # slower and dearer than a uniform one, and PRICE PER HOUR IS THE WRONG OBJECTIVE. Hard-coding one
@@ -228,7 +228,7 @@ def measured_cost_per_proof(path=ECONOMICS):
     finding that a mixture's cost cannot be attributed to either card in it. Charging that row's
     $0.262 to the A40 would be inventing the very number this refuses to invent.
 
-    ⛔ AND ONE BLOCK ONLY (found on the 968,243/968,255 tip run, 2026-09-23). Cost per proof is not a property of the card, it is a
+    ⛔ AND ONE BLOCK ONLY (hazync#497). Cost per proof is not a property of the card, it is a
     property of the card AND the block: block 968,243 is 10,666 segments and cost $7.43 on 16x A40,
     while the 741,000 rows cost $0.243 on 3x RTX 4090. Ranking those against each other says the
     A40 is 30x worse, when almost all of that gap is BLOCK SIZE. That is the same error as
@@ -518,7 +518,7 @@ def main():
     ap.add_argument("--gpu-type", default="auto",
                     help="'auto' (default) ranks every type RunPod has in SECURE stock by MEASURED "
                          "cost per proof, then by price for cards nobody has measured, and fills the "
-                         "fleet from ONE type wherever capacity allows (found on the 968,243/968,255 tip run, 2026-09-23). Or pass a "
+                         "fleet from ONE type wherever capacity allows (hazync#493). Or pass a "
                          "comma-separated preference list to pin the choice.")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
@@ -695,7 +695,7 @@ def main():
             if name in existing:
                 raise SystemExit(f"refusing: {name} already exists")
 
-        # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (found on the 968,243/968,255 tip run, 2026-09-23).
+        # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (hazync#493).
         #
         # deploy_listening walks the type list PER POD, so pod 1 took a 4090, pod 2 found none left
         # and took an A40, and the fleet was mixed before anyone chose to mix it. That is the exact
@@ -1036,7 +1036,7 @@ def main():
         # the requested count would either raise or silently prove a chunk count the fleet cannot
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
-        # ⛔ DO NOT NAME A BLOCK THE RUN IS NOT PROVING (found on the 968,243/968,255 tip run, 2026-09-23). `a.block` is only assigned from
+        # ⛔ DO NOT NAME A BLOCK THE RUN IS NOT PROVING (hazync#496). `a.block` is only assigned from
         # a claim on the `a.claim and not a.session` path, so a SESSION run never updates it and this
         # line printed the argparse default. Captured on the 968,243 run, one second apart:
         #

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A block that has not finished has no finish time (found on the 968,243/968,255 tip run, 2026-09-23).
+"""A block that has not finished has no finish time (hazync#494).
 
 ⛔ WHY THIS EXISTS. The renderer animates a finished block travelling from the join tree to its cell
 in the block map, for PULSE_S seconds after it finished. It fires on

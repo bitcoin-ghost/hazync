@@ -94,7 +94,7 @@ class StreamCursor:
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
-        # ⚠ SURVIVES THE TICK. The height carried forward (found on the 968,243/968,255 tip run, 2026-09-23) must persist between reads,
+        # ⚠ SURVIVES THE TICK. The height carried forward (hazync#498) must persist between reads,
         # or it resets every second and carries nothing.
         self.last_h = ""
 
@@ -225,7 +225,7 @@ def read_streams(rundir, now, cursors=None):
                     peak = max(peak, min(1.0, n_ / tot_))
 
             h = f[10].strip()
-            # ⛔ CARRY THE HEIGHT FORWARD WHILE THE CARD IS WORKING (found on the 968,243/968,255 tip run, 2026-09-23). tip-stream.sh reads
+            # ⛔ CARRY THE HEIGHT FORWARD WHILE THE CARD IS WORKING (hazync#498). tip-stream.sh reads
             # the height off the `RANGE [n..n]` banner within `tail -c 40000` of the prover log. As
             # the log grows that banner scrolls OUT of the 40 KB window, so the field goes empty
             # part-way through a block and every later row is dropped here -- silently, because a row
@@ -385,7 +385,7 @@ def blocks_from_cards(cards, state, now, verified=()):
         n_cards = max(1, len(a["cards"]))
         # ⛔ COMPUTE `done` FIRST, BECAUSE `done_at` IS ONLY MEANINGFUL IF IT IS TRUE.
         #
-        # ⛔ SILENCE IS NOT COMPLETION WHILE CARDS ARE STILL WORKING (found on the 968,243/968,255 tip run, 2026-09-23). The 5-second rule
+        # ⛔ SILENCE IS NOT COMPLETION WHILE CARDS ARE STILL WORKING (hazync#499). The 5-second rule
         # exists for the END of a run: the collector stops before its own grace period elapses, so
         # the last block would never count. But it also fired MID-BLOCK, during the handover from
         # proving to assembling, when the coordinator briefly stops naming the height.
@@ -414,7 +414,7 @@ def blocks_from_cards(cards, state, now, verified=()):
                     # 968,243 while proving: status=None, done_at=now-1.1s, refreshed every tick.
                     # A block that has not finished has no finish time, and must report none.
                     "done_at": a["t1"] if done_flag else None,
-                    # ⛔ WALL TIME, FROM TIMESTAMPS (found on the 968,243/968,255 tip run, 2026-09-23). The chain comparison must not be
+                    # ⛔ WALL TIME, FROM TIMESTAMPS (hazync#495). The chain comparison must not be
                     # derived by COUNTING SAMPLES: `prove` is incremented once per row, which equals
                     # seconds only if the capture runs at exactly 1 Hz. It does not. The driver
                     # started the feed twice on this run ("streaming 18 pods", then "streaming 16

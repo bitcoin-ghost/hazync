@@ -293,6 +293,24 @@ class DashboardFeed:
         ⛔ Clearing t0 here is what makes `mark_t0` write-once safe. Without it a new session would
         inherit the last one's t0 and count its blocks as this session's.
         """
+        # ⛔ STOP WHATEVER IS ALREADY STREAMING FIRST (hazync#500). `start` never did, and a run
+        # calls it more
+        # than once -- once when the fleet is rented, again after the gates pick the final cards
+        # ("feed rewritten for N cards"). Both streamer sets then ran against the SAME csv files for
+        # the rest of the run, each appending its own 1 Hz line.
+        #
+        # Measured on the 968,243 run: the log shows `streaming 18 pods` then `streaming 16 pods`,
+        # and the coordinator's capture held 5,356 rows across 2,860 s -- 1.87 rows/sec, not 1.
+        # Nothing on the frame said so. It also silently doubles capture growth, which on a 24 h run
+        # is the thing StreamCursor exists to keep ahead of.
+        #
+        # ⚠ Anything that counts rows as seconds is wrong by that factor, which is exactly how the
+        # behind-the-chain figure came to report 4,845s for a block that had run 2,560s.
+        try:
+            self.stop()
+        except Exception:
+            pass                      # nothing was streaming yet, which is the normal first call
+
         n = write_feed(self.rundir, cards)
         try:
             os.remove(os.path.join(self.rundir, "t0"))

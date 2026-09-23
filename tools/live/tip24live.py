@@ -224,7 +224,7 @@ def draw_live(snap, fo):
     PERIOD = 600.0
     eta = max(0.0, PERIOD - el) if cur else 0.0
     # how far ahead of the chain the fleet actually is, from MEASURED block totals (not a claim)
-    # ⛔ FINISHED BLOCKS ONLY, AND BY WALL CLOCK (found on the 968,243/968,255 tip run, 2026-09-23). This summed prove_s + fold_s over
+    # ⛔ FINISHED BLOCKS ONLY, AND BY WALL CLOCK (hazync#495). This summed prove_s + fold_s over
     # every block INCLUDING the one still being proved, so the headline raced downwards all run: a
     # partial total was presented as a block's cost. Captured live on 968,243 as it proved:
     # 0.2x -> 0.1x, "3156s per block" -> "4845s per block", while nothing had finished at all.
