@@ -30,6 +30,13 @@ check("_mine=" in src and "ps -o ppid=" in src,
       "--stop walks its own parent chain and excludes those PIDs")
 check("pgrep -c" not in src.split("--stop")[-1][:2000],
       "and counts with grep -c on a string, not `pgrep -c` (which prints 0 AND exits 1)")
+# ⛔ NO GREEDY WILDCARD. `hazync-.*-loop` matches any command line with "hazync-" somewhere and
+# "-loop" later. It caught an unrelated `collect.py --rundir ~/hazync-flagship-…/ --loop` through
+# its PATH and its flag — a phantom in a survivor list, from a pattern nobody meant to be that wide.
+check("hazync-.*-loop" not in src,
+      "the survivor pattern names the loops instead of wildcarding them")
+check("hazync-(worker|fold|spine)-loop" in src,
+      "and names worker/fold/spine explicitly, matching the kill list above it")
 
 # ── 2. ⛔ THE CENTRAL CASE, executed: an ANCESTOR whose argv mentions the pattern is excluded ─────
 # ⚠ Do NOT assert "zero survivors". Other processes on the box legitimately match this (loose)

@@ -115,7 +115,14 @@ if [ "$STOP" = "--stop" ]; then
         [ -n "$_p" ] || break
         _mine="$_mine $_p "
     done
-    _survivors=$(pgrep -f 'hazync-worker|hazync-.*-loop|prove-range-bridge|extend-spine' 2>/dev/null \
+    # ⛔ NAME THE LOOPS, DO NOT WILDCARD THEM. This counted a `hazync-<anything>-loop` wildcard,
+    # which matches any
+    # command line with "hazync-" somewhere and "-loop" later -- it matched an unrelated
+    # `collect.py --rundir ~/hazync-flagship-20260923T190410Z/ --loop` purely through its PATH and
+    # its flag. Harmless on a worker pod, where nothing else has that shape, and exactly the kind of
+    # accident that puts a phantom in a survivor list. The kill loop above already names each
+    # process; the count now uses the same names.
+    _survivors=$(pgrep -f 'hazync-(worker|fold|spine)-loop|hazync-worker (run|fold|spine)|prove-range-bridge|extend-spine' 2>/dev/null \
         | while read -r _pid; do case "$_mine" in *" $_pid "*) ;; *) echo "$_pid" ;; esac; done)
     # ⚠ grep -c on a possibly-empty string, not `pgrep -c`, which prints 0 AND exits 1.
     _left=$(printf '%s' "$_survivors" | grep -c . || true)
