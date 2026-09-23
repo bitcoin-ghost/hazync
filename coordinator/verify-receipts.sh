@@ -51,6 +51,32 @@ if [ -z "$BIN" ]; then
     exit 1
 fi
 
+# ⛔⛔ THE BINARY MUST CARRY THE CANONICAL METHOD_ID. `receipt-digest` verifies against whatever
+# image id is baked into the binary it is run from, and this project ships TWO binaries on purpose:
+# hazync-coord carries both `hazync-host` (37987b85…, canonical) and `hazync-host-bridge`
+# (fb4d7352…, the bridge's own guest). Verifying a tip receipt with the bridge binary checks it
+# against the wrong image entirely -- and a script that picked by filename order would do exactly
+# that the day the order changed. Refuse rather than report a verdict that means nothing.
+EXPECT="${HAZYNC_METHOD_ID:-37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd}"
+if [ -n "$HOST" ]; then
+    GOT=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" "$BIN method-id" 2>/dev/null \
+          | awk '/METHOD_ID/{print $2}' | head -1)
+else
+    GOT=$("$BIN" method-id 2>/dev/null | awk '/METHOD_ID/{print $2}' | head -1)
+fi
+if [ -z "$GOT" ]; then
+    echo "⛔ $BIN would not report a METHOD_ID — refusing to verify against an unknown image" >&2
+    exit 1
+fi
+if [ "$GOT" != "$EXPECT" ]; then
+    echo "⛔ WRONG IMAGE. $BIN carries METHOD_ID $GOT" >&2
+    echo "   expected $EXPECT" >&2
+    echo "   A receipt verified against the wrong image id proves nothing. Pass --bin explicitly," >&2
+    echo "   or set HAZYNC_METHOD_ID if the canonical id has deliberately moved." >&2
+    exit 1
+fi
+echo "[verify] image id ${GOT:0:16}… matches canonical"
+
 WHERE="${HOST:-$(hostname -s)}"
 OUT="$RUNDIR/verification.json"
 echo "[verify] ${#receipts[@]} receipt(s), binary $BIN on $WHERE"
