@@ -412,10 +412,15 @@ class FetchFleet:
     run that has nothing to swap in.
     """
 
-    def __init__(self, total, keep, *, grace_s=120):
+    def __init__(self, total, keep, *, grace_s=120, never_abandon=()):
         self.total, self.keep, self.grace_s = total, keep, grace_s
         self.done, self.dropped, self.enough_at = 0, 0, None
         self.reasons = {}
+        # ⛔ CARDS THAT ARE NOT FUNGIBLE. A worker is replaced by a spare; the AGGREGATE is not --
+        # every worker's reachability was tested against it, so dropping it ends the run. This gate
+        # did exactly that on its first live outing (2026-09-24), cutting the aggregate loose for
+        # needing two more minutes and killing a healthy 30-card fleet 34 seconds in.
+        self.never_abandon = set(never_abandon)
         self._lk = threading.Lock()
 
     def completed(self, cid):
@@ -436,6 +441,10 @@ class FetchFleet:
     def abandon(self, cid, why):
         """Take one card out of the fleet, if the fleet can still afford to lose it."""
         with self._lk:
+            # ⛔ NO SURPLUS BUYS THE AGGREGATE. This is an identity, not a threshold: there is no
+            # fleet size at which losing the one card the run cannot promote is the cheap option.
+            if cid in self.never_abandon:
+                return False
             # ⛔ COUNT THE SURVIVORS, NOT THE CASUALTIES. `total - dropped - 1` is what would be
             # left if this card went; comparing `dropped` against the spare count instead would be
             # wrong the moment the run rented fewer pods than it asked for, which is the normal
@@ -1111,7 +1120,16 @@ def main():
         # ⛔ THE GATE IS FLEET-RELATIVE NOW (hazync#503). One card at 93 KB/s held 17 ready cards in
         # this gate for 18 minutes and cost ~$5 of a one-hour run. `a.cards` is the floor, so a
         # laggard is cut loose only while the survivors would still be enough to run.
-        fleet_fetch = FetchFleet(len(order), a.cards)
+        # ⛔⛔ AND THE AGGREGATE IS NEVER CUT LOOSE FOR BEING SLOW. Measured 2026-09-24 02:03, on this
+        # gate's FIRST live outing: it dropped hz-smoke-1 for needing "~2 more min at 2424 KB/s" --
+        # and hz-smoke-1 was the aggregate. Every worker's reachability had been tested against it,
+        # so the surplus check below could not promote another card and killed the run 34 seconds
+        # into a 30-card fleet.
+        #
+        # ⚠ A worker is fungible and a spare replaces it; the aggregate is the one card the run
+        # cannot swap. Waiting two minutes for it is obviously cheaper than losing the fleet, and no
+        # amount of surplus changes that -- which is why this is an identity, not a threshold.
+        fleet_fetch = FetchFleet(len(order), a.cards, never_abandon={agg.cid})
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want, fleet=fleet_fetch)), order))
         for c, ok, n in got:
