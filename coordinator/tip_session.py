@@ -393,4 +393,21 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
                 if not st["ok"]:
                     emit(f"⚠ telemetry gaps: stale={st['stale']} never-seen={st['never']}")
 
+    # ⛔ SAVE ON THE WAY OUT, ONCE, FOR EVERY EXIT. The spend accrued at the top of the final
+    # iteration covers the block that just finished, and nothing after it wrote state -- so the
+    # figure on disk was permanently one block behind. Measured 2026-09-24: session.json said $4.54
+    # where RunPod billed $11.03, because the last block spent 1,910 s inside one prove() call and
+    # its cost was accrued and then dropped on the way out.
+    #
+    # ⚠ THE FILE IS NOT A REPORT, IT IS THE BUDGET. A resumed session reads spend_usd from it and
+    # checks --budget-usd against that number, so the gap refills a budget that was already spent.
+    #
+    # ⛔ AFTER THE LOOP, NOT AT THE break. There are THREE breaks in it -- the planner's stop, the
+    # exhausted-idle guard and the fleet-fault guard -- and my first attempt at this fixed only the
+    # first one. The test exercised a different exit and still saw $0.00 on disk, which is the only
+    # reason I found out.
+    try:
+        save(path, state)
+    except Exception:
+        pass                      # accounting must never be the thing that raises at the end
     return summary(state, now())

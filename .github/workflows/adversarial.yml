@@ -215,6 +215,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_collector_single_owner.py --control
+      - name: The spend a session stops on is the spend it writes down (hazync#513)
+        run: cd coordinator && python3 test_spend_persisted.py
+      - name: Spend POSITIVE CONTROL (post-loop save removed — the budget must refill itself)
+        run: |
+          cd coordinator
+          python3 test_spend_persisted.py --control
       - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)

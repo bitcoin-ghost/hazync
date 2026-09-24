@@ -1,0 +1,206 @@
+{
+ "attempts": {
+  "124622": 1,
+  "124643": 1,
+  "124650": 1,
+  "124652": 1,
+  "124654": 1,
+  "124656": 1,
+  "124660": 1,
+  "124662": 1,
+  "124665": 1,
+  "124667": 1,
+  "124669": 1,
+  "124672": 1,
+  "124673": 1,
+  "968339": 1,
+  "968340": 1
+ },
+ "blocks": {
+  "124622": {
+   "at": 1790215478.6971216,
+   "cards": 15,
+   "digest": "9378a18f587b1086799edd7ec06ed5c28e8b6df3fc8a3304526b0328477c9b18",
+   "events": [
+    "serving block 124622 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 44.3
+  },
+  "124643": {
+   "at": 1790215533.7244802,
+   "cards": 15,
+   "digest": "50db0174a793066671c8d495dadb9432071179f3e2da9e4faee3eefbc460c455",
+   "events": [
+    "serving block 124643 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 45.9
+  },
+  "124650": {
+   "at": 1790215573.624504,
+   "cards": 15,
+   "digest": "d331d71c77433905e874be87a5df8a69190d8a9095549d8da7d7ab273948da14",
+   "events": [
+    "serving block 124650 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 35.3
+  },
+  "124652": {
+   "at": 1790215616.543839,
+   "cards": 15,
+   "digest": "ca67076e531c9fa76646ca720137f4ae4803f1509ae0c307bc0b7f409e5c32c8",
+   "events": [
+    "serving block 124652 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 36.0
+  },
+  "124654": {
+   "at": 1790215665.4707704,
+   "cards": 15,
+   "digest": "c032229a7f3d5ca9699f7d5e6c980425bdaddc1e947d64bb0e1ee5a2ab6fb50d",
+   "events": [
+    "serving block 124654 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 38.1
+  },
+  "124656": {
+   "at": 1790215705.5865333,
+   "cards": 15,
+   "digest": "7aa976e2f4d66642219057ca2f66c2fc927561820166f20ab35b849dccfd9d2f",
+   "events": [
+    "serving block 124656 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 35.8
+  },
+  "124660": {
+   "at": 1790215751.63675,
+   "cards": 15,
+   "digest": "4ac8623f2b9cd35debfed958d65670b5c3ba5c225b03d08c455274b371811db9",
+   "events": [
+    "serving block 124660 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 38.2
+  },
+  "124662": {
+   "at": 1790215800.0953748,
+   "cards": 15,
+   "digest": "0c518da5116c99fa181cfe7a61453ee87f640e4d3cf9677cc34aa212aa454740",
+   "events": [
+    "serving block 124662 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 36.4
+  },
+  "124665": {
+   "at": 1790215844.5790584,
+   "cards": 15,
+   "digest": "104e17a1cdd7e8319a6ad4acb4b4fe289a5436b7e2f18549b995221b7ca29e5c",
+   "events": [
+    "serving block 124665 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 37.8
+  },
+  "124667": {
+   "at": 1790215886.5277522,
+   "cards": 15,
+   "digest": "6bfe95b3a3dac51817ff002dd2997fe25f0886f88e6b2167290ef668148762a0",
+   "events": [
+    "serving block 124667 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 36.0
+  },
+  "124669": {
+   "at": 1790215940.677692,
+   "cards": 15,
+   "digest": "43eabf0bafe14e8e4ad5eb02bf9326ad6b655e5869a4c79d0c32ccf6db381a33",
+   "events": [
+    "serving block 124669 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 42.4
+  },
+  "124672": {
+   "at": 1790215989.5288982,
+   "cards": 15,
+   "digest": "b047d9bc4ba9281fb58b4d015d311e51937ad936217e3cc9ea6a78a0d3fae1c3",
+   "events": [
+    "serving block 124672 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 37.9
+  },
+  "124673": {
+   "at": 1790216041.6362925,
+   "cards": 15,
+   "digest": "731012cba5754ca3b199eb030f69fe5652154401d5249a2298a84087370f75ac",
+   "events": [
+    "serving block 124673 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 41.7
+  },
+  "968339": {
+   "at": 1790216897.3541281,
+   "cards": 15,
+   "digest": "ac4796dc5d8859ed7d51ec49a1475dcfa9ef5245b1d0cc99db1c3be9ccbf6c85",
+   "events": [
+    "serving block 968339 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 783.1
+  },
+  "968340": {
+   "at": 1790218814.9380522,
+   "cards": 15,
+   "digest": "1085db211c95e4eb47ec35286e4460cd6451ada1bc4b30b718213820b7c056e5",
+   "events": [
+    "serving block 968340 as a range from its bundle",
+    "armed 15 card(s) to dial the aggregate"
+   ],
+   "ok": true,
+   "wall_s": 1910.0
+  }
+ },
+ "duration_s": 3600.0,
+ "fleet": [
+  "1xe2qwcbflj3yn",
+  "4jjkr7gh4g2uei",
+  "4wwlwte8sybz9h",
+  "5wtr4xswma7u77",
+  "7tndl9375o6cfz",
+  "8x4f6rwi186vji",
+  "bhcqiydll4dvxn",
+  "cf729udt21lplf",
+  "dybf7m33i919go",
+  "hinu4nwp9x8szf",
+  "qoptpk7y1huxjd",
+  "qp229fx5w5rm8g",
+  "vfb35ghp8fpx6d",
+  "w8jko5uwssvx5y",
+  "xz3w9wu0l3arg6"
+ ],
+ "spend_usd": 4.5387,
+ "started_at": 1790215424.1097353
+}

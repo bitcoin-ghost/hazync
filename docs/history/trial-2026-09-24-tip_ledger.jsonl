@@ -1,0 +1,6 @@
+{"event": "appeared", "t": 1790215426.191, "utc": "2026-09-24T02:03:46Z", "height": 968338}
+{"event": "appeared", "t": 1790216084.276, "utc": "2026-09-24T02:14:44Z", "height": 968339}
+{"event": "accepted", "t": 1790216897.354, "utc": "2026-09-24T02:28:17Z", "height": 968339, "appeared_at": 1790216084.276, "lag_s": 813.1, "chain_tip_now": 968340, "blocks_behind": 1}
+{"event": "appeared", "t": 1790216898.279, "utc": "2026-09-24T02:28:18Z", "height": 968340}
+{"event": "accepted", "t": 1790218814.937, "utc": "2026-09-24T03:00:14Z", "height": 968340, "appeared_at": 1790216898.279, "lag_s": 1916.7, "chain_tip_now": 968343, "blocks_behind": 3}
+{"event": "appeared", "t": 1790218815.949, "utc": "2026-09-24T03:00:15Z", "height": 968343}
