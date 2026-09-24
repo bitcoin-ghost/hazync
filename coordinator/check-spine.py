@@ -181,6 +181,17 @@ def main(argv=None):
     ap.add_argument("--bitcoin-cli", default=os.environ.get("BITCOIN_CLI", "bitcoin-cli"))
     ap.add_argument("--bitcoin-datadir", default=os.environ.get("HAZYNC_BITCOIN_DATADIR"))
     ap.add_argument("--stall-secs", type=int, default=int(os.environ.get("SPINE_STALL_SECS", "7200")))
+    # ⛔ FOLDING IS NOT NOTHING HAPPENING (hazync#515). A spine that is behind while folds keep arriving
+    # is an operator deliberately folding first and absorbing later -- which is the CHEAP order, because
+    # `extend-spine` costs the same whatever the chunk width, so a deep tree buys far more per step.
+    # Measured 2026-09-24: absorbing into the collapsed backlog ran at 11.7 blocks/s (chunks up to 1,024),
+    # and absorbing near the fold frontier ran at 0.34 blocks/s (chunks of 2 and 4). Same fleet, 34x apart.
+    # Calling the first state an INTEGRITY FAILURE fired 75 alerts in a row on a healthy spine.
+    ap.add_argument("--fold-idle-secs", type=int, default=int(os.environ.get("SPINE_FOLD_IDLE_SECS", "7200")),
+                    help="if no new folded range has arrived in this long either, the spine really is stalled")
+    # ⚠ A HARD CEILING, so "folding is live" cannot excuse an unbounded backlog for ever.
+    ap.add_argument("--behind-max-secs", type=int, default=int(os.environ.get("SPINE_BEHIND_MAX_SECS", "259200")),
+                    help="fail once the spine is this far behind even while folding continues (default 72 h)")
     a = ap.parse_args(argv)
     rep = Report()
     remote = bool(a.url)
@@ -286,12 +297,38 @@ def main(argv=None):
         except sqlite3.Error as e:
             rep.cannot_check(f"whether proofs are waiting above the spine ({a.db}): {e}")
         else:
-            if waiting:
-                rep.fail(f"the spine has not advanced for {age / 3600:.1f} h, while proof {waiting[0]} (starting at "
-                         f"block {hi + 1:,}) is waiting to be absorbed")
-            else:
+            if not waiting:
                 rep.ok(f"the spine last advanced {age / 3600:.1f} h ago, but nothing proven starts at block "
                        f"{hi + 1:,} yet")
+            else:
+                # ⛔ IS ANYTHING FEEDING IT? A spine that is behind while folds keep arriving is the
+                # fold-then-absorb workflow, not a fault. A spine that is behind while NOTHING has
+                # arrived either is the failure this check was written for -- and the two look
+                # identical if you only ask whether the spine moved.
+                fold_age = None
+                try:
+                    c = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True, timeout=30)
+                    row = c.execute("SELECT MAX(ts) FROM vranges").fetchone()
+                    c.close()
+                    if row and row[0]:
+                        fold_age = time.time() - float(row[0])
+                except sqlite3.Error:
+                    fold_age = None            # ⚠ unknown is not "folding" -- fall through to the fail
+                if fold_age is not None and fold_age <= a.fold_idle_secs and age <= a.behind_max_secs:
+                    rep.ok(f"the spine is {age / 3600:.1f} h behind (proof {waiting[0]} waits at block "
+                           f"{hi + 1:,}), but folding is LIVE — newest range {fold_age / 60:.0f} min ago. "
+                           f"Absorbing later is cheaper: a step costs the same at any width, so a "
+                           f"collapsed tree buys more per step")
+                elif fold_age is not None and fold_age <= a.fold_idle_secs:
+                    rep.fail(f"the spine is {age / 3600:.1f} h behind — past the {a.behind_max_secs / 3600:.0f} h "
+                             f"ceiling — while proof {waiting[0]} waits at block {hi + 1:,}. Folding is still "
+                             f"live, so nothing is broken; the backlog just needs a spine pass")
+                else:
+                    seen = "no folded range has EVER been recorded" if fold_age is None \
+                        else f"the newest folded range is {fold_age / 3600:.1f} h old"
+                    rep.fail(f"the spine has not advanced for {age / 3600:.1f} h, while proof {waiting[0]} "
+                             f"(starting at block {hi + 1:,}) is waiting to be absorbed — and {seen}, so "
+                             f"nothing is feeding it either")
     return rep.finish()
 
 
