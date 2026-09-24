@@ -158,6 +158,30 @@ fleet4 = tip_smoke.FetchFleet(16, 15)
 check(fleet4.abandon("a", "slow") is True, "one spare allows exactly one card to be dropped")
 check(fleet4.abandon("b", "slow") is False, "and the second is refused — survivors, not casualties")
 
+# ── 3b. ⛔⛔ THE AGGREGATE IS NEVER CUT LOOSE, AT ANY FLEET SIZE ─────────────────────────────────
+# Measured on this gate's FIRST live outing, 2026-09-24 02:03: it dropped hz-smoke-1 for needing
+# "~2 more min at 2424 KB/s" — and hz-smoke-1 was the aggregate. Every worker's reachability had
+# been tested against it, so nothing could be promoted, and a healthy 30-card fleet died 34 s in:
+#
+#   the aggregate hz-smoke-1 failed a pre-clock gate — every worker was checked against it,
+#   so the run cannot simply promote another card
+#
+# ⚠ A worker is fungible; the aggregate is not. That makes this an IDENTITY, not a threshold —
+# there is no surplus large enough to make losing it the cheap option, so it is tested with a
+# fleet that has spares to burn.
+rich = tip_smoke.FetchFleet(30, 15, never_abandon={"hz-smoke-1"})
+check(rich.abandon("hz-smoke-1", "needs ~2 more min") is False,
+      "⛔ the aggregate is refused even with 15 spares in hand")
+check(rich.abandon("hz-smoke-9", "needs ~2 more min") is True,
+      "and an ordinary worker on the same fleet is still dropped")
+check(rich.dropped == 1,
+      f"the refused aggregate did not consume a drop ({rich.dropped}, not 2)")
+
+# and the driver actually passes it — the guard is useless if the caller never names the aggregate
+_ts = open(os.path.join(HERE, "tip_smoke.py")).read()
+check("FetchFleet(len(order), a.cards, never_abandon={agg.cid})" in _ts,
+      "the driver names the aggregate when it builds the gate's fleet view")
+
 # ── 4. the clock starts when the fleet could RUN, not when the first card lands ──────────────────
 fleet5 = tip_smoke.FetchFleet(18, 15)
 for i in range(14):
