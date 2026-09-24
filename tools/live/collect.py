@@ -619,7 +619,41 @@ def main():
     ap.add_argument("--cards", type=int, default=30, help="demo only: fleet size")
     ap.add_argument("--replay", action="store_true",
                     help="anchor 'now' to the newest sample, so a finished capture renders as live")
+    ap.add_argument("--steal", action="store_true",
+                    help="take over <out> from a collector that still holds it")
     a = ap.parse_args()
+
+    # ⛔ ONE COLLECTOR PER OUTPUT FILE. A unique temp name (below) stops two collectors KILLING each
+    # other; it does not stop them both writing the same snapshot, which is worse -- the renderer
+    # then alternates between two runs and the page shows a plausible mixture of both. Measured
+    # 2026-09-24: a collector from the previous night's run owned snapshot.json for eight hours and
+    # published its blocks throughout the next session. Nothing reported a problem, because from the
+    # outside the page was updating once a second, exactly as it should.
+    #
+    # ⚠ The lock records a PID and is checked for LIVENESS, so a collector killed with -9 (which
+    # leaves no chance to clean up) does not wedge the next run for ever.
+    lock = os.path.abspath(a.out) + ".owner"
+    if not a.once:
+        held = None
+        try:
+            held = int(open(lock).read().strip())
+        except (OSError, ValueError):
+            held = None
+        if held and held != os.getpid():
+            alive = os.path.exists(f"/proc/{held}")
+            if alive and not a.steal:
+                raise SystemExit(
+                    f"⛔ pid {held} is already collecting into {a.out}.\n"
+                    f"   Two collectors on one snapshot means the page shows a MIXTURE of two runs.\n"
+                    f"   Stop it (kill {held}), or pass --steal to take over.")
+            if alive:
+                print(f"[collect] --steal: taking {a.out} from pid {held}", flush=True)
+        try:
+            with open(lock, "w") as fh:
+                fh.write(str(os.getpid()))
+        except OSError as exc:
+            print(f"[collect] ⚠ could not write {lock}: {exc}", flush=True)
+
     state = {}
     # One cursor per card, carried across ticks. A fresh cursor reads the file whole, so --once and
     # the first tick of --loop are unchanged; every later tick reads only what has been appended.
@@ -702,10 +736,27 @@ def main():
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}
-        tmp = a.out + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(snap, fh, separators=(",", ":"))
-        os.replace(tmp, a.out)          # atomic: the renderer never sees a half-written file
+        # ⛔ THE TEMP NAME MUST BE UNIQUE PER COLLECTOR, NOT A FIXED SIBLING. `a.out + ".tmp"` is
+        # atomic against the RENDERER and lethal against another COLLECTOR: two of them share the
+        # path, each writes it, and whichever renames first deletes the other's file. The loser dies
+        # on the rename it was about to do:
+        #
+        #   FileNotFoundError: [Errno 2] .../snapshot.json.tmp -> .../snapshot.json
+        #
+        # Measured 2026-09-24 03:03:20. A collector left running from the previous night's flagship
+        # run killed the new one 72 SECONDS after it started, then went on publishing 8-hour-old
+        # blocks to hazync.org/live for the whole of the next session. The live page was not stale
+        # in the sense of "not updating" -- it updated every second, with the wrong run.
+        tmp = f"{a.out}.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(snap, fh, separators=(",", ":"))
+            os.replace(tmp, a.out)      # atomic: the renderer never sees a half-written file
+        finally:
+            # ⚠ A crash between write and rename must not leave a per-pid file behind for ever.
+            if os.path.exists(tmp):
+                try: os.unlink(tmp)
+                except OSError: pass
         print(f"[{time.strftime('%H:%M:%S')}] {len(up)}/{len(cards)} up · "
               f"{len(blocks)} blocks · ${rate:.2f}/hr · spent ${spend_total:.4f} · "
               f"chain {'ok' if chain.get('ok') else chain.get('error')}",
