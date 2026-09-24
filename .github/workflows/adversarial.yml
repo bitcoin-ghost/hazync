@@ -221,6 +221,18 @@ jobs:
         run: |
           cd coordinator
           python3 test_spend_persisted.py --control
+      - name: An idle says what it is waiting for, not what it never asked (hazync#505)
+        run: cd coordinator && python3 test_idle_reason.py
+      - name: Idle-reason POSITIVE CONTROL (one fixed sentence — a chain wait must report the board)
+        run: |
+          cd coordinator
+          python3 test_idle_reason.py --control
+      - name: A reachability failure is reported by network block, before the clock (hazync#508)
+        run: cd coordinator && python3 test_reachability_report.py
+      - name: Reachability-report POSITIVE CONTROL (grouping removed — the pattern must vanish)
+        run: |
+          cd coordinator
+          python3 test_reachability_report.py --control
       - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)
