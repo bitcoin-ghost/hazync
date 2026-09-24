@@ -209,6 +209,12 @@ jobs:
         run: cd coordinator && python3 test_stop_self_match.py
       - name: Stop-self-match POSITIVE CONTROL
         run: cd coordinator && python3 test_stop_self_match.py --control
+      - name: One collector owns the snapshot; a stale one cannot keep the live page (hazync#510)
+        run: cd coordinator && python3 test_collector_single_owner.py
+      - name: Collector POSITIVE CONTROL (the shared .tmp name — one collector must kill the other)
+        run: |
+          cd coordinator
+          python3 test_collector_single_owner.py --control
       - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)
