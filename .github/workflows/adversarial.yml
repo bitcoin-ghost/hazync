@@ -233,6 +233,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_reachability_report.py --control
+      - name: Integrity checks describe the phase the system is in (hazync#515)
+        run: cd coordinator && python3 test_check_phase_assumptions.py
+      - name: Phase POSITIVE CONTROL (old rules — a healthy system must alert on both checks)
+        run: |
+          cd coordinator
+          python3 test_check_phase_assumptions.py --control
       - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)

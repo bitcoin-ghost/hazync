@@ -45,13 +45,40 @@ say() { echo "[ckpt] $*"; }
 
 [ -s "$DIR/state.bin" ] || { say "cannot check: no $DIR/state.bin"; exit 2; }
 
-# Height from the journal. See the note above: printed AFTER the save, so it never overstates what is on disk.
+# ⛔ THE SIDECAR FIRST, THE JOURNAL ONLY AS A FALLBACK (hazync#515).
+#
+# The journal was the only source, read from the last 200 entries, and AT THE TIP THAT CANNOT WORK.
+# `checkpoint @ N` is printed on the WALK path, every HAZYNC_BRIDGE_CKPT (2,000) blocks. At the tip the
+# chain produces ~6 blocks/hour, so that line appears roughly ONCE A FORTNIGHT, while 200 entries is
+# about 17 hours. Measured 2026-09-24: newest bundle 968,376, last logged `checkpoint @` 967,457 from
+# the previous day -- so the check exited 2 and pushed a 🚨 every run, for ever, on a bridge that was
+# perfectly healthy and exactly at the tip.
+#
+# ⚠ THE BRIDGE IS CHECKPOINTING FAR MORE OFTEN THAN IT SAYS. main.rs:4343 saves state on every
+# catch-up cycle (`if done > last_ckpt`), not on the 2,000-block schedule -- the schedule is the walk
+# path (:4323). So the checkpoint was fresh the whole time; only the LOG LINE was rare.
+#
+# ⛔ AND state.head IS SAFE FOR THIS, WHICH IS THE ONLY THING THAT MATTERS HERE. The rung's name decides
+# what prune_bundles.py may delete, so a height that is too HIGH authorises deleting bundles that
+# cannot be rebuilt. `bridge_save_head` is called AFTER `bridge_save_state` at every one of its three
+# call sites (main.rs:4204, :4330, :4346) -- deliberately, per the comment at :4330. So the sidecar's
+# height is always <= the height inside state.bin: conservative by construction, exactly like the
+# journal line, but fresh and with no dependence on journal retention.
+H=$(awk 'NR==1 && $1 ~ /^[0-9]+$/ {print $1}' "$DIR/state.head" 2>/dev/null)
 JOURNAL=$(journalctl -u "$UNIT" -n 200 --no-pager 2>/dev/null)
-H=$(printf '%s\n' "$JOURNAL" | grep -oE 'checkpoint @ [0-9]+' | tail -1 | grep -oE '[0-9]+')
+if [ -n "${H:-}" ]; then
+    say "height $H from state.head (written after state.bin, so never higher than what is on disk)"
+else
+    H=$(printf '%s\n' "$JOURNAL" | grep -oE 'checkpoint @ [0-9]+' | tail -1 | grep -oE '[0-9]+')
+fi
 
 # ⛔ A WALK THAT HAS NOT CHECKPOINTED YET IS "NOT DUE", NOT "COULD NOT CHECK".
-# For the live bridge, no "checkpoint @ N" in 200 entries really is a fault: it checkpoints every 2,000
-# blocks, constantly. For a freshly started backfill it is simply the first two hours -- 25,000 blocks at
+# ⚠ This paragraph used to say "for the live bridge, no 'checkpoint @ N' in 200 entries really is a
+# fault: it checkpoints every 2,000 blocks, CONSTANTLY". That was true of a BACKFILL -- 2,000 blocks at
+# 0.294 s/block is ten minutes. At the tip the same 2,000 blocks is a fortnight, and the sentence
+# became the reason a healthy bridge alerted every run. The sidecar read above is what fixes that; this
+# fallback now only matters when state.head is missing or unreadable.
+# For a freshly started backfill it is simply the first two hours -- 25,000 blocks at
 # the measured 0.294 s/block. Exiting 2 there pushed a 🚨 on the very first run (2026-09-18) for a walk
 # that was working perfectly, and would have re-pushed hourly until the first rung appeared.
 #
