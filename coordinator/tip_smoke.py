@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -388,7 +389,65 @@ def _drop_cards(order, created, bad, why, *, release, record):
     return [c for c in order if c.cid not in bad], kept
 
 
-def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400):
+class FetchFleet:
+    """What the OTHER cards are doing, so a laggard can be judged against the fleet (hazync#503).
+
+    ⛔ A PER-CARD GUARD CANNOT SEE A SLOW CARD. Both of `fetch_binary`'s guards ask only about the
+    card in front of them: the stall check asks "did the byte count move" and the ceiling asks "have
+    40 minutes passed". Measured 2026-09-23 -- 17 of 18 cards had the whole 410 MB within seconds,
+    and hz-smoke-13 pulled at 93 KB/s:
+
+        hz-smoke-13   69,414,912 of 410,441,528   +4,210,688 bytes in 45 s   ~60 min remaining
+
+    It was growing the whole time, so it never stalled; it was nowhere near 40 minutes, so the
+    ceiling never fired. The fleet sat in the gate for 18 minutes at $13.32/hr with every GPU idle
+    at 16 W, and the only way out was to terminate the pod by hand -- killing the curl did not work,
+    because `-C -` resumes, exactly as designed.
+
+    ⚠ THE SPARES ARE WHAT BUY THE IMPATIENCE. Cutting a card short is only safe while enough others
+    remain to run, so that is the condition, and it is asked here rather than per card: `abandon`
+    refuses once dropping one more would leave fewer than `keep`, and that card gets the old patient
+    treatment. ⛔ A run with no spares therefore behaves EXACTLY as it did before -- which matters,
+    because the previous fix in this area (hazync#479) exists to stop a merely-slow card killing a
+    run that has nothing to swap in.
+    """
+
+    def __init__(self, total, keep, *, grace_s=120):
+        self.total, self.keep, self.grace_s = total, keep, grace_s
+        self.done, self.dropped, self.enough_at = 0, 0, None
+        self.reasons = {}
+        self._lk = threading.Lock()
+
+    def completed(self, cid):
+        with self._lk:
+            self.done += 1
+            # ⚠ The clock starts when the fleet could RUN, not when the first card lands. With a
+            # floor of 15 and 18 rented, three cards may finish long before the run has enough.
+            if self.enough_at is None and self.done >= self.keep:
+                self.enough_at = time.time()
+
+    def grace_left(self):
+        """Seconds a laggard still has, or None while the fleet does not yet have enough cards."""
+        with self._lk:
+            if self.enough_at is None:
+                return None
+            return self.grace_s - (time.time() - self.enough_at)
+
+    def abandon(self, cid, why):
+        """Take one card out of the fleet, if the fleet can still afford to lose it."""
+        with self._lk:
+            # ⛔ COUNT THE SURVIVORS, NOT THE CASUALTIES. `total - dropped - 1` is what would be
+            # left if this card went; comparing `dropped` against the spare count instead would be
+            # wrong the moment the run rented fewer pods than it asked for, which is the normal
+            # case when capacity is thin (18 of a requested 60 on 2026-09-23).
+            if self.total - self.dropped - 1 < self.keep:
+                return False
+            self.dropped += 1
+            self.reasons[cid] = why
+            return True
+
+
+def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400, fleet=None):
     """Pull the 407 MB prover onto the card BEFORE the clock starts, resuming if interrupted.
 
     ⛔ A 407 MB DOWNLOAD HAS NO BUSINESS INSIDE THE TIMED RUN. pod-prove.sh fetches it on first use,
@@ -415,15 +474,48 @@ def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400):
     is whether the byte count is still MOVING, so that is what is measured: keep waiting while it
     climbs, abandon after `stall_polls` consecutive polls with no progress at all. `ceiling_s` is a
     backstop for a card that trickles forever, not the normal exit.
+
+    ⛔ AND "MOVING" IS NOT ENOUGH EITHER (hazync#503). A card can climb steadily at 93 KB/s and hold
+    a whole fleet in the gate for the full 40 minutes without ever tripping either guard. Pass a
+    `FetchFleet` and the third question gets asked -- not "is this card moving" but "is it going to
+    arrive before the fleet that is already waiting for it has been paid for twice" -- and the
+    answer is acted on only while there are enough other cards to run without it.
     """
-    got, last, stuck, t0 = -1, -1, 0, time.time()
+    got, last, stuck, t0, polls = -1, -1, 0, time.time(), 0
     while time.time() - t0 < ceiling_s:
         out = ssh.run(card, "stat -c%s /workspace/hazync-host-cuda 2>/dev/null || echo 0",
                       timeout=60) or "0"
         got = int((out.strip().splitlines() or ["0"])[-1] or 0)
+        polls += 1
         if got == want:
             ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
+            if fleet is not None:
+                fleet.completed(card.cid)
             return True, got
+        # ── is this card worth waiting for, given what the rest of the fleet has already done? ──
+        # ⚠ ASKED ONLY ONCE THE FLEET HAS ENOUGH. Before that there is no surplus to spend and
+        # every card is needed, so `grace_left()` returns None and this whole branch is skipped.
+        if fleet is not None:
+            left = fleet.grace_left()
+            # ⚠ NEVER ON THE FIRST POLL. The loop polls before it starts the curl, so every card
+            # reads 0 bytes at t=0, and a card whose ssh hiccups reads 0 once too. Judging on one
+            # reading would condemn a healthy card for the crime of not having started yet; a
+            # second poll costs one `wait_s` and is what makes the number a RATE.
+            if left is not None and polls >= 2:
+                # ⚠ Rate since the start, not since the last poll. A single interval is noisy
+                # enough to condemn a healthy card on one slow ssh round-trip; the average over
+                # the whole fetch is what was 93 KB/s in the incident, and it is stable.
+                elapsed = time.time() - t0
+                rate = got / elapsed if elapsed > 0 and got > 0 else 0.0
+                # ⛔ NO RATE MEANS NO ARRIVAL. A card still at zero bytes while the rest of the
+                # fleet is ready is not "unmeasured", it is not coming -- treat it as infinite ETA
+                # rather than letting an undefined number read as fast.
+                eta = (want - got) / rate if rate > 0 else float("inf")
+                if eta > max(left, 0.0):
+                    why = (f"it needs ~{eta / 60:.0f} more min at {rate / 1e3:.0f} KB/s "
+                           f"({got:,}/{want:,}) and the fleet is ready now")
+                    if fleet.abandon(card.cid, why):
+                        return False, got
         # ⚠ Progress resets the patience; no progress spends it. An ssh hiccup reads as `got == last`
         # for one poll and costs one of the eight, which is the right price for not being able to see.
         if got > last:
@@ -1016,10 +1108,18 @@ def main():
         # minutes, and doing it one at a time would double that for no reason.
         want = binary_size()
         phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
+        # ⛔ THE GATE IS FLEET-RELATIVE NOW (hazync#503). One card at 93 KB/s held 17 ready cards in
+        # this gate for 18 minutes and cost ~$5 of a one-hour run. `a.cards` is the floor, so a
+        # laggard is cut loose only while the survivors would still be enough to run.
+        fleet_fetch = FetchFleet(len(order), a.cards)
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
-            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
+            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want, fleet=fleet_fetch)), order))
         for c, ok, n in got:
-            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
+            # ⚠ Say WHY, not just "INCOMPLETE". A card cut loose for being slow and a card that
+            # never started look identical in a byte count, and the difference is the whole point.
+            why = fleet_fetch.reasons.get(c.cid)
+            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes"
+                + (f" — dropped: {why}" if why else ""))
         bad = [c.cid for c, ok, _ in got if not ok]
         if bad:
             # ⛔ THE GATE THAT KILLED THE 2026-09-22 RUN. Its reasoning is right -- a card without the

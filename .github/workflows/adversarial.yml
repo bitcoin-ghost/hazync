@@ -215,6 +215,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_board_fill.py --control
+      - name: One slow card does not hold a ready fleet in the prover-fetch gate (hazync#503)
+        run: cd coordinator && python3 test_slow_card_gate.py
+      - name: Slow-card POSITIVE CONTROL (fleet view withheld — the gate must shut for 2,400 s again)
+        run: |
+          cd coordinator
+          python3 test_slow_card_gate.py --control
       - name: A folded range and a one-at-a-time absorption are distinguishable (hazync#487)
         run: cd coordinator && python3 test_spine_absorption.py
       - name: Absorption POSITIVE CONTROL (width ignored — the two must become indistinguishable)
