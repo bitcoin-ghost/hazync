@@ -152,8 +152,16 @@ check(tc.next_work(967714, lambda: None) == {"source": "tip", "range": "967714"}
       "a waiting tip block is proved first")
 check(tc.next_work(None, lambda: "98285") == {"source": "board", "range": "98285"},
       "with no tip block, the board's next block comes from the coordinator's HANDOUT")
-check(tc.next_work(None, lambda: None) == {"source": "idle", "range": None},
+# ⚠ FIELDS, NOT DICT EQUALITY (hazync#505). This compared the whole dict, so adding the REASON an
+# idle carries broke an assertion whose subject -- "a busy board is idle, not an error" -- was
+# untouched. The two things this must actually pin are the verdict and the range; the reason is
+# asserted separately, below, because a missing one is its own bug.
+_idle = tc.next_work(None, lambda: None)
+check(_idle["source"] == "idle" and _idle["range"] is None,
       "a busy board (every block claimed) is idle, not an error: hazync maps that to EX_TEMPFAIL")
+check(bool(_idle.get("why")) and "board" in _idle["why"],
+      f"and it says the BOARD is what had nothing, so the session does not have to guess "
+      f"({_idle.get('why')!r})")
 
 print()
 EXPECTED_CONTROL_FAILURES = {
