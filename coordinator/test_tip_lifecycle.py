@@ -216,6 +216,33 @@ check(not ok and bad == ["b"],
 ok, why, bad = tl.reachability_verdict({})
 check(not ok, "probing nothing is not a pass")
 
+
+# ── the bridge id must be WRITTEN DOWN somewhere, or it goes stale in silence ────────────────────
+# ⛔ IT DID. This constant read "05a5a279" until 2026-09-24 — true when written (the 2026-09-16
+# drop-in records the bridge pointed at a build from main @ bffdbbf with that id), stale ever since
+# the bridge was rebuilt. The live binary reports fb4d7352…, and THREE files still quoted the old
+# number: this constant and two deploy comments. Nothing was tied to the binary, so nothing noticed.
+#
+# ⚠ This test cannot ssh to the bridge, so it does not check the constant against the live binary.
+# What it checks is the thing that actually failed: that the id is RECORDED, in the one file whose
+# job is to say which guest images exist. A future bridge rebuild that moves the id has to touch
+# that file, and this test is what makes it.
+#
+# ⛔ "APPEARS IN THE FILE" IS NOT ENOUGH, AND I CHECKED. `05a5a279` IS in reproduce/METHOD_ID — in
+# the sentence explaining that a laptop build yields it — so a mere substring test passes on the
+# exact value it was written to catch. The id has to be written down AS THE BRIDGE BINARY, on a
+# line that names it, which is the only form of "documented" that distinguishes the two.
+_MID = os.path.join(os.path.dirname(HERE), "reproduce", "METHOD_ID")
+_doc = open(_MID).read() if os.path.exists(_MID) else ""
+_named = [ln for ln in _doc.splitlines()
+          if tl.BRIDGE_METHOD_ID in ln and "hazync-host-bridge" in ln]
+check(bool(_named),
+      f"reproduce/METHOD_ID records {tl.BRIDGE_METHOD_ID}… on a line naming hazync-host-bridge")
+# ⛔ AND IT MUST NOT BE THE CANONICAL ID, BY ANY PREFIX. If these two ever collide, `qualify` turns
+# every good card into "the bridge guest, not the prover guest" and the tip rig qualifies nobody.
+check(not tl.CANONICAL_METHOD_ID.startswith(tl.BRIDGE_METHOD_ID),
+      "and it is not a prefix of the canonical id, which would refuse every honest card")
+
 EXPECTED_CONTROL_FAILURES = {
     "a wrong METHOD_ID is refused (ok)",
     "the bridge guest is refused for proving",

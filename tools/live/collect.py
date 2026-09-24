@@ -34,6 +34,35 @@ def chain_facts():
         return {"ok": False, "error": str(e)[:120]}
 
 
+# Bitcoin's mean inter-block time. The ring's denominator is a COUNT OF BLOCKS, and on a one-hour
+# run that count is ~6, not the 144 of a full day.
+BLOCK_PERIOD_S = 600.0
+
+
+def session_blocks(phase_text):
+    """Blocks this session can expect, parsed from its own `SESSION · X h ...` line.
+
+    ⛔ THE DENOMINATOR IS NOT ALWAYS 144. The frame showed `N / 144 TODAY` on every run, including a
+    0.9 h one -- so a flagship hour that proved 6 of its ~6 blocks rendered as 6/144, which reads as
+    a 4% success rate rather than a complete run. The run states its own length; use it.
+
+    Returns None when the phase line says nothing about a session, and the caller keeps the daily 144.
+    """
+    if not phase_text:
+        return None
+    import re as _re
+    m = _re.search(r"SESSION\s*\u00b7\s*([0-9.]+)\s*h", phase_text)
+    if not m:
+        return None
+    try:
+        hours = float(m.group(1))
+    except ValueError:
+        return None
+    if hours <= 0:
+        return None
+    return max(1, round(hours * 3600.0 / BLOCK_PERIOD_S))
+
+
 def read_phase(rundir):
     """What the run says it is doing, from `$RUNDIR/phase`. One short line, or None.
 
@@ -51,7 +80,15 @@ def read_phase(rundir):
 
 
 def read_pods(rundir):
-    """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption."""
+    """id name ip port cost gpu — cost is REAL money from RunPod, not an assumption.
+
+    ⛔ THE FIRST LINE IS THE COORDINATOR, AND THIS IS THE ONLY PLACE THAT STILL KNOWS IT.
+    tip_smoke.py does `agg = order[0]` and writes pods.txt from that same order, but read_streams
+    walks `sorted(os.listdir(stream))`, so by the time a card becomes a lane its position is gone.
+    Marking the role here is what lets the frame tell a coordinator's flat trace apart from a dead
+    card — they look identical otherwise, because the coordinator streams segments on the CPU and
+    leaves its GPU idle by design.
+    """
     out = {}
     p = os.path.join(rundir, "pods.txt")
     if not os.path.exists(p):
@@ -60,7 +97,8 @@ def read_pods(rundir):
         f = line.split()
         if len(f) >= 6:
             out[f[1]] = {"pod": f[0], "ip": f[2], "port": f[3],
-                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " ")}
+                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " "),
+                         "role": "coordinator" if not out else "worker"}
     return out
 
 
@@ -79,17 +117,21 @@ class StreamCursor:
     WINDOW_S samples and is read from the END of the file instead.
     """
 
-    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h")
+    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h", "last_h")
 
     def __init__(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
+        # ⚠ SURVIVES THE TICK. The height carried forward (hazync#498) must persist between reads,
+        # or it resets every second and carries nothing.
+        self.last_h = ""
 
     def reset(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
+        self.last_h = ""
 
 
 def _tail_lines(path, nbytes):
@@ -122,6 +164,23 @@ def read_streams(rundir, now, cursors=None):
         if not fn.endswith(".csv"):
             continue
         name = fn[:-4]
+        # ⛔ A RELEASED POD IS NOT A DOWN CARD (hazync#492). The card list came from whatever CSV
+        # files were lying in stream/, but a pod that is released keeps its capture file for ever.
+        # The run rents spares, picks the best --cards after the gates, and releases the rest on
+        # purpose; those releases then rendered as `hz-smoke-8 · down` in RED and inflated the
+        # denominator. Measured live on block 968,243: 23 CSV files, 16 entries in pods.txt, frame
+        # read `16/23 up · 7 down` -- every one of those 7 a deliberate release, none a failure.
+        #
+        # ⚠ pods.txt IS THE LIST OF CARDS BEING PAID FOR, and the driver rewrites it after selection
+        # ("feed rewritten for N cards"), so it is the authority on what the fleet IS. A card that is
+        # in it but has stopped streaming must STILL show as down and still cost money -- that is
+        # hazync#476 and it is deliberately untouched here. Only a card that is not rented at all
+        # drops out.
+        #
+        # ⚠ Fall back to showing everything when pods.txt is missing or empty: a capture replayed
+        # without its feed should still render rather than come up blank.
+        if pods and name not in pods:
+            continue
         path = os.path.join(sdir, fn)
         t, w, u = [], [], []
         phase, seg_n, seg_total, block = "idle", 0, 0, None
@@ -139,6 +198,7 @@ def read_streams(rundir, now, cursors=None):
                     newrows = fh.readlines()
                 secs, by_block = 0, {}
                 peak, peak_h = 0.0, None
+                last_h = ""
             else:
                 st = os.stat(path)
                 # ⛔ A SHRUNK OR REPLACED FILE MUST RESET THE CURSOR. tip-stream.sh truncates the
@@ -165,6 +225,7 @@ def read_streams(rundir, now, cursors=None):
                 newrows = blob[:cut].decode("utf8", "replace").splitlines(keepends=True)
                 secs, by_block = cur.secs, cur.by_block
                 peak, peak_h = cur.peak, cur.peak_h
+                last_h = cur.last_h
         except OSError:
             continue
 
@@ -193,6 +254,26 @@ def read_streams(rundir, now, cursors=None):
                     peak = max(peak, min(1.0, n_ / tot_))
 
             h = f[10].strip()
+            # ⛔ CARRY THE HEIGHT FORWARD WHILE THE CARD IS WORKING (hazync#498). tip-stream.sh reads
+            # the height off the `RANGE [n..n]` banner within `tail -c 40000` of the prover log. As
+            # the log grows that banner scrolls OUT of the 40 KB window, so the field goes empty
+            # part-way through a block and every later row is dropped here -- silently, because a row
+            # with no height simply `continue`s.
+            #
+            # Measured on this run: of 15,483 `assembling` rows, 19 named block 968,243 and 18 named
+            # 968,255. The other 15,446 named nothing. Proving is the same shape: 98,455 rows with no
+            # height against 5,736 with one. So fold time was accumulated from ~18 samples instead of
+            # thousands, and the folding bar rendered as nothing at all.
+            #
+            # ⚠ ONLY WHILE WORKING, AND NEVER ACROSS IDLE. A card that goes idle has finished with
+            # that height; carrying it forward there would re-open a closed block and hold it alive
+            # for the rest of the run -- which is the failure the `idle` guard below was added for.
+            if not h and last_h and f[7] in ("proving", "assembling", "done"):
+                h = last_h
+            if h.isdigit() and f[7] != "idle":
+                last_h = h
+            elif f[7] == "idle":
+                last_h = ""
             if not h.isdigit():
                 continue
             try:
@@ -223,6 +304,7 @@ def read_streams(rundir, now, cursors=None):
         if cur is not None:
             cur.secs, cur.by_block = secs, by_block
             cur.peak, cur.peak_h = peak, peak_h
+            cur.last_h = last_h
 
         # WINDOW, for the traces: only what the waveform draws. Read from the END of the file rather
         # than slicing the whole capture -- at 24 h that slice was the thing being paid for.
@@ -254,6 +336,7 @@ def read_streams(rundir, now, cursors=None):
         meta = pods.get(name, {})
         rate = meta.get("cost_hr", 0.0)
         cards.append({"name": name, "gpu": meta.get("gpu", "?"), "cost_hr": rate,
+                      "role": meta.get("role", "worker"),
                       "up": bool(t) and (now - t[-1]) < STALE_S,
                       "t": t, "w": w, "u": u,
                       "phase": phase, "seg_n": seg_n, "seg_total": seg_total, "block": block,
@@ -317,19 +400,95 @@ def blocks_from_cards(cards, state, now, verified=()):
             a["segs"] = max(a["segs"], e["segs"])
             a["prove"] += e["prove"]; a["asm"] += e["asm"]
             a["cards"].add(c["name"])
-            a["cost"] += e["n"] * rate / 3600.0
     # ⚠ PAIRED WITH THE HEIGHT THE CARD WAS ON, not taken as "some card is done, so all are".
     finished_by_cards = {str(c.get("block")) for c in cards
                          if c.get("phase") == "done" and c.get("block")}
+    # ⚠ IS ANY CARD STILL WORKING, AND ON WHICH BLOCK? `executed` counts as busy: the card has
+    # loaded the block and is about to prove it, so a gap there is a handover, not an ending.
+    #
+    # ⛔ THIS MUST BE PER BLOCK, NOT PER FLEET. A global "is anything working" suppressed the silence
+    # rule for EVERY block, so the moment the fleet moved on to the next height, the block it had
+    # just finished reverted to done=False -- its tile went from green back to orange and the "blocks
+    # today" count fell from 1 to 0. Observed live: 968,257 verified at 11:14:43, and by 11:18:41 the
+    # frame read `0 blocks` with the cell orange again.
+    #
+    # ⚠ Only the COORDINATOR names a height; workers always report None. That is enough, because the
+    # coordinator is the one card that knows which block the fleet is on.
+    _active = [c for c in cards
+               if c.get("up") and c.get("phase") in ("proving", "assembling", "executed")]
+    _named = {str(c.get("block")) for c in _active if c.get("block")}
+    _newest = max((int(h) for h in agg), default=None)
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
+        # ⛔ A BLOCK COSTS WHAT THE FLEET COST WHILE IT RAN. This used to sum `e["n"] * rate` --
+        # per-card SAMPLE COUNTS -- which charges a block only for cards that named it. Only the
+        # COORDINATOR ever names a height; every worker leaves the block field empty. So a block was
+        # charged the coordinator's share alone.
+        #
+        # Measured on 968,279: the frame showed THIS BLOCK $1.08 against a true $4.45 -- almost
+        # exactly one quarter, the coordinator's share of a 4-card fleet. The header (session spend)
+        # was right, so the two money figures on one frame disagreed by 4x.
+        #
+        # The fleet is rented as a unit: while a block is being proved, EVERY card is billed whether
+        # or not it named the height. So the charge is the fleet's rate across the block's own wall
+        # clock -- the same basis as the header, which is why they now reconcile.
+        #
+        # ⚠ THIS ASSUMES ONE BLOCK AT A TIME, which is true of today's serial session loop. If
+        # blocks are ever overlapped (hazync#502's leapfrog banks), two blocks would each be charged
+        # the whole fleet and the total would double-count. That change must split the rate.
+        fleet_rate = sum(c.get("cost_hr", 0.0) for c in cards)
+
+        # ⛔ COMPUTE `done` FIRST, BECAUSE `done_at` IS ONLY MEANINGFUL IF IT IS TRUE.
+        #
+        # ⛔ SILENCE IS NOT COMPLETION WHILE CARDS ARE STILL WORKING (hazync#499). The 5-second rule
+        # exists for the END of a run: the collector stops before its own grace period elapses, so
+        # the last block would never count. But it also fired MID-BLOCK, during the handover from
+        # proving to assembling, when the coordinator briefly stops naming the height.
+        #
+        # Measured on block 968,255: done_at fired 09:55:14 UTC, the run logged `verified` at
+        # 09:56:56 -- the tile went green and the ring read VERIFIED 102 SECONDS EARLY, while the
+        # frame still showed FOLDING 89%. No card ever reported phase=done for that height (0 rows),
+        # so it was silence alone that said so.
+        #
+        # A fleet with cards still proving or assembling has not finished. Silence only means
+        # completion when nothing is working any more -- which is exactly the end-of-run case the
+        # rule was written for, and nothing else.
+        # ⚠ When nobody names a block we cannot tell which one the fleet is on, so only the NEWEST
+        # height gets the benefit of the doubt. An older block is never held open by activity that
+        # cannot possibly belong to it.
+        working_on_this = bool(_active) and (str(h) in _named
+                                             or (not _named and int(h) == _newest))
+        done_flag = (int(h) in verified or str(h) in finished_by_cards
+                     or ((now - a["t1"]) > 5 and not working_on_this))
         out.append({"h": int(h), "arrive": a["t0"],
                     # ⛔ `done` is a BOOLEAN and the pulse needs a TIME. The renderer animates a
                     # block travelling from the join tree to its cell for PULSE seconds after it
                     # finished, so it has to know WHEN that was -- `(now - t1) > 5` cannot say.
                     # t1 is the last moment any card reported this height, which is that instant.
-                    "done_at": a["t1"],
+                    #
+                    # ⛔ ...BUT ONLY ONCE THE BLOCK IS ACTUALLY DONE. While it is still being proved,
+                    # t1 is simply the newest telemetry, so it advanced to ~now on EVERY tick. The
+                    # pulse fires for `0 <= now - done_at < PULSE_S`, so that condition was true
+                    # forever: the green dot re-launched from the join tree every frame and drifted
+                    # around instead of the tree's root sitting still. Measured live on block
+                    # 968,243 while proving: status=None, done_at=now-1.1s, refreshed every tick.
+                    # A block that has not finished has no finish time, and must report none.
+                    "done_at": a["t1"] if done_flag else None,
+                    # ⛔ WALL TIME, FROM TIMESTAMPS (hazync#495). The chain comparison must not be
+                    # derived by COUNTING SAMPLES: `prove` is incremented once per row, which equals
+                    # seconds only if the capture runs at exactly 1 Hz. It does not. The driver
+                    # started the feed twice on this run ("streaming 18 pods", then "streaming 16
+                    # pods") without stopping the first, so two streamers appended to every CSV and
+                    # the real rate was 1.87 rows/sec -- inflating every sample-counted duration by
+                    # 1.87x. Measured on block 968,243: 5,356 rows across 2,860 s.
+                    #
+                    # It must not be divided by n_cards either: a worker's row leaves the block
+                    # field EMPTY and only the coordinator names the height, so `cards` was 1 on a
+                    # 16-card fleet and prove_s was divided by one.
+                    #
+                    # t1 - t0 is the block's actual wall clock and answers neither question wrongly.
+                    "wall_s": round(a["t1"] - a["t0"], 1),
                     "prove_s": round(a["prove"] / n_cards, 1) or None,
                     "fold_s": round(a["asm"] / n_cards, 1) or None,
                     "segs": a["segs"], "cards": len(a["cards"]),
@@ -341,9 +500,8 @@ def blocks_from_cards(cards, state, now, verified=()):
                       # the 5-second silence rule cannot fire while the card is still streaming the
                       # block it just finished. Between the receipt existing and the driver saying
                       # so, nothing could tell the cell to stop being orange.
-                      "done": (int(h) in verified or str(h) in finished_by_cards
-                               or (now - a["t1"]) > 5),
-                    "cost": round(a["cost"], 4)})
+                      "done": done_flag,
+                    "cost": round(max(0.0, a["t1"] - a["t0"]) * fleet_rate / 3600.0, 4)})
     out.sort(key=lambda x: x["h"])
     return out
 
@@ -483,6 +641,12 @@ def main():
         else:
             cards = read_streams(a.rundir, now, cursors)
             phase_label = read_phase(a.rundir)
+            # ⚠ LATCH IT. The phase line is rewritten as the run proceeds ("PROVING block ..."), so
+            # the SESSION header is only visible for part of the run. Read it once and keep it, or
+            # the ring's denominator would flip back to the daily 144 mid-run.
+            sb = session_blocks(phase_label)
+            if sb:
+                state["session_blocks"] = sb
             chain = chain_facts()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
@@ -534,6 +698,7 @@ def main():
         # `wall` always advances, so a collector that DIES stops advancing it and the frame can say
         # so. In replay it is also the real clock, so a freshly replayed capture reads as fresh.
         snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_label,
+                "session_blocks": state.get("session_blocks"),
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}

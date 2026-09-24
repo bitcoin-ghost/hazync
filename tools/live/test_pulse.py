@@ -129,16 +129,25 @@ check(moved(frame({-1: -30.0}, "future")) is None,
       "⚠ a done_at in the FUTURE (a card clock ahead of ours) does not fire a pulse")
 
 # ── 6. ⛔ EVERY FRAME MUST RENDER ─────────────────────────────────────────────────────────────────
-# The age window also keeps the travel fraction in [0, 1). Without it a block that finished ten
-# minutes ago gives f = 100, the token's radius goes to -293, and PIL refuses to draw the ellipse —
-# so the renderer produces NO FRAME AT ALL. On the live page that is a dashboard frozen on its last
-# good frame, which is precisely the failure the staleness banner exists to expose.
+# ⏰ The failure mode this once caught is GONE, and that is deliberate. The pulse used to draw a
+# travelling dot whose radius was `7 - 3 * f`; without the age window f reached 100, the radius went
+# to -293, PIL refused the ellipse and the renderer produced NO FRAME AT ALL. The dot was removed on
+# request (a moving token read as a stray object on a page that is otherwise all states), so nothing
+# drives a negative radius any more and this assertion can no longer detect a missing age window.
+#
+# It is KEPT because "every frame renders" is worth asserting on its own — a frozen dashboard is the
+# failure the staleness banner exists to expose. The age window is now caught by checks 3, 4 and 5
+# instead, which is stronger: three independent detectors rather than one incidental PIL crash.
 check(not RENDER_FAILURES,
-      f"⛔ every frame rendered — a pulse with no age window drives the radius negative and PIL "
-      f"refuses ({RENDER_FAILURES[:2]})")
+      f"⛔ every frame rendered ({RENDER_FAILURES[:2]})")
 
+# ⚠ NAME EVERY ONE. Removing the age window is now caught by three assertions: the pulse stops
+# moving (it is pinned at the frame edge at every age), a long-finished block still draws, and a
+# future done_at draws. Listing a subset would let an unrelated breakage ride inside a "CONTROL OK".
 EXPECTED_CONTROL_FAILURES = {
-    "every frame rendered",
+    "it MOVES toward the grid",
+    "a block that finished 20 s ago draws NOTHING",
+    "a done_at in the FUTURE",
 }
 
 print()

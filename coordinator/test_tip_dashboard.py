@@ -188,8 +188,13 @@ d2 = tempfile.mkdtemp(prefix="feed2_")
 fd = tdash.DashboardFeed(d2, script="./tip-stream.sh", run=lambda a, e: calls.append((a, e)),
                          key="/k/id")
 check(fd.start(CARDS) == 2, "start() writes pods.txt for every card")
-check(calls and calls[0][0] == ["./tip-stream.sh", "start"],
-      "and starts the streamer by argv")
+# ⛔ STOP THEN START, IN THAT ORDER (hazync#500). start() used to launch a streamer without
+# stopping whatever was already running, and a run calls start() twice -- once at rent, once after
+# the gates ("feed rewritten for N cards"). Both sets then appended to the same capture files: the
+# 968,243 run measured 1.87 rows/sec against a 1 Hz design. Pinning the SEQUENCE is stricter than
+# the old assertion, which only pinned the first call.
+check([c[0] for c in calls] == [["./tip-stream.sh", "stop"], ["./tip-stream.sh", "start"]],
+      f"and stops any existing streamer BEFORE starting one, by argv (got {[c[0][-1] for c in calls]})")
 check(os.path.exists(os.path.join(d2, "pods.txt")), "pods.txt is on disk")
 check(not os.path.exists(os.path.join(d2, "t0")),
       "⛔ start() does NOT write t0 — the streamer runs BEFORE the clock, and a t0 written here would "

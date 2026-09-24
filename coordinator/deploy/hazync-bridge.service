@@ -59,7 +59,12 @@ ExecStartPre=/bin/sh -c 'test -d "${HAZYNC_BRIDGE_OUT}" || { echo "HAZYNC_BRIDGE
 # ⛔ hazync-host-bridge, NOT hazync-host. They are DIFFERENT GUESTS, on purpose:
 #
 #     /usr/local/bin/hazync-host          METHOD_ID 37987b85…   canonical
-#     /usr/local/bin/hazync-host-bridge   METHOD_ID 05a5a279…   the bridge build
+#     /usr/local/bin/hazync-host-bridge   METHOD_ID fb4d7352…   the bridge build
+#
+# ⚠ MEASURED 2026-09-24, not copied. This said 05a5a279… — correct for the 2026-09-16 build, and
+# stale from the next rebuild onwards, because an image id moves with the build and nothing here
+# was tied to the binary. If you rebuild the bridge, re-read `hazync-host-bridge method-id` and
+# update reproduce/METHOD_ID with it; coordinator/tip_lifecycle.py keys its message on that id.
 #
 # A RISC0 image id absorbs the build's absolute paths, so a canonical guest can only come from the
 # fixed-path container build in reproduce/Dockerfile. That is fine here — the bridge walks blocks and
@@ -77,6 +82,19 @@ ExecStartPre=/bin/sh -c 'test -d "${HAZYNC_BRIDGE_OUT}" || { echo "HAZYNC_BRIDGE
 ExecStart=/usr/local/bin/hazync-host-bridge bridge
 Restart=always
 RestartSec=10
+# ⛔ ExecStopPost=, NOT OnFailure=. This unit is Restart=always with RestartSec=10, so it can never
+# enter the `failed` state: systemd's start limit is 5 starts in 10 s and a 10 s delay cannot reach
+# it. A crash-looping bridge would restart for ever and OnFailure= would never say a word -- which
+# is precisely the case hazync-alert.sh's header names, and until now nothing called --crash.
+#
+# The bridge is the BUNDLE PRODUCER ("emits per-block bundles", above). Every downstream check --
+# check-bundle-gap, check-bridge-progress, bundle-push -- alerts on its own failure, but all of them
+# are timers that fire minutes apart and compare against bundles that a dead bridge simply stops
+# producing. The producer itself was the one thing with no alarm on it.
+#
+# --crash sends only when SERVICE_RESULT != success, so an operator restart stays quiet, and
+# hazync-alert.sh de-duplicates to one alert per unit per ALERT_REPEAT_SECS (default 900).
+ExecStopPost=-/usr/local/bin/hazync-alert.sh --crash %n
 # generous startup: the first genesis->tip pass runs inside the process (checkpoints along the way)
 TimeoutStartSec=0
 Nice=5

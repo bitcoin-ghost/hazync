@@ -186,6 +186,41 @@ jobs:
         run: |
           cd coordinator
           python3 test_spare_survival.py --control
+      # ⛔ FIVE TESTS THAT NOTHING RAN. Written on the 2026-09-23 tip run and never wired in, so
+      # they protected nothing: a guard CI does not execute is a comment. Each has a positive
+      # control, and each control step must exit 0 by failing in exactly its own place.
+      - name: Board work is fetched from the API, never the bridge (hazync#506)
+        run: cd coordinator && python3 test_board_fetch_source.py
+      - name: Board-fetch POSITIVE CONTROL (the bridge is asked for a board height again)
+        run: cd coordinator && python3 test_board_fetch_source.py --control
+      - name: The card catalogue ranks every usable type, and excludes MIG slices
+        run: cd coordinator && python3 test_card_catalogue.py
+      - name: Card-catalogue POSITIVE CONTROL
+        run: cd coordinator && python3 test_card_catalogue.py --control
+      - name: The dashboard feed has exactly one streamer per card
+        run: cd coordinator && python3 test_feed_single_streamer.py
+      - name: Feed POSITIVE CONTROL
+        run: cd coordinator && python3 test_feed_single_streamer.py --control
+      - name: --fresh-tip waits for a fresh tip and fills the wait with board work (hazync#367)
+        run: cd coordinator && python3 test_fresh_tip.py
+      - name: Fresh-tip POSITIVE CONTROL (the old blanket refusal — the gaps go back to idle)
+        run: cd coordinator && python3 test_fresh_tip.py --control
+      - name: --stop does not count the shell that invoked it (hazync#491)
+        run: cd coordinator && python3 test_stop_self_match.py
+      - name: Stop-self-match POSITIVE CONTROL
+        run: cd coordinator && python3 test_stop_self_match.py --control
+      - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
+        run: cd coordinator && python3 test_board_fill.py
+      - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)
+        run: |
+          cd coordinator
+          python3 test_board_fill.py --control
+      - name: One slow card does not hold a ready fleet in the prover-fetch gate (hazync#503)
+        run: cd coordinator && python3 test_slow_card_gate.py
+      - name: Slow-card POSITIVE CONTROL (fleet view withheld — the gate must shut for 2,400 s again)
+        run: |
+          cd coordinator
+          python3 test_slow_card_gate.py --control
       - name: A folded range and a one-at-a-time absorption are distinguishable (hazync#487)
         run: cd coordinator && python3 test_spine_absorption.py
       - name: Absorption POSITIVE CONTROL (width ignored — the two must become indistinguishable)

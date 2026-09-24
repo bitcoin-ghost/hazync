@@ -124,8 +124,12 @@ def parse_pods_txt(text):
     for line in text.splitlines():
         f = line.split()
         if len(f) >= 6:
+            # ⚠ `role` MIRRORS collect.py: the FIRST line is the coordinator, because tip_smoke writes
+            # pods.txt from `order` and `agg = order[0]`. This mirror exists to prove we match the real
+            # reader field for field, so a field added there must be added here.
             out[f[1]] = {"pod": f[0], "ip": f[2], "port": f[3],
-                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " ")}
+                         "cost_hr": float(f[4]), "gpu": f[5].replace("_", " "),
+                         "role": "coordinator" if not out else "worker"}
     return out
 
 
@@ -294,6 +298,28 @@ class DashboardFeed:
         inherit the last one's t0 and count its blocks as this session's.
         """
         n = write_feed(self.rundir, cards)
+        # ⚠ AFTER write_feed, NEVER BEFORE. write_feed validates every card and RAISES on a bad
+        # one (pods_txt is all-or-nothing), so stopping first meant a REFUSED feed killed the
+        # streamer that was running perfectly well -- caught by test_tip_dashboard's "a refused
+        # feed never starts the streamer".
+        # ⛔ STOP WHATEVER IS ALREADY STREAMING FIRST (hazync#500). `start` never did, and a run
+        # calls it more
+        # than once -- once when the fleet is rented, again after the gates pick the final cards
+        # ("feed rewritten for N cards"). Both streamer sets then ran against the SAME csv files for
+        # the rest of the run, each appending its own 1 Hz line.
+        #
+        # Measured on the 968,243 run: the log shows `streaming 18 pods` then `streaming 16 pods`,
+        # and the coordinator's capture held 5,356 rows across 2,860 s -- 1.87 rows/sec, not 1.
+        # Nothing on the frame said so. It also silently doubles capture growth, which on a 24 h run
+        # is the thing StreamCursor exists to keep ahead of.
+        #
+        # ⚠ Anything that counts rows as seconds is wrong by that factor, which is exactly how the
+        # behind-the-chain figure came to report 4,845s for a block that had run 2,560s.
+        try:
+            self.stop()
+        except Exception:
+            pass                      # nothing was streaming yet, which is the normal first call
+
         try:
             os.remove(os.path.join(self.rundir, "t0"))
         except OSError:

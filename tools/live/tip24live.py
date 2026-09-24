@@ -224,8 +224,15 @@ def draw_live(snap, fo):
     PERIOD = 600.0
     eta = max(0.0, PERIOD - el) if cur else 0.0
     # how far ahead of the chain the fleet actually is, from MEASURED block totals (not a claim)
-    tot = sorted((b.get('prove_s') or 0) + (b.get('fold_s') or 0)
-                 for b in blocks if b.get('prove_s'))
+    # ⛔ FINISHED BLOCKS ONLY, AND BY WALL CLOCK (hazync#495). This summed prove_s + fold_s over
+    # every block INCLUDING the one still being proved, so the headline raced downwards all run: a
+    # partial total was presented as a block's cost. Captured live on 968,243 as it proved:
+    # 0.2x -> 0.1x, "3156s per block" -> "4845s per block", while nothing had finished at all.
+    # A block that has not finished has not told us how long it takes.
+    #
+    # ⚠ And wall_s, not the sample-counted prove_s: see collect.py. At 1.87 rows/sec from a
+    # doubled feed, prove_s ran 1.87x high and was divided by a card count of 1.
+    tot = sorted(b['wall_s'] for b in blocks if b.get('done') and b.get('wall_s'))
     med = tot[len(tot) // 2] if tot else 0.0
     ahead = (PERIOD / med) if med > 0 else 0.0
 
@@ -282,6 +289,12 @@ def draw_live(snap, fo):
             d.text((LX0 + 6, b0 - row + 3), c['name'][:18] + ' · down',
                    font=fo['tiny'] if 'tiny' in fo else fo['small'], fill=mix(RED, GROUND, .6))
             continue
+        # ⚠ NAME THE COORDINATOR. Its GPU is idle BY DESIGN -- it streams segments to the
+        # workers on the CPU -- so its lane is a near-flat line that reads exactly like a card that
+        # stalled. Without the label, the only lane a viewer questions is the one working correctly.
+        if c.get('role') == 'coordinator':
+            d.text((LX0 + 6, b0 - row + 3), c['name'][:18] + ' · coordinator',
+                   font=fo['tiny'] if 'tiny' in fo else fo['small'], fill=mix(FAINT, GROUND, .75))
         w = c.get('w') or []
         if not w:
             continue
@@ -303,9 +316,17 @@ def draw_live(snap, fo):
         if len(pts) > 1:
             d.polygon([(pts[0][0], b0)] + pts + [(pts[-1][0], b0)], fill=mix(col, GROUND, .10))
             d.line(pts, fill=mix(col, GROUND, .95), width=2)
-        if p > 0:                       # progress is a MARKER now, not the axis
-            xp = LX0 + p * (LX1 - LX0)
-            d.line([xp, b0 - (row - 4), xp, b0], fill=mix(OK, GROUND, .85), width=2)
+        # ⛔ NO PER-LANE PROGRESS MARKER. It was drawn `if p > 0`, and p needs BOTH seg_n and
+        # seg_total on the card's OWN row. Only the coordinator ever carries seg_total -- it is the
+        # one that knows the block's segment count -- so on a 16-card fleet the marker appeared on
+        # exactly one lane, and that lane is the coordinator, whose trace is near-flat because it
+        # streams on the CPU with its GPU idle by design. The one card doing no GPU work was the
+        # only card showing progress.
+        #
+        # Measured live on block 968,243: hz-smoke-12 seg_n=3070 seg_total=10666 -> p=0.29; every
+        # one of the 15 proving cards seg_total=0 -> p=0.
+        #
+        # The RING carries progress for the block. The lanes carry ACTIVITY.
     # span the LANES, not the whole band: with the lane height capped, a 3-card fleet left a
     # full-height green rule with nothing attached to two thirds of it
     d.line([LX1, ytop, LX1, ytop + row * nlanes], fill=mix(OK, GROUND, .7), width=2)
@@ -363,7 +384,13 @@ def draw_live(snap, fo):
                  if on_board else f'{mmss(el)} ON THIS BLOCK')
     else:
         mid_s, mid_c, low_s = 'STANDING BY', hx(DIM), 'WAITING FOR A BLOCK'
-    for s, f_, dy, c_ in ((f'/ {WINDOW} TODAY', 'lab', 22, mix(TEXT, GROUND, .7)),
+    # ⛔ THE DENOMINATOR IS THE SESSION, NOT THE DAY. This was always `/ 144 TODAY`, so a one-hour
+    # run that proved all ~6 of its blocks rendered as `6 / 144` — a complete run looking like a 4%
+    # one. The run declares its own length in its SESSION line; collect.py parses and latches it.
+    # Falls back to the daily window when there is no session (board work, a replay).
+    _den = snap.get('session_blocks') or WINDOW
+    _lab = 'TODAY' if _den == WINDOW else 'THIS SESSION'
+    for s, f_, dy, c_ in ((f'/ {_den} {_lab}', 'lab', 22, mix(TEXT, GROUND, .7)),
                           (mid_s, 'mid', 48, mid_c),
                           (low_s, 'small', 78, hx(DIM))):
         d.text((RCX - d.textlength(s, font=fo[f_]) / 2, RCY + dy), s, font=fo[f_], fill=c_)
@@ -492,9 +519,12 @@ def draw_live(snap, fo):
         cx, cy = cell_xy(b['h'] - lo)
         tx_, ty_ = cx + GCELL / 2, cy + GCELL / 2
         px, py = TX1 + (tx_ - TX1) * f, RCY + (ty_ - RCY) * f
-        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18))
-        r_ = 7 - 3 * f
-        d.ellipse([px - r_, py - r_, px + r_, py + r_], fill=mix(OK, GROUND, .95))
+        # ⛔ THE LINE, NOT A TRAVELLING DOT. The pulse used to draw a bright dot sliding from the
+        # join tree to the block's cell. Two problems with it: on a still frame it reads as a stray
+        # object near the tree's convergence point rather than as motion, and it was mistaken for the
+        # tree's root more than once. The faint line alone says the same thing -- this block just
+        # landed in that cell -- without putting a moving object on a page that is mostly states.
+        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18), width=2)
 
     kx = GX0
     for lbl, c_ in (('proving', MAP_PROVING), ('folding', MAP_FOLDING), ('done', MAP_DONE)):

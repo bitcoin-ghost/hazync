@@ -34,6 +34,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# A oneshot DOES reach `failed`, so OnFailure= is the right hook here -- same as every other
+# bundle-side oneshot (check-bundle-gap, prune-bundles).
+OnFailure=hazync-alert@%n.service
 User=hazync
 Group=hazync
 

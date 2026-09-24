@@ -1,0 +1,4 @@
+[
+ {"height": 968315, "verdict": "VERIFIED", "sha256": "7f45c276b5141a5c33a0254b31c8abb2496d71f14f5f96248903e241439599a3", "bytes": 234298, "journal_digest": "c38429b034d9bdad6748f7bb5e33cc9324df4da1634ba22faa795611c76d3921", "journal_bytes": 5536, "verified_on": "hazync-coord", "binary": "/usr/local/bin/hazync-host"},
+ {"height": 968316, "verdict": "VERIFIED", "sha256": "9c06adb55600b00c56549066e92d722fd65c0acc0909d46f0bb86f66d6952b0f", "bytes": 233786, "journal_digest": "c5b4e9d86c76cbb02459331755898cb0aebe0f4b96007482030064e0314322e5", "journal_bytes": 5280, "verified_on": "hazync-coord", "binary": "/usr/local/bin/hazync-host"}
+]

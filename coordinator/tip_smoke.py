@@ -17,7 +17,9 @@ names are refused there by name as well.
 import argparse
 import json
 import os
+import re
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,8 +87,26 @@ class SmokeRunPod(sponsor_bot.RunPod):
             except sponsor_bot.RunPodError as e:
                 refused, p = e, None
             if p and p.get("id"):
+                # ⛔ RECORD WHERE THE CARD IS. Geography is the one term in a fleet's throughput that
+                # has never been controlled for here, and it has already caused a published error
+                # once: 142 s of spread was attributed to geography when it was CARD TYPE
+                # (hazync#448), and controlling for the card collapsed it to 9.0 s. The lesson taken
+                # was "state the card mix" -- but the site was then left unrecorded entirely, so the
+                # rival explanation can still never be tested. The milestone tooling recorded a
+                # `site` column per chunk; tip_smoke never did.
+                #
+                # In mode 6 the coordinator PUSHES segments over the network to every worker, so RTT
+                # plausibly reaches per-card throughput. Whether it does is unmeasured -- which is
+                # exactly why it must be written down before anyone compares two fleets again.
+                dc = None
+                try:
+                    q2 = ('query { pod(input:{podId:%s}) { machine { dataCenterId } } }'
+                          % self._s(p["id"]))
+                    dc = ((self._gql(q2).get("pod") or {}).get("machine") or {}).get("dataCenterId")
+                except Exception:
+                    pass          # never fail a rental over a label
                 return {"id": p["id"], "name": name, "gpu_type": gt,
-                        "price": float(p.get("costPerHr") or 0)}
+                        "price": float(p.get("costPerHr") or 0), "dc": dc}
         if refused is not None and not answered:
             raise refused
         return None
@@ -188,6 +208,155 @@ def wait_for_ssh(api, pods, ssh, timeout_s=420, need=None):
 # more than its wall-clock.
 DEFAULT_GPU_TYPES = ("NVIDIA GeForce RTX 4090",)
 
+# ⭐ AUTO: RANK THE WHOLE LIVE CATALOGUE, PREFER ONE TYPE, LEARN FROM EVERY RUN (hazync#493).
+#
+# The lesson of #448 was never "only ever rent a 4090". It was two narrower things: a MIXED fleet is
+# slower and dearer than a uniform one, and PRICE PER HOUR IS THE WRONG OBJECTIVE. Hard-coding one
+# card type satisfies both by accident and fails the moment that card is out of stock -- which is
+# exactly what happened on 2026-09-23: five attempts, 4090 secure stock "Low", the run never started.
+# Restricting the catalogue did not buy comparability, it bought an outage.
+#
+# So `--gpu-type auto` ranks every type RunPod ACTUALLY has, in two tiers:
+#
+#   MEASURED   a type with a clean uniform measurement in docs/history/fleet-economics.jsonl,
+#              ordered by usd_per_proof -- the objective that matters. Today that is the 4090 alone
+#              ($0.243-$0.262 over three runs on block 741000).
+#   UNMEASURED everything else with SECURE stock and enough VRAM, ordered by price per hour.
+#
+# ⛔ THE SECOND ORDERING IS A GUESS AND IS LABELLED AS ONE. Price per hour is the objective #448
+# proved wrong, so it is used ONLY to break ties between cards nobody has measured, never to rank a
+# measured card. A cheap card that proves slowly sorts high here and is still the wrong buy -- the
+# run finds that out and writes it down, which is the point of the tier existing at all.
+#
+# ⛔ NO INVENTED FACTORS. It is tempting to score an L40S from docs/history/BENCH_8xL40S_2026-09-08.md,
+# but that bench is a different block set on a different guest version; dividing its card-seconds by
+# the 741000 runs would manufacture a number that was never measured. An unmeasured card stays
+# unmeasured until a run measures it.
+#
+# ⚠ VRAM FLOOR IS EVIDENCE, NOT A SPEC. The 4090 has 24 GB and proves, so 24 GB is known-sufficient.
+# It is not known to be the minimum; it is the smallest card we have actually seen work.
+VRAM_FLOOR_GB = 24
+ECONOMICS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "docs", "history", "fleet-economics.jsonl")
+
+
+def measured_cost_per_proof(path=ECONOMICS):
+    """({display name: best usd_per_proof}, block) — from UNIFORM fleets, ON ONE BLOCK.
+
+    ⛔ UNIFORM ONLY. A '2x A40 + 1x RTX 4090' row measures a MIXTURE, and #448 is precisely the
+    finding that a mixture's cost cannot be attributed to either card in it. Charging that row's
+    $0.262 to the A40 would be inventing the very number this refuses to invent.
+
+    ⛔ AND ONE OPERATING POINT ONLY (hazync#497). Cost per proof is not a property of the card. It
+    is a property of the card AND the conditions it ran under, and there are at least three:
+
+      block     968,243 is 10,666 segments and cost $7.43 on 16x A40; the 741,000 rows cost $0.243
+                on 3x RTX 4090. Rank those together and the A40 looks 30x worse, when nearly all of
+                that gap is BLOCK SIZE.
+      po2       HAZYNC_SEG_PO2 sets cycles-per-segment. po2 22 halves the segment count, but peak
+                VRAM at po2 21 was already 22,478 MiB on a 24GB card (milestone 966,256), so only
+                48GB+ cards can use it. A card that CAN is being credited for the setting, not for
+                the silicon.
+      pods      8 GPUs in one pod share a NIC and PCIe. That is a deployment shape, not a card
+                property, and recording `32x A40` for 4x8 hides it completely.
+
+    Each of those, left unrecorded, attributes a condition to the card -- the same error as
+    attributing a MIXTURE to one card, wearing a different hat three times over. So the comparison
+    is confined to rows sharing all three, and the point is named wherever the ranking is shown.
+
+    ⚠ Rows written before these fields existed carry None, which forms its own group. That is
+    deliberate: an unknown operating point is not evidence of a shared one, and guessing would be
+    the very thing this refuses to do.
+    """
+    per_block = {}
+    try:
+        with open(path, encoding="utf8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                fleet, usd = r.get("fleet", ""), r.get("usd_per_proof")
+                blk = str(r.get("block") or "")
+                if usd is None or "+" in fleet or not blk:
+                    continue
+                m = re.match(r"\s*\d+x\s+(.+?)\s*$", fleet)
+                if not m:
+                    continue
+                name = m.group(1)
+                point = (blk, r.get("po2"), r.get("gpus_per_pod"))
+                b = per_block.setdefault(point, {"best": {}, "rows": 0})
+                b["rows"] += 1
+                if name not in b["best"] or usd < b["best"][name]:
+                    b["best"][name] = float(usd)
+    except FileNotFoundError:
+        pass
+    if not per_block:
+        return {}, None
+    point = max(per_block, key=lambda k: (len(per_block[k]["best"]), per_block[k]["rows"]))
+    blk, po2, gpp = point
+    label = f"block {blk}"
+    if po2 is not None:
+        label += f", po2 {po2}"
+    if gpp is not None:
+        label += f", {gpp} GPU/pod"
+    return per_block[point]["best"], label
+
+
+def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
+    """Every type with SECURE stock and enough VRAM, best-known-value first.
+
+    Returns [{id, display, vram, price, stock, usd_per_proof|None}], measured tier first.
+    """
+    ids = [g["id"] for g in api._gql("query { gpuTypes { id } }")["gpuTypes"]]
+    measured, measured_block = measured_cost_per_proof(economics)
+    out = []
+    for gt in ids:
+        # ⛔ CUDA ONLY. The prover is a risc0 CUDA build; an AMD card cannot run it at all, so
+        # offering one would rent a pod that is guaranteed to fail the GPU gate.
+        if not gt.startswith("NVIDIA"):
+            continue
+        # ⛔ NO MIG SLICES. `MIG 1g.24gb` / `2g.48gb` are Multi-Instance GPU PARTITIONS of one
+        # physical card, not cards. RunPod lists them beside whole GPUs with their own price, and
+        # this catalogue ranks unmeasured types by price per hour -- so a slice presents as a cheap
+        # 24GB card and sorts near the top while delivering a fraction of a GPU and sharing memory
+        # bandwidth with its neighbours. That is hazync#448's error in a new costume: buying the
+        # cheap-looking thing that costs more per proof.
+        #
+        # It nearly happened: on 2026-09-23 `PRO 6000 MIG 24GB` at $0.59 ranked FOURTH, above the
+        # RTX PRO 4500 that actually won the fleet. The tell is in the id, and `maxGpuCount` agrees
+        # (16 for the 48GB slice against 9 for the whole RTX PRO 6000).
+        #
+        # ⚠ Not banned outright -- `--gpu-type` still takes one by name if it is ever wanted. This
+        # only keeps them out of the AUTOMATIC ranking, where nobody chose them.
+        if " MIG " in gt:
+            continue
+        q = ('query { gpuTypes(input:{id:%s}) { id displayName memoryInGb '
+             'lowestPrice(input:{gpuCount:1, secureCloud:true}) '
+             '{ uninterruptablePrice stockStatus } } }' % json.dumps(gt))
+        try:
+            g = api._gql(q)["gpuTypes"][0]
+        except Exception:
+            continue
+        lp = g.get("lowestPrice") or {}
+        price, stock = lp.get("uninterruptablePrice"), lp.get("stockStatus")
+        vram = g.get("memoryInGb") or 0
+        # No secure price or no stock means RunPod cannot sell it right now, whatever it lists.
+        if not price or not stock or vram < vram_floor:
+            continue
+        out.append({"id": gt, "display": g.get("displayName") or gt, "vram": vram,
+                    "price": float(price), "stock": stock,
+                    "usd_per_proof": measured.get(g.get("displayName") or gt),
+                    "measured_on": measured_block})
+    # Measured tier (by the objective that matters) ahead of the unmeasured tier (by the objective
+    # that does not, used only because nothing better exists for a card nobody has run).
+    out.sort(key=lambda c: (c["usd_per_proof"] is None,
+                            c["usd_per_proof"] if c["usd_per_proof"] is not None else c["price"]))
+    return out
+
 HOST_RELEASE = "v0.21.7"
 HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
@@ -220,7 +389,65 @@ def _drop_cards(order, created, bad, why, *, release, record):
     return [c for c in order if c.cid not in bad], kept
 
 
-def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400):
+class FetchFleet:
+    """What the OTHER cards are doing, so a laggard can be judged against the fleet (hazync#503).
+
+    ⛔ A PER-CARD GUARD CANNOT SEE A SLOW CARD. Both of `fetch_binary`'s guards ask only about the
+    card in front of them: the stall check asks "did the byte count move" and the ceiling asks "have
+    40 minutes passed". Measured 2026-09-23 -- 17 of 18 cards had the whole 410 MB within seconds,
+    and hz-smoke-13 pulled at 93 KB/s:
+
+        hz-smoke-13   69,414,912 of 410,441,528   +4,210,688 bytes in 45 s   ~60 min remaining
+
+    It was growing the whole time, so it never stalled; it was nowhere near 40 minutes, so the
+    ceiling never fired. The fleet sat in the gate for 18 minutes at $13.32/hr with every GPU idle
+    at 16 W, and the only way out was to terminate the pod by hand -- killing the curl did not work,
+    because `-C -` resumes, exactly as designed.
+
+    ⚠ THE SPARES ARE WHAT BUY THE IMPATIENCE. Cutting a card short is only safe while enough others
+    remain to run, so that is the condition, and it is asked here rather than per card: `abandon`
+    refuses once dropping one more would leave fewer than `keep`, and that card gets the old patient
+    treatment. ⛔ A run with no spares therefore behaves EXACTLY as it did before -- which matters,
+    because the previous fix in this area (hazync#479) exists to stop a merely-slow card killing a
+    run that has nothing to swap in.
+    """
+
+    def __init__(self, total, keep, *, grace_s=120):
+        self.total, self.keep, self.grace_s = total, keep, grace_s
+        self.done, self.dropped, self.enough_at = 0, 0, None
+        self.reasons = {}
+        self._lk = threading.Lock()
+
+    def completed(self, cid):
+        with self._lk:
+            self.done += 1
+            # ⚠ The clock starts when the fleet could RUN, not when the first card lands. With a
+            # floor of 15 and 18 rented, three cards may finish long before the run has enough.
+            if self.enough_at is None and self.done >= self.keep:
+                self.enough_at = time.time()
+
+    def grace_left(self):
+        """Seconds a laggard still has, or None while the fleet does not yet have enough cards."""
+        with self._lk:
+            if self.enough_at is None:
+                return None
+            return self.grace_s - (time.time() - self.enough_at)
+
+    def abandon(self, cid, why):
+        """Take one card out of the fleet, if the fleet can still afford to lose it."""
+        with self._lk:
+            # ⛔ COUNT THE SURVIVORS, NOT THE CASUALTIES. `total - dropped - 1` is what would be
+            # left if this card went; comparing `dropped` against the spare count instead would be
+            # wrong the moment the run rented fewer pods than it asked for, which is the normal
+            # case when capacity is thin (18 of a requested 60 on 2026-09-23).
+            if self.total - self.dropped - 1 < self.keep:
+                return False
+            self.dropped += 1
+            self.reasons[cid] = why
+            return True
+
+
+def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400, fleet=None):
     """Pull the 407 MB prover onto the card BEFORE the clock starts, resuming if interrupted.
 
     ⛔ A 407 MB DOWNLOAD HAS NO BUSINESS INSIDE THE TIMED RUN. pod-prove.sh fetches it on first use,
@@ -247,15 +474,48 @@ def fetch_binary(ssh, card, want, *, wait_s=15, stall_polls=8, ceiling_s=2400):
     is whether the byte count is still MOVING, so that is what is measured: keep waiting while it
     climbs, abandon after `stall_polls` consecutive polls with no progress at all. `ceiling_s` is a
     backstop for a card that trickles forever, not the normal exit.
+
+    ⛔ AND "MOVING" IS NOT ENOUGH EITHER (hazync#503). A card can climb steadily at 93 KB/s and hold
+    a whole fleet in the gate for the full 40 minutes without ever tripping either guard. Pass a
+    `FetchFleet` and the third question gets asked -- not "is this card moving" but "is it going to
+    arrive before the fleet that is already waiting for it has been paid for twice" -- and the
+    answer is acted on only while there are enough other cards to run without it.
     """
-    got, last, stuck, t0 = -1, -1, 0, time.time()
+    got, last, stuck, t0, polls = -1, -1, 0, time.time(), 0
     while time.time() - t0 < ceiling_s:
         out = ssh.run(card, "stat -c%s /workspace/hazync-host-cuda 2>/dev/null || echo 0",
                       timeout=60) or "0"
         got = int((out.strip().splitlines() or ["0"])[-1] or 0)
+        polls += 1
         if got == want:
             ssh.run(card, "chmod +x /workspace/hazync-host-cuda", timeout=60)
+            if fleet is not None:
+                fleet.completed(card.cid)
             return True, got
+        # ── is this card worth waiting for, given what the rest of the fleet has already done? ──
+        # ⚠ ASKED ONLY ONCE THE FLEET HAS ENOUGH. Before that there is no surplus to spend and
+        # every card is needed, so `grace_left()` returns None and this whole branch is skipped.
+        if fleet is not None:
+            left = fleet.grace_left()
+            # ⚠ NEVER ON THE FIRST POLL. The loop polls before it starts the curl, so every card
+            # reads 0 bytes at t=0, and a card whose ssh hiccups reads 0 once too. Judging on one
+            # reading would condemn a healthy card for the crime of not having started yet; a
+            # second poll costs one `wait_s` and is what makes the number a RATE.
+            if left is not None and polls >= 2:
+                # ⚠ Rate since the start, not since the last poll. A single interval is noisy
+                # enough to condemn a healthy card on one slow ssh round-trip; the average over
+                # the whole fetch is what was 93 KB/s in the incident, and it is stable.
+                elapsed = time.time() - t0
+                rate = got / elapsed if elapsed > 0 and got > 0 else 0.0
+                # ⛔ NO RATE MEANS NO ARRIVAL. A card still at zero bytes while the rest of the
+                # fleet is ready is not "unmeasured", it is not coming -- treat it as infinite ETA
+                # rather than letting an undefined number read as fast.
+                eta = (want - got) / rate if rate > 0 else float("inf")
+                if eta > max(left, 0.0):
+                    why = (f"it needs ~{eta / 60:.0f} more min at {rate / 1e3:.0f} KB/s "
+                           f"({got:,}/{want:,}) and the fleet is ready now")
+                    if fleet.abandon(card.cid, why):
+                        return False, got
         # ⚠ Progress resets the patience; no progress spends it. An ssh hiccup reads as `got == last`
         # for one poll and costs one of the eight, which is the right price for not being able to see.
         if got > last:
@@ -397,10 +657,22 @@ def cleanup(api, rented_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=2)
-    ap.add_argument("--gpu-type", default=",".join(DEFAULT_GPU_TYPES),
-                    help="comma-separated GPU types, in preference order. Default is 4090 ONLY: an "
-                         "A40 in the fleet measured 40%% slower AND dearer per proof (hazync#448). "
-                         "Pass a list to allow fallback.")
+    ap.add_argument("--gpu-type", default="auto",
+                    help="'auto' (default) ranks every type RunPod has in SECURE stock by MEASURED "
+                         "cost per proof, then by price for cards nobody has measured, and fills the "
+                         "fleet from ONE type wherever capacity allows (hazync#493). Or pass a "
+                         "comma-separated preference list to pin the choice.")
+    ap.add_argument("--fresh-tip", action="store_true",
+                    help="prove only blocks mined AFTER the fleet is ready: the claim floor starts "
+                         "at the current tip, so boot is paid while idle and each block is timed "
+                         "from a height that did not exist when the run began")
+    # ⛔ AN ESCAPE HATCH, NOT THE DEFAULT. Filling the gaps between tip blocks with board work is
+    # what #367 asked for and what the flagship hour measured the cost of not doing -- 31.4 idle
+    # minutes, $5.81. This flag exists for the case where a run must be a clean measurement of tip
+    # latency alone, with nothing else touching the fleet.
+    ap.add_argument("--no-board-fill", action="store_true",
+                    help="with --fresh-tip, sit idle between tip blocks instead of proving board "
+                         "work; use when measuring tip latency with nothing else on the fleet")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -541,20 +813,101 @@ def main():
         # ⛔ VALIDATE BEFORE RENTING. An unrecognised name is accepted by the GraphQL call and simply
         # matches nothing, so the run would report "no capacity" for every pod and look like a RunPod
         # outage rather than a typo. Fail here, having spent nothing.
-        gpu_types = tuple(t.strip() for t in a.gpu_type.split(",") if t.strip())
-        if not gpu_types:
-            raise SystemExit("--gpu-type is empty")
-        unknown = [t for t in gpu_types if t not in sponsor_bot.GPU_TYPES]
-        if unknown:
-            raise SystemExit(f"unknown --gpu-type {unknown}; known: {list(sponsor_bot.GPU_TYPES)}")
-        log(f"card type preference: {' > '.join(gpu_types)}"
-            + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
+        if a.gpu_type.strip() == "auto":
+            catalogue = rank_card_types(api)
+            if not catalogue:
+                raise SystemExit("no NVIDIA type has SECURE stock and "
+                                 f"{VRAM_FLOOR_GB}GB+ right now — nothing to rent")
+            gpu_types = tuple(c["id"] for c in catalogue)
+            log(f"card catalogue ({len(catalogue)} types with SECURE stock and {VRAM_FLOOR_GB}GB+), "
+                "best known value first:")
+            for c in catalogue:
+                val = (f"${c['usd_per_proof']:.3f}/proof on {c['measured_on']} MEASURED"
+                       if c["usd_per_proof"] is not None
+                       else "unmeasured — ordered by $/hr, which is NOT the objective (#448)")
+                log(f"    {c['display']:34} {c['vram']:>3}GB  ${c['price']:>5.2f}/hr  "
+                    f"stock={c['stock']:<7} {val}")
+        else:
+            # ⛔ VALIDATE AGAINST WHAT RUNPOD ACTUALLY OFFERS, not against a hard-coded pair. The old
+            # check refused any type outside sponsor_bot.GPU_TYPES, so naming a real, in-stock,
+            # perfectly capable card (an L40S, say) was rejected as "unknown" — a typo guard that had
+            # quietly become a policy. Typos still fail here; real cards no longer do.
+            gpu_types = tuple(t.strip() for t in a.gpu_type.split(",") if t.strip())
+            if not gpu_types:
+                raise SystemExit("--gpu-type is empty")
+            offered = {g["id"] for g in api._gql("query { gpuTypes { id } }")["gpuTypes"]}
+            unknown = [t for t in gpu_types if t not in offered]
+            if unknown:
+                raise SystemExit(f"unknown --gpu-type {unknown} — RunPod offers no such type")
+            log(f"card type preference: {' > '.join(gpu_types)}"
+                + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
 
-        want = a.cards + a.spares
+        # ⚠ `rented` NOT `want` (hazync#492). `want` is reused at the prover-fetch gate for the
+        # BINARY SIZE, so a message down there that reads `want` prints 410441528 where a card count
+        # belongs — which is what a real run reported: "only 2 of 410441528 rented cards".
+        rented = a.cards + a.spares
+        want = rented
         for i in range(want):
             name = f"{PREFIX}{i+1}"
             if name in existing:
                 raise SystemExit(f"refusing: {name} already exists")
+
+        # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (hazync#493).
+        #
+        # deploy_listening walks the type list PER POD, so pod 1 took a 4090, pod 2 found none left
+        # and took an A40, and the fleet was mixed before anyone chose to mix it. That is the exact
+        # mechanism behind #448's 142 s of unexplained "variance".
+        #
+        # So try each type for the ENTIRE fleet, best-value first, and keep the first one that can
+        # field at least --cards. A type that comes up short is RELEASED, not topped up from the next
+        # type down: a partial fleet held while we try the next type costs seconds of billing, and a
+        # mixed fleet costs 40% of the run. Only when NO single type can field the minimum do we mix
+        # — deliberately, and labelled.
+        def rent_uniform(gt, upto):
+            got = []
+            for i in range(upto):
+                p = api.deploy_listening(f"{PREFIX}{i+1}", pub, gpu_types=(gt,))
+                if not p:
+                    break
+                got.append(p)
+                with open(rented_path, "w") as fh:
+                    json.dump(got, fh, indent=1)
+            return got
+
+        for gt in gpu_types:
+            got = rent_uniform(gt, want)
+            if len(got) >= a.cards:
+                created = got
+                log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
+                break
+            if got:
+                log(f"  {gt} could field only {len(got)} of the {a.cards} needed — releasing and "
+                    f"trying the next type (a mixed fleet costs more than these seconds do)")
+                for p in got:
+                    # ⛔ CONFIRMED, NOT FIRE-AND-FORGET. A terminate that silently failed here would
+                    # leave a pod billing for the whole run with nothing in `created` to release it.
+                    try:
+                        sponsor_bot.terminate_confirmed(api, p["id"])
+                    except Exception as e:
+                        log(f"  ⚠ could not release {p['name']}: {e}")
+                with open(rented_path, "w") as fh:
+                    json.dump([], fh, indent=1)
+            else:
+                log(f"  {gt}: no capacity")
+
+        # ⛔ MIXING IS THE LAST RESORT, AND IT IS STATED. Reaching here means no single type could
+        # field --cards, so the choice is a mixed fleet or no run at all. #448 says a mix is slower
+        # and dearer; it does not say a mix is wrong when the alternative is not proving the block.
+        #
+        # ⛔ AND ONLY WHEN THE FLEET IS EMPTY. Topping a uniform fleet up to its spare count from the
+        # next type down would mix it after the fact — a spare is promoted to a run card the moment
+        # one of the originals fails a gate, so a "spare" of another type is a mixed fleet on a delay.
+        mixed_fallback = not created
+        if mixed_fallback:
+            log(f"⚠ NO SINGLE TYPE can field {a.cards} cards — falling back to a MIXED fleet across "
+                f"{len(gpu_types)} types. Its wall-clock is NOT comparable with a uniform run.")
+        for i in range(len(created), want if mixed_fallback else len(created)):
+            name = f"{PREFIX}{i+1}"
             p = api.deploy_listening(name, pub, gpu_types=gpu_types)
             if not p:
                 # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
@@ -587,8 +940,15 @@ def main():
         mix = {}
         for c in created:
             mix[c["gpu_type"]] = mix.get(c["gpu_type"], 0) + 1
+        sites = {}
+        for c in created:
+            sites[c.get("dc") or "?"] = sites.get(c.get("dc") or "?", 0) + 1
         log("FLEET: " + ", ".join(f"{n}x {g}" for g, n in sorted(mix.items()))
             + (["", "   ⚠ MIXED CARD TYPES — timings are NOT comparable with a uniform fleet"][len(mix) > 1]))
+        # ⚠ SITES, for the same reason the card mix is stated: a run whose geography is not recorded
+        # is a run whose throughput cannot be compared with any other.
+        log("SITES: " + ", ".join(f"{n}x {d}" for d, n in sorted(sites.items()))
+            + (["", "   ⚠ SPREAD ACROSS SITES — per-card rates mix card and network"][len(sites) > 1]))
 
         phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
         cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
@@ -748,10 +1108,18 @@ def main():
         # minutes, and doing it one at a time would double that for no reason.
         want = binary_size()
         phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
+        # ⛔ THE GATE IS FLEET-RELATIVE NOW (hazync#503). One card at 93 KB/s held 17 ready cards in
+        # this gate for 18 minutes and cost ~$5 of a one-hour run. `a.cards` is the floor, so a
+        # laggard is cut loose only while the survivors would still be enough to run.
+        fleet_fetch = FetchFleet(len(order), a.cards)
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
-            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want)), order))
+            got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want, fleet=fleet_fetch)), order))
         for c, ok, n in got:
-            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes")
+            # ⚠ Say WHY, not just "INCOMPLETE". A card cut loose for being slow and a card that
+            # never started look identical in a byte count, and the difference is the whole point.
+            why = fleet_fetch.reasons.get(c.cid)
+            log(f"  {c.cid}: {'ok' if ok else 'INCOMPLETE'} {n}/{want} bytes"
+                + (f" — dropped: {why}" if why else ""))
         bad = [c.cid for c, ok, _ in got if not ok]
         if bad:
             # ⛔ THE GATE THAT KILLED THE 2026-09-22 RUN. Its reasoning is right -- a card without the
@@ -799,7 +1167,11 @@ def main():
             raise SystemExit(f"the aggregate {agg.cid} failed a pre-clock gate — every worker was "
                              f"checked against it, so the run cannot simply promote another card")
         if len(order) < a.cards:
-            raise SystemExit(f"only {len(order)} of {want} rented cards passed every pre-clock gate; "
+            # ⚠ len(created), not `rented`. `rented` is what we ASKED for (cards + spares); the
+            # run routinely gets fewer when capacity is thin -- 18 of a requested 60 on 2026-09-23.
+            # Reporting the request makes a healthy fleet look like a catastrophic shortfall.
+            raise SystemExit(f"only {len(order)} of {len(created)} rented cards "
+                             f"passed every pre-clock gate; "
                              f"needed {a.cards}. Rent more spares, or read the per-card lines above")
         surplus = [c.cid for c in order[a.cards:]]
         if surplus:
@@ -840,20 +1212,46 @@ def main():
         # the requested count would either raise or silently prove a chunk count the fleet cannot
         # cover -- the chunk count IS the fleet size.
         assignment = {i: c for i, c in enumerate(order)}
-        phase(f"PROVING block {a.block} on {len(order)} cards")
+        # ⛔ DO NOT NAME A BLOCK THE RUN IS NOT PROVING (hazync#496). `a.block` is only assigned from
+        # a claim on the `a.claim and not a.session` path, so a SESSION run never updates it and this
+        # line printed the argparse default. Captured on the 968,243 run, one second apart:
+        #
+        #     [09:46:04] PROVING block 130000 on 16 cards
+        #     [09:46:05]   proving 968243 (attempt 1)
+        #
+        # 130,000 is a real fixture height, so the line reads as a true statement about the wrong
+        # block rather than as an obvious placeholder. A session claims its height per block inside
+        # the loop below, and at this point there is no height yet -- so say that instead.
+        phase(f"PROVING block {a.block} on {len(order)} cards" if not a.session else
+              f"READY · {len(order)} cards, claiming each block as it arrives")
         if not a.claim:
             log(f"proving {block_name} on {len(order)} cards, aggregate on {agg.cid} "
                 f"(binds 9110, dialled on {agg_dial})")
 
         if a.claim:
             # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
-            def prove_and_submit(rng, *, from_tip=False):
+            def prove_and_submit(rng, *, from_tip=False, abort=None):
                 """Fetch the bundle, prove it as a range, collect the receipt, submit. Returns the
                 run dict. Shared by the single-block path and the session loop so there is exactly
                 ONE definition of what proving a claimed block means."""
                 bp = os.path.join(a.rundir, f"bundle_{rng}.json")
                 if not os.path.exists(bp):
-                    src = "ssh" if from_tip else a.claim_source
+                    # ⛔ BOARD WORK ALWAYS COMES FROM THE API, NEVER FROM THE BRIDGE. This read
+                    # `a.claim_source` for board heights, so a tip run started with
+                    # --claim-source ssh asked the BRIDGE for a board block -- and the bridge emits
+                    # nothing below EMIT_FROM, so it can never have one:
+                    #
+                    #   no bundle for 123538: .../tip_bundles/bundle_123538.json: No such file
+                    #
+                    # Three of those in a row tripped the fleet-fault guard and released a 36-card
+                    # fleet 17 seconds into a session (2026-09-23). It also silently disabled the
+                    # whole point of #367 -- filling the gaps between tip blocks with board work --
+                    # because every board claim was unfetchable. A 15-card fleet then sat idle for
+                    # 31.4 minutes of a 60-minute session, $5.81 of rented GPU doing nothing.
+                    #
+                    # --claim-source governs where a TIP bundle comes from. The board has exactly
+                    # one source, /api/witness, and it does not depend on that flag.
+                    src = "ssh" if from_tip else "api"
                     if src == "ssh":
                         bok, bwhy = tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host)
                     else:
@@ -869,7 +1267,7 @@ def main():
                 res = tip_run.run_range(height=int(rng), cards=assignment, runner=runner,
                                         bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
                                         on_event=lambda m: log(f"  {m}"), beat=_b,
-                                        max_ticks=1200, tick_s=6.0)
+                                        max_ticks=1200, tick_s=6.0, abort=abort)
                 rc = os.path.join(a.rundir, f"receipt_{rng}.bin")
                 gotr, which = runner.fetch_receipt(int(rng), rc)
                 if not gotr:
@@ -895,7 +1293,27 @@ def main():
             state = tip_session.new_state(started_at=time.time(), duration_s=a.session * 3600.0,
                                           fleet_ids=[p["id"] for p in created])
             tip_session.save(spath, state)
+            # ⭐ --fresh-tip: prove only blocks mined AFTER the fleet was ready.
+            #
+            # `proved_tip["h"]` is the floor for claiming a tip block, and starting it at 0 means the
+            # session grabs whatever bundle the bridge already holds -- a block that may have been
+            # mined minutes before we booted. Proving that measures our speed against a head start,
+            # not against the chain, and it is the wrong number to publish.
+            #
+            # With --fresh-tip the floor starts at the CURRENT tip, so the session sits idle until
+            # the chain produces a block it has never seen, then proves that. The measurement then
+            # runs from "this block did not exist" to "its proof is accepted", which is the only
+            # figure that supports a claim about following the tip. It also prices boot separately:
+            # renting and gating happen while waiting, so they cannot hide inside a block's time.
             proved_tip = {"h": 0}
+            if a.fresh_tip:
+                t0h = tip_board.highest_tip_bundle(a.bridge_host)
+                if t0h:
+                    proved_tip["h"] = int(t0h)
+                    log(f"FRESH TIP: floor set at {t0h} — waiting for the chain to mine a block "
+                        f"this fleet has never seen (boot cost is paid while waiting)")
+                else:
+                    log("⚠ --fresh-tip: no tip bundle on the bridge yet, so the floor stays at 0")
 
             def claim_fn():
                 """The board's next block, or None when the board is genuinely busy.
@@ -919,21 +1337,116 @@ def main():
                     return None
                 raise RuntimeError(f"claim refused and retrying cannot fix it: {res.get('why')}")
 
+            # ⭐ THE TIP LEDGER — what turns "we followed the tip" into a measurement.
+            #
+            # session.log records when WE started and finished a block. It has never recorded what
+            # the CHAIN was doing at those moments, so the central claim of a tip run could only ever
+            # be asserted. One line per event, appended as it happens, so it survives a crash and can
+            # be read by anyone: when a height first became provable, when we claimed it, when its
+            # proof was accepted, and where the chain had got to by then.
+            #
+            # `appeared` is when the BUNDLE first existed, which is the earliest moment this fleet
+            # could have begun -- not the block's header timestamp, which a miner sets and which can
+            # run backwards. The lag that matters is measured from the former.
+            tipledger = os.path.join(a.rundir, "tip_ledger.jsonl")
+            seen_at = {}
+
+            def tip_note(event, **kv):
+                rec = {"event": event, "t": round(time.time(), 3),
+                       "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **kv}
+                try:
+                    with open(tipledger, "a") as fh:
+                        fh.write(json.dumps(rec) + "\n")
+                except OSError:
+                    pass          # a ledger that cannot be written must never stop a run
+
             def work_fn():
                 # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
                 # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
                 t = tip_board.highest_tip_bundle(a.bridge_host)
+                if t and t not in seen_at:
+                    seen_at[t] = time.time()
+                    tip_note("appeared", height=int(t))
                 pending = t if (t and t > proved_tip["h"]) else None
+                # ⛔ --fresh-tip MEANS TIP ONLY. Without this, next_work() falls through to BOARD
+                # work whenever no fresh tip is waiting -- and a driver configured with
+                # --claim-source ssh fetches from the bridge's tip_bundles, which holds nothing
+                # below EMIT_FROM. So it claimed board heights 123538/123541/123544, each failed
+                # instantly with "no bundle", and three in a row tripped the fleet-fault guard:
+                #
+                #   stopping: 3 blocks failed in a row — this is the FLEET, not the blocks.
+                #
+                # It released a 36-card fleet 17 seconds into a session, and the guard was right to
+                # fire on what it could see -- three consecutive failures DO usually mean the fleet.
+                # The fault was asking it to prove blocks this driver can never fetch.
+                #
+                # ⛔ THE REFUSAL ABOVE IS GONE, AND IT WAS ALWAYS A WORKAROUND (hazync#506). It read:
+                #
+                #     if a.fresh_tip and pending is None: return idle
+                #
+                # which kept a --fresh-tip run from ever touching the board. That was the right
+                # emergency measure when every board claim was unfetchable, and it is the wrong
+                # steady state: a 15-card fleet sat idle for 31.4 minutes of a 60-minute session,
+                # $5.81 of rented GPU doing nothing, while the board had work waiting. With the
+                # fetch fixed (board work now always comes from /api/witness) the gaps between tip
+                # blocks are the board's, which is what #367 intended all along.
+                #
+                # ⚠ --fresh-tip still means what it says about the TIP: `pending` is only ever a
+                # height that did not exist at boot. Board work does not weaken that, because the
+                # tip always wins -- see the `abort` in prove_one, which abandons a board block the
+                # moment a tip bundle lands.
+                if a.fresh_tip and pending is None and a.no_board_fill:
+                    return {"source": "idle", "range": None}
                 return tip_controller.next_work(pending, claim_fn)
+
+            def tip_waiting():
+                """A tip bundle above what we have proved, or None. The board block's abort signal.
+
+                ⛔ COMPLETE BUNDLES ONLY, which is why highest_tip_bundle had to be fixed first: its
+                filter counted `bundle_<h>.json.tmp` -- the file the bridge is still writing -- as an
+                available tip. Abandoning a board block for a bundle that does not exist yet would
+                throw away real work and then fail to fetch the thing it was thrown away for.
+                """
+                try:
+                    t = tip_board.highest_tip_bundle(a.bridge_host)
+                except Exception:
+                    return None                      # ⚠ never abort a healthy block on an ssh blip
+                if t and int(t) > proved_tip["h"]:
+                    if int(t) not in seen_at:
+                        seen_at[int(t)] = time.time()
+                        tip_note("appeared", height=int(t))
+                    return f"tip block {t} is waiting and the tip comes first"
+                return None
 
             def prove_one(rng):
                 # ⚠ A tip height is simply one at or above EMIT_FROM: the bridge emits nothing below
                 # it, so a bundle can only come off the bridge host up there. Board work comes from
                 # the frontier (~113,537) and is fetched from /api/witness. No cleverness needed.
                 from_tip = str(rng).isdigit() and int(rng) >= TIP_FROM
-                out = prove_and_submit(rng, from_tip=from_tip)
+                # ⛔ ONLY BOARD WORK IS PREEMPTIBLE. A tip block is the thing everything else gives
+                # way to; making it interruptible would mean a later tip could abandon an earlier
+                # one mid-proof, and the fleet would chase the chain without ever finishing a block.
+                try:
+                    out = prove_and_submit(rng, from_tip=from_tip,
+                                           abort=(None if from_tip else tip_waiting))
+                except tip_run.RunAborted as exc:
+                    # ⚠ Returned, not raised: the session distinguishes "aborted" from "failed", and
+                    # a raise here would be caught by its generic handler and counted as a failure.
+                    return {"ok": False, "aborted": True, "block": str(rng),
+                            "why": exc.why, "wall_s": exc.elapsed_s}
                 if from_tip:
                     proved_tip["h"] = int(rng)
+                    # chain tip NOW, so the lag is against the real chain rather than our own clock
+                    try:
+                        tip_now = tip_board.highest_tip_bundle(a.bridge_host)
+                    except Exception:
+                        tip_now = None
+                    app = seen_at.get(int(rng))
+                    tip_note("accepted", height=int(rng),
+                             appeared_at=round(app, 3) if app else None,
+                             lag_s=round(time.time() - app, 1) if app else None,
+                             chain_tip_now=int(tip_now) if tip_now else None,
+                             blocks_behind=(int(tip_now) - int(rng)) if tip_now else None)
                 return out
 
             # The fleet's hourly rate, from what RunPod actually charged for the cards we KEPT.
@@ -1046,6 +1559,34 @@ def main():
                 runner.stop_auto_attach(assignment)
         except Exception as e:                                     # noqa: BLE001
             log(f"stop_auto_attach: {e}")
+
+        # ⭐ BILLED TIME, NOT rate x wall. Every cost figure this run reports is otherwise
+        # COMPUTED: the fleet rate multiplied by our own wall clock. That is close, but it is not
+        # what RunPod charges, and a published cost should be the billed one. Ask the API for each
+        # pod's real lifetime BEFORE it is released -- afterwards the pod is gone and so is the
+        # answer. Same discipline as the harvest below, for the same reason.
+        try:
+            billed = []
+            for p_ in created:
+                q = ('query { pod(input:{podId:%s}) { id name costPerHr '
+                     'runtime { uptimeInSeconds } } }' % api._s(p_["id"]))
+                try:
+                    pd = (api._gql(q) or {}).get("pod") or {}
+                    up = (pd.get("runtime") or {}).get("uptimeInSeconds")
+                    billed.append({"name": p_["name"], "id": p_["id"], "dc": p_.get("dc"),
+                                   "gpu": p_["gpu_type"], "price_hr": p_["price"],
+                                   "uptime_s": up,
+                                   "usd": round((up or 0) / 3600.0 * p_["price"], 4)})
+                except Exception as e:
+                    billed.append({"name": p_["name"], "id": p_["id"], "error": str(e)[:80]})
+            with open(os.path.join(a.rundir, "billing.json"), "w") as fh:
+                json.dump(billed, fh, indent=1)
+            tot = sum(b.get("usd") or 0 for b in billed)
+            known = sum(1 for b in billed if b.get("uptime_s"))
+            log(f"BILLED: ${tot:.2f} across {known}/{len(billed)} pod(s) with a known uptime "
+                f"-> {a.rundir}/billing.json")
+        except Exception as e:
+            log(f"⚠ billing snapshot failed ({str(e)[:70]}) — cost falls back to rate x wall")
 
         # ── harvest BEFORE release: this is the only chance ───────────────────────────────────────
         # ⛔ EVERY PREVIOUS RUN THREW ITS EVIDENCE AWAY. The pods were terminated below with no logs

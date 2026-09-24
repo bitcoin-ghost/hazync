@@ -1,0 +1,122 @@
+[
+ {
+  "name": "hz-smoke-1",
+  "dc": "US-TX-3",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4919,
+  "usd": 1.0111
+ },
+ {
+  "name": "hz-smoke-2",
+  "dc": null,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4916,
+  "usd": 1.0105
+ },
+ {
+  "name": "hz-smoke-3",
+  "dc": null,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4915,
+  "usd": 1.0103
+ },
+ {
+  "name": "hz-smoke-4",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4896,
+  "usd": 1.0064
+ },
+ {
+  "name": "hz-smoke-5",
+  "dc": "EUR-IS-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4850,
+  "usd": 0.9969
+ },
+ {
+  "name": "hz-smoke-6",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4920,
+  "usd": 1.0113
+ },
+ {
+  "name": "hz-smoke-7",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4913,
+  "usd": 1.0099
+ },
+ {
+  "name": "hz-smoke-10",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4972,
+  "usd": 1.022
+ },
+ {
+  "name": "hz-smoke-11",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4946,
+  "usd": 1.0167
+ },
+ {
+  "name": "hz-smoke-12",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4945,
+  "usd": 1.0165
+ },
+ {
+  "name": "hz-smoke-14",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4949,
+  "usd": 1.0173
+ },
+ {
+  "name": "hz-smoke-15",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4957,
+  "usd": 1.0189
+ },
+ {
+  "name": "hz-smoke-16",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4945,
+  "usd": 1.0165
+ },
+ {
+  "name": "hz-smoke-17",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4960,
+  "usd": 1.0196
+ },
+ {
+  "name": "hz-smoke-18",
+  "dc": "EU-RO-1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "price_hr": 0.74,
+  "uptime_s": 4943,
+  "usd": 1.0161
+ }
+]

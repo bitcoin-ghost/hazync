@@ -203,6 +203,24 @@ def record_attempt(state, rng):
     return state["attempts"][rng]
 
 
+def undo_attempt(state, rng):
+    """Give back the attempt a block never got to use (hazync#506).
+
+    ⛔ AN ATTEMPT IS A BUDGET FOR BEING BAD, AND STEPPING ASIDE IS NOT BEING BAD. `MAX_ATTEMPTS` (3)
+    exists so one unprovable block cannot consume a session. A board block abandoned because a tip
+    landed has demonstrated nothing about itself, and counting it would retire a perfectly good
+    block after three tip arrivals -- permanently, since `plan_next` then refuses it for the rest of
+    the session while the board goes on handing it back as ours.
+    """
+    rng = str(rng)
+    n = state["attempts"].get(rng, 0)
+    if n > 0:
+        state["attempts"][rng] = n - 1
+    if not state["attempts"].get(rng):
+        state["attempts"].pop(rng, None)
+    return state["attempts"].get(rng, 0)
+
+
 def record_block(state, rng, result, *, at):
     """Record one block's outcome. Called the moment it verifies, not at the end of the session."""
     rng = str(rng)
@@ -342,6 +360,18 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
         except Exception as exc:                      # noqa: BLE001 -- a bad block is not a bad run
             result = {"ok": False, "events": [f"{type(exc).__name__}: {exc}"]}
             emit(f"block {rng} failed: {type(exc).__name__}: {exc}")
+
+        # ⛔ AN ABORT IS NEITHER A SUCCESS NOR A FAILURE (hazync#506). Board work between tip blocks
+        # steps aside the moment a tip lands. Recording that as a failed block would be wrong twice
+        # over: it would retire the block after three tips (MAX_ATTEMPTS) and, far worse, three tip
+        # arrivals in a row would trip the fleet-fault guard and RELEASE A HEALTHY FLEET -- turning
+        # the feature that fills the gaps into the thing that ends the session.
+        if result.get("aborted"):
+            undo_attempt(state, rng)
+            save(path, state)
+            emit(f"stepped aside from {rng} after {result.get('wall_s', '?')}s: "
+                 f"{result.get('why') or 'higher-priority work arrived'}")
+            continue
 
         record_block(state, rng, result, at=now())
         save(path, state)

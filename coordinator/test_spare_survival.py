@@ -122,6 +122,29 @@ o3, c3 = tip_smoke._drop_cards(order2, created2, [], "nothing", release=release,
 check(released == [] and recorded == [] and len(o3) == 5,
       "dropping nothing releases nothing and rewrites nothing")
 
+# ── the gate's own error message must name a CARD COUNT (hazync#492) ─────────────────────────────
+# ⛔ A real run reported "only 2 of 410441528 rented cards passed every pre-clock gate". 410,441,528
+# is the PROVER BINARY'S SIZE: `want` holds the rented count early on and is reassigned to
+# binary_size() by the fetch gate, so a message further down printed bytes where cards belong. The
+# refusal itself was correct — the documented contract is that fewer survivors than --cards fails —
+# but an operator reading that number learns nothing and doubts the rest of the line.
+_src = open(os.path.join(HERE, "tip_smoke.py"), encoding="utf8").read()
+_i = _src.index("passed every pre-clock gate")
+# ⚠ WIDEN THE WINDOW AND PIN THE PROPERTY, NOT ONE VARIABLE NAME. This read only the single line
+# before the match and required the literal `{rented}`, so splitting the f-string across lines — or
+# improving it — failed a test whose point was "a card count, not a byte count".
+_msg = _src[_src.rfind("raise SystemExit", 0, _i):_i + 200]
+_counts = ("{rented}" in _msg) or ("{len(created)}" in _msg)
+check(_counts,
+      f"the survivors message interpolates a CARD COUNT ({_msg.strip()[:70]}…)")
+check("{want}" not in _msg,
+      "and not `want`, which by that point holds the prover binary's size in bytes")
+# ⭐ len(created) is better than `rented`: `rented` is what was ASKED for (cards + spares), and the
+# run routinely gets fewer — 18 of a requested 60 on 2026-09-23. Reporting the request makes a
+# healthy fleet read as a catastrophic shortfall.
+check("{len(created)}" in _msg,
+      "and reports what was ACTUALLY rented, not what was requested")
+
 EXPECTED_CONTROL = {"is allowed to finish"}
 
 print()
