@@ -171,7 +171,11 @@ def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
     if rng is None:
         # ⚠ THE BOARD'S idle, not ours. This one can end on its own — another contributor
         # finishes, a claim expires, the tip moves — so waiting is the right thing to do.
-        return {"action": "idle", "kind": "board", "why": "the board has nothing free right now"}
+        # ⚠ Whoever decided to idle knows WHY; this used to overwrite that with one fixed
+        # sentence about the board (hazync#505). The fallback is kept for a caller that supplies
+        # nothing, but a caller that does is believed.
+        return {"action": "idle", "kind": "board",
+                "why": (work or {}).get("why") or "the board has nothing free right now"}
     rng = str(rng)
 
     # ⛔ NEVER RE-PROVE A BLOCK THIS SESSION ALREADY PROVED. On a resume the coordinator may hand back

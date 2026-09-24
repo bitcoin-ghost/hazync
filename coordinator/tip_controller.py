@@ -201,5 +201,11 @@ def next_work(tip_block, claim_fn):
         return {"source": "tip", "range": str(tip_block)}
     rng = claim_fn()
     if rng is None:
-        return {"source": "idle", "range": None}
+        # ⚠ THE REASON TRAVELS WITH THE VERDICT (hazync#505). The session used to supply one fixed
+        # sentence for every idle, so a run waiting for the CHAIN reported that the BOARD was busy --
+        # a claim about a request it had not made. An idle that states the wrong cause is worse than
+        # one that states none: during the 2026-09-23 flagship it was read live as a run that had
+        # given up, when it was a run working exactly as designed.
+        return {"source": "idle", "range": None,
+                "why": "the board has nothing free right now"}
     return {"source": "board", "range": str(rng)}

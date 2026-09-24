@@ -307,6 +307,53 @@ def bind_verdict(env, *, cards_are_remote, accept_public=False):
     return True, f"bind {bind}"
 
 
+def reachability_by_block(results, hosts):
+    """Group a reachability result by network /24, and say whether the split is structural.
+
+    ⛔ WHY GROUPED. A bare count ("7 of 17 cannot reach the aggregate") tells an operator how bad it
+    is and nothing about what to do. Measured 2026-09-24, the same numbers grouped are a different
+    fact entirely -- reachability was predicted PERFECTLY by network block:
+
+        194.68.245.x   10 reached, 0 failed
+        69.30.85.x      0 reached, 4 failed   <- the aggregate's OWN block
+        63.141.33.x     0 reached, 3 failed
+
+    That is not seven unlucky pods, it is two unreachable networks, and it is knowable before the
+    clock starts rather than by grepping the log afterwards -- which is how it was actually found.
+
+    ⚠ IT REPORTS, IT DOES NOT DIAGNOSE. The obvious reading is NAT hairpinning (workers dial the
+    aggregate's public mapped port, and a host behind the same edge may fail to loop back out and
+    in) -- but that is a hypothesis from one run. ⛔ Note it predicts that renting within one data
+    centre, the intuitive fix, would make things WORSE. Nothing here acts on the guess.
+
+    `hosts` maps card id -> host/ip. Returns {block: {"ok": n, "bad": n, "cards": [...]}}.
+    """
+    out = {}
+    for cid, reached in results.items():
+        host = str(hosts.get(cid, "") or "")
+        block = ".".join(host.split(".")[:3]) if host.count(".") >= 3 else (host or "?")
+        row = out.setdefault(block, {"ok": 0, "bad": 0, "cards": []})
+        row["ok" if reached else "bad"] += 1
+        row["cards"].append(str(cid))
+    for row in out.values():
+        row["cards"].sort()
+    return out
+
+
+def reachability_is_structural(by_block):
+    """True when every block is all-good or all-bad, and at least one of each exists.
+
+    ⚠ That shape is what says "this is the network, not the pods". A mixture inside a block is the
+    ordinary unlucky-pod case and needs no special explanation.
+    """
+    if len(by_block) < 2:
+        return False
+    pure = all(row["ok"] == 0 or row["bad"] == 0 for row in by_block.values())
+    has_bad = any(row["bad"] for row in by_block.values())
+    has_ok = any(row["ok"] for row in by_block.values())
+    return pure and has_bad and has_ok
+
+
 def reachability_verdict(results):
     """Every card must have reached the aggregate's port. Returns (ok, reason, unreachable).
 

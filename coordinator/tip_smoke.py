@@ -1064,6 +1064,29 @@ def main():
             ok, why, unreachable = tip_lifecycle.reachability_verdict(
                 {c.cid: v for c, v in reach.items()})
             log(f"reachability: {why}")
+            # ⛔ SAY IT GROUPED, BEFORE THE CLOCK (hazync#508). A bare count says how bad it is and
+            # nothing about what to do. On 2026-09-24 the same numbers grouped by network block were
+            # a different fact: reachability was predicted PERFECTLY by block, with the aggregate's
+            # own block failing completely. That took a log-grep after the run to find; it is
+            # knowable here, for free, from a result already in hand.
+            if not ok:
+                # ⚠ Card.ip, not portmap. portmap is keyed BY PORT NUMBER (ports[22] = (ip, port)),
+                # so a .get("host") on it returns "" for every card and the grouping would put the
+                # whole fleet in one bucket called "?" -- a report that cannot say anything.
+                hosts = {c.cid: getattr(c, "ip", "") for c in order}
+                by_block = tip_lifecycle.reachability_by_block(
+                    {c.cid: v for c, v in reach.items()}, hosts)
+                for blk, row in sorted(by_block.items()):
+                    mark = "⛔" if row["ok"] == 0 else ("⚠" if row["bad"] else "  ")
+                    log(f"  {mark} {blk:<16} reached {row['ok']:>2}, failed {row['bad']:>2}"
+                        + ("   <- the aggregate's own block"
+                           if blk == ".".join(str(getattr(agg, "ip", "")).split(".")[:3])
+                           else ""))
+                if tip_lifecycle.reachability_is_structural(by_block):
+                    log("  ⛔ every block is all-reached or all-failed — this is the NETWORK, not "
+                        "the pods. ⚠ Do NOT assume renting within one site fixes it: on the run "
+                        "that produced this shape, the block that FAILED was the aggregate's own "
+                        "(hazync#508).")
             if not ok:
                 # ⛔ DROP THEM AND RE-PLAN, rather than run a fleet that does not exist. A card that
                 # cannot attach is not a slow card: it sits in its retry loop contributing nothing
@@ -1413,9 +1436,23 @@ def main():
                 # height that did not exist at boot. Board work does not weaken that, because the
                 # tip always wins -- see the `abort` in prove_one, which abandons a board block the
                 # moment a tip bundle lands.
+                # ⚠ SAY WHAT IS ACTUALLY BEING WAITED FOR (hazync#505). Both idles used to print
+                # "the board has nothing free right now" -- a claim about a request this path never
+                # makes. During the 2026-09-23 flagship a reader watching live took twelve of those
+                # in a row to mean the run had proved one block and given up; it was waiting for the
+                # chain to mine 968,316, which it then proved. Naming the tip and the floor makes
+                # the wait self-explanatory and roughly self-timing.
                 if a.fresh_tip and pending is None and a.no_board_fill:
-                    return {"source": "idle", "range": None}
-                return tip_controller.next_work(pending, claim_fn)
+                    return {"source": "idle", "range": None,
+                            "why": f"waiting for the chain — bridge tip {t or '?'}, "
+                                   f"floor {proved_tip['h']} (--no-board-fill: the gap is not "
+                                   f"filled with board work)"}
+                out = tip_controller.next_work(pending, claim_fn)
+                if out.get("source") == "idle" and a.fresh_tip and pending is None:
+                    # Both are true here and only one of them is the interesting one.
+                    out["why"] = (f"waiting for the chain — bridge tip {t or '?'}, "
+                                  f"floor {proved_tip['h']}; the board has nothing free either")
+                return out
 
             def tip_waiting():
                 """A tip bundle above what we have proved, or None. The board block's abort signal.
