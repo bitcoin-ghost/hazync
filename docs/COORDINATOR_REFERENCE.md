@@ -36,6 +36,7 @@ Applies to every route, from `H` in `server.py`:
 | `/api/sponsor/quote` | `lo`, `hi` | `sponsor_quote()` | 200 | Minimum USD and sats for `?lo=&hi=`. Answers while sponsorship is closed; refuses spans that are not open (proven, anchored, claimed or already held). |
 | `/api/sponsor/status/<token>` | — | `sponsor_status()` | 200, 404 | One sponsorship, looked up by the sha256 of its private token (`[A-Za-z0-9_-]{16,128}`); `404` otherwise. |
 | `/api/sponsors` | — | `sponsors_public()` | 200 | Public table of sponsorships whose status is paid, proving or proven and whose settled amount covers the minimum (`SPONSOR_PUBLIC_SQL`). |
+| `/api/donations` | — | `donations_public()` | 200 | Public donations record for hazync.org/donations/: every settled BTCPay invoice reduced to date and amount, newest first, cached for `DONATIONS_TTL`. Publishes no txid, address or invoice id — that would make the whole donations wallet public. Amounts are `paidAmount` (what arrived), not `amount` (what the invoice asked for). Returns `{error}` rather than an empty list when BTCPay cannot be read, so a failure never renders as 'nobody has ever donated'. |
 | `/api/pick` | — | `pick()` | 200, 404 | Advice only, claims nothing: the first block after the frontier that is not proven here or at a peer, not held, not (on the first pass) being proven at a peer, and has a witness. `404` if none. |
 | `/api/meta` | — | `expected_method_id()`, `frontier_hi()`, `source_sha256()` | 200 | Pre-flight: `method_id` (the `method-id` output of `HAZYNC_HOST`), `frontier`, `reproduce` (`reproduce/METHOD_ID`) and `source_sha256` of the running `server.py`. |
 | `/api/foldable` | `limit` | `foldable()` | 200 | Sibling pairs of the canonical fold tree whose parent is not yet verified. `?limit=` clamped to 1-32, default 32 (`FOLDABLE_DEFAULT`; 8 before #333). A pair under a live fold claim is left out. |
@@ -146,6 +147,8 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `SPONSOR_RETURN_URL` | `'https://hazync.org/sponsors/'` | constant `SPONSOR_RETURN_URL` | Where the checkout sends a sponsor back to; `#t=<token>` is appended. |
 | `SPONSOR_RATE_TTL` | `'60'` | constant `SPONSOR_RATE_TTL` | Seconds BTCPay's bitcoin price is cached. |
 | `SPONSOR_RATE_STALE` | `'600'` | constant `SPONSOR_RATE_STALE` | Seconds the last good BTCPay price is still used when BTCPay stops answering. |
+| `DONATIONS_TTL` | `'300'` | constant `DONATIONS_TTL` | Seconds the public donations record is cached before BTCPay is asked again. |
+| `DONATIONS_MAX` | `'250'` | constant `DONATIONS_MAX` | How many recent invoices the donations record asks BTCPay for in one call. |
 | `SPONSOR_BOT_PUBKEY_FILE` | `''` | constant `SPONSOR_BOT_PUBKEY_FILE` | File holding the sponsor bot's ed25519 public key (hex). Unset or unreadable: every `/api/bot/` request is refused `503`. |
 | `SPONSOR_BOT_SKEW` | `'120'` | constant `SPONSOR_BOT_SKEW` | Seconds a sponsor bot request's timestamp may be off; its nonce is remembered twice as long. |
 | `BEAT_LOG_WINDOW` | `'600'` | constant `BEAT_LOG_WINDOW` | Seconds identical beat rejections are collapsed into one log line. |

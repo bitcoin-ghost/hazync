@@ -67,6 +67,12 @@ ROUTES = {
     "GET /api/sponsors":
         "Public table of sponsorships whose status is paid, proving or proven and whose settled amount "
         "covers the minimum (`SPONSOR_PUBLIC_SQL`).",
+    "GET /api/donations":
+        "Public donations record for hazync.org/donations/: every settled BTCPay invoice reduced to date "
+        "and amount, newest first, cached for `DONATIONS_TTL`. Publishes no txid, address or invoice id "
+        "— that would make the whole donations wallet public. Amounts are `paidAmount` (what arrived), "
+        "not `amount` (what the invoice asked for). Returns `{error}` rather than an empty list when "
+        "BTCPay cannot be read, so a failure never renders as 'nobody has ever donated'.",
     "GET /api/pick":
         "Advice only, claims nothing: the first block after the frontier that is not proven here or at a "
         "peer, not held, not (on the first pass) being proven at a peer, and has a witness. `404` if none.",
@@ -259,6 +265,8 @@ ENV = {
     "server:SPONSOR_RETURN_URL": "Where the checkout sends a sponsor back to; `#t=<token>` is appended.",
     "server:SPONSOR_RATE_TTL": "Seconds BTCPay's bitcoin price is cached.",
     "server:SPONSOR_RATE_STALE": "Seconds the last good BTCPay price is still used when BTCPay stops answering.",
+    "server:DONATIONS_TTL": "Seconds the public donations record is cached before BTCPay is asked again.",
+    "server:DONATIONS_MAX": "How many recent invoices the donations record asks BTCPay for in one call.",
     "server:BEAT_LOG_WINDOW": "Seconds identical beat rejections are collapsed into one log line.",
     "server:COORD_ALLOW_PUBLIC_INSECURE": "Allows a non-loopback bind in an insecure mode. Not for "
                                           "production.",
