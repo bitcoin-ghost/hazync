@@ -783,6 +783,12 @@ def main():
     ap.add_argument("--claim", action="store_true",
                     help="claim a block from the board and prove it from its BUNDLE (mode 6, #367) "
                          "instead of proving a named fixture")
+    ap.add_argument("--claim-as", default=None, metavar="HANDLE",
+                    help="refuse to start unless this box's claim identity is HANDLE. Board work is "
+                         "credited to whoever signs the claim, permanently and publicly, and "
+                         "tip_board.identity() returns whatever $HAZYNC_HOME holds — so a run on the "
+                         "wrong box claims as the wrong name and says so in one line nobody reads. "
+                         "Checked before anything is rented")
     ap.add_argument("--claim-source", choices=("api", "ssh"), default="api",
                     help="api: /api/witness (board heights, <=418,268). ssh: straight off the bridge "
                          "host (TIP heights, once the walk passes EMIT_FROM)")
@@ -824,6 +830,23 @@ def main():
     if a.claim:
         ident = tip_board.identity()
         log(f"claiming as {ident[2]!r} ({ident[1][:10]}…)")
+        # ⛔ WHOSE WORK IS THIS? tip_board.identity() returns whatever $HAZYNC_HOME happens to hold,
+        # and every box has SOME identity, so a run always claims as someone. Measured 2026-09-26:
+        # a tip session launched on the rig claimed board blocks as 'hazync-coordinator'
+        # (9be361b031…) when hazync#367 decided they are claimed as 'G H O S T' (c4c7d99b6b…) --
+        # whose key deliberately lives on a box the operator owns and NOT on any server. The log line
+        # above said so plainly and nobody was reading it; the operator spotted it, not the tooling.
+        #
+        # ⚠ The credit is the whole point of claiming. Board work proved under the wrong identity is
+        # not a cosmetic slip: it lands on a leaderboard, under a name, permanently.
+        #
+        # ⚠ Checked HERE, before anything is rented, so a wrong identity costs nothing. Default None
+        # keeps the old behaviour -- this refuses only when an operator has said who they expect.
+        if a.claim_as and a.claim_as != ident[2]:
+            raise SystemExit(
+                f"--claim-as {a.claim_as!r} but this box's identity is {ident[2]!r} "
+                f"({ident[1][:10]}…). Nothing has been rented. Point HAZYNC_HOME at the identity "
+                f"whose name should go on this work, or drop --claim-as if the box's own is right.")
     if a.claim and not a.session:
         res = tip_board.claim(ident=ident)
         if res["state"] == "idle":
