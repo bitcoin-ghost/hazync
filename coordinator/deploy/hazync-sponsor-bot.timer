@@ -1,0 +1,25 @@
+[Unit]
+Description=Every few minutes: prove any paid sponsorship that is waiting
+
+# ⛔ THE BOT IS NOT A DAEMON, SO ENABLING THE SERVICE ALONE ACHIEVES NOTHING. `run --live` breaks out
+# of its loop with stop_reason "done" as soon as there is no live pod and no pending work, and the
+# unit is Type=simple with Restart=no. Measured 2026-09-26: the first real run proved block 196,001
+# and exited 0 at 17:23:07. `systemctl enable --now` would therefore start it, find an empty queue,
+# exit, and stay stopped until the next reboot -- so a sponsor who paid an hour later would get
+# nothing proved, which is the exact failure enabling it was meant to prevent.
+#
+# ⚠ OnUnitInactiveSec, NOT OnUnitActiveSec. A run lasts as long as the proving does (15 minutes for
+# one block at 196,001, longer nearer the tip), and an interval measured from the START would fire
+# again mid-run. Measured from the END, each pass gets the whole gap to itself.
+#
+# ⚠ Persistent so a reboot does not silently skip the window a payment landed in. The bot reads the
+# coordinator's queue on every pass, so a late catch-up proves what is waiting rather than double-
+# proving anything: the coordinator moves a sponsorship to `proving` and holds it.
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

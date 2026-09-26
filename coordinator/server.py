@@ -2230,6 +2230,11 @@ SPONSOR_CONFIRMING_HOLD = int(os.environ.get("SPONSOR_CONFIRMING_HOLD", str(2 * 
 SPONSOR_UNPAID_HOLD_MAX = int(os.environ.get("SPONSOR_UNPAID_HOLD_MAX", "5000"))
 SPONSOR_OPEN_INVOICES_PER_IP = int(os.environ.get("SPONSOR_OPEN_INVOICES_PER_IP", "3"))
 SPONSOR_RETURN_URL = os.environ.get("SPONSOR_RETURN_URL", "https://hazync.org/sponsors/")
+# ⚠ ONE DEFINITION, TWO READERS. _sponsor_request_invoice writes this prefix onto every sponsor
+# invoice's orderId, and _donation_rows uses it to keep sponsorships out of the public donations
+# record. Written out twice, the two would drift and sponsorships would quietly reappear as
+# donations; there is nothing else on the invoice that distinguishes them.
+SPONSOR_ORDER_PREFIX = "hazync-sponsorship-"
 SPONSOR_RATE_TTL = int(os.environ.get("SPONSOR_RATE_TTL", "60"))
 SPONSOR_RATE_STALE = int(os.environ.get("SPONSOR_RATE_STALE", "600"))   # the last good rate is used this long
 
@@ -2634,7 +2639,7 @@ def _sponsor_request_invoice(body, lo, hi, name, min_usd, min_sats, amount, toke
         # Priced in SATS, the unit the minimum and the public rule are kept in, so what settles compares with
         # min_sats exactly. The rate that set min_sats is BTCPay's own (sponsor_btc_usd).
         req = {"amount": str(amount), "currency": "SATS",
-               "metadata": {"orderId": f"hazync-sponsorship-{sid}",
+               "metadata": {"orderId": f"{SPONSOR_ORDER_PREFIX}{sid}",
                             "itemDesc": f"Hazync: prove block{'' if lo == hi else 's'} "
                                         f"{lo:,}{'' if lo == hi else f' to {hi:,}'}"},
                # ⛔ redirectAutomatically MUST BE SET. BTCPay defaults it to false, and a redirectURL
@@ -2871,6 +2876,18 @@ def _donation_rows():
     out = []
     for i in inv:
         if not isinstance(i, dict) or str(i.get("status", "")).lower() not in _SETTLED:
+            continue
+        # ⛔ A SPONSORSHIP IS NOT A DONATION. Sponsor invoices are raised against this same store, so
+        # the first real one (2026-09-26, 2000 sats for block 196,001) landed straight in the
+        # donations record. It is money received either way, but /donations/ says "every donation",
+        # and a sponsorship already has its own public row on /sponsors/ with the block it bought --
+        # counting it twice, under a name that does not describe it, overstates donations.
+        #
+        # ⚠ The marker is the orderId the coordinator sets when it raises the invoice
+        # (SPONSOR_ORDER_PREFIX), not the amount or the currency: those are indistinguishable from a
+        # donation of the same size.
+        if str(((i.get("metadata") or {}) if isinstance(i.get("metadata"), dict) else {})
+               .get("orderId") or "").startswith(SPONSOR_ORDER_PREFIX):
             continue
         ts = i.get("createdTime") or 0
         try:
