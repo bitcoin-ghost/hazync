@@ -1,0 +1,13 @@
+[Unit]
+Description=Every 5 minutes: check for donations and BTCPay health
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+# ⚠ Persistent so a reboot does not silently skip the window a donation landed in; the watermark
+# is a timestamp, so a late catch-up notifies rather than double-notifies.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
