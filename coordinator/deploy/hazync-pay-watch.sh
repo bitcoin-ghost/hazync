@@ -246,10 +246,17 @@ else
     # and it is the same rate the store would price an invoice at, so the alert and the UI agree.
     rate_json=$(curl -fsS -m 25 "${CURL_PIN[@]}" -H "Authorization: token $KEY" \
                "$URL/api/v1/stores/$STORE/rates?currencyPair=BTC_$SWEEP_CURRENCY" 2>/dev/null)
-    btc=$(docker exec generated_postgres_1 psql -U postgres -d nbxplorermainnet -t -A -c \
+    # ⛔⛔ nbxplorer STORES SATOSHIS, and this used to call the result `btc` and multiply it straight
+    # by the GBP rate. It was invisible for as long as the wallet held nothing, because 0 satoshis and
+    # 0 BTC are the same number -- so the very first donation to land on-chain, 20,300 sat, was
+    # announced as "20300 BTC = 1287267660.00 GBP" and tripped the £200 sweep alert by a factor of
+    # 100,000,000. A unit bug that only a non-zero value can expose will sit in a green log for ever;
+    # the test beside this file now pins a real measured pair (20,300 sat == 0.000203 BTC).
+    sats=$(docker exec generated_postgres_1 psql -U postgres -d nbxplorermainnet -t -A -c \
       "SELECT COALESCE(SUM(available_balance),0) FROM wallets_balances WHERE asset_id='' AND wallet_id IN (SELECT DISTINCT wallet_id FROM nbxv1_metadata WHERE key IN ('Mnemonic','MasterHDKey','AccountHDKey'));" \
       2>/dev/null | tr -d ' ')
-    case "${btc:-}" in ''|*[!0-9.]*) btc=-1 ;; esac
+    # ⚠ Validate BEFORE converting: awk turns junk into 0, which would read as an empty hot wallet.
+    case "${sats:-}" in ''|*[!0-9.]*) btc=-1 ;; *) btc=$(awk -v s="$sats" 'BEGIN{printf "%.8f", s/100000000}') ;; esac
     rate=$(printf '%s' "${rate_json:-}" | python3 -c '
 import json,sys
 try:
@@ -270,7 +277,9 @@ except Exception: print(-1)
     else
         fiat=$(awk -v b="$btc" -v r="$rate" 'BEGIN{printf "%.2f", b*r}')
         over=$(awk -v f="$fiat" -v t="$SWEEP_THRESHOLD" 'BEGIN{print (f>=t)?1:0}')
-        say "sweep check: hot balance $btc BTC = $fiat $SWEEP_CURRENCY (threshold $SWEEP_THRESHOLD)"
+        # ⚠ Print the satoshi figure too. The bug above was a unit error, and a line that shows only
+        # the converted number gives the next reader nothing to check the conversion against.
+        say "sweep check: hot balance ${sats:-?} sat = $btc BTC = $fiat $SWEEP_CURRENCY (threshold $SWEEP_THRESHOLD)"
         if [ "$over" = "1" ] && [ ! -s "$SWEPT" ]; then
             push "₿ Hazync hot wallet is over the sweep line" \
                  "$fiat $SWEEP_CURRENCY on the BTCPay hot wallet (threshold $SWEEP_THRESHOLD $SWEEP_CURRENCY). Sweep to cold when convenient." \
