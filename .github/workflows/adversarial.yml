@@ -172,6 +172,18 @@ jobs:
           cd coordinator
           python3 test_pod_cloud_type.py --control
 
+      - name: The donations record counts donations, and what arrived (hazync#524)
+        # ⛔ Sponsor invoices are raised against the same BTCPay store, so the first real sponsorship
+        # (2000 sats for block 196,001) landed straight in the public donations record. A sponsorship
+        # already has its own row on /sponsors/ naming the block it bought; counting it again as a
+        # donation overstates donations under a name that does not describe it. Only the orderId
+        # distinguishes them -- amount and currency cannot.
+        run: cd coordinator && python3 test_donations_record.py
+      - name: Donations-record POSITIVE CONTROL (filter and paidAmount removed — must be caught)
+        run: |
+          cd coordinator
+          python3 test_donations_record.py --control
+
       - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
         # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a
         # form outliving the run -- re-checking it meant re-reading a session transcript, which is
