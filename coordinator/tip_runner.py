@@ -142,6 +142,110 @@ while time.time() < end:
         pass
 """
 
+    # ⛔ THE AGGREGATE'S LINK CARRIES THE WHOLE FLEET, AND IT WAS CHOSEN AT RANDOM (hazync#517).
+    # Every segment is pushed FROM the aggregate and every join round-trips THROUGH it. Measured on
+    # block 968,340: 12.48 GB through one card in 1,910 s. The driver took `order[0]` -- whichever pod
+    # answered ssh first -- for the one role where the pod's network matters more than its GPU.
+    #
+    # ⚠ AND THE RUN LOGS CANNOT ANSWER THIS. Two runs sustained 36 and 52 Mbit/s, but the fleet was
+    # GPU-busy 92%, so those are DEMAND, not capacity: the aggregate only ever pushed as fast as the
+    # workers consumed. The link is never saturated by a healthy run, so it has to be asked directly.
+    _EGRESS_SERVER = """import socket, threading, time
+CHUNK = b"x" * 65536
+def serve(c):
+    end = time.time() + SECS
+    try:
+        while time.time() < end:
+            c.sendall(CHUNK)
+    except Exception:
+        pass
+    try: c.close()
+    except Exception: pass
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", PORT))
+s.listen(64)
+s.settimeout(1)
+end = time.time() + SECS + 8
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+        threading.Thread(target=serve, args=(c,), daemon=True).start()
+    except Exception:
+        pass
+"""
+
+    def measure_egress(self, cards, *, secs=8):
+        """Mbit/s this aggregate can push to ALL its workers at once, or None if untestable.
+
+        ⛔ CONCURRENTLY, NOT ONE AT A TIME. The real shape is one aggregate feeding every worker
+        simultaneously; a single-stream figure would flatter a card whose link collapses under 14
+        readers. Every worker pulls for `secs` and the totals are summed.
+
+        ⛔ AND None IS NOT ZERO. If the streamer cannot be confirmed up, this returns None so the
+        caller can say "untested" rather than condemn a healthy pod -- the same rule check_reachability
+        already follows, and for the same reason.
+        """
+        script = (self._EGRESS_SERVER.replace("PORT", str(self.agg_port))
+                                     .replace("SECS", str(int(secs))))
+        blob = base64.b64encode(script.encode()).decode()
+        self.ssh.run(self.agg,
+                     f"echo {blob} | base64 -d > /tmp/egress.py && "
+                     f"nohup timeout {int(secs) + 12} python3 /tmp/egress.py "
+                     f"> /tmp/egress.log 2>&1 < /dev/null & disown; exit 0",
+                     timeout=tip_driver.PROBE_TIMEOUT_S)
+        time.sleep(2)
+        up = (self.ssh.run(self.agg,
+                           f"(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -c ':{self.agg_port} '",
+                           timeout=tip_driver.PROBE_TIMEOUT_S) or "").strip().splitlines()
+        if not up or not up[-1].strip().isdigit() or int(up[-1].strip()) < 1:
+            return None, {}
+
+        workers = [c for c in dict.fromkeys(cards.values() if hasattr(cards, "values") else cards)
+                   if c.cid != self.agg.cid]
+        if not workers:
+            return None, {}
+        host = self.agg.ip
+        reader = (f"import socket,time\n"
+                  f"s=socket.create_connection(('{host}',{self.agg_dial}),10); s.settimeout(3)\n"
+                  f"n=0; t0=time.time(); end=t0+{int(secs)}\n"
+                  f"while time.time()<end:\n"
+                  f"    b=s.recv(262144)\n"
+                  f"    if not b: break\n"
+                  f"    n+=len(b)\n"
+                  f"print('EGRESS',n,round(time.time()-t0,3))\n")
+        blob2 = base64.b64encode(reader.encode()).decode()
+
+        def one(card):
+            out = self.ssh.run(card,
+                               f"echo {blob2} | base64 -d > /tmp/pull.py && "
+                               f"timeout {int(secs) + 10} python3 /tmp/pull.py 2>/dev/null; exit 0",
+                               timeout=tip_driver.PROBE_TIMEOUT_S + secs)
+            for ln in reversed((out or "").strip().splitlines()):
+                parts = ln.strip().split()
+                if len(parts) == 3 and parts[0] == "EGRESS":
+                    try:
+                        return int(parts[1]), float(parts[2])
+                    except ValueError:
+                        return None
+            return None
+
+        raw, per = {}, {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            for card, res in zip(workers, pool.map(one, workers)):
+                if res and res[1] > 0:
+                    raw[card.cid] = res                      # (bytes, elapsed_s)
+                    per[card.cid] = res[0] * 8 / res[1] / 1e6
+        if not raw:
+            return None, {}
+        # ⛔ TOTAL BYTES OVER THE LONGEST READ, not the sum of per-stream rates. Summing rates treats a
+        # stream that delivered 8 MB in 1 s the same as one that delivered 64 MB in 8 s, so a fleet
+        # where half the readers finish early reports a throughput the aggregate never sustained.
+        # Dividing the total by the window they actually shared cannot flatter it that way.
+        total_bytes = sum(b for b, _ in raw.values())
+        window = max(e for _, e in raw.values())
+        return total_bytes * 8 / window / 1e6, per
+
     def check_reachability(self, cards, *, secs=30):
         """{card: bool} — can each worker actually open a TCP connection to the aggregate's port?
 
