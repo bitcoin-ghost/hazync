@@ -2637,8 +2637,15 @@ def _sponsor_request_invoice(body, lo, hi, name, min_usd, min_sats, amount, toke
                "metadata": {"orderId": f"hazync-sponsorship-{sid}",
                             "itemDesc": f"Hazync: prove block{'' if lo == hi else 's'} "
                                         f"{lo:,}{'' if lo == hi else f' to {hi:,}'}"},
+               # ⛔ redirectAutomatically MUST BE SET. BTCPay defaults it to false, and a redirectURL
+               # that nobody follows is not a redirect: measured on the first real sponsorship
+               # (2026-09-26), the sponsor paid and was left sitting on donate.hazync.org -- a BTCPay
+               # invoice page with no Hazync branding -- needing to spot a small "return to store"
+               # link. The destination was correct and complete all along (/sponsors/#t=<token>
+               # renders "Paid, and these blocks are being proven now"); nobody was ever taken to it.
                "checkout": {"expirationMinutes": SPONSOR_INVOICE_MINUTES,
                             "monitoringMinutes": max(1, SPONSOR_INVOICE_WATCH // 60),
+                            "redirectAutomatically": True,
                             "redirectURL": f"{SPONSOR_RETURN_URL}#t={token}"}}
         try:
             inv = _btcpay("POST", "/invoices", req)
