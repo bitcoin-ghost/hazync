@@ -387,6 +387,26 @@ while time.time() < end:
         return self._launch(card, chunk, block=block, chunks=chunks, workdir=workdir)
 
     # ── phase 6 ────────────────────────────────────────────────────────────────────────────────────
+    # ⛔ THE AGGREGATE'S LOG WAS DELETED AT THE START OF EVERY BLOCK, TAKING THE EVIDENCE WITH IT.
+    # `rm -f agg.log` ran before each `seg-serve`, so only the LAST block of a run still had its
+    # segment count, join round-trips and timings. Measured consequence, board-fill trial 2026-09-24:
+    # of four blocks proved, segment totals survived for exactly one, and the writeup had to record
+    # that as "a gap in the evidence, not a rounding choice".
+    #
+    # ⚠ APPEND, DO NOT ROTATE TO A NEW NAME. tip_harvest fetches a FIXED list of filenames
+    # (AGG_LOGS) one by one; files named agg.log.<timestamp> would be written faithfully and then
+    # never fetched, which is the same evidence loss with extra steps. One cumulative file is a name
+    # harvest can ask for.
+    #
+    # ⚠ The separator is written BEFORE the old log is appended, so the lines that FOLLOW a separator
+    # are the ones it describes: "rotated <time>, before height N" is the log of whatever ran up to
+    # that moment, i.e. the block before N. There is no height for the previous block in scope here,
+    # and inventing one would be worse than bounding it by the height that is about to start.
+    def _rotate_agg(self, label):
+        return ("{ printf '\\n===== rotated %s, before %s =====\\n' "
+                "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" " + f"'{label}'" + "; "
+                "cat agg.log 2>/dev/null; } >> agg-history.log 2>/dev/null; rm -f agg.log agg.err")
+
     def start_aggregate(self, *, block, chunks):
         env = dict(self.prove_env,
                    HAZYNC_BLOCK=f"{self.workdir}/block_{block}.json",
@@ -414,7 +434,7 @@ while time.time() < end:
         if not ok:
             raise RuntimeError(f"refusing to start the aggregate: {why}")
         assigns = " ".join(f"{k}={v}" for k, v in sorted(env.items()))
-        body = (f"cd {self.workdir} && rm -f agg.log agg.err && {assigns} "
+        body = (f"cd {self.workdir} && {self._rotate_agg(block)} && {assigns} "
                 f"nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & "
                 f"disown; exit 0")
         # ⚠ RECORDED HERE, NOT BY THE CALLER, and recorded BEFORE the ssh rather than after, so a slow
@@ -464,7 +484,7 @@ while time.time() < end:
         if not ok:
             return False, f"refusing to start the range aggregate: {why}"
         assigns = " ".join(f"{k}={v}" for k, v in sorted(env.items()))
-        body = (f"cd {self.workdir} && rm -f agg.log agg.err && {assigns} "
+        body = (f"cd {self.workdir} && {self._rotate_agg(f'height {height}')} && {assigns} "
                 f"nohup setsid ./hazync-host-cuda seg-serve > agg.log 2> agg.err < /dev/null & "
                 f"disown; exit 0")
         self.agg_started_ms = int(time.time() * 1000)
