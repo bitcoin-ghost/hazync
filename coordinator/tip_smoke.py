@@ -679,6 +679,18 @@ def main():
     # what #367 asked for and what the flagship hour measured the cost of not doing -- 31.4 idle
     # minutes, $5.81. This flag exists for the case where a run must be a clean measurement of tip
     # latency alone, with nothing else touching the fleet.
+    # ⛔ THE ONE ROLE WHERE THE LINK MATTERS MORE THAN THE GPU (hazync#517). 1 disables the probe and
+    # restores the old "first card that answered ssh" behaviour, for a run that must not spend the
+    # ~10 s per candidate.
+    ap.add_argument("--agg-candidates", type=int, default=3,
+                    help="how many cards to measure before choosing the aggregate (1 = do not probe)")
+    ap.add_argument("--agg-probe-secs", type=int, default=8,
+                    help="seconds each candidate streams to every worker at once")
+    # ⚠ Default 0 = REPORT, do not refuse. A block needs roughly segments x ~1.3 MB x 8 / target_s
+    # (1.1-1.3 MB/segment measured over two runs), so 9,600 segments under 600 s wants ~166 Mbit/s --
+    # but the right floor depends on the block and the target, so the operator sets it.
+    ap.add_argument("--agg-min-mbit", type=float, default=0.0,
+                    help="refuse to start if the best aggregate candidate is below this Mbit/s")
     ap.add_argument("--no-board-fill", action="store_true",
                     help="with --fresh-tip, sit idle between tip blocks instead of proving board "
                          "work; use when measuring tip latency with nothing else on the fleet")
@@ -1008,11 +1020,59 @@ def main():
                     json.dump(kept, fh, indent=1)
             return _drop_cards(order_, created_, bad, why, release=release, record=record)
 
-        agg = order[0]
+        # ⛔ THE AGGREGATE IS CHOSEN ON ITS LINK, NOT ON WHO ANSWERED SSH FIRST (hazync#517).
+        # This was `order[0]`. Every segment is pushed FROM the aggregate and every join round-trips
+        # THROUGH it -- 12.48 GB through one card on block 968,340 -- so it is the one role where the
+        # pod's NETWORK matters more than its GPU, and it was being filled at random.
+        #
+        # ⚠ WHY A PROBE AND NOT THE RUN LOGS. Two past runs sustained 36 and 52 Mbit/s, but the fleet
+        # was GPU-busy 92% of the block: the aggregate only ever pushed as fast as the workers
+        # consumed, so those figures are DEMAND, not capacity. A healthy run never saturates the link,
+        # which is exactly why it has to be asked directly, before the clock.
+        cand = [c for c in order if 9110 in portmap.get(c.cid, {})][:a.agg_candidates]
+        if not cand:
+            raise SystemExit("no card has a published 9110 — workers could never attach")
+        best = (None, -1.0, {})
+        if len(cand) > 1 and a.agg_candidates > 1:
+            phase(f"PREPARING · measuring the link on {len(cand)} aggregate candidate(s)")
+            for c in cand:
+                probe = tip_runner.FleetRunner(
+                    ssh, c, stage_dir=os.path.join(a.rundir, "stage"),
+                    agg_port=9110, agg_dial=portmap[c.cid][9110][1])
+                try:
+                    mbit, per = probe.measure_egress(order, secs=a.agg_probe_secs)
+                except Exception as exc:                       # noqa: BLE001
+                    log(f"  {c.cid}: egress probe failed ({type(exc).__name__}) — not judged on it")
+                    continue
+                if mbit is None:
+                    # ⚠ "could not test" is not "it failed" — the same rule the reachability gate uses.
+                    log(f"  {c.cid}: egress UNTESTED (no streamer, or no worker answered)")
+                    continue
+                log(f"  {c.cid}: {mbit:.0f} Mbit/s to {len(per)} worker(s)")
+                if mbit > best[1]:
+                    best = (c, mbit, per)
+        agg = best[0] or cand[0]
+        if best[0] is not None:
+            log(f"aggregate: {agg.cid} at {best[1]:.0f} Mbit/s "
+                f"(best of {len(cand)} candidate(s))")
+            # ⛔ A FLOOR, BECAUSE THE BEST OF A BAD SET IS STILL BAD. The rate a block needs is
+            # roughly segments x ~1.3 MB x 8 / target_seconds (1.1-1.3 MB/segment measured over two
+            # runs), so a 9,600-segment block under 600 s wants ~166 Mbit/s. Default 0 = report only,
+            # because the right floor depends on the block and the operator's target.
+            if a.agg_min_mbit and best[1] < a.agg_min_mbit:
+                raise SystemExit(
+                    f"the best aggregate candidate sustains {best[1]:.0f} Mbit/s, below the "
+                    f"--agg-min-mbit floor of {a.agg_min_mbit:.0f}. Every segment is pushed from this "
+                    f"one card, so the fleet cannot outrun it. Rent more spares and try again")
+        else:
+            log(f"aggregate: {agg.cid} (link UNMEASURED — falling back to the first candidate)")
         agg_ports = portmap.get(agg.cid, {})
         if 9110 not in agg_ports:
             raise SystemExit("the aggregator has no published 9110 — workers could never attach")
         agg_dial = agg_ports[9110][1]
+        # ⚠ The aggregate must lead `order`: assignment_preview and the surplus check both take the
+        # head of the list as the aggregate, and a mismatch would arm the wrong card.
+        order = [agg] + [c for c in order if c.cid != agg.cid]
 
         # ── the dashboard feed: started NOW, so the page is not dark through setup ───────────────
         os.makedirs(a.rundir, exist_ok=True)

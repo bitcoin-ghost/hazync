@@ -239,6 +239,12 @@ jobs:
         run: |
           cd coordinator
           python3 test_check_phase_assumptions.py --control
+      - name: The aggregate is chosen on its link, not on who answered ssh first (hazync#517)
+        run: cd coordinator && python3 test_aggregate_choice.py
+      - name: Aggregate-choice POSITIVE CONTROL (first card wins — the link must stop mattering)
+        run: |
+          cd coordinator
+          python3 test_aggregate_choice.py --control
       - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)
