@@ -43,6 +43,11 @@ _pre_env=$(for v in BTCPAY_URL BTCPAY_STORE_ID BTCPAY_API_KEY_FILE PAY_STATE_DIR
              eval "val=\${$v+set}"
              [ "${val:-}" = "set" ] && eval "printf '%s=%s\n' \"$v\" \"\$$v\""
            done)
+# ⚠ The env file is operator config and is not in the repo, so there is nothing for shellcheck to
+# follow. The directive below must carry NO trailing comment -- shellcheck reads the rest of the
+# line as key=value pairs and rejects it (SC1125), which is how a silencing directive becomes a
+# second error.
+# shellcheck source=/dev/null
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
 # re-apply whatever the caller actually set
 if [ -n "${_pre_env:-}" ]; then
