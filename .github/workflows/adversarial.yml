@@ -184,6 +184,29 @@ jobs:
           cd coordinator
           python3 test_donations_record.py --control
 
+      - name: The aggregate is not left feeding a tail (hazync#527)
+        # ⛔ The fold waits for the SLOWEST peer at every level, so one bad link sets the wall clock.
+        # Block 968,340: join RTTs 0.4 s to 107.4 s, 31.8 minutes, three blocks behind. Renting more
+        # cards does not fix a tail — it adds join levels for it to appear at. Gates on the link the
+        # probe just measured, never on the datacentre label, because the run that produced those
+        # numbers says nothing in it separates geography from card-to-card routing.
+        run: cd coordinator && python3 test_worker_gate.py
+      - name: Worker-gate POSITIVE CONTROL (gate disabled — slow links must survive)
+        run: |
+          cd coordinator
+          python3 test_worker_gate.py --control
+
+      - name: Every block's aggregate log survives the run (hazync#526)
+        # ⛔ `rm -f agg.log` ran before each seg-serve, so only the LAST block of a run still had its
+        # segment count and join timings. The board-fill trial proved four blocks and could report
+        # segment totals for one. Appending is half the fix: tip_harvest fetches a FIXED list of
+        # names, so a rotated file would be written faithfully and never collected.
+        run: cd coordinator && python3 test_agg_log_survives.py
+      - name: Aggregate-log POSITIVE CONTROL (`rm -f` restored — evidence must be lost)
+        run: |
+          cd coordinator
+          python3 test_agg_log_survives.py --control
+
       - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
         # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a
         # form outliving the run -- re-checking it meant re-reading a session transcript, which is

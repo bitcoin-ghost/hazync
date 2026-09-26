@@ -57,7 +57,11 @@ RE_CONN = re.compile(r"^(\d{13})\s+\[(\w+)\]\s+connected to\s+(\S+)", re.M)
 # host CPU. None of it can be reconstructed once the pod is released, and until now none of it was
 # fetched -- so every question of the form "was that slow card in a different datacenter?" was
 # answerable only by inferring from peer IPs. hazync#448 is exactly that question.
-AGG_LOGS = ("agg.log", "agg.err", "run.log", "prove.log", "facts.json")
+# ⚠ agg-history.log holds EVERY earlier block of the run. agg.log is only the block currently
+# being proved, because seg-serve is restarted per block; the runner appends the old one here
+# first. Without this name in the list the rotation would write faithfully and nothing would
+# ever fetch it -- the same evidence loss as deleting it, with extra steps.
+AGG_LOGS = ("agg.log", "agg.err", "agg-history.log", "run.log", "prove.log", "facts.json")
 WORKER_LOGS = ("aggw.log", "aa.log", "run.log", "prove.log", "facts.json")
 
 

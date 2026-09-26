@@ -370,6 +370,74 @@ def binary_size():
         return int(r.headers["Content-Length"])
 
 
+def slow_worker_cut(order, per, *, need, floor=0.0):
+    """Which workers to release so the aggregate is not feeding a tail (hazync#527).
+
+    Returns (drop_cids, ranked) where `ranked` is [(cid, mbit_or_None)] worst-first among droppable
+    cards, for the log. Pure: it releases nothing and asks nothing of the network.
+
+    ⛔ WHY THE TAIL AND NOT THE MEDIAN. The fold waits for the SLOWEST peer at every level, so one
+    bad link sets the wall clock for the whole block. Measured on block 968,340, 7,986 join samples:
+
+        min 0.4 s    p50 17.1 s    p90 55.5 s    max 107.4 s      a 268x spread
+
+    That block took 31.8 minutes and the chain moved three blocks past us. Adding cards does not fix
+    a tail -- it adds join levels for the tail to appear at.
+
+    ⛔ AND IT GATES ON MEASUREMENT, NOT ON THE DATACENTRE LABEL. `dc` has been recorded per card all
+    along and it is tempting to just cluster on it, but the run that produced those numbers says
+    plainly that "nothing here separates geography from card-to-card routing". Dropping a card for
+    the datacentre it happens to sit in would be acting on a hypothesis nobody has tested; dropping
+    it for a link we just measured is acting on evidence.
+
+    ⚠ AN UNMEASURED CARD RANKS AT THE MEDIAN OF THE MEASURED ONES. "Untested is not failed" is the
+    rule the aggregate choice and the reachability gate already follow, so an unmeasured card is not
+    condemned -- but it cannot be favoured over a card measured to be fast either, or the gate would
+    prefer ignorance. The median is where a typical card sits, which is the honest default.
+
+    ⚠ THE AGGREGATE IS NEVER DROPPED. It is order[0] by construction, it is not in `per` (it does not
+    stream to itself), and hazync#509 is what happens when a gate forgets that a role is not
+    fungible: a fleet-relative check dropped the aggregate and killed a 30-card run 34 seconds in.
+    """
+    if not order:
+        return set(), []
+    agg, workers = order[0], order[1:]
+    if len(order) <= need:
+        return set(), []
+
+    measured = [v for v in (per.get(c.cid) for c in workers) if v is not None]
+    median = sorted(measured)[len(measured) // 2] if measured else None
+
+    def rank(c):
+        v = per.get(c.cid)
+        return (v if v is not None else median) if (v is not None or median is not None) else 0.0
+
+    # ⚠ Sort by rank, then by cid, so the same fleet always yields the same decision. Without the
+    # tiebreak two equal cards would be dropped in whatever order the dict happened to give.
+    ranked = sorted(workers, key=lambda c: (rank(c), c.cid))
+
+    drop, surplus = set(), len(order) - need
+    # ⛔ Evidence first: a card MEASURED below the floor goes regardless of surplus, because keeping
+    # it is choosing to wait for it. An unmeasured card is never cut by the floor -- there is nothing
+    # to compare it against.
+    if floor:
+        # ⚠ WORST FIRST, not iteration order. When the floor can only take one card -- because
+        # dropping a second would go below `need` -- it must take the WORST one. Iterating the fleet
+        # in its own order cut a 12 Mbit/s link and left a 3 Mbit/s one in place, which is the exact
+        # tail this gate exists to remove. Caught by test_worker_gate, not by reading it.
+        below = sorted(((per[c.cid], c.cid) for c in workers
+                        if per.get(c.cid) is not None and per[c.cid] < floor))
+        for _v, cid in below:
+            if len(order) - len(drop) > need:
+                drop.add(cid)
+    for c in ranked:
+        if len(drop) >= surplus:
+            break
+        drop.add(c.cid)
+    drop.discard(agg.cid)
+    return drop, [(c.cid, per.get(c.cid)) for c in ranked]
+
+
 def _drop_cards(order, created, bad, why, *, release, record):
     """Release the named cards and return the (order, created) that are left (hazync#479).
 
@@ -694,6 +762,12 @@ def main():
     ap.add_argument("--no-board-fill", action="store_true",
                     help="with --fresh-tip, sit idle between tip blocks instead of proving board "
                          "work; use when measuring tip latency with nothing else on the fleet")
+    ap.add_argument("--worker-min-mbit", type=float, default=0.0,
+                    help="release any WORKER the chosen aggregate cannot push to at this rate "
+                         "(Mbit/s), and, when there are spares, the slowest ones down to --cards. "
+                         "0 (default) = measure and report, release nothing. The fold waits for the "
+                         "slowest peer at every level, so the tail sets the wall clock: block "
+                         "968,340 saw join RTTs from 0.4 s to 107.4 s and took 31.8 minutes")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -1073,6 +1147,23 @@ def main():
         # ⚠ The aggregate must lead `order`: assignment_preview and the surplus check both take the
         # head of the list as the aggregate, and a mismatch would arm the wrong card.
         order = [agg] + [c for c in order if c.cid != agg.cid]
+
+        # ── ⛔ and cut the tail the aggregate has to feed (hazync#527) ───────────────────────────
+        # The same probe that chose the aggregate already measured EVERY worker individually; only
+        # the total was being used. `best[2]` is {cid: Mbit/s} from the winning candidate, so this
+        # costs nothing extra and happens before the clock starts.
+        w_drop, w_ranked = slow_worker_cut(
+            order, best[2], need=a.cards, floor=a.worker_min_mbit)
+        if w_ranked:
+            shown = ", ".join(f"{cid} {'untested' if v is None else format(v, '.0f')}"
+                              for cid, v in w_ranked[:6])
+            log(f"worker links, slowest first: {shown}"
+                + ("" if len(w_ranked) <= 6 else f", +{len(w_ranked) - 6} more"))
+        if w_drop:
+            order, created = _drop(order, created, w_drop,
+                                   "the aggregate could not push to it fast enough")
+        elif a.worker_min_mbit:
+            log(f"worker gate: every worker clears {a.worker_min_mbit:.0f} Mbit/s")
 
         # ── the dashboard feed: started NOW, so the page is not dark through setup ───────────────
         os.makedirs(a.rundir, exist_ok=True)
