@@ -26,6 +26,7 @@
 #   BTCPAY_STORE_ID     the store whose invoices are watched
 #   BTCPAY_API_KEY_FILE root-only file holding the Greenfield API key. NEVER inline, never logged.
 #   PAY_STATE_DIR       watermark + health state (default /var/lib/hazync/pay-watch)
+#   PAY_LEDGER          append-only record of every donation seen (default $PAY_STATE_DIR/donations.jsonl)
 #   SWEEP_THRESHOLD     ping when the HOT on-chain balance reaches this much fiat (default 200)
 #   SWEEP_CURRENCY      the fiat the threshold is in (default GBP)
 #   CERT_WARN_DAYS      warn when the TLS cert expires within this many days (default 14)
@@ -98,6 +99,33 @@ if [ "${1:-}" = "--selftest" ]; then
     # sats formatting
     fmt() { awk -v s="$1" 'BEGIN{printf "%.8f", s/100000000}'; }
     [ "$(fmt 123456)" = "0.00123456" ] || { echo "  FAIL sat formatting ($(fmt 123456))"; fails=1; }
+    # ── the ledger: valid JSON, APPENDED, and never rewritten ──────────────────────────────────
+    L="$t/donations.jsonl"
+    for i in 1 2 3; do
+        printf '{"ts":%s,"utc":"%s","amount":"%s","currency":"%s","invoice":"%s"}\n' \
+            "170000000$i" "2023-11-14T22:13:2${i}Z" "12.3$i" "GBP" "inv$i" >> "$L"
+    done
+    rows=$(wc -l < "$L" | tr -d ' ')
+    [ "$rows" = "3" ] || { echo "  FAIL ledger has $rows rows, expected 3"; fails=1; }
+    # ⛔ EVERY row must parse. A ledger with one malformed line is a ledger you cannot read back.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import json,sys
+n=0
+for line in open('$L'):
+    line=line.strip()
+    if not line: continue
+    d=json.loads(line); n+=1
+    assert set(('ts','utc','amount','currency','invoice')) <= set(d), d
+print(n)
+" >/dev/null 2>&1 || { echo "  FAIL ledger rows do not parse as JSON with the expected fields"; fails=1; }
+    fi
+    # ⚠ appending again must PRESERVE the earlier rows — the failure mode that lost 6 of 10 rows
+    # elsewhere in this project was a whole-file rewrite that reported success every time.
+    printf '{"ts":1700000009,"utc":"x","amount":"1","currency":"GBP","invoice":"inv9"}\n' >> "$L"
+    grep -q '"invoice":"inv1"' "$L" || { echo "  FAIL the first row vanished after a later append"; fails=1; }
+    [ "$(wc -l < "$L" | tr -d " ")" = "4" ] || { echo "  FAIL append did not grow the ledger"; fails=1; }
+
     rm -rf "$t"
     [ "$fails" = "0" ] && { echo "  selftest ok"; exit 0; }
     echo "  selftest FAILED"; exit 1
@@ -106,6 +134,11 @@ fi
 mkdir -p "$STATE" 2>/dev/null || { say "cannot create $STATE"; exit 2; }
 WM="$STATE/last_payment_ts"
 HEALTH="$STATE/health.last"
+# ⛔ THE ACCOUNTING RECORD, DELIBERATELY SEPARATE FROM THE BACKUP PROBLEM. Backing up BTCPay's
+# Postgres would preserve invoice history -- and would also put the hot wallet's SEED in whatever
+# store the backup lands in. This file holds the same facts with no secrets in it, so it can be
+# copied anywhere without thinking about it. That is the whole point of it existing.
+LEDGER="${PAY_LEDGER:-$STATE/donations.jsonl}"
 
 # ── 1. donations ────────────────────────────────────────────────────────────────────────────────
 # ⚠ Inert, not broken, until the store has a wallet and an API key exists. Saying so once per run in
@@ -137,6 +170,14 @@ else
                 push "₿ Hazync donation received" \
                      "$amt $cur — invoice ${id:0:12} at $(date -u -d "@$ts" '+%F %H:%M:%SZ')" \
                      default "moneybag"
+                # ⚠ Written BEFORE the watermark moves, and appended never rewritten. A whole-file
+                # rewrite is how a ledger loses rows: this project has already had one lose 6 of 10
+                # while every flow reported success.
+                if [ "$DRY" != "1" ]; then
+                    printf '{"ts":%s,"utc":"%s","amount":"%s","currency":"%s","invoice":"%s"}\n' \
+                        "$ts" "$(date -u -d "@$ts" '+%FT%TZ')" "$amt" "$cur" "$id" >> "$LEDGER" \
+                        || say "⛔ could not append to $LEDGER — the notification was sent but NOT recorded"
+                fi
             fi
             [ "$ts" -gt "$newest" ] && newest="$ts"
         done <<EOF
