@@ -147,7 +147,7 @@ All untrusted.
 - **Whoever controls a rented host** can read `$HAZYNC_HOME/key.hex` (mode 600 guards it from other users,
   not from root). With that key they can submit and fold as the contributor, beat the contributor's claims,
   and, on a coordinator that turns rotation on, **rotate the key to one they hold**
-  ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). `rotate()` requires signatures from the old
+  ([#311](https://github.com/hazync/hazync/issues/311)). `rotate()` requires signatures from the old
   and the new key over `rotate_message(old, new, ts)` within `ROTATE_MAX_SKEW`, and the thief can make both.
   It records one row per `old_pubkey`, so the real owner's later attempt is `409` "has already rotated", and
   nothing removes a rotation. So since #311 `/api/rotate` answers `410` unless the operator sets
@@ -190,7 +190,7 @@ the board; retaining receipts; serving witness bundles.
 
 **An outside attacker** (no access to the box):
 
-- **Can claim blocks under any pubkey, unsigned** ([#310](https://github.com/bitcoin-ghost/hazync/issues/310)).
+- **Can claim blocks under any pubkey, unsigned** ([#310](https://github.com/hazync/hazync/issues/310)).
   `claim()` accepts a claim signed by its key over `claim:<nonce>:<ts>` (within `BEAT_SKEW`), refuses one whose
   signature does not verify, and still accepts an unsigned one unless `CLAIM_REQUIRE_SIG=1`, because workers up
   to v0.21.4 sign nothing. `beat()`, `submit()` and `rotate()` are all signed. The bounds that apply:
@@ -248,7 +248,7 @@ local host, `<range>:<ts>` beats, `claim:<nonce>:<ts>` claims (#310), rotation m
 (`cmd_submit`), and `spine_index` only follows `/api/proof/` paths, fetched relative to `COORD_URL`.
 
 **It runs the prover binary it finds, but only where the contributor or the release put it**
-([#312](https://github.com/bitcoin-ghost/hazync/issues/312), fixed). When `HAZYNC_HOST` is unset, `_find_host()`
+([#312](https://github.com/hazync/hazync/issues/312), fixed). When `HAZYNC_HOST` is unset, `_find_host()`
 takes the first executable file named `hazync-host-x86_64-linux-gnu-cuda`, `hazync-host-cuda`,
 `hazync-host-x86_64-linux-gnu` or `hazync-host` in, in order: the CLI's own directory, `$HAZYNC_HOME/bin`,
 then `$HAZYNC_HOME` (default `~/.hazync`); the bare name `host` only in the CLI's own directory. After that
@@ -384,7 +384,7 @@ Each verified against the tree or GitHub on 2026-09-14.
 3. **CORE fleet figures rest on few measurements.** `GOALS.md` G2 gives CORE **44–73 L40S card-years**,
    INFERRED from one near-tip block (966,108, ~0.77 card-s per input). `BUILDS.md` computes 10 cards from
    block 962,000 proved serially, and its 8 × L40S fleet check on 966,108 puts a sub-10-minute block at ~13.
-4. ✅ **Decided: no accepted set of method ids** — [#244](https://github.com/bitcoin-ghost/hazync/issues/244),
+4. ✅ **Decided: no accepted set of method ids** — [#244](https://github.com/hazync/hazync/issues/244),
    closed 2026-09-16. 10 of 17 lineage ids predate at least one consensus rule, so "accept any historical id"
    would re-admit proofs from narrower guests (§1); and composition is homogeneous inside the circuit, so
    widening only the top-level verifier would leave old proofs checkable but never foldable. Layer 1
@@ -392,15 +392,15 @@ Each verified against the tree or GitHub on 2026-09-14.
 5. **The worker reads coordinator responses without a bound** (`get()` in `coordinator/hazync`; §6).
 6. **No commissioned external audit** (`SECURITY.md`). The accumulator, the recursion binding and ghostd
    adoption are the named priorities.
-7. **Unsigned claims** — [#310](https://github.com/bitcoin-ghost/hazync/issues/310). Signed claims are verified
+7. **Unsigned claims** — [#310](https://github.com/hazync/hazync/issues/310). Signed claims are verified
    and counted apart, so unsigned claims under a key cannot use up its signed cap or re-take wait; unsigned claims
    stay accepted until `CLAIM_REQUIRE_SIG=1`, which needs a worker release that signs. Many fresh keys are not
    limited, and there is no per-address cap behind the web box (§5). The effect on the board is not measured.
-8. ✅ **Fixed: a stolen key could move attribution for good** — [#311](https://github.com/bitcoin-ghost/hazync/issues/311).
+8. ✅ **Fixed: a stolen key could move attribution for good** — [#311](https://github.com/hazync/hazync/issues/311).
    Key rotation is off unless `ROTATE_ENABLED=1`, so a stolen `key.hex` cannot move anyone's blocks. Turning
    rotation on brings the risk back, since a rotation still cannot be undone (§4).
 9. ✅ **Fixed: the worker searched the current directory for a prover** —
-   [#312](https://github.com/bitcoin-ghost/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
+   [#312](https://github.com/hazync/hazync/issues/312). With `HAZYNC_HOST` unset it now looks only
    beside the CLI, in `$HAZYNC_HOME/bin` and `$HAZYNC_HOME`, and takes the bare name `host` only beside the
    CLI (§6). Kept in this list, numbered, so references to the items below stay valid.
 10. **ghostd's competing-chain and reorg adversarial cases are open** (§10).

@@ -24,7 +24,7 @@ Building `host` (RISC0 + Bitcoin Core) wants real RAM/CPU — a $10/mo box will 
 capable box (or reuse a GPU box), then copy just the binary to the cheap coordinator.
 
 ```bash
-git clone https://github.com/bitcoin-ghost/hazync /opt/hazync && cd /opt/hazync
+git clone https://github.com/hazync/hazync /opt/hazync && cd /opt/hazync
 ./provision-vps.sh                 # CPU build (do NOT set GPU=1 — the coordinator only verifies)
 # → /opt/hazync/prover/target/release/host
 ```

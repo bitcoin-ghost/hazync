@@ -1,6 +1,6 @@
 # Hazync v0.21.3 — a board that frees itself, and work that is credited to whoever did it
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.3>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.3>
 
 Two threads. One is the frontier: a board that froze for thirteen hours, and a block no worker could
 ever prove. The other is attribution: proving, folding and anchoring are three different jobs, and

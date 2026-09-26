@@ -1,6 +1,6 @@
 # Hazync v0.21.5 — claims that belong to their key, and workers that tell you when they stop
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.5>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.5>
 
 Most of this release comes from one key on 2026-09-13 and 09-14. `ghost:dda215` claimed blocks it never
 proved (no heartbeats, no submissions, ever), re-claimed them as fast as they were released, and held the

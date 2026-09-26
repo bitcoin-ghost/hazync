@@ -1,7 +1,7 @@
 # v0.20.0 — the coprocessor field backend
 
 > Pre-publish DRAFT of the GitHub release body, not the published text; the GitHub release is canonical:
-> <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.20.0>. The published body drops the DRAFT notice below and records the cutover as completed on
+> <https://github.com/hazync/hazync/releases/tag/v0.20.0>. The published body drops the DRAFT notice below and records the cutover as completed on
 > 2026-09-06. Neither version mentions #181 (native `sm_100`, CUDA version knob) or #217 (`release.sh`
 > `deployed-verifier` gate), both merged between v0.19.0 and v0.20.0.
 

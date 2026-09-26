@@ -7,7 +7,7 @@
 # the 53,641 eligible bundles and nothing else, leaving proofs untouched and the boundary exact.
 [Unit]
 Description=Hazync: prune bundles whose block is proven, spined and backed up in both stores
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Documentation=https://github.com/hazync/hazync/issues/347
 Wants=network-online.target
 After=network-online.target
 OnFailure=hazync-alert@%n.service

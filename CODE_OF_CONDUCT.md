@@ -62,7 +62,7 @@ Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through this
 repository's private reporting form: on GitHub, open the **Security** tab and
 choose **Report a vulnerability**
-(<https://github.com/bitcoin-ghost/hazync/security/advisories/new>). Conduct
+(<https://github.com/hazync/hazync/security/advisories/new>). Conduct
 reports may be filed there as well as security reports. A report made there is
 visible only to you and the repository's maintainers; it is not public.
 All complaints will be reviewed and investigated promptly and fairly.

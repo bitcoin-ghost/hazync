@@ -27,6 +27,12 @@ cd "$(dirname "$0")/.." || exit 1
 # ghcr.io/bitcoin-ghost/defenwycke instead of .../hazync-deps. A default that a stray env var can
 # shadow is not a default.
 REGISTRY="${HAZYNC_REGISTRY:-ghcr.io}"
+# ⚠ THE REGISTRY OWNER IS NOT THE REPO OWNER, AND THAT IS DELIBERATE. The repository moved to the
+# hazync org, but a GHCR package does NOT move with a repo transfer -- it is owned by the org and
+# merely linked to the repo. The published deps images still live under bitcoin-ghost, and the
+# reproduce/ instructions refer to them. Changing this default would point at a package that does
+# not exist and break reproducible verification, which is the one thing this project sells. Moving
+# them is a separate job: republish under hazync, then change this and re-pin what refers to it.
 OWNER="${HAZYNC_OWNER:-bitcoin-ghost}"
 # Which variant. cpu is the default because it is what `reproduce/Dockerfile` builds from and what
 # anyone standing up a non-GPU box wants; cuda exists for release builds of the CUDA host (#167).

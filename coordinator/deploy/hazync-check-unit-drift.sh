@@ -22,7 +22,7 @@
 set -uo pipefail
 
 REPO="${HAZYNC_DRIFT_REPO:-/var/lib/hazync-drift/repo}"
-REMOTE="${HAZYNC_DRIFT_REMOTE:-https://github.com/bitcoin-ghost/hazync.git}"
+REMOTE="${HAZYNC_DRIFT_REMOTE:-https://github.com/hazync/hazync.git}"
 # ⛔ THIS RUNS THE SCRIPT FROM THE FETCHED REF, NOT THE ONE INSTALLED BESIDE IT. That is the point --
 # the question is whether the box matches the repo as it stands now -- but it means the timer must not
 # be enabled until the drift script's own fixes are ON the ref. Installing this while main still had

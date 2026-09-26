@@ -358,7 +358,7 @@ def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
     return out
 
 HOST_RELEASE = "v0.21.7"
-HOST_URL = (f"https://github.com/bitcoin-ghost/hazync/releases/download/{HOST_RELEASE}/"
+HOST_URL = (f"https://github.com/hazync/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
 
 

@@ -78,7 +78,7 @@ fi
 # or wrong-artifact deploy), never as a substitute for the id and verdict checks below.
 README=verifier-wasm/README.md
 BUILD_WASM=verifier-wasm/target/wasm32-unknown-unknown/release/hazync_verify_wasm.wasm
-RELEASE_URL=https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify.wasm
+RELEASE_URL=https://github.com/hazync/hazync/releases/latest/download/hazync-verify.wasm
 
 DEPLOYED_SZ=$(wc -c < "$TMP/live.wasm" | tr -d ' ')
 README_SZ=$(grep -oE '^raw[[:space:]]+[0-9,]+' "$README" 2>/dev/null | head -1 | tr -cd '0-9')
@@ -184,7 +184,7 @@ if [ "$fail" -ne 0 ]; then
     echo
     echo "The public verifier disagrees with this repo. Usually the fix is a deploy, not a rebuild:"
     echo "  1. confirm the release ships the canonical guest:"
-    echo "       curl -sfL -o /tmp/v.wasm https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify.wasm"
+    echo "       curl -sfL -o /tmp/v.wasm https://github.com/hazync/hazync/releases/latest/download/hazync-verify.wasm"
     echo "       verify it against the signed SHA256SUMS.txt.asc before copying it anywhere"
     echo "  2. back up the live module under its OLD guest id, then install the new one:"
     echo "       sudo install -o www-data -g www-data -m 644 /tmp/v.wasm \\"

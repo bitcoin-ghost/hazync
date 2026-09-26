@@ -5,7 +5,7 @@
 # lasts, and pushes again on recovery — the same treatment the integrity checks get. The script's exit
 # codes match that contract: 0 held, 1 something is wrong, 2 could not check.
 Description=Hazync: archive a bridge checkpoint so a deleted bundle has a way back
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Documentation=https://github.com/hazync/hazync/issues/347
 
 [Service]
 Type=oneshot

@@ -16,7 +16,7 @@ does the same and rejects anything else as a build mismatch.
 
 So a guest change retires the whole back catalogue at once. The record holds **17 ids — 16
 supersessions** — between 2026-07-18 and 2026-09-07; it is
-[`reproduce/LINEAGE.tsv`](https://github.com/bitcoin-ghost/hazync/blob/main/reproduce/LINEAGE.tsv),
+[`reproduce/LINEAGE.tsv`](https://github.com/hazync/hazync/blob/main/reproduce/LINEAGE.tsv),
 derived from git history rather than typed by hand, so a row cannot be quietly dropped.
 
 **Method 1 has real virtues and we are not apologising for it.** "Verified" has exactly one meaning.
@@ -76,7 +76,7 @@ claim.
 The cautionary case is already ours: `1d6c3792` left Core's consensus code untouched yet changed what
 the aggregate checks versus what it trusts, and establishing that the statement survived took two
 same-run differentials and a 16-chunk end-to-end run
-([`PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md) §2,
+([`PROOF_DURABILITY.md`](https://github.com/hazync/hazync/blob/main/docs/PROOF_DURABILITY.md) §2,
 "What makes it hard").
 
 "No rule changed" was a **finding**, not an observation. A scheme that admits ids because someone
@@ -93,12 +93,12 @@ Composition is homogeneous and enforced inside the circuit, so widening only the
 would leave old proofs checkable but never foldable. **For accumulated chain work to survive, the guest
 itself must carry the accepted set** — which puts the list inside the thing whose correctness
 everything else rests on. The mechanism is in
-[`PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md) §2.
+[`PROOF_DURABILITY.md`](https://github.com/hazync/hazync/blob/main/docs/PROOF_DURABILITY.md) §2.
 
 ## Open questions
 
 These are the questions we would most like answered, and they are put to the community in
-[Discussion #299](https://github.com/bitcoin-ghost/hazync/discussions/299) rather than settled here.
+[Discussion #299](https://github.com/hazync/hazync/discussions/299) rather than settled here.
 
 1. **Is "starts at the id we are moving to, and only ever tightens" sound?** It is the load-bearing
    claim, and we would rather it failed here than in production.
@@ -114,7 +114,7 @@ These are the questions we would most like answered, and they are put to the com
    are not assuming Method 2 wins.
 
 Two claims in the original issue (#244) have since been corrected in
-[`docs/PROOF_DURABILITY.md`](https://github.com/bitcoin-ghost/hazync/blob/main/docs/PROOF_DURABILITY.md),
+[`docs/PROOF_DURABILITY.md`](https://github.com/hazync/hazync/blob/main/docs/PROOF_DURABILITY.md),
 and both are worth reading before replying: the soft-fork analogy does not transfer as originally
 stated (the constraints above are what answer it), and recursion cannot lift a proof from a narrower
 guest into a stricter one.

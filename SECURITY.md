@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report it privately through GitHub's private vulnerability reporting:
-<https://github.com/bitcoin-ghost/hazync/security/advisories/new> (the **Security** tab, then **Report a
+<https://github.com/hazync/hazync/security/advisories/new> (the **Security** tab, then **Report a
 vulnerability**). A report there is visible only to you and the maintainers. Conduct reports under
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) may use the same form. Please do not open a public issue for a
 way to make an invalid block prove valid.
@@ -49,9 +49,9 @@ defenwycke <defenwycke@icloud.com>
 From a release's assets, download the binary **keeping its asset filename** (`hazync-host-x86_64-linux-gnu`) plus `SHA256SUMS.txt` and `SHA256SUMS.txt.asc`, then:
 
 ```bash
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/SHA256SUMS.txt.asc
+curl -LO https://github.com/hazync/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
+curl -LO https://github.com/hazync/hazync/releases/latest/download/SHA256SUMS.txt
+curl -LO https://github.com/hazync/hazync/releases/latest/download/SHA256SUMS.txt.asc
 curl -s https://github.com/defenwycke.gpg | gpg --import   # the key, from the account that publishes
                                                            # the releases (see "second source" below)
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt   # must report a GOOD signature from the key above
