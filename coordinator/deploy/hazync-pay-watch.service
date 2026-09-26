@@ -1,0 +1,11 @@
+[Unit]
+Description=Hazync: notify on donations received, and on BTCPay being unwell
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hazync-pay-watch
+# ⚠ No ExecStopPost alert: this unit ALREADY pushes its own failures, and a second path would
+# double every notification.
+Nice=10
