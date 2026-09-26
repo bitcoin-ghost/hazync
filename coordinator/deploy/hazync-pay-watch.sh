@@ -70,6 +70,7 @@ DISK_MIN_PCT="${DISK_MIN_PCT:-15}"
 DOMAIN="${PAY_DOMAIN:-donate.hazync.org}"
 DRY="${DRY:-0}"
 ALERT="${ALERT_BIN:-/usr/local/bin/hazync-alert.sh}"
+PARSER="${PAY_PARSER:-/usr/local/sbin/hazync-pay-invoices.py}"
 
 say() { echo "[pay-watch] $*"; }
 
@@ -79,8 +80,16 @@ push() {   # push <title> <body> [priority] [tags]
         printf '  WOULD PUSH [%s/%s] %s\n    %s\n' "$prio" "$tags" "$title" "$body"
         return 0
     fi
-    ALERT_PRIORITY="$prio" ALERT_TAGS="$tags" "$ALERT" "$title" "$body" >/dev/null 2>&1 \
-        || say "⛔ the alert itself could not be sent: $title"
+    # ⛔ DO NOT SWALLOW THE ALERT'S OWN OUTPUT. It prints "[hazync-alert] sent: …" on success, and
+    # sending that to /dev/null leaves the journal unable to answer the only question that matters
+    # here -- did the notification actually go? That is the same shape of mistake as silencing the
+    # invoice parser: hiding the evidence that distinguishes working from silently broken.
+    local out
+    if out=$(ALERT_PRIORITY="$prio" ALERT_TAGS="$tags" "$ALERT" "$title" "$body" 2>&1); then
+        say "notified: ${out:-$title}"
+    else
+        say "⛔ the alert itself could not be sent: $title — ${out:-no output}"
+    fi
 }
 
 # ── selftest: the parsing and the watermark, with no network and no live state ──────────────────
@@ -166,7 +175,22 @@ else
              high rotating_light
     else
         newest="$last"; n=0
-        # settled invoices only, newest-first from the API; one line per invoice
+        # ⛔ THE PARSER IS A FILE, NOT A HEREDOC. It was an inline python one-liner and the \" escaping
+        # mangled on the way through the heredoc -- a SyntaxError on every run, silenced by
+        # 2>/dev/null, so it printed nothing and the loop below read that as "no donations". A real
+        # £1 Lightning payment settled on 2026-09-26 and nobody was told.
+        parsed=$("$PARSER" <<<"$body" 2>/tmp/pay-parse.err); prc=$?
+        if [ "$prc" -ne 0 ]; then
+            # ⛔ COULD NOT PARSE IS NOT "NO DONATIONS". That conflation is the whole bug.
+            say "⛔ could not read the invoice list: $(head -c 160 /tmp/pay-parse.err)"
+            push "⛔ Hazync donations: the invoice parser failed" \
+                 "hazync-pay-watch could not read BTCPay's invoice list. Donations may be arriving unseen. $(head -c 120 /tmp/pay-parse.err)" \
+                 high rotating_light
+            rm -f /tmp/pay-parse.err
+            parsed=""
+            newest="$last"
+        fi
+        rm -f /tmp/pay-parse.err
         while IFS='|' read -r ts amt cur id; do
             [ -n "${ts:-}" ] || continue
             case "$ts" in ''|*[!0-9]*) continue ;; esac
@@ -175,9 +199,7 @@ else
                 push "₿ Hazync donation received" \
                      "$amt $cur — invoice ${id:0:12} at $(date -u -d "@$ts" '+%F %H:%M:%SZ')" \
                      default "moneybag"
-                # ⚠ Written BEFORE the watermark moves, and appended never rewritten. A whole-file
-                # rewrite is how a ledger loses rows: this project has already had one lose 6 of 10
-                # while every flow reported success.
+                # ⚠ Written BEFORE the watermark moves, and appended never rewritten.
                 if [ "$DRY" != "1" ]; then
                     printf '{"ts":%s,"utc":"%s","amount":"%s","currency":"%s","invoice":"%s"}\n' \
                         "$ts" "$(date -u -d "@$ts" '+%FT%TZ')" "$amt" "$cur" "$id" >> "$LEDGER" \
@@ -185,19 +207,7 @@ else
                 fi
             fi
             [ "$ts" -gt "$newest" ] && newest="$ts"
-        done <<EOF
-$(printf '%s' "$body" | python3 -c '
-import json,sys
-try: inv=json.load(sys.stdin)
-except Exception: sys.exit(0)
-for i in inv if isinstance(inv,list) else []:
-    if str(i.get("status","")).lower() not in ("settled","complete","confirmed"): continue
-    ts=i.get("createdTime") or 0
-    amt=i.get("amount") or "?"
-    cur=i.get("currency") or ""
-    print(f"{int(ts)}|{amt}|{cur}|{i.get(\"id\",\"\")}")
-' 2>/dev/null)
-EOF
+        done <<<"$parsed"
         # ⛔ Only advance on a GOOD read. An empty or unparseable answer leaves the watermark alone,
         # so a transient blip delays a notification rather than losing it.
         # ⛔ DRY WRITES NOTHING. A dry run that moves the watermark would suppress the very
