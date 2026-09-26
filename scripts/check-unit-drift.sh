@@ -97,9 +97,22 @@ for u in $UNITS; do
     # bridge took that machine over -- reported "Restart is no on the box but the repo declares always"
     # on EVERY run. A permanent false positive on a deliberately retired service is precisely how a
     # check like this gets muted, which costs more than the blind spot it was added to close.
+    # ⛔ xargs, NOT `tr ' ' '\n'`. systemd keeps a quoted Environment= as ONE assignment and
+    # `systemctl show` prints it back quoted, so splitting on every space tears it in half and the
+    # tail becomes a key that exists nowhere:
+    #
+    #     Environment="HAZYNC_DISK_PATHS=/srv/bulk /"
+    #       tr    -> '"HAZYNC_DISK_PATHS=/srv/bulk'  and  '/"'
+    #       xargs -> 'HAZYNC_DISK_PATHS=/srv/bulk /'
+    #
+    # Measured 2026-09-26: deploying the repo's own hazync-check-disk.service made this check report
+    # `DRIFT ... /" is set on the box and appears NOWHERE in the repo` on BOTH boxes. The repo's unit
+    # and the repo's checker disagreed, and it stayed hidden only because the quoted form had never
+    # been deployed -- the unquoted copy that was live silently dropped the second path, so the
+    # coordinator was never checking its root filesystem at all.
     probe="
         echo \"STATE \$(systemctl show $u -p LoadState --value 2>/dev/null)\"
-        systemctl show $u -p Environment --value | tr ' ' '\n' | grep -v '^\$' | sed 's/^/ENV /'
+        systemctl show $u -p Environment --value | xargs -n1 2>/dev/null | grep -v '^\$' | sed 's/^/ENV /'
         systemctl show $u -p ExecStart --value | grep -oE 'argv\[\]=[^;]*' | sed 's/^/EXEC /'
         systemctl show $u -p User --value | sed 's/^/USER /'
         for d in $GUARDED; do
