@@ -669,7 +669,19 @@ class RunPod:
         refused = None
         answered = False
         for gt in gpu_types:
-            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: ALL, gpuCount: 1, volumeInGb: 0, "
+            # ⛔ SECURE, NOT ALL. `cloudType: ALL` includes community hosts, and those mostly never
+            # start -- RunPod accepts the deploy and never publishes a port, so the caller waits out
+            # its full SSH timeout having paid for a pod that never existed. Measured 2026-09-20 in
+            # tip_smoke.deploy_listening, where the split is by PRICE, which is the tell:
+            #     $0.34/hr   1 of 6 started   (17%)
+            #     $0.74/hr  14 of 14 started  (100%)
+            #
+            # ⚠ That fix landed in tip_smoke.py and NOT here, although tip_smoke imports this
+            # module's IMAGE and GPU_TYPES -- the two deploy paths are siblings and drifted apart.
+            # For the bot the failure is worse than a slow run: a sponsor has already PAID, and the
+            # sponsorship stalls in `proving` while the refusal budget burns down.
+            # test_pod_cloud_type.py now checks every deploy path in the repo, not just this one.
+            q = ("mutation { podFindAndDeployOnDemand(input: { cloudType: SECURE, gpuCount: 1, volumeInGb: 0, "
                  f"containerDiskInGb: 40, gpuTypeId: {self._s(gt)}, name: {self._s(name)}, "
                  f"imageName: {self._s(IMAGE)}, ports: \"22/tcp\", "
                  f"env: [{{key: \"PUBLIC_KEY\", value: {self._s(ssh_pubkey)}}}] }}) {{ id costPerHr }} }}")

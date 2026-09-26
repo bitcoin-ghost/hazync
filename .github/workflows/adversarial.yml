@@ -159,6 +159,19 @@ jobs:
           cd coordinator
           python3 test_gpu_type.py --control
 
+      - name: Every RunPod deploy path asks for SECURE hosts, not ALL (hazync#523)
+        # ⛔ `cloudType: ALL` includes community hosts, and those mostly never start: RunPod accepts
+        # the deploy and never publishes a port. Measured 2026-09-20, split by PRICE: $0.34/hr started
+        # 1 of 6, $0.74/hr started 14 of 14. The fix landed in tip_smoke.py and NOT in sponsor_bot.py,
+        # although tip_smoke imports sponsor_bot's IMAGE and GPU_TYPES -- siblings that drifted. For
+        # the bot it is worse than a slow run: a sponsor has already PAID while pods that never boot
+        # burn down the refusal budget. This sweeps the whole repo, so a new deploy path is covered.
+        run: cd coordinator && python3 test_pod_cloud_type.py
+      - name: SECURE-hosts POSITIVE CONTROL (a deploy path back to ALL — must be caught)
+        run: |
+          cd coordinator
+          python3 test_pod_cloud_type.py --control
+
       - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
         # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a
         # form outliving the run -- re-checking it meant re-reading a session transcript, which is
