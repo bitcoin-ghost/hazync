@@ -2836,6 +2836,73 @@ def sponsors_public():
                               "queue_ahead": ahead} for r, ahead in zip(rows, aheads)],
             "open": SPONSOR_OPEN, "priced": bool(SPONSOR_PRICE_BANDS)}
 
+# ---------- the public donations record (hazync-web#41) ----------
+#
+# ⛔ WHAT THIS DELIBERATELY DOES NOT PUBLISH. No transaction id, no Bitcoin address, no invoice id.
+# Publishing txids would make each donation independently checkable, which is the stronger claim --
+# but it also makes the whole donations wallet public: every address, the running balance, and every
+# payment out of it. That is a larger disclosure than a donations list needs, and it cannot be undone
+# once it is published. The page says plainly that it is our own record and not proof.
+#
+# ⛔ AND IT PUBLISHES WHAT ARRIVED, NOT WHAT WAS ASKED FOR. `amount` is the invoice's price;
+# `paidAmount` is what was actually received. Measured 2026-09-26: an invoice priced at £5.00 was paid
+# with £12.87, because the donor's wallet had a minimum. Publishing `amount` would have understated a
+# real donation by £7.87 and would understate every overpayment the same way -- a donations page that
+# credits people with less than they gave is worse than no page.
+DONATIONS_TTL = float(os.environ.get("DONATIONS_TTL", "300"))
+DONATIONS_MAX = int(os.environ.get("DONATIONS_MAX", "250"))
+_SETTLED = ("settled", "complete", "confirmed")
+
+
+def _donation_rows():
+    """Settled invoices, newest first, reduced to date + amount. Raises BTCPayError if it cannot ask."""
+    inv = _btcpay("GET", f"/invoices?take={DONATIONS_MAX}")
+    if not isinstance(inv, list):
+        # ⚠ BTCPay answers an auth failure with an OBJECT. Treating that as an empty list would
+        # publish "no donations have been received" on the strength of a revoked key.
+        raise BTCPayError("BTCPay did not return a list of invoices")
+    out = []
+    for i in inv:
+        if not isinstance(i, dict) or str(i.get("status", "")).lower() not in _SETTLED:
+            continue
+        ts = i.get("createdTime") or 0
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if ts <= 0:
+            continue
+        try:
+            paid = float(i.get("paidAmount") or 0)
+        except (TypeError, ValueError):
+            paid = 0.0
+        if paid <= 0:
+            try:
+                paid = float(i.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+        if paid <= 0:
+            continue
+        out.append({"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+                    "amount": round(paid, 2),
+                    "currency": i.get("currency") or "GBP"})
+    out.sort(key=lambda r: r["utc"], reverse=True)
+    return out
+
+
+def donations_public():
+    def build():
+        try:
+            rows = _donation_rows()
+        except BTCPayError as e:
+            # ⛔ A FAILURE IS NOT AN EMPTY LIST. `donations: []` renders as "nobody has ever donated",
+            # which is both false and the single worst thing this page can say. The client checks for
+            # the key's absence and says it could not load the record.
+            return {"error": str(e), "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return {"donations": rows, "count": len(rows),
+                "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    return _single_flight("donations:public", DONATIONS_TTL, build)
+
 # ---------- the sponsor bot's API (#351) ----------
 #
 # The sponsor bot rents GPUs with real money and runs pod-handling code against a third-party API, so it is the
@@ -3938,6 +4005,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(code, obj)
         if p == "/api/sponsors":                           # the public table of paid sponsorships
             return self._send(200, sponsors_public())
+        if p == "/api/donations":                          # the public donations record (hazync-web#41)
+            return self._send(200, donations_public())
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),

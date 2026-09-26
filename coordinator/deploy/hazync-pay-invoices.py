@@ -50,7 +50,23 @@ def main():
             continue
         if ts <= 0:
             continue
-        amt = i.get("amount")
+        # ⛔ WHAT ARRIVED, NOT WHAT WAS ASKED FOR. `amount` is the invoice's price; `paidAmount` is what
+        # was actually received. Measured 2026-09-26: an invoice priced at £5.00 was paid with £12.87
+        # because the donor's wallet had a minimum, and the ledger recorded "5.0". A record that
+        # credits a donor with less than they gave is worse than no record, and the alert understates
+        # the money too. Fall back to `amount` only when paidAmount is missing or unusable.
+        try:
+            amt = float(i.get("paidAmount") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if amt <= 0:
+            try:
+                amt = float(i.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+        if amt <= 0:
+            continue
+        amt = f"{amt:.2f}"
         cur = i.get("currency") or ""
         iid = i.get("id") or ""
         # ⚠ Pipe-separated because the caller reads it with `IFS='|' read`. Strip any pipe out of
