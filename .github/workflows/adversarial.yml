@@ -229,6 +229,15 @@ jobs:
         run: |
           cd coordinator
           python3 test_prover_lists.py --control
+      - name: --adopt reuses a live fleet and drops records whose pods are gone
+        # ⛔ rented.json records what was RENTED, not what still EXISTS. A blind adopt hands the run
+        # a list of ghosts: it waits out its full ssh timeout on pods that are not there, then fails
+        # at the gate with a fleet's worth of time spent. Capacity is what caps a big fleet — 45
+        # requested on 2026-09-27 granted 1 4090, 4 PRO 4500, 38 PRO 6000 — so the fleet is worth
+        # more than the session that rented it, and adopting it must not be a guess.
+        run: cd coordinator && python3 test_adopt_fleet.py
+      - name: Adopt POSITIVE CONTROL (a loader that trusts the record — must adopt ghosts)
+        run: cd coordinator && python3 test_adopt_fleet.py --control
 
       - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
         # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a

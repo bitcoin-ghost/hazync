@@ -708,6 +708,44 @@ def dash_chain(a):
     return chain
 
 
+def adopt_fleet(api, record_path, expect_names=None):
+    """Pods from a previous run's rented.json that are STILL ALIVE on the account.
+
+    ⛔ A RECORD IS NOT A POD. rented.json says what was rented, not what still exists: the previous
+    driver may have released them, RunPod may have reclaimed one, or the file may be from a run three
+    days ago. Adopting the file blindly makes the run sit in its ssh wait for pods that are not there
+    and then fail at the gate with nothing to show for the time. So every id is checked against a
+    LIVE LISTING and the dead ones are dropped here, loudly, before anything depends on them.
+
+    Returns (adopted, missing). Raises SystemExit only when the record itself cannot be read.
+    """
+    try:
+        with open(record_path) as fh:
+            records = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"--adopt {record_path}: cannot read the rental record ({e})")
+    if not isinstance(records, list) or not records:
+        raise SystemExit(f"--adopt {record_path}: the rental record is empty — nothing to adopt")
+
+    live = {}
+    for pod in api.pods():
+        if pod.get("id"):
+            live[str(pod["id"])] = pod
+
+    adopted, missing = [], []
+    for r in records:
+        pid = str(r.get("id") or "")
+        if pid and pid in live:
+            # Keep the RECORD (it carries gpu_type, price and dc, which the listing may not), but
+            # take the name from the live pod so a rename on RunPod's side cannot desync the feed.
+            r = dict(r)
+            r["name"] = live[pid].get("name") or r.get("name")
+            adopted.append(r)
+        else:
+            missing.append(r.get("name") or pid or "?")
+    return adopted, missing
+
+
 def cleanup(api, rented_path):
     """Release whatever a dead driver left behind. Safe to run at any time."""
     try:
@@ -780,6 +818,15 @@ def main():
     ap.add_argument("--publish-dest", default="")
     ap.add_argument("--publish-key", default="/root/.ssh/hazync_publish")
     ap.add_argument("--keep", action="store_true", help="do NOT terminate (debugging only)")
+    ap.add_argument("--adopt", metavar="RENTED_JSON", default="",
+                    help="reuse the pods in a previous run's rented.json instead of renting new "
+                         "ones. Capacity is the binding constraint on a big fleet -- 30 RTX PRO "
+                         "6000 could be had on 2026-09-27 and the 31st could not -- so a fleet that "
+                         "dies with the run that rented it is a fleet that may not be reassembled. "
+                         "Adopted pods are NOT released at the end unless --release-adopted")
+    ap.add_argument("--release-adopted", action="store_true",
+                    help="with --adopt, DO release the adopted pods at the end. Off by default: "
+                         "surviving the run is the whole point of adopting them")
     ap.add_argument("--claim", action="store_true",
                     help="claim a block from the board and prove it from its BUNDLE (mode 6, #367) "
                          "instead of proving a named fixture")
@@ -960,95 +1007,123 @@ def main():
             log(f"card type preference: {' > '.join(gpu_types)}"
                 + ("" if len(gpu_types) > 1 else "  (no fallback — hazync#448)"))
 
-        # ⚠ `rented` NOT `want` (hazync#492). `want` is reused at the prover-fetch gate for the
-        # BINARY SIZE, so a message down there that reads `want` prints 410441528 where a card count
-        # belongs — which is what a real run reported: "only 2 of 410441528 rented cards".
-        rented = a.cards + a.spares
-        want = rented
-        for i in range(want):
-            name = f"{PREFIX}{i+1}"
-            if name in existing:
-                raise SystemExit(f"refusing: {name} already exists")
-
-        # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (hazync#493).
+        # ⭐ ADOPT AN EXISTING FLEET INSTEAD OF RENTING ONE (the supply half of hazync#506).
         #
-        # deploy_listening walks the type list PER POD, so pod 1 took a 4090, pod 2 found none left
-        # and took an A40, and the fleet was mixed before anyone chose to mix it. That is the exact
-        # mechanism behind #448's 142 s of unexplained "variance".
-        #
-        # So try each type for the ENTIRE fleet, best-value first, and keep the first one that can
-        # field at least --cards. A type that comes up short is RELEASED, not topped up from the next
-        # type down: a partial fleet held while we try the next type costs seconds of billing, and a
-        # mixed fleet costs 40% of the run. Only when NO single type can field the minimum do we mix
-        # — deliberately, and labelled.
-        def rent_uniform(gt, upto):
-            got = []
-            for i in range(upto):
-                p = api.deploy_listening(f"{PREFIX}{i+1}", pub, gpu_types=(gt,))
-                if not p:
-                    break
-                got.append(p)
-                with open(rented_path, "w") as fh:
-                    json.dump(got, fh, indent=1)
-            return got
-
-        for gt in gpu_types:
-            got = rent_uniform(gt, want)
-            if len(got) >= a.cards:
-                created = got
-                log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
-                break
-            if got:
-                log(f"  {gt} could field only {len(got)} of the {a.cards} needed — releasing and "
-                    f"trying the next type (a mixed fleet costs more than these seconds do)")
-                for p in got:
-                    # ⛔ CONFIRMED, NOT FIRE-AND-FORGET. A terminate that silently failed here would
-                    # leave a pod billing for the whole run with nothing in `created` to release it.
-                    try:
-                        sponsor_bot.terminate_confirmed(api, p["id"])
-                    except Exception as e:
-                        log(f"  ⚠ could not release {p['name']}: {e}")
-                with open(rented_path, "w") as fh:
-                    json.dump([], fh, indent=1)
-            else:
-                log(f"  {gt}: no capacity")
-
-        # ⛔ MIXING IS THE LAST RESORT, AND IT IS STATED. Reaching here means no single type could
-        # field --cards, so the choice is a mixed fleet or no run at all. #448 says a mix is slower
-        # and dearer; it does not say a mix is wrong when the alternative is not proving the block.
-        #
-        # ⛔ AND ONLY WHEN THE FLEET IS EMPTY. Topping a uniform fleet up to its spare count from the
-        # next type down would mix it after the fact — a spare is promoted to a run card the moment
-        # one of the originals fails a gate, so a "spare" of another type is a mixed fleet on a delay.
-        mixed_fallback = not created
-        if mixed_fallback:
-            log(f"⚠ NO SINGLE TYPE can field {a.cards} cards — falling back to a MIXED fleet across "
-                f"{len(gpu_types)} types. Its wall-clock is NOT comparable with a uniform run.")
-        for i in range(len(created), want if mixed_fallback else len(created)):
-            name = f"{PREFIX}{i+1}"
-            p = api.deploy_listening(name, pub, gpu_types=gpu_types)
-            if not p:
-                # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
-                # raise on the first pod RunPod could not sell, which threw away every pod already
-                # rented. Measured 2026-09-21: five came up, the SIXTH (a spare) had no capacity, and
-                # the run released all five and failed. Renting spares to survive a bad pod, then
-                # failing because a spare was unavailable, is the opposite of the intent.
-                if len(created) >= a.cards:
-                    log(f"  no capacity for {name} — continuing with {len(created)} pod(s), "
-                        f"{a.cards} needed")
-                    break
-                raise SystemExit(f"no capacity for {name} — only {len(created)} pod(s) rented and "
-                                 f"{a.cards} are needed")
-            created.append(p)
-            # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
-            # that dies without releasing leaves cards billing until someone notices. A SIGINT during
-            # a probe fan-out did exactly that: ThreadPoolExecutor.__exit__ waits for every in-flight
-            # ssh, so the teardown did not run for minutes and the pods had to be killed by hand.
-            # `--cleanup` reads this file and releases whatever is in it, whatever happened.
+        # ⛔ CAPACITY, NOT MONEY, IS WHAT CAPS A BIG FLEET. Measured 2026-09-27 at 45 requested:
+        # RTX 4090 granted 1, RTX PRO 4500 SE granted 4, RTX PRO 6000 granted 38 — and the live run
+        # then got exactly 30 before the 31st was refused. A fleet that size may not be reassembled
+        # on demand, so releasing it at the end of a one-hour session can cost more than the pods do.
+        if a.adopt:
+            adopted, missing = adopt_fleet(api, a.adopt)
+            if missing:
+                log(f"⚠ {len(missing)} pod(s) in {a.adopt} are NO LONGER on the account and were "
+                    f"dropped: {sorted(missing)}")
+            if len(adopted) < a.cards:
+                raise SystemExit(f"--adopt {a.adopt}: only {len(adopted)} of the recorded pods are "
+                                 f"still alive; {a.cards} are needed. Lower --cards or rent fresh")
+            created = adopted
+            # ⛔ `rented` and `want` are read AFTER this branch (the ssh wait, the prover-fetch
+            # gate and their messages), and both were only ever assigned on the renting path. An
+            # adopted fleet therefore reached `waiting for N of {want}` with `want` unbound and died
+            # with UnboundLocalError — after the pods were already adopted, so the run had a fleet
+            # and no driver. There is no spare to wait for when the fleet is adopted: both are the
+            # number of pods actually in hand.
+            rented = want = len(adopted)
+            log(f"ADOPTED {len(created)} live pod(s) from {a.adopt} — nothing rented")
+            # ⚠ The record is now THIS run's to maintain: a card dropped at a gate must leave the
+            # file, or a later --cleanup would try to release a pod that is already gone.
             with open(rented_path, "w") as fh:
                 json.dump(created, fh, indent=1)
-            log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
-                f"  (recorded in {rented_path})")
+        else:
+            # ⚠ `rented` NOT `want` (hazync#492). `want` is reused at the prover-fetch gate for the
+            # BINARY SIZE, so a message down there that reads `want` prints 410441528 where a card count
+            # belongs — which is what a real run reported: "only 2 of 410441528 rented cards".
+            rented = a.cards + a.spares
+            want = rented
+            for i in range(want):
+                name = f"{PREFIX}{i+1}"
+                if name in existing:
+                    raise SystemExit(f"refusing: {name} already exists")
+
+            # ⭐ ONE TYPE FOR THE WHOLE FLEET IF ANY TYPE CAN SUPPLY IT (hazync#493).
+            #
+            # deploy_listening walks the type list PER POD, so pod 1 took a 4090, pod 2 found none left
+            # and took an A40, and the fleet was mixed before anyone chose to mix it. That is the exact
+            # mechanism behind #448's 142 s of unexplained "variance".
+            #
+            # So try each type for the ENTIRE fleet, best-value first, and keep the first one that can
+            # field at least --cards. A type that comes up short is RELEASED, not topped up from the next
+            # type down: a partial fleet held while we try the next type costs seconds of billing, and a
+            # mixed fleet costs 40% of the run. Only when NO single type can field the minimum do we mix
+            # — deliberately, and labelled.
+            def rent_uniform(gt, upto):
+                got = []
+                for i in range(upto):
+                    p = api.deploy_listening(f"{PREFIX}{i+1}", pub, gpu_types=(gt,))
+                    if not p:
+                        break
+                    got.append(p)
+                    with open(rented_path, "w") as fh:
+                        json.dump(got, fh, indent=1)
+                return got
+
+            for gt in gpu_types:
+                got = rent_uniform(gt, want)
+                if len(got) >= a.cards:
+                    created = got
+                    log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
+                    break
+                if got:
+                    log(f"  {gt} could field only {len(got)} of the {a.cards} needed — releasing and "
+                        f"trying the next type (a mixed fleet costs more than these seconds do)")
+                    for p in got:
+                        # ⛔ CONFIRMED, NOT FIRE-AND-FORGET. A terminate that silently failed here would
+                        # leave a pod billing for the whole run with nothing in `created` to release it.
+                        try:
+                            sponsor_bot.terminate_confirmed(api, p["id"])
+                        except Exception as e:
+                            log(f"  ⚠ could not release {p['name']}: {e}")
+                    with open(rented_path, "w") as fh:
+                        json.dump([], fh, indent=1)
+                else:
+                    log(f"  {gt}: no capacity")
+
+            # ⛔ MIXING IS THE LAST RESORT, AND IT IS STATED. Reaching here means no single type could
+            # field --cards, so the choice is a mixed fleet or no run at all. #448 says a mix is slower
+            # and dearer; it does not say a mix is wrong when the alternative is not proving the block.
+            #
+            # ⛔ AND ONLY WHEN THE FLEET IS EMPTY. Topping a uniform fleet up to its spare count from the
+            # next type down would mix it after the fact — a spare is promoted to a run card the moment
+            # one of the originals fails a gate, so a "spare" of another type is a mixed fleet on a delay.
+            mixed_fallback = not created
+            if mixed_fallback:
+                log(f"⚠ NO SINGLE TYPE can field {a.cards} cards — falling back to a MIXED fleet across "
+                    f"{len(gpu_types)} types. Its wall-clock is NOT comparable with a uniform run.")
+            for i in range(len(created), want if mixed_fallback else len(created)):
+                name = f"{PREFIX}{i+1}"
+                p = api.deploy_listening(name, pub, gpu_types=gpu_types)
+                if not p:
+                    # ⛔ SPARES ARE OPTIONAL BY DEFINITION — THAT IS WHAT MAKES THEM SPARES. This used to
+                    # raise on the first pod RunPod could not sell, which threw away every pod already
+                    # rented. Measured 2026-09-21: five came up, the SIXTH (a spare) had no capacity, and
+                    # the run released all five and failed. Renting spares to survive a bad pod, then
+                    # failing because a spare was unavailable, is the opposite of the intent.
+                    if len(created) >= a.cards:
+                        log(f"  no capacity for {name} — continuing with {len(created)} pod(s), "
+                            f"{a.cards} needed")
+                        break
+                    raise SystemExit(f"no capacity for {name} — only {len(created)} pod(s) rented and "
+                                     f"{a.cards} are needed")
+                created.append(p)
+                # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
+                # that dies without releasing leaves cards billing until someone notices. A SIGINT during
+                # a probe fan-out did exactly that: ThreadPoolExecutor.__exit__ waits for every in-flight
+                # ssh, so the teardown did not run for minutes and the pods had to be killed by hand.
+                # `--cleanup` reads this file and releases whatever is in it, whatever happened.
+                with open(rented_path, "w") as fh:
+                    json.dump(created, fh, indent=1)
+                log(f"rented {name}  {p['gpu_type']}  ${p['price']:.3f}/hr  id={p['id']}"
+                    f"  (recorded in {rented_path})")
 
         # ⛔ NAME THE FLEET'S COMPOSITION IN THE EVIDENCE. `pods.txt` carried it all along but nothing
         # summarised it, so a mixed fleet looked identical to a uniform one in every log and summary.
@@ -1389,6 +1464,19 @@ def main():
                              f"passed every pre-clock gate; "
                              f"needed {a.cards}. Rent more spares, or read the per-card lines above")
         surplus = [c.cid for c in order[a.cards:]]
+        # ⛔ SURPLUS IS NOT THE TEARDOWN'S BUSINESS, AND THE TEARDOWN'S GUARD DOES NOT REACH IT. An
+        # adopted fleet exists precisely so it survives the run, but this path terminates through
+        # _drop long before the finally ever sees it -- so `--adopt` without this check would quietly
+        # destroy every card beyond --cards, which is the opposite of what adopting is for. Found by
+        # reading the adopt path against this one, not by a failure: on the night it shipped the run
+        # was launched with --cards set exactly to the fleet, so `surplus` was empty and the bug
+        # could not fire.
+        if surplus and a.adopt and not a.release_adopted:
+            log(f"{len(surplus)} adopted card(s) are surplus to --cards {a.cards} and are being "
+                f"LEFT RUNNING rather than released (adopted fleets outlive the run): "
+                f"{sorted(surplus)}")
+            order = order[:a.cards]
+            surplus = []
         if surplus:
             log(f"the run has its {a.cards} card(s); releasing {len(surplus)} that passed the gates "
                 f"but are not needed: {sorted(surplus)}")
@@ -1856,9 +1944,18 @@ def main():
             feed.stop()
         except Exception:
             pass
-        if a.keep:
-            log("--keep: pods LEFT RUNNING and still billing: "
-                + ", ".join(p["name"] for p in created))
+        # ⛔ AN ADOPTED FLEET IS NOT THIS RUN'S TO DESTROY, BY DEFAULT. The point of adopting is to
+        # outlive the session that rented it, so releasing here would defeat the feature entirely.
+        # But "left running" must never be quiet: the cards bill whether or not anyone is watching,
+        # so the cost and the exact release command go in the log where the run ends.
+        if a.keep or (a.adopt and not a.release_adopted):
+            why = "--keep" if a.keep else "--adopt (use --release-adopted to hand them back)"
+            rate = sum(float(p.get("price") or 0) for p in created)
+            log(f"{why}: {len(created)} pod(s) LEFT RUNNING and STILL BILLING at "
+                f"${rate:.2f}/hr (${rate * 24:.2f}/day)")
+            log("  release them with:  python3 tip_smoke.py --cleanup --rundir " + a.rundir)
+            for p in created:
+                log(f"    {p['name']}  {p['id']}  ${float(p.get('price') or 0):.3f}/hr")
         else:
             mine = [p["id"] for p in created]
             verdict = tip_session.terminable(mine, mine)
