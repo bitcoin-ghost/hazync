@@ -1085,6 +1085,14 @@ jobs:
         run: ./scripts/test-lineage.sh --control
       - name: Test surfaces are connected (no test that reports green while measuring nothing)
         run: ./scripts/check-test-surfaces.sh
+      - name: Drop-in attribution when one unit name extends another
+        # `dropins/$u-*.conf` also matched a LONGER unit's files, so hazync-coordinator was credited
+        # with hazync-coordinator-backup's BACKUP_DIR. A wider declared set can only HIDE drift, so it
+        # is invisible until it hides something: it changed no live output on either box the day it
+        # was fixed. Hence a test, not a measurement.
+        run: ./scripts/test-check-unit-drift.sh
+      - name: Drop-in attribution POSITIVE CONTROL (old glob — must reproduce the collision)
+        run: ./scripts/test-check-unit-drift.sh --control
       - name: check-dist attestation path (#248)
         # A CUDA host that cannot execute here must PASS when attested (no FAIL line), and FAIL when
         # unattested or attested with the wrong id. Against the pre-#248 script it fails 2 checks.

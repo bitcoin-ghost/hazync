@@ -58,6 +58,28 @@ ALLOW="${HAZYNC_DRIFT_ALLOW:-coordinator/deploy/unit-drift-allow.txt}"
 
 fail=0
 cannot=0
+
+# ⛔ `dropins/$u-*.conf` MATCHES ANOTHER UNIT'S FILES WHENEVER ONE UNIT NAME EXTENDS ANOTHER.
+# The repo has carried this since the drop-ins were committed: `hazync-coordinator-*.conf` also globs
+# every `hazync-coordinator-backup-*.conf`, so the backup job's paths, retention and receipts were
+# being read as things hazync-coordinator declares. That widens the DECLARED set, and a wider
+# declared set can only ever HIDE drift -- the one direction this whole script exists to catch.
+# hazync-bridge / hazync-bridge-mem-sampler is the same shape, which is how this was noticed.
+declared_dropin_bodies() {
+    local u="$1" f base other skip
+    for f in "$DROPINS_DIR/$u-"*.conf; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
+        skip=no
+        for other in $UNITS; do
+            [ "$other" = "$u" ] && continue
+            case "$other" in "$u"-*) ;; *) continue ;; esac   # only a LONGER unit can steal a file
+            case "$base" in "$other"-*) skip=yes; break ;; esac
+        done
+        [ "$skip" = no ] && cat "$f"
+    done
+}
+
 note() { echo "  $*"; }
 bad()  { echo "DRIFT $*"; fail=1; }
 # ⛔ "could not read" IS NOT "no drift", AND IT IS NOT DRIFT EITHER. Until 2026-09-18 an unreadable
@@ -215,7 +237,7 @@ for u in $UNITS; do
         esac
     }
     gdeclared=$( { cat "coordinator/deploy/$u.service" 2>/dev/null
-                   cat "$DROPINS_DIR/$u-"*.conf 2>/dev/null; } \
+                   declared_dropin_bodies "$u"; } \
                  | grep -E "^($(echo "$GUARDED" | tr ' ' '|'))=" | sort -u )
     while read -r _ kv; do
         [ -n "${kv:-}" ] || continue
@@ -253,7 +275,7 @@ for u in $UNITS; do
     # Union, not precedence: we are asking "could the repo have produced this value at all", which
     # is the question that matters and needs no simulation of systemd's override order.
     declared=$( { cat "coordinator/deploy/$u.service" 2>/dev/null
-                  cat "$DROPINS_DIR/$u-"*.conf 2>/dev/null; } \
+                  declared_dropin_bodies "$u"; } \
                 | grep -E '^Environment=' | sed 's/^Environment=//' | sort -u )
     while read -r _ kv; do
         [ -n "${kv:-}" ] || continue

@@ -1,0 +1,38 @@
+[Unit]
+Description=Hazync: sample bridge memory against the state it holds
+Documentation=https://github.com/hazync/hazync/issues/350
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# ⛔ NO OnFailure=hazync-alert@%n HERE, DELIBERATELY. This is an observer: its own health is not worth
+# waking anyone, and the loop never exits on purpose, so the only way it "fails" is being killed.
+# What DOES need noticing is the sampler running somewhere the bridge is not — and that shows up in
+# the log's own `why=` field, which is why that field exists.
+#
+# ⚠ EVERY PATH IS A PER-BOX SETTING and belongs in a drop-in, not here. The two boxes do not agree:
+#   hazync-proof  HAZYNC_BRIDGE_OUT=/srv/bulk/hazync/bridge_bundles   (the history walk; now stopped)
+#   hazync-coord  HAZYNC_BRIDGE_OUT=/var/lib/hazync/tip_bundles       (the tip bridge; live)
+# With BUNDLE_DIR and STATE_BIN unset the sampler still records memory and writes `-` for the sizes,
+# rather than inventing a path that happens to exist on the other machine.
+Environment=HAZYNC_SAMPLER_UNIT=hazync-bridge
+Environment=HAZYNC_SAMPLER_LOG=/var/log/hazync/bridge-mem.log
+Environment=HAZYNC_SAMPLER_INTERVAL=600
+ExecStart=/usr/local/sbin/hazync-bridge-mem-sampler
+Restart=always
+RestartSec=30
+# Nice + idle I/O: the du pass walks a terabyte-scale tree. It must never compete with the bridge.
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+# ⛔ LogsDirectory=, NOT ReadWritePaths=/var/log/hazync. Under ProtectSystem=strict a ReadWritePaths
+# that does not yet exist FAILS THE UNIT AT START, and /var/log/hazync existed on neither box.
+# LogsDirectory creates it, and this is the same idiom as StateDirectory= on the check units.
+LogsDirectory=hazync
+
+[Install]
+WantedBy=multi-user.target
