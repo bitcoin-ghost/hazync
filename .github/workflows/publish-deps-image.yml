@@ -1,0 +1,75 @@
+name: publish-deps-image
+
+# ⛔ WHY A WORKFLOW AND NOT A LAPTOP. Publishing the deps image used to mean a human holding a
+# personal access token with write:packages, logged in to ghcr on a machine somewhere. That token
+# expires, leaks, or lives on one person's laptop — and on 2026-09-27 the stored one had gone stale
+# and could not even PULL, which is worse than no login at all.
+#
+# A workflow's GITHUB_TOKEN is minted when the job starts, scoped to this repository, and dies with
+# the job. `packages: write` lets it push to ghcr.io/hazync/* because hazync owns this repo.
+#
+# ⚠ The SOURCE is public, so the pull needs no credential at all: only the push does.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Image to copy FROM (must be publicly readable)"
+        default: ghcr.io/bitcoin-ghost/hazync-deps
+      tags:
+        description: "Space-separated tags to copy"
+        default: e2226e81bd91dd30 0a54d2b21b96dc86
+
+permissions:
+  contents: read
+  packages: write        # the only reason this workflow can push
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr as this run
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ⚠ imagetools copies SERVER SIDE. It never downloads the layers, so a multi-gigabyte image
+      # costs seconds and no runner disk. It also preserves the OCI index — the amd64 manifest AND
+      # the buildx attestation beside it — which a pull/tag/push would flatten.
+      - name: Copy each tag
+        run: |
+          set -uo pipefail
+          fail=0
+          for t in ${{ inputs.tags }}; do
+            echo "::group::$t"
+            if docker buildx imagetools create \
+                 --tag ghcr.io/${{ github.repository_owner }}/hazync-deps:"$t" \
+                 "${{ inputs.source }}:$t"; then
+              echo "copied $t"
+            else
+              echo "::error::failed to copy $t"; fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # ⛔ VERIFY BY DIGEST, NOT BY "the push did not error". A copy that lands a different digest is
+      # a different image, and the whole point of this one is that reproduce/ can name it exactly.
+      - name: Check each copy matches the source digest
+        run: |
+          set -uo pipefail
+          fail=0
+          for t in ${{ inputs.tags }}; do
+            a=$(docker buildx imagetools inspect "${{ inputs.source }}:$t" --format '{{.Manifest.Digest}}')
+            b=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/hazync-deps:$t" --format '{{.Manifest.Digest}}')
+            if [ "$a" = "$b" ]; then
+              echo "ok   $t  $a"
+            else
+              echo "::error::$t digest differs — source $a, copy $b"; fail=1
+            fi
+          done
+          exit $fail
