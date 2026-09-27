@@ -1,7 +1,7 @@
 # Hazync prover
 
 The zkVM prover: it runs Bitcoin Core's **real** consensus code inside RISC0 — Core's consensus logic
-unmodified, with the patches in [`../patches/`](../patches/) listed in the [root README](../README.md#what-is-actually-compiled-from-core) — and emits a
+unmodified, with the patches in [`../patches/`](../patches/) listed in the [design overview](../docs/DESIGN_OVERVIEW.md#what-is-actually-compiled-from-core) — and emits a
 STARK proof that a block — or a whole range of blocks folded together — is valid. This directory holds
 the guest program (the code that runs in the zkVM), the host driver (builds witnesses, drives proving,
 verifies receipts), and the test scaffolding.

@@ -13,6 +13,7 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 |---|---|
 | [`STATUS.md`](STATUS.md) | where it stands: release, guest id, board, open issues, decisions (dated) |
 | [`EXPLAINER.md`](EXPLAINER.md) | what this is, in plain terms |
+| [`DESIGN_OVERVIEW.md`](DESIGN_OVERVIEW.md) | how a block becomes a proof, what is compiled from Core, checking a proof by hand — the detail the README used to carry |
 | [`GOALS.md`](GOALS.md) | what it is for, and what it is not |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | contributing GPU time to the board |
 | [`PROVER_OPERATIONS.md`](PROVER_OPERATIONS.md) | running provers for days: modes, claims, stopping, systemd, upgrades, watching, disk, troubleshooting |
@@ -26,6 +27,7 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 |---|---|
 | [`PROVING.md`](PROVING.md) | proving, end to end |
 | [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md) | one block across many GPUs: `seg-serve` / `seg-connect`, knobs, failure handling |
+| [`TIP_RUN_OPERATIONS.md`](TIP_RUN_OPERATIONS.md) | **renting a fleet to prove blocks as the chain mines them**: sizing (target vs floor), the phases and their real durations, growing a running fleet, what to do when a gate drops cards, stopping without stranding pods |
 | [`BUILDS.md`](BUILDS.md) | the CORE (shipped) and GHOST channels: patches, flags, measured card counts |
 | [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | fleet shape, card and per-box settings |
 | [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a board coordinator |

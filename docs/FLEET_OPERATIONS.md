@@ -108,15 +108,29 @@ python3 coordinator/tip_smoke.py --cards 3 --spares 3 \
     --rundir /tmp/run1 --repo tools/milestone --live-rig tools/live --key ~/.ssh/hz_smoke
 ```
 
+> **Running a tip session with real money?** The full operator's manual is
+> [`TIP_RUN_OPERATIONS.md`](TIP_RUN_OPERATIONS.md): fleet sizing, the phases and their real
+> durations, what to do when a gate drops cards, and how to stop without stranding pods. The table
+> below covers only the flags this page's single-block workflow needs.
+
 | flag | default | meaning |
 |---|---|---|
-| `--cards` | 2 | cards the run needs. Fewer surviving the gates and the run fails rather than proving on a smaller fleet than asked for |
+| `--cards` | 2 | the **target** fleet size: what to rent, how long to wait for ssh, and what the tail cut trims to |
+| `--min-cards` | 0 (= `--cards`) | the **floor**: run with whatever survives the gates, provided it is at least this many. The default reproduces the old all-or-nothing behaviour |
 | `--spares` | 1 | extra pods rented so one bad pod does not end the run. Unused spares are released immediately |
-| `--gpu-type` | `NVIDIA GeForce RTX 4090` | comma-separated, in preference order. **4090 only by default** — see below |
+| `--gpu-type` | `auto` | `auto` ranks every type with SECURE stock by **measured** cost per proof, then by price for unmeasured cards, and fills from ONE type where capacity allows (#493). Or pass a comma-separated preference list to pin it |
 | `--block` / `--block-path` | 130000 | the block, and the **local** path to its fixture. ⚠ `--block-path` is pushed from this machine; it is not a path on the card |
 | `--claim` | off | claim a board block and prove it from its bundle (mode 6) instead of a fixture |
+| `--claim-as HANDLE` | — | refuse to start unless this box's claim identity is HANDLE. Board credit is public and permanent |
 | `--session HOURS` / `--budget-usd` | off | keep claiming and proving until the time or money runs out |
+| `--adopt FILE` | — | reuse a previous run's `rented.json` instead of renting; adopted pods are **not** released at the end |
+| `--grow-to N` | 0 | during a session, rent and gate toward N in the background; recruits join at a block boundary |
 | `--cleanup` | — | release whatever `rented.json` records and exit, for a driver that died hard |
+
+⛔ **`--cards` is a target, `--min-cards` is a floor, and confusing them costs money in both
+directions.** Treating the target as a floor threw away four healthy fleets on 2026-09-27 (29 of 30,
+28 of 29, 25 of 26 twice). Passing the floor where a target belongs took a 21-card fleet down to 10
+the same evening. See [`TIP_RUN_OPERATIONS.md`](TIP_RUN_OPERATIONS.md#the-three-fleet-numbers).
 
 ### ⭐ Card type is the largest single lever on wall-clock
 
@@ -132,7 +146,9 @@ Measured 2026-09-21, 9 runs on block 741000 (hazync#448):
 loses on **price per proof**. Choosing on price per hour is the wrong objective.
 
 `deploy_listening` walks `--gpu-type` in order and takes the first RunPod will sell, so a list means
-**silent fallback**. That is how mixed fleets appeared. Pass
+**silent fallback**. That is how mixed fleets appeared. ⚠ Since #493 the default is `auto`, which
+tries each type for the WHOLE fleet best-value-first and only mixes when no single type can field
+the target — and says so when it does. Pass
 `--gpu-type "NVIDIA GeForce RTX 4090,NVIDIA A40"` only when completing a run matters more than its
 wall-clock — and expect it to be slower and dearer when the fallback fires.
 
