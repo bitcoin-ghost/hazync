@@ -3112,6 +3112,56 @@ def bot_reconcile():
             c.close()
     return 200, {"proven": done}
 
+PROVERS_TTL = float(os.environ.get("PROVERS_TTL", "30"))
+
+
+def provers_public():
+    """Every contributor with work, for hazync.org/provers/. Cached; /api/state stays at eight."""
+    def build():
+        c = db()
+        try:
+            rows, _ = prover_rows(c, blocked_pubkeys())
+        finally:
+            c.close()
+        return {"provers": rows, "count": len(rows)}
+    return _single_flight("provers:public", PROVERS_TTL, build)
+
+
+# ---------- who has done work, in one place (hazync-web#42) ----------
+#
+# ⛔ ONE BUILDER, TWO READERS. /api/state ships the TOP 8 because the block map polls it every ten
+# seconds and /api/provers ships the lot for the provers page. Those lists must agree about who
+# counts and who is hidden, and the rules are not trivial: moderation has to follow key rotations,
+# rotated-away keys must not appear beside the head they resolve to, and a contributor who only
+# FOLDS or only ANCHORS still counts. Written out twice, the two would drift, and the symptom would
+# be a page quietly disagreeing with the tile beside it — which is exactly what sent us here.
+#
+# ⚠ The count on the tile (`contributors`) is deliberately NOT len(this): it counts everyone with
+# work including moderated keys, while this list hides them. See state().
+def prover_rows(c, blocked):
+    """Every contributor with work, best first. Full list; callers slice it."""
+    dbp = contributions_by_pubkey()
+    rmap = rotation_map()
+    blk_resolved = blocked | {resolve_pubkey(b, rmap) for b in blocked}
+    handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
+    try:
+        versions = {r["pubkey"]: r["last_version"]
+                    for r in c.execute("SELECT pubkey,last_version FROM contributors")}
+    except Exception:
+        versions = {}
+    rows = sorted(
+        (dict(id=pk[:10], handle=handles.get(pk), blocks=v["proved"],
+              proved=v["proved"], folded=v["folded"], anchored=v["anchored"],
+              version=versions.get(pk))
+         for pk, v in dbp.items()
+         if pk.lower() not in blk_resolved and (v["proved"] or v["folded"] or v["anchored"])),
+        # Ranked on blocks proved, the headline number; folds and absorptions break ties beneath it
+        # rather than competing with it, since one fold is not worth one block and nothing here says
+        # what it is worth. `blocks` is kept as an alias so an existing client does not break.
+        key=lambda d: (d["proved"], d["folded"], d["anchored"]), reverse=True)
+    return rows, dbp
+
+
 def state(slim=False):
     now = time.time()
     _tip_now = chain_tip()    # read once: the board must not report a pct and a tip from two scans
@@ -3143,40 +3193,16 @@ def state(slim=False):
         board.append(b)
     # DISTINCT blocks per contributor (interval-merge) — reconciles with the headline 'proven' by
     # construction; a stored per-submit counter can drift on overlapping submissions.
-    _dbp = contributions_by_pubkey()
-    _rmap = rotation_map()
-    # Moderation has to follow rotations too, or a takedown is trivially escaped by rotating to a fresh
-    # key: the blocked key's blocks would reappear on a head that is not itself on the list. rotate()
-    # refuses when either key is blocked, but a key can be blocked AFTER it has rotated, so the read
-    # path cannot rely on that. Blocking any key in a chain hides the head it resolves to.
-    _blk_resolved = blk | {resolve_pubkey(b, _rmap) for b in blk}
-    # One row per RESOLVED identity. Iterating `contributors` would emit a rotated-away key as well,
-    # and rotate() guarantees the head has a row, so key off the resolved totals instead.
-    _handles = {r["pubkey"]: r["handle"] for r in c.execute("SELECT pubkey,handle FROM contributors")}
-    # #293: the release each contributor was last seen running, so they can notice their own worker is
-    # stale without having to ask anyone. None until they run a CLI new enough to say.
-    try:
-        _versions = {r["pubkey"]: r["last_version"]
-                     for r in c.execute("SELECT pubkey,last_version FROM contributors")}
-    except Exception:
-        _versions = {}
+    _all_provers, _dbp = prover_rows(c, blk)
     # A contributor counts if they did ANY of the three. Someone who only folds or only anchors was
     # invisible here before, which is the whole point of splitting the kinds.
     ncontrib = sum(1 for v in _dbp.values() if v["proved"] or v["folded"] or v["anchored"])
     # Fold OPERATIONS chain-wide, the leaderboard's column summed. `folded` above counts BLOCKS inside a
     # fold; this counts folds, which is what "N of the proven - 1 folds it takes to make one proof" needs.
-    # The site used to count them from /api/vranges, a full-index download per visitor.
     folds = sum(v["folded"] for v in _dbp.values())
-    leaders = sorted(
-        (dict(id=pk[:10], handle=_handles.get(pk), blocks=v["proved"],
-              proved=v["proved"], folded=v["folded"], anchored=v["anchored"],
-              version=_versions.get(pk))
-         for pk, v in _dbp.items()
-         if pk.lower() not in _blk_resolved and (v["proved"] or v["folded"] or v["anchored"])),
-        # Ranked on blocks proved, the headline number; folds and absorptions break ties beneath it
-        # rather than competing with it, since one fold is not worth one block and nothing here says
-        # what it is worth. `blocks` is kept as an alias so an existing client does not break.
-        key=lambda d: (d["proved"], d["folded"], d["anchored"]), reverse=True)[:8]
+    # ⚠ THE TOP 8 ONLY. /api/state is polled every ten seconds by the block map, and #35 exists because
+    # this payload was once 5.8 MB. The full list is /api/provers, which one page fetches once.
+    leaders = _all_provers[:8]
     recent = [dict(range=s["range_id"], handle=(s["handle"] if s["pubkey"].lower() not in blk else "[removed]"),
                    verified=bool(s["verified"]), ts=s["ts"], note=s["note"])
               # 40, not 8: the feed now carries three kinds of work (proved / folded / spine) and the
@@ -4031,6 +4057,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, sponsors_public())
         if p == "/api/donations":                          # the public donations record (hazync-web#41)
             return self._send(200, donations_public())
+        if p == "/api/provers":                            # EVERY prover; /api/state ships eight
+            return self._send(200, provers_public())
         if p == "/api/pick": code, obj = pick(None); return self._send(code, obj)
         if p == "/api/meta":                               # pre-flight: expected guest id + frontier
             return self._send(200, {"method_id": expected_method_id(), "frontier": frontier_hi(),

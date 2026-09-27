@@ -67,6 +67,12 @@ ROUTES = {
     "GET /api/sponsors":
         "Public table of sponsorships whose status is paid, proving or proven and whose settled amount "
         "covers the minimum (`SPONSOR_PUBLIC_SQL`).",
+    "GET /api/provers":
+        "Every contributor with work, best first, for hazync.org/provers/. Same rows as `/api/state`'s "
+        "`leaderboard` and built by the same `prover_rows()`, but NOT truncated — state ships eight "
+        "because the block map polls it every ten seconds. Moderated keys are hidden here as there; "
+        "`progress.contributors` counts them, so the tile and this list differ on purpose. Cached "
+        "`PROVERS_TTL`.",
     "GET /api/donations":
         "Public donations record for hazync.org/donations/: every settled BTCPay invoice reduced to date "
         "and amount, newest first, cached for `DONATIONS_TTL`. Publishes no txid, address or invoice id "
@@ -265,6 +271,7 @@ ENV = {
     "server:SPONSOR_RETURN_URL": "Where the checkout sends a sponsor back to; `#t=<token>` is appended.",
     "server:SPONSOR_RATE_TTL": "Seconds BTCPay's bitcoin price is cached.",
     "server:SPONSOR_RATE_STALE": "Seconds the last good BTCPay price is still used when BTCPay stops answering.",
+    "server:PROVERS_TTL": "Seconds the full prover list is cached before it is rebuilt.",
     "server:DONATIONS_TTL": "Seconds the public donations record is cached before BTCPay is asked again.",
     "server:DONATIONS_MAX": "How many recent invoices the donations record asks BTCPay for in one call.",
     "server:BEAT_LOG_WINDOW": "Seconds identical beat rejections are collapsed into one log line.",
