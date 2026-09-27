@@ -357,7 +357,7 @@ def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
                             c["usd_per_proof"] if c["usd_per_proof"] is not None else c["price"]))
     return out
 
-HOST_RELEASE = "v0.21.7"
+HOST_RELEASE = "v0.22.0"
 HOST_URL = (f"https://github.com/hazync/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
 

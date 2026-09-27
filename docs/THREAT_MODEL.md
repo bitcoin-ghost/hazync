@@ -219,7 +219,8 @@ the board; retaining receipts; serving witness bundles.
 - Can misattribute or hide contributors; edit, withhold or delete receipts; refuse submissions; publish any
   frontier or progress figure; serve wrong or stale bundles (costing provers GPU time); serve a stale spine;
   report a different `method_id` in `/api/meta`, which stops every worker that compares ids (exit `78`);
-  and set sponsorship statuses by hand, since payments are not connected (`SPONSORSHIP.md`).
+  and set sponsorship statuses by hand (`SPONSORSHIP.md`) — the coordinator owns those records, and
+  payments now arriving through BTCPay does not change that.
 - Cannot make a receipt verify for anyone else.
 - Deployment drift is visible: `/api/meta` publishes `source_sha256` of the running `server.py`, compared by
   `scripts/check-deployment.sh`. On 2026-09-14 at 08:31 and 12:02 UTC it equalled the sha256 of

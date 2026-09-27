@@ -1,9 +1,16 @@
 # Sponsoring blocks
 
-Status: **the records, the minimum, the private link, the public list, the API, the site's form and the
-BTCPay payments code exist; the proving bot cannot run live yet** ([#351](https://github.com/hazync/hazync/issues/351)).
-Sponsorship is closed on the live coordinator (`SPONSOR_OPEN` unset) and payments are not connected there, so the
-site's form says so and nothing is recorded. Payments must stay unconnected until the bot can prove what is paid for.
+Status: **live since 2026-09-26.** `SPONSOR_OPEN=1` on the coordinator, BTCPay is connected, and the bot
+runs on a timer. The first sponsorship was paid over Lightning (2,000 sats for block 196,001), and the bot
+rented an RTX 4090, proved the block in 819.6 s and released the pod; the board credits the sponsor on it.
+
+⚠ ONE sponsorship has been proved this way, so treat the price ladder as a starting point rather than a
+settled rate: for that block it projected $0.01 of GPU against an actual $0.19, because cost follows the
+UTXO set and a band median predicts a single block badly.
+
+⚠ The dollar minimum is converted to sats using **BTCPay's own store rate**, the same source that prices
+the invoice, so a quote and its checkout cannot disagree. `SPONSOR_BTC_USD` is only the fallback for a
+coordinator with no payments connected.
 
 ## What it is for
 
