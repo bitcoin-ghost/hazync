@@ -26,6 +26,7 @@ in [`../CHANGELOG.md`](../CHANGELOG.md); the GitHub releases are canonical.
 |---|---|
 | [`PROVING.md`](PROVING.md) | proving, end to end |
 | [`FLEET_OPERATIONS.md`](FLEET_OPERATIONS.md) | one block across many GPUs: `seg-serve` / `seg-connect`, knobs, failure handling |
+| [`TIP_RUN_OPERATIONS.md`](TIP_RUN_OPERATIONS.md) | **renting a fleet to prove blocks as the chain mines them**: sizing (target vs floor), the phases and their real durations, growing a running fleet, what to do when a gate drops cards, stopping without stranding pods |
 | [`BUILDS.md`](BUILDS.md) | the CORE (shipped) and GHOST channels: patches, flags, measured card counts |
 | [`TOPOLOGY_AND_SETTINGS.md`](TOPOLOGY_AND_SETTINGS.md) | fleet shape, card and per-box settings |
 | [`RUN_YOUR_OWN_COORDINATOR.md`](RUN_YOUR_OWN_COORDINATOR.md) | operating a board coordinator |
