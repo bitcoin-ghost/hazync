@@ -1420,7 +1420,12 @@ def main():
                                    "the prover never finished downloading")
 
         # ── the GPU smoke, BEFORE the clock ───────────────────────────────────────────────────────
-        phase(f"PREPARING · proving one block on each of {len(order)} GPUs")
+        # ⚠ THE PHASE LINE IS PUBLISHED, so it has to read correctly to someone who is not holding
+        # the code. "proving one block on each of 29 GPUs" reads as though 29 blocks of real work are
+        # under way — on a page whose headline is a block count sitting at 0, which makes the run look
+        # like it is losing proofs. Nothing is being proved for the chain here: each card proves a
+        # throwaway block so a GPU that cannot prove is found BEFORE the clock rather than during it.
+        phase(f"PREPARING · checking all {len(order)} GPUs can prove (a throwaway block each)")
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             smoke = list(pool.map(lambda c: (c, *gpu_smoke(ssh, c)), order))
         duds = []
