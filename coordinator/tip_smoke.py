@@ -1464,6 +1464,19 @@ def main():
                              f"passed every pre-clock gate; "
                              f"needed {a.cards}. Rent more spares, or read the per-card lines above")
         surplus = [c.cid for c in order[a.cards:]]
+        # ⛔ SURPLUS IS NOT THE TEARDOWN'S BUSINESS, AND THE TEARDOWN'S GUARD DOES NOT REACH IT. An
+        # adopted fleet exists precisely so it survives the run, but this path terminates through
+        # _drop long before the finally ever sees it -- so `--adopt` without this check would quietly
+        # destroy every card beyond --cards, which is the opposite of what adopting is for. Found by
+        # reading the adopt path against this one, not by a failure: on the night it shipped the run
+        # was launched with --cards set exactly to the fleet, so `surplus` was empty and the bug
+        # could not fire.
+        if surplus and a.adopt and not a.release_adopted:
+            log(f"{len(surplus)} adopted card(s) are surplus to --cards {a.cards} and are being "
+                f"LEFT RUNNING rather than released (adopted fleets outlive the run): "
+                f"{sorted(surplus)}")
+            order = order[:a.cards]
+            surplus = []
         if surplus:
             log(f"the run has its {a.cards} card(s); releasing {len(surplus)} that passed the gates "
                 f"but are not needed: {sorted(surplus)}")
