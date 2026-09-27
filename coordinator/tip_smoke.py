@@ -34,6 +34,7 @@ import tip_driver                       # noqa: E402
 import tip_economics                    # noqa: E402
 import tip_harvest                      # noqa: E402
 import tip_lifecycle                   # noqa: E402
+import tip_recruit                      # noqa: E402
 import tip_run                          # noqa: E402
 import tip_runner                       # noqa: E402
 import tip_session                      # noqa: E402
@@ -806,6 +807,13 @@ def main():
                          "0 (default) = measure and report, release nothing. The fold waits for the "
                          "slowest peer at every level, so the tail sets the wall clock: block "
                          "968,340 saw join RTTs from 0.4 s to 107.4 s and took 31.8 minutes")
+    ap.add_argument("--grow-to", type=int, default=0, metavar="N",
+                    help="during a SESSION, keep trying to grow the fleet toward N as capacity "
+                         "appears. Stock is erratic -- the same card went 26 available -> 0 -> 18 in "
+                         "one evening (hazync#504) -- so a run that rents once takes whatever "
+                         "existed in the second it started. Recruits are rented and gated on a "
+                         "background thread, off the clock, and join at a BLOCK BOUNDARY; one that "
+                         "is not ready simply misses that block. 0 = do not grow")
     ap.add_argument("--min-cards", type=int, default=0, metavar="N",
                     help="the FLOOR: run with whatever survives the gates, as long as it is at least "
                          "this many. Default 0 = use --cards, which is the old all-or-nothing "
@@ -968,6 +976,8 @@ def main():
     # run got as far as — a fleet that died during staging still has a `run.log` worth keeping — and
     # a NameError in teardown would leave the cards billing.
     assignment, runner, agg = {}, None, None
+    # Always bound, so the teardown can ask about them whichever path the run took.
+    recruiter, recruited = None, []
 
     # ⛔ #429 ADDED SEVEN `phase(...)` CALLS AND NEVER DEFINED IT. Every run since died on the FIRST
     # one — `NameError: name 'phase' is not defined` at "PREPARING · renting …", before a single pod
@@ -1542,7 +1552,24 @@ def main():
         # ⛔ len(order), NOT a.cards. Cards can be dropped by the reachability gate, and indexing by
         # the requested count would either raise or silently prove a chunk count the fleet cannot
         # cover -- the chunk count IS the fleet size.
-        assignment = {i: c for i, c in enumerate(order)}
+        # ⛔ MUTATE, DO NOT REBIND. `assignment` is created before the try block and is what the
+        # teardown, the harvest and stop_auto_attach reach for. Rebinding is fine while the fleet is
+        # fixed; once it can GROW, the teardown must see the cards that were added, so the same dict
+        # has to be the one everybody holds.
+        assignment.update(assignment_preview(order))
+
+        def current_assignment():
+            """The fleet as it stands NOW, rebuilt per block.
+
+            ⛔ THE CHUNK COUNT IS THE FLEET SIZE, so this map cannot change while a block is in
+            flight -- run_range is handed a SNAPSHOT and keeps it for the whole proof. Rebuilding
+            between blocks is what lets a card recruited mid-session ever reach a proof: before
+            this, `assignment` was built once before the loop and every block was proved with the
+            fleet as it stood at that instant, so appending to `order` reached nothing at all.
+            """
+            assignment.clear()
+            assignment.update(assignment_preview(order))
+            return dict(assignment)
         # ⛔ DO NOT NAME A BLOCK THE RUN IS NOT PROVING (hazync#496). `a.block` is only assigned from
         # a claim on the `a.claim and not a.session` path, so a SESSION run never updates it and this
         # line printed the argparse default. Captured on the 968,243 run, one second apart:
@@ -1595,7 +1622,7 @@ def main():
                     hi_l["n"] = tip_board.beat(rng, progress, hi_l["n"], ident=ident)
                     return hi_l["n"]
 
-                res = tip_run.run_range(height=int(rng), cards=assignment, runner=runner,
+                res = tip_run.run_range(height=int(rng), cards=current_assignment(), runner=runner,
                                         bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
                                         on_event=lambda m: log(f"  {m}"), beat=_b,
                                         max_ticks=1200, tick_s=6.0, abort=abort)
@@ -1795,8 +1822,15 @@ def main():
                 return out
 
             # The fleet's hourly rate, from what RunPod actually charged for the cards we KEPT.
+            # ⛔ THE RATE IS NOT A CONSTANT ONCE THE FLEET CAN GROW. spend_fn closed over a number
+            # computed here, so every card recruited mid-session billed invisibly: the budget cap
+            # would be compared against a figure that stopped counting the moment the fleet changed.
+            def rate_now():
+                names = {c.cid for c in order}
+                return sum(p["price"] for p in created if p["name"] in names)
+
             live = {c.cid for c in order}
-            rate_hr = sum(p["price"] for p in created if p["name"] in live)
+            rate_hr = rate_now()
 
             # ⛔ ELAPSED TIME, NOT BLOCK TIME. A pod bills from the moment it exists; claiming,
             # fetching a bundle, submitting and waiting on a busy board are all billed and none of
@@ -1808,7 +1842,10 @@ def main():
             def spend_fn():
                 now_t = time.time()
                 delta, billed_to["t"] = now_t - billed_to["t"], now_t
-                return rate_hr * (delta / 3600.0)
+                # ⚠ Charged at the rate the fleet is on NOW, over the interval since the last
+                # charge. The loop charges every pass, so a fleet that grew part-way through an
+                # interval is out by at most that interval.
+                return rate_now() * (delta / 3600.0)
 
             # ⛔ MAX, NOT MEDIAN. Measured over 18 blocks: median 30.0 s, max 226.7 s. A
             # median-based guard let a claim be taken with 30 s left that then ran for nearly four
@@ -1819,6 +1856,78 @@ def main():
                         if b.get("ok") and b.get("wall_s")]
                 return max(seen) if seen else DEFAULT_BLOCK_EST_S
 
+            # ── growing the fleet while it runs (the supply half of hazync#504/#506) ─────────────
+            recruited_path = os.path.join(a.rundir, "recruited.json")
+
+            def _recruit_rent():
+                """⛔ RECORD IT THE INSTANT IT EXISTS, in a file of its own. rented.json is written
+                by the main thread; a second writer would race it and the loser is a pod nobody can
+                release. There is no budget cap by decision, so an unrecorded pod bills until an
+                invoice says so."""
+                pod = api.deploy_listening(f"hz-grow-{len(recruited) + 1}", pub, gpu_types=gpu_types)
+                if pod:
+                    recruited.append(pod)
+                    with open(recruited_path, "w") as fh:
+                        json.dump(recruited, fh, indent=1)
+                return pod
+
+            def _recruit_gate(pod):
+                """THE SAME GATES THE RUN APPLIES TO ITSELF, on one card, off the clock.
+
+                ⛔ NOT A REDUCED SET. Every one of these caught a real card on 2026-09-27:
+                hz-smoke-8 never answered ssh, hz-smoke-21's GPU could not prove, three more failed
+                reachability. Admitting a card that skipped them would put exactly those failures
+                inside a block instead of before it, where they cost the whole fleet's wall clock.
+                """
+                cs, _pm = wait_for_ssh(api, [pod], ssh, need=1)
+                if not cs:
+                    return False, None, "it never answered ssh"
+                c = cs[0]
+                if not prepare(ssh, c, block_path=(None if a.claim else a.block_path),
+                               block_name=block_name, repo_hint=a.repo):
+                    return False, None, "it could not be staged"
+                fok, n = fetch_binary(ssh, c, want, fleet=None)
+                if not fok:
+                    return False, None, f"the prover never finished downloading ({n} bytes)"
+                gok, detail = gpu_smoke(ssh, c)
+                if gok is None:
+                    return False, None, f"its GPU could not be judged ({detail})"
+                if not gok:
+                    return False, None, f"its GPU cannot prove ({detail})"
+                reach = probe_runner.check_reachability({0: c}, secs=15)
+                if reach is not None and not all(reach.values()):
+                    return False, None, "it cannot reach the aggregate"
+                return True, c, ""
+
+            if a.grow_to and a.grow_to > len(order):
+                recruiter = tip_recruit.Recruiter(
+                    target=a.grow_to, have_fn=lambda: len(order), rent_fn=_recruit_rent,
+                    gate_fn=_recruit_gate,
+                    release_fn=lambda pod: sponsor_bot.terminate_confirmed(api, pod["id"]),
+                    log=lambda m: log(f"  {m}"), poll_s=45.0).start()
+                log(f"  growing toward {a.grow_to} cards as capacity appears "
+                    f"(recruits gate off the clock and join at a block boundary)")
+
+            def grow_fn():
+                """Admit finished recruits. Called BETWEEN blocks only; never rents or waits."""
+                if recruiter is None:
+                    return None
+                joined = recruiter.drain()
+                if not joined:
+                    return None
+                for item in joined:
+                    order.append(item["card"])
+                    created.append(item["pod"])
+                # ⚠ The feed was written for the fleet that went through the gates; rewrite it, or
+                # the dashboard shows a fleet that no longer matches what is proving.
+                try:
+                    feed.start(tip_dashboard.feed_records(order, fleet)["records"])
+                except Exception as exc:                       # noqa: BLE001
+                    log(f"  ⚠ could not rewrite the feed after growing: {exc}")
+                names = ", ".join(i["pod"].get("name", "?") for i in joined)
+                return (f"fleet grew by {len(joined)} to {len(order)} cards ({names}) — "
+                        f"they join from the next block")
+
             phase(f"SESSION · {a.session:.1f} h on {len(order)} cards"
                   + (f", budget ${a.budget_usd:.2f}" if a.budget_usd else ""))
             log(f"  fleet rate ${rate_hr:.3f}/hr across {len(live)} card(s)")
@@ -1826,7 +1935,8 @@ def main():
                                            work_fn=work_fn, now=time.time, sleep=time.sleep,
                                            feed=feed, on_event=lambda m: log(f"  {m}"),
                                            idle_s=30.0, block_estimate_s=estimate_s,
-                                           budget_usd=(a.budget_usd or None), spend_fn=spend_fn)
+                                           budget_usd=(a.budget_usd or None), spend_fn=spend_fn,
+                                           grow_fn=grow_fn)
             log("SESSION " + json.dumps(summ, indent=1))
             return 0
 
@@ -1954,6 +2064,26 @@ def main():
                     json.dump(blob, fh, indent=1)
         except Exception as e:                       # noqa: BLE001 — teardown must not be blocked
             log(f"  ⚠ harvest failed ({type(e).__name__}: {e}) — releasing the fleet regardless")
+
+        # ⛔ A RECRUIT CAUGHT MID-GATE IS IN NEITHER LIST. `created` holds only cards the session
+        # ADMITTED; the recruiter's own queue holds only ones that FINISHED gating. A pod rented
+        # thirty seconds before the session ended, still downloading the prover, is in neither — and
+        # there is no budget cap by decision, so it would bill until an invoice said so. Every pod
+        # the recruiter ever rented is in recruited.json for exactly this moment.
+        try:
+            if recruiter is not None:
+                recruiter.stop()
+                rc_ = recruiter.counts()
+                log(f"recruiter: rented {rc_['rented']}, rejected {rc_['rejected']}")
+            admitted_ids = {p["id"] for p in created}
+            orphans = [p for p in recruited if p["id"] not in admitted_ids]
+            if orphans:
+                log(f"releasing {len(orphans)} recruit(s) that never joined the fleet")
+                for p_ in orphans:
+                    ok_ = sponsor_bot.terminate_confirmed(api, p_["id"])
+                    log(f"  {p_.get('name')}: {'gone' if ok_ else '⛔ STILL LISTED — RELEASE BY HAND'}")
+        except Exception as exc:       # noqa: BLE001 -- cleanup bookkeeping must not mask a failure
+            log(f"⛔ could not finish releasing recruits: {type(exc).__name__}: {exc}")
 
         # ── release, whatever happened ────────────────────────────────────────────────────────────
         elapsed = time.time() - t_start

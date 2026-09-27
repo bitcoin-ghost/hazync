@@ -232,6 +232,14 @@ jobs:
         run: cd coordinator && python3 test_min_cards.py
       - name: Min-cards POSITIVE CONTROL (floor == target — must throw away tonight's fleets)
         run: cd coordinator && python3 test_min_cards.py --control
+      - name: A growing fleet rents for the slots it needs, not one per poll
+        # ⛔ Gating a recruit takes MINUTES (the prover fetch measured 14 min across 29 cards on
+        # 2026-09-27) while the poll is seconds, so a policy that counts only cards already IN the
+        # fleet starts a fresh rental every poll — 10+ pods billing for one slot. Cards being gated
+        # and cards gated-but-not-yet-admitted must both count against the target.
+        run: cd coordinator && python3 test_tip_recruit.py
+      - name: Recruiter POSITIVE CONTROL (counts only the fleet — must over-rent)
+        run: cd coordinator && python3 test_tip_recruit.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator

@@ -287,7 +287,7 @@ def resume_verdict(state, live_pod_ids, now):
 
 def run_session(*, state, path, prove, work_fn, now, sleep,
                 feed=None, idle_s=30.0, block_estimate_s=None, on_event=None,
-                budget_usd=None, spend_fn=None):
+                budget_usd=None, spend_fn=None, grow_fn=None):
     """Drive a whole session. Thin on purpose — every decision above is a pure function.
 
     `prove(rng)` proves one block and returns `tip_run.run_block`'s dict, or raises.
@@ -319,6 +319,22 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
                 add_spend(state, spend_fn())
             except Exception:
                 pass                      # accounting must never stop a session
+        # ⛔ BETWEEN BLOCKS, NEVER DURING ONE. A card admitted here joins the fleet for the NEXT
+        # block: the chunk count IS the fleet size, so changing it while a proof is in flight would
+        # re-split work the cards are already doing. This is the only point in the loop where no
+        # block is running.
+        # ⛔ AND IT MUST NEVER DELAY A TIP BLOCK. grow_fn only DRAINS what a background recruiter has
+        # already finished gating -- it must not rent, wait or probe. A tip block that arrives while
+        # a recruit is still being gated simply proves without it; the recruit joins whenever it is
+        # ready, which may be several blocks later. Paying a whole fleet to wait for one more card is
+        # the trade this feature exists to avoid making.
+        if grow_fn is not None:
+            try:
+                joined = grow_fn()
+                if joined:
+                    emit(joined)
+            except Exception as exc:      # noqa: BLE001 -- recruiting must never end a session
+                emit(f"growth check failed, continuing: {type(exc).__name__}: {exc}")
         # ⚠ A CALLABLE ESTIMATE IS RE-ASKED EVERY LOOP. A fixed number cannot learn: this session
         # measured a median of 30.0 s and a MAX of 226.7 s, so a median-based guard would have let
         # the slowest block overrun its window by minutes.
