@@ -806,6 +806,12 @@ def main():
                          "0 (default) = measure and report, release nothing. The fold waits for the "
                          "slowest peer at every level, so the tail sets the wall clock: block "
                          "968,340 saw join RTTs from 0.4 s to 107.4 s and took 31.8 minutes")
+    ap.add_argument("--min-cards", type=int, default=0, metavar="N",
+                    help="the FLOOR: run with whatever survives the gates, as long as it is at least "
+                         "this many. Default 0 = use --cards, which is the old all-or-nothing "
+                         "behaviour. ⛔ --cards is a TARGET; treating it as a floor threw away four "
+                         "healthy fleets on 2026-09-27 — 29 cards when 30 were asked for, then 28 of "
+                         "29, then 25 of 26 twice — each after paying for every pre-clock gate")
     ap.add_argument("--spares", type=int, default=1,
                     help="extra pods to rent; the first --cards to answer run, the rest are released")
     ap.add_argument("--block", default="130000",
@@ -852,6 +858,16 @@ def main():
     a = ap.parse_args()
 
     # publish.sh reads these from the environment; os.spawnv hands the child ours.
+    # ⛔ THE FLOOR IS NOT THE TARGET. Every pre-clock gate can legitimately drop a card -- a pod that
+    # never starts, a GPU that cannot prove, a link the aggregate cannot push to -- and the gates are
+    # right to drop them. What was wrong was the response: the run asked for N, got N-1, and exited
+    # having paid for all of it. 2026-09-27 lost four fleets that way in under an hour.
+    # Defaulting min_cards to cards keeps the old behaviour exactly for anyone who wants it.
+    a.min_cards = a.min_cards or a.cards
+    if a.min_cards > a.cards:
+        raise SystemExit(f"--min-cards {a.min_cards} is above --cards {a.cards}: the floor cannot "
+                         f"exceed the target")
+
     if a.publish_dest:
         os.environ["HAZYNC_PUBLISH_DEST"] = a.publish_dest
         os.environ["HAZYNC_PUBLISH_KEY"] = a.publish_key
@@ -1018,9 +1034,10 @@ def main():
             if missing:
                 log(f"⚠ {len(missing)} pod(s) in {a.adopt} are NO LONGER on the account and were "
                     f"dropped: {sorted(missing)}")
-            if len(adopted) < a.cards:
+            if len(adopted) < a.min_cards:
                 raise SystemExit(f"--adopt {a.adopt}: only {len(adopted)} of the recorded pods are "
-                                 f"still alive; {a.cards} are needed. Lower --cards or rent fresh")
+                                 f"still alive; at least {a.min_cards} are needed. Lower "
+                                 f"--min-cards or rent fresh")
             created = adopted
             # ⛔ `rented` and `want` are read AFTER this branch (the ssh wait, the prover-fetch
             # gate and their messages), and both were only ever assigned on the renting path. An
@@ -1069,7 +1086,7 @@ def main():
 
             for gt in gpu_types:
                 got = rent_uniform(gt, want)
-                if len(got) >= a.cards:
+                if len(got) >= a.min_cards:
                     created = got
                     log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
                     break
@@ -1108,12 +1125,12 @@ def main():
                     # rented. Measured 2026-09-21: five came up, the SIXTH (a spare) had no capacity, and
                     # the run released all five and failed. Renting spares to survive a bad pod, then
                     # failing because a spare was unavailable, is the opposite of the intent.
-                    if len(created) >= a.cards:
+                    if len(created) >= a.min_cards:
                         log(f"  no capacity for {name} — continuing with {len(created)} pod(s), "
-                            f"{a.cards} needed")
+                            f"{a.min_cards} needed at minimum")
                         break
                     raise SystemExit(f"no capacity for {name} — only {len(created)} pod(s) rented and "
-                                     f"{a.cards} are needed")
+                                     f"at least {a.min_cards} are needed")
                 created.append(p)
                 # ⛔ WRITE IT DOWN THE INSTANT IT EXISTS. There is NO BUDGET CAP by decision, so a driver
                 # that dies without releasing leaves cards billing until someone notices. A SIGINT during
@@ -1143,10 +1160,11 @@ def main():
         log("SITES: " + ", ".join(f"{n}x {d}" for d, n in sorted(sites.items()))
             + (["", "   ⚠ SPREAD ACROSS SITES — per-card rates mix card and network"][len(sites) > 1]))
 
-        phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer")
-        cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
-        if len(cards) < a.cards:
-            raise SystemExit(f"only {len(cards)} of {want} rented cards came up; needed {a.cards}")
+        phase(f"PREPARING · waiting for {a.min_cards} of {want} cards to answer")
+        cards, portmap = wait_for_ssh(api, created, ssh, need=a.min_cards)
+        if len(cards) < a.min_cards:
+            raise SystemExit(f"only {len(cards)} of {want} rented cards came up; "
+                             f"needed at least {a.min_cards}")
 
         # ⛔ THE SPARES LIVE UNTIL THE GATES HAVE RUN (hazync#479). They used to be released here,
         # immediately after the SSH gate -- 23 seconds before the three gates that actually find a bad
@@ -1251,7 +1269,7 @@ def main():
         # the total was being used. `best[2]` is {cid: Mbit/s} from the winning candidate, so this
         # costs nothing extra and happens before the clock starts.
         w_drop, w_ranked = slow_worker_cut(
-            order, best[2], need=a.cards, floor=a.worker_min_mbit)
+            order, best[2], need=a.min_cards, floor=a.worker_min_mbit)
         if w_ranked:
             shown = ", ".join(f"{cid} {'untested' if v is None else format(v, '.0f')}"
                               for cid, v in w_ranked[:6])
@@ -1390,7 +1408,7 @@ def main():
         want = binary_size()
         phase(f"PREPARING · fetching the prover ({want/1e6:.0f} MB) onto {len(order)} cards")
         # ⛔ THE GATE IS FLEET-RELATIVE NOW (hazync#503). One card at 93 KB/s held 17 ready cards in
-        # this gate for 18 minutes and cost ~$5 of a one-hour run. `a.cards` is the floor, so a
+        # this gate for 18 minutes and cost ~$5 of a one-hour run. `a.min_cards` is the floor, so a
         # laggard is cut loose only while the survivors would still be enough to run.
         # ⛔⛔ AND THE AGGREGATE IS NEVER CUT LOOSE FOR BEING SLOW. Measured 2026-09-24 02:03, on this
         # gate's FIRST live outing: it dropped hz-smoke-1 for needing "~2 more min at 2424 KB/s" --
@@ -1401,7 +1419,7 @@ def main():
         # ⚠ A worker is fungible and a spare replaces it; the aggregate is the one card the run
         # cannot swap. Waiting two minutes for it is obviously cheaper than losing the fleet, and no
         # amount of surplus changes that -- which is why this is an identity, not a threshold.
-        fleet_fetch = FetchFleet(len(order), a.cards, never_abandon={agg.cid})
+        fleet_fetch = FetchFleet(len(order), a.min_cards, never_abandon={agg.cid})
         with _cf.ThreadPoolExecutor(max_workers=len(order)) as pool:
             got = list(pool.map(lambda c: (c, *fetch_binary(ssh, c, want, fleet=fleet_fetch)), order))
         for c, ok, n in got:
@@ -1461,13 +1479,18 @@ def main():
             # honest answer is to say so rather than run on an untested topology.
             raise SystemExit(f"the aggregate {agg.cid} failed a pre-clock gate — every worker was "
                              f"checked against it, so the run cannot simply promote another card")
-        if len(order) < a.cards:
+        # ⛔ THE CHECK THAT KILLED FOUR FLEETS ON 2026-09-27. It compared against the TARGET, so a
+        # run that asked for 30 and had 29 healthy gated cards exited and released them — four times
+        # in an hour, each after paying for every gate above. The floor is what matters; the surplus
+        # below trims to the target only when there IS a surplus.
+        if len(order) < a.min_cards:
             # ⚠ len(created), not `rented`. `rented` is what we ASKED for (cards + spares); the
             # run routinely gets fewer when capacity is thin -- 18 of a requested 60 on 2026-09-23.
             # Reporting the request makes a healthy fleet look like a catastrophic shortfall.
-            raise SystemExit(f"only {len(order)} of {len(created)} rented cards "
+            raise SystemExit(f"only {len(order)} of {len(created)} cards "
                              f"passed every pre-clock gate; "
-                             f"needed {a.cards}. Rent more spares, or read the per-card lines above")
+                             f"need at least {a.min_cards} (target {a.cards}). Lower --min-cards, "
+                             f"rent more spares, or read the per-card lines above")
         surplus = [c.cid for c in order[a.cards:]]
         # ⛔ SURPLUS IS NOT THE TEARDOWN'S BUSINESS, AND THE TEARDOWN'S GUARD DOES NOT REACH IT. An
         # adopted fleet exists precisely so it survives the run, but this path terminates through

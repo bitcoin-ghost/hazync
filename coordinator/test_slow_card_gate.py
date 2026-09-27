@@ -179,7 +179,7 @@ check(rich.dropped == 1,
 
 # and the driver actually passes it — the guard is useless if the caller never names the aggregate
 _ts = open(os.path.join(HERE, "tip_smoke.py")).read()
-check("FetchFleet(len(order), a.cards, never_abandon={agg.cid})" in _ts,
+check("FetchFleet(len(order), a.min_cards, never_abandon={agg.cid})" in _ts,
       "the driver names the aggregate when it builds the gate's fleet view")
 
 # ── 4. the clock starts when the fleet could RUN, not when the first card lands ──────────────────
