@@ -18,7 +18,8 @@ For what is true now, see [`../README.md`](../README.md); for releases, [`../../
 | card counts of 16 / 28 / 29 / 32 / 48, and FLEET_SIZING's self-retracted ~50 | `TEN_MINUTE_BLOCK.md`, `FLEET_SIZING.md`, `MODELS.md`, `STACK_INTEGRATION_PLAN.md`, `PERF_INVESTIGATION_2026-08-26.md` | measured CORE fleet: ~13 L40S for a sub-ten-minute block, from a formula that reproduces the measured 8-card block (`BENCH_8xL40S_2026-09-08.md`) |
 | "~7 cards" after #139 | `TEN_MINUTE_BLOCK.md` (annotated), `HELIX_DUAL_BACKEND.md` | measured 2026-09-02 on two L40S: CORE 10, GHOST 5 (`../BUILDS.md` §1); the 8-card CORE fleet then put CORE at ~13 |
 | the Core/Ghost gap as "~5x the hardware" | `CORE_VS_GHOST.md` | measured 10 vs 5 cards (`../BUILDS.md` §1); the memo's own §1 already projected ~1.8x |
-| `7.53x` projected for bigint2 on the tip block | `TIP_BLOCK_BIGINT2_2026-08-28.md` | measured **4.48x** execute (Tier 0 + bigint2 against control; bigint2 alone 4.384x) in that document, and **4.112x** proved (`GHOST_GAINS.md` §0, arm S) |
+| `7.53x` projected for bigint2 on the tip block | `TRIAL_BOARD_FILL_2026-09-24.md` | the second tip hour, same cards and rate, with idle gaps sent to the board: 15 blocks, 0 failed | dated measurement; board fill went 48% -> 91% busy at the same cost |
+| `TIP_BLOCK_BIGINT2_2026-08-28.md` | measured **4.48x** execute (Tier 0 + bigint2 against control; bigint2 alone 4.384x) in that document, and **4.112x** proved (`GHOST_GAINS.md` §0, arm S) |
 | `7.18x` "MEASURED" for #139 wholesale | `ACCELERATION.md`, `TEN_MINUTE_BLOCK.md` (both annotated) | a block bound derived from the n=256 `ec-bench` microbenchmark, never a block measurement; see the 4.48x row |
 | `5.25x` / `6.95x` for #139 middle path / wholesale + packer | `ACCELERATION.md`, `MODELS.md`, `TEN_MINUTE_BLOCK.md`, `GPU_EXPERIMENT_RUNBOOK.md` | execute-derived projections; see the 4.48x row. The wholesale arm was never run (`9b767b5`) |
 | worker processes "1.20x" per card | `PERF_INVESTIGATION_2026-08-26.md`, `GPU_EXPERIMENT_RUNBOOK.md`, `ACCELERATION.md` (annotated) | ceiling **≤1.09x** once the card was measured 91.5% busy (`TEN_MINUTE_BLOCK.md` §3) |
@@ -37,6 +38,9 @@ For what is true now, see [`../README.md`](../README.md); for releases, [`../../
 | `FLEET_SIZING.md` | the first fleet-size estimate, and coordinator egress | superseded by `BENCH_8xL40S_2026-09-08.md` and the milestone record |
 | `GHOST_GAINS.md` | every remaining Ghost gain, priced | G1, G3, G6 built; G4, G5 not; next build in `../BUILDS.md` §3.1 |
 | `GPU_EXPERIMENT_RUNBOOK.md` | the experiments that needed a card | run, closed or overtaken; #182 closed unmerged |
+| `BENCH_MODE6_3xRTX4090_2026-09-17.md` | the first mode-6 distribution on real hardware: block 74,928 across 3x RTX 4090 | dated measurement; a *board* block could not be distributed before #364 |
+| `BRIDGE_MEMORY_VS_UTXO_2026-09.md` | bridge RSS against the UTXO set over a history walk, 1.27M -> 128.8M coins, with `bridge-mem-2026-09.txt` beside it as the raw evidence | **the measurement behind #435's MemoryHigh**; states plainly what it cannot answer for #350 |
+| `FLAGSHIP_TIP_HOUR_2026-09-23.md` | one hour following the tip on 15x RTX 4090: two blocks proved and accepted while the chain was still on them, $15.20 | dated measurement |
 | `HAZYNC_ARCHITECTURE.md` | the original design and integration plan | superseded by `../SPEC.md`, `../SOUNDNESS.md`, `../PROVING.md` |
 | `HELIX_DUAL_BACKEND.md` | one guest, both backends, height-gated | verdict: probably not needed |
 | `MILESTONE_966256_RUN4_2026-09-10.md` | block 966,256 on rented RTX 4090 fleets, runs 1–4 (runs 1 and 2 merged in) | the 600 s target met: 544.0 s on 27 cards |
