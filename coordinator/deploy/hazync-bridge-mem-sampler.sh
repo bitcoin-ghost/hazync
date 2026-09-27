@@ -37,6 +37,10 @@ DU_EVERY="${HAZYNC_SAMPLER_DU_EVERY:-6}"
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
+# Probed once, not every ten minutes: journald's own grep (systemd 237+) searches the whole journal.
+have_g=no
+journalctl --help 2>/dev/null | grep -q -- ' -g' && have_g=yes
+
 round=0
 bundles_gib='-'
 while true; do
@@ -76,9 +80,36 @@ while true; do
         hi="${hi:--}"
     fi
 
-    ckpt=$(journalctl -u "$UNIT" -o cat --no-pager -n 400 2>/dev/null \
-           | grep 'checkpoint @' | tail -1 \
-           | sed -nE 's/.*@ ([0-9]+) \(([0-9]+) utxos.*/\1 \2/p')
+    # ⛔ TWO SHAPES, AND THE WINDOW WAS TUNED FOR THE WRONG BRIDGE. The original read the last 400
+    # journal lines and matched `@ ([0-9]+) \(`. Both parts fail on the tip box:
+    #
+    #   bridge: checkpoint @ 967457 (165224019 utxos, 165224019 leaves)                    <- the WRITE
+    #   bridge: resuming from checkpoint @ height 968136 (165192074 utxos, ...)            <- the RESUME
+    #
+    # The resume line says `@ height N`, so `@ ([0-9]+)` does not match it — and it is usually the most
+    # recent of the two. Worse, the tip bridge logs ~2 lines per block at one block every ~10 min and
+    # checkpoints every 2,000 blocks, so 400 lines covers ~a day and a checkpoint lands ~fortnightly:
+    # the field would have read `-` essentially for ever. Measured 2026-09-27: 0 matches in the last
+    # 400 lines, 893 in the last 20,000.
+    #
+    # ⚠ `-g` greps inside journald instead of streaming lines to us — it searches the WHOLE journal and
+    # measured 3x faster than piping 20,000 lines through grep. Kept behind a capability test because a
+    # journald without it must degrade to the window, not to silence.
+    # ⚠ ckpt_src= names WHICH line it came from. "last checkpoint written" and "where this run resumed"
+    # are different facts and must never be read as one.
+    ckpt_line=
+    if [ "$have_g" = yes ]; then
+        ckpt_line=$(journalctl -u "$UNIT" -o cat --no-pager -g 'checkpoint @' -n 1 2>/dev/null | tail -1)
+    fi
+    [ -n "$ckpt_line" ] || ckpt_line=$(journalctl -u "$UNIT" -o cat --no-pager -n "${HAZYNC_SAMPLER_JOURNAL_LINES:-20000}" 2>/dev/null \
+                                       | grep 'checkpoint @' | tail -1)
+    ckpt=$(printf '%s' "$ckpt_line" \
+           | sed -nE 's/.*checkpoint @ (height )?([0-9]+) \(([0-9]+) utxos.*/\2 \3/p')
+    case "${ckpt:+set}${ckpt_line}" in
+        set*resuming*) ckpt_src='resume' ;;
+        set*)          ckpt_src='write' ;;
+        *)             ckpt_src='none' ;;
+    esac
 
     state_mb='-'
     if [ -n "$STATE_BIN" ] && [ -f "$STATE_BIN" ]; then
@@ -91,8 +122,8 @@ while true; do
         bundles_gib="${bundles_gib:--}"
     fi
 
-    printf '%s unit=%s active=%s why=%s bundle=%s ckpt_height_utxos=%s rss_mib=%s peak_mib=%s avail_mib=%s state_bin_mb=%s bundles_gib=%s\n' \
-        "$(date -u +%FT%TZ)" "$UNIT" "${act:-unknown}" "$why" "$hi" "${ckpt:--}" \
+    printf '%s unit=%s active=%s why=%s bundle=%s ckpt_src=%s ckpt_height_utxos=%s rss_mib=%s peak_mib=%s avail_mib=%s state_bin_mb=%s bundles_gib=%s\n' \
+        "$(date -u +%FT%TZ)" "$UNIT" "${act:-unknown}" "$why" "$hi" "$ckpt_src" "${ckpt:--}" \
         "${rss:--}" "${hwm:--}" \
         "$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)" \
         "$state_mb" "$bundles_gib" >> "$LOG"
