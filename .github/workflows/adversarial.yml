@@ -219,6 +219,17 @@ jobs:
           cd coordinator
           python3 test_claim_identity.py --control
 
+      - name: The prover tile, the top eight and the full list agree (hazync-web#42)
+        # ⛔ The explorer showed "Provers 10" beside a table of 8 and was rendering both faithfully:
+        # `contributors` is a total, `leaderboard` is truncated, and nothing said so. The fix is ONE
+        # builder feeding both — the rules for who appears (moderation following key rotations,
+        # rotated-away keys, fold-only contributors) are not trivial enough to write twice.
+        run: cd coordinator && python3 test_prover_lists.py
+      - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
+        run: |
+          cd coordinator
+          python3 test_prover_lists.py --control
+
       - name: The fleet ledger groups fleets and refuses misleading rows (hazync#448)
         # ⛔ The 4090-only default rests on nine runs on one night, and nothing kept that result in a
         # form outliving the run -- re-checking it meant re-reading a session transcript, which is
