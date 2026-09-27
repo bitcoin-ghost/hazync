@@ -1096,7 +1096,10 @@ def main():
 
             for gt in gpu_types:
                 got = rent_uniform(gt, want)
-                if len(got) >= a.min_cards:
+                # ⛔ TARGET, NOT FLOOR: a type that can field only the floor should not stop us
+                # trying the next one, which might field the target. The final gate check is what
+                # accepts a short fleet, after the gates have had their say.
+                if len(got) >= a.cards:
                     created = got
                     log(f"UNIFORM fleet from {gt}: {len(created)} of {want} rented")
                     break
@@ -1170,8 +1173,14 @@ def main():
         log("SITES: " + ", ".join(f"{n}x {d}" for d, n in sorted(sites.items()))
             + (["", "   ⚠ SPREAD ACROSS SITES — per-card rates mix card and network"][len(sites) > 1]))
 
-        phase(f"PREPARING · waiting for {a.min_cards} of {want} cards to answer")
-        cards, portmap = wait_for_ssh(api, created, ssh, need=a.min_cards)
+        # ⛔ WAIT FOR THE TARGET, REFUSE ON THE FLOOR. wait_for_ssh stops the moment it holds
+        # `need` cards, so passing the FLOOR turned it into an impatience setting: on 2026-09-27
+        # a 21-card fleet reached 10 after 44 seconds and the other five were released as "never
+        # answered ssh" — with 420 s of its timeout left, and every one of them still booting.
+        # The floor decides whether the run PROCEEDS (the check below); never how long to wait.
+        phase(f"PREPARING · waiting for {a.cards} of {want} cards to answer "
+              f"(will proceed on {a.min_cards})")
+        cards, portmap = wait_for_ssh(api, created, ssh, need=a.cards)
         if len(cards) < a.min_cards:
             raise SystemExit(f"only {len(cards)} of {want} rented cards came up; "
                              f"needed at least {a.min_cards}")
@@ -1279,7 +1288,11 @@ def main():
         # the total was being used. `best[2]` is {cid: Mbit/s} from the winning candidate, so this
         # costs nothing extra and happens before the clock starts.
         w_drop, w_ranked = slow_worker_cut(
-            order, best[2], need=a.min_cards, floor=a.worker_min_mbit)
+            # ⛔ THIS TRIMS THE FLEET DOWN TO `need` (`if len(order) <= need: return`), so the
+            # FLOOR here means "cut everything above the floor". On 2026-09-27 that took a
+            # 16-card fleet to 10 in seven seconds, each one reported as a card the aggregate
+            # could not push to — a configuration fault wearing a network fault's clothes.
+            order, best[2], need=a.cards, floor=a.worker_min_mbit)
         if w_ranked:
             shown = ", ".join(f"{cid} {'untested' if v is None else format(v, '.0f')}"
                               for cid, v in w_ranked[:6])

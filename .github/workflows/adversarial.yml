@@ -232,6 +232,14 @@ jobs:
         run: cd coordinator && python3 test_min_cards.py
       - name: Min-cards POSITIVE CONTROL (floor == target — must throw away tonight's fleets)
         run: cd coordinator && python3 test_min_cards.py --control
+      - name: The floor decides whether a run proceeds, never how long it waits
+        # ⛔ #539 passed --min-cards to three call sites whose argument is a TARGET. Measured live:
+        # a 21-card fleet went 21 -> 16 (wait_for_ssh stopped on reaching the floor and released 5
+        # still-booting cards) -> 10 (slow_worker_cut trims DOWN TO `need`). Ten cards cannot hold
+        # tip pace and the run was stopped. The tell is in each callee, not at the call site.
+        run: cd coordinator && python3 test_floor_vs_target.py
+      - name: Floor-vs-target POSITIVE CONTROL (floor as `need` — must cut 16 cards to 10)
+        run: cd coordinator && python3 test_floor_vs_target.py --control
       - name: A growing fleet rents for the slots it needs, not one per poll
         # ⛔ Gating a recruit takes MINUTES (the prover fetch measured 14 min across 29 cards on
         # 2026-09-27) while the poll is seconds, so a policy that counts only cards already IN the
