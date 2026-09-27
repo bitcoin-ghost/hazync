@@ -71,7 +71,7 @@ RUN --mount=type=secret,id=gh_token,required=false \
 # GitHub links a ghcr package to a repository by this label and nothing else. Without it the package
 # publishes fine, resolves fine, and is INVISIBLE on the repo page -- which read as "the push failed"
 # when it had not.
-LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
+LABEL org.opencontainers.image.source=https://github.com/hazync/hazync
 
 # ── STAGE 1b: the same dependencies PLUS CUDA (hazync#167) ────────────────────────────────────────
 #
@@ -91,7 +91,7 @@ FROM deps-cpu AS deps-cuda
 RUN --mount=type=secret,id=gh_token,required=false \
     if [ -s /run/secrets/gh_token ]; then export GITHUB_TOKEN="$(cat /run/secrets/gh_token)"; fi && \
     SKIP_GROTH16=1 GPU=1 HAZYNC_PROVISION=deps ./provision-vps.sh
-LABEL org.opencontainers.image.source=https://github.com/bitcoin-ghost/hazync
+LABEL org.opencontainers.image.source=https://github.com/hazync/hazync
 
 # ── STAGE 2: the guest build ──────────────────────────────────────────────────────────────────────
 #

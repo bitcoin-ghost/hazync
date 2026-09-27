@@ -1,6 +1,6 @@
 # Hazync v0.21.6 — workers move to api.hazync.org, and folders stop colliding
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.6>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.6>
 
 Workers now talk to the coordinator at **`https://api.hazync.org`**, Hazync's own name on its own web box.
 Folders reserve the pair they fold instead of racing each other for the same eight. The rest is a claim bug that

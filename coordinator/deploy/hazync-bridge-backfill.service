@@ -28,7 +28,7 @@
 #     systemctl start hazync-bridge-backfill   # ~41 hours; resumes from its own checkpoint if restarted
 #
 Description=Hazync: one-time backfill walk to create checkpoint rungs inside the bundle gap
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Documentation=https://github.com/hazync/hazync/issues/347
 After=network-online.target bitcoind.service
 Wants=network-online.target
 

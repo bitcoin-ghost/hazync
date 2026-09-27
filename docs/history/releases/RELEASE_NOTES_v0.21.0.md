@@ -1,6 +1,6 @@
 # Hazync v0.21.0 — Core becomes the guest that ships
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.0>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.0>
 
 **The release binary now proves with Core acceleration on.** v0.20.0 shipped the stock guest with
 every lever off; the README meanwhile said *"CORE — what ships"* and *"Core is the project"*. That

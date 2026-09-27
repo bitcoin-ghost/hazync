@@ -73,7 +73,7 @@ guest id only at startup (#99).
 
 ## 3. The browser verifier
 
-Served at `https://hazync.org/verify/` (from `bitcoin-ghost/hazync-web`). A copy that does not match the release is caught only by
+Served at `https://hazync.org/verify/` (from `hazync/hazync-web`). A copy that does not match the release is caught only by
 calling it: a stale module has the same size and exports as a correct one. Do this after every release whose
 `hazync-verify.wasm` differs from the deployed one, and in the **same cutover** as the coordinator's binary
 swap on a re-baseline (§5).
@@ -81,9 +81,9 @@ swap on a re-baseline (§5).
 First fetch the wasm from the release and check it against the signed manifest:
 
 ```bash
-curl -fLO https://github.com/bitcoin-ghost/hazync/releases/download/vX.Y.Z/hazync-verify.wasm
-curl -fLO https://github.com/bitcoin-ghost/hazync/releases/download/vX.Y.Z/SHA256SUMS.txt
-curl -fLO https://github.com/bitcoin-ghost/hazync/releases/download/vX.Y.Z/SHA256SUMS.txt.asc
+curl -fLO https://github.com/hazync/hazync/releases/download/vX.Y.Z/hazync-verify.wasm
+curl -fLO https://github.com/hazync/hazync/releases/download/vX.Y.Z/SHA256SUMS.txt
+curl -fLO https://github.com/hazync/hazync/releases/download/vX.Y.Z/SHA256SUMS.txt.asc
 gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt && sha256sum -c --ignore-missing SHA256SUMS.txt
 ```
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=Hourly: copy the Hazync bridge checkpoint rungs to Cloudflare R2
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/386
+Documentation=https://github.com/hazync/hazync/issues/386
 
 [Timer]
 # A rung appears every 25,000 blocks — about 4 hours at the rate measured near the tip — so hourly is

@@ -1,7 +1,7 @@
 # Sponsoring blocks
 
 Status: **the records, the minimum, the private link, the public list, the API, the site's form and the
-BTCPay payments code exist; the proving bot cannot run live yet** ([#351](https://github.com/bitcoin-ghost/hazync/issues/351)).
+BTCPay payments code exist; the proving bot cannot run live yet** ([#351](https://github.com/hazync/hazync/issues/351)).
 Sponsorship is closed on the live coordinator (`SPONSOR_OPEN` unset) and payments are not connected there, so the
 site's form says so and nothing is recorded. Payments must stay unconnected until the bot can prove what is paid for.
 

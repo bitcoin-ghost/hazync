@@ -1,6 +1,6 @@
 [Unit]
 Description=Hazync: prove held sponsorships on rented GPUs, within a spend cap
-Documentation=https://github.com/bitcoin-ghost/hazync/pull/372
+Documentation=https://github.com/hazync/hazync/pull/372
 After=network-online.target hazync-coordinator.service
 Wants=network-online.target
 Requires=hazync-coordinator.service

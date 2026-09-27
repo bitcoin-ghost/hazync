@@ -80,7 +80,7 @@ being the constraint — it exists to price that trade honestly, not to replace 
 
 
 ```bash
-curl -fLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+curl -fLO https://github.com/hazync/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
 curl -fLOJ https://api.hazync.org/api/spine/proof  # -J: lands as hazync-spine-1-<hi>.hzk
 ./hazync-verify-x86_64-linux-gnu hazync-spine-1-*.hzk
@@ -203,7 +203,7 @@ binary in a container rather than rebuilding.
 rather than only genesis-anchored ones.
 
 ```bash
-curl -LO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
+curl -LO https://github.com/hazync/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu
 chmod +x hazync-host-x86_64-linux-gnu
 ./hazync-host-x86_64-linux-gnu verify-any proof.hzk   # prints a line starting with RANGE-OK
 ```

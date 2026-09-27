@@ -1,7 +1,7 @@
 [Unit]
 Description=Publish the archive node's height for the Hazync coordinator
 After=bitcoind.service
-Documentation=https://github.com/bitcoin-ghost/hazync
+Documentation=https://github.com/hazync/hazync
 
 [Service]
 Type=oneshot

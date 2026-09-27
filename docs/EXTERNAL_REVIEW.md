@@ -29,7 +29,7 @@ much — it proves one short range — but that a reviewer starts from a thing t
 rather than from our description of it.
 
 ```sh
-curl -fsLO https://github.com/bitcoin-ghost/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
+curl -fsLO https://github.com/hazync/hazync/releases/latest/download/hazync-verify-x86_64-linux-gnu
 chmod +x hazync-verify-x86_64-linux-gnu
 curl -f https://api.hazync.org/api/spine/proof -o spine.snark
 ./hazync-verify-x86_64-linux-gnu --json spine.snark

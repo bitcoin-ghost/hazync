@@ -231,7 +231,7 @@ is the only secret: keep it private. CONTRIBUTING, "Get a push when a worker nee
   was left to finish one block and then sat idle for about three hours at $0.49/h.
 - **Your key is on that machine.** Whoever controls the host can read `~/.hazync/key.hex` and submit as you.
   They cannot move your blocks to a key of their own: key rotation is off on the public coordinator
-  ([#311](https://github.com/bitcoin-ghost/hazync/issues/311)). Use hosts you trust with your name.
+  ([#311](https://github.com/hazync/hazync/issues/311)). Use hosts you trust with your name.
 
 ## Identity
 

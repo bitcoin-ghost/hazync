@@ -16,7 +16,7 @@ bad(){  printf '  ⛔ %s\n' "$*"; FAIL=$((FAIL+1)); }
 skip(){ printf '  ⚠  %s\n' "$*"; SKIP=$((SKIP+1)); }
 hdr(){  printf '\n=== %s ===\n' "$*"; }
 
-REPO=${REPO:-bitcoin-ghost/hazync}
+REPO=${REPO:-hazync/hazync}
 SITE=${SITE:-https://hazync.org}
 REL="https://github.com/$REPO/releases/latest/download"
 

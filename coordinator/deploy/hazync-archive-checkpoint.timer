@@ -6,7 +6,7 @@
 # is about 3.7 hours. Hourly is comfortably inside that with room for the rate to improve at lower input
 # counts, and a missed run costs nothing because the next one still sees the rung as due.
 Description=Hazync: archive a bridge checkpoint hourly (rung every 25,000 blocks)
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Documentation=https://github.com/hazync/hazync/issues/347
 
 [Timer]
 OnCalendar=*-*-* *:23:00 UTC

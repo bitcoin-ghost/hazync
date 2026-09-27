@@ -65,7 +65,7 @@ GRAPHQL_URL = "https://api.runpod.io/graphql"
 # RunPod's API sits behind Cloudflare, which refuses Python's default "Python-urllib/3.x" User-Agent with
 # HTTP 403 "error code: 1010" (measured 2026-09-14). Without this header the bot could not deploy, list or
 # terminate a pod, and every refusal was logged as "no GPU capacity".
-USER_AGENT = "hazync-sponsor-bot/1 (+https://github.com/bitcoin-ghost/hazync)"
+USER_AGENT = "hazync-sponsor-bot/1 (+https://github.com/hazync/hazync)"
 # After this many refused deploy requests in a row the bot stops: an API it cannot talk to will not start
 # answering by itself, and it could not terminate a pod either.
 RUNPOD_REFUSALS_MAX = 3
@@ -745,7 +745,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader | grep -q GeForce && for d in 
 ldconfig 2>/dev/null
 python3 -c "import cryptography" 2>/dev/null || pip install -q cryptography >/dev/null 2>&1
 for f in hazync-worker hazync-run-workers.sh hazync-host-x86_64-linux-gnu-cuda; do
-  for t in 1 2 3; do [ -s $f ] && break; curl -fsSL -o $f.tmp https://github.com/bitcoin-ghost/hazync/releases/download/@REL@/$f && mv $f.tmp $f; done
+  for t in 1 2 3; do [ -s $f ] && break; curl -fsSL -o $f.tmp https://github.com/hazync/hazync/releases/download/@REL@/$f && mv $f.tmp $f; done
 done
 chmod +x hazync-worker hazync-run-workers.sh hazync-host-x86_64-linux-gnu-cuda
 sha256sum -c --quiet want.txt && echo SHA_OK || echo SHA_BAD
@@ -802,14 +802,14 @@ class SshRunner:
         self.method_id = mid
         tag = self.release
         if not tag:
-            req = urllib.request.Request("https://api.github.com/repos/bitcoin-ghost/hazync/releases/latest",
+            req = urllib.request.Request("https://api.github.com/repos/hazync/hazync/releases/latest",
                                          headers={"Accept": "application/vnd.github+json"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 tag = json.load(r).get("tag_name", "")
         if not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
             raise SystemExit(f"sponsor_bot: could not resolve a release tag (got {tag!r})")
         self.release = tag
-        base = f"https://github.com/bitcoin-ghost/hazync/releases/download/{tag}/"
+        base = f"https://github.com/hazync/hazync/releases/download/{tag}/"
         for f in ("SHA256SUMS.txt", "SHA256SUMS.txt.asc"):
             urllib.request.urlretrieve(base + f, os.path.join(self.dir, f))
         if not self.verify_manifest():

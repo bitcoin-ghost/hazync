@@ -14,7 +14,7 @@
 # negative difference against its own height, and report "not due" for the entire walk while archiving
 # nothing. See the LAST loop in hazync-archive-checkpoint.sh.
 Description=Hazync: archive checkpoints from the backfill walk (rung every 25,000 blocks)
-Documentation=https://github.com/bitcoin-ghost/hazync/issues/347
+Documentation=https://github.com/hazync/hazync/issues/347
 
 [Service]
 Type=oneshot

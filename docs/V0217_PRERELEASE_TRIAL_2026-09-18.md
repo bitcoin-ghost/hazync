@@ -97,7 +97,7 @@ rather than assuming.
 - ⛔ **Groth16 wrapping is CPU-only.** It crashes in `sppark` on every CUDA build (#20, closed
   won't-fix upstream), so the CUDA wrap path remains unexercised and is expected to fail.
 - ~~**The live submission ran on `3f6b5c8`**, before #402/#403 merged.~~ **Closed 2026-09-18**: the
-  acceptance run for [#367](https://github.com/bitcoin-ghost/hazync/issues/367) used `39c403f`, which
+  acceptance run for [#367](https://github.com/hazync/hazync/issues/367) used `39c403f`, which
   carries #402 and #403. `hazync run --distributed --workers=4` claimed block **93,076** from the board,
   proved it across 4 A40s in 70.1 s and submitted it as `G H O S T` — confirmed from `/api/block/93076`,
   with `/api/proof/93076` downloading 228,746 bytes whose sha matches the collected receipt byte for byte.

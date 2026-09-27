@@ -1155,7 +1155,7 @@ def cmd_selftest(args):
     if not HOSTBIN or not os.path.exists(HOSTBIN):
         sys.exit("✗ no prover binary found.\n"
                  "  Looked beside this script, in ~/.hazync/bin, in the current directory, and on PATH.\n"
-                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  Download one from https://github.com/hazync/hazync/releases/latest\n"
                  "  (hazync-host-x86_64-linux-gnu-cuda for an NVIDIA GPU, or ...-linux-gnu for CPU),\n"
                  "  put it next to this script and `chmod +x` it — or set HAZYNC_HOST=/path/to/host.")
     print(f"✓ prover binary present: {HOSTBIN}")
@@ -1616,7 +1616,7 @@ def cmd_fold(args):
     """
     if not HOSTBIN:
         sys.exit("no prover binary found — folding is a prove operation.\n"
-                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  Download one from https://github.com/hazync/hazync/releases/latest\n"
                  "  or set HAZYNC_HOST=/path/to/host.")
     want = int(args[0]) if args and args[0].isdigit() else 1
     sk, pub, handle = identity()
@@ -1729,7 +1729,7 @@ def cmd_spine(args):
     """
     if not HOSTBIN:
         sys.exit("no prover binary found — `hazync spine` folds receipts, which is a prove operation.\n"
-                 "  Download one from https://github.com/bitcoin-ghost/hazync/releases/latest\n"
+                 "  Download one from https://github.com/hazync/hazync/releases/latest\n"
                  "  or set HAZYNC_HOST=/path/to/host.")
     want = int(args[0]) if args and args[0].isdigit() else None
     sk, pub, handle = identity()

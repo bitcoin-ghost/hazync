@@ -33,7 +33,7 @@ VERIFY_ONLY=0
 # preflight refuses because the tag exists. Without this the only route back was reading the script.
 [ "${2:-}" = "--verify-only" ] && VERIFY_ONLY=1
 
-REPO_SLUG="${REPO_SLUG:-bitcoin-ghost/hazync}"
+REPO_SLUG="${REPO_SLUG:-hazync/hazync}"
 DIST="${DIST:-dist}"
 # Every artifact that must carry the current guest id. The aarch64 verifier is NOT here: CI builds it
 # from the tag and attaches it during signing (#85/#90), so it cannot exist before publish.

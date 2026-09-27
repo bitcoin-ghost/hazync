@@ -1,6 +1,6 @@
 # Hazync v0.21.4 — a board that explains itself
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.4>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.4>
 
 Everything here comes from one night's incident. Block 39,413 pinned the frontier for five hours, and
 the coordinator's entire account of it was *"a live worker is proving it"*. Each change below is a

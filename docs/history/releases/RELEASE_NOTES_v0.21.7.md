@@ -1,6 +1,6 @@
 # Hazync v0.21.7 — a board block across many cards, and the height cap comes off
 
-> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/bitcoin-ghost/hazync/releases/tag/v0.21.7>
+> Copy of the GitHub release body at the time; the GitHub release is canonical: <https://github.com/hazync/hazync/releases/tag/v0.21.7>
 
 A board block can now be proved across **N cards** and still produce the receipt the coordinator accepts. Workers
 survive a dropped link instead of dying. The bridge's height cap is gone, so blocks above 418,268 are claimable.
@@ -110,7 +110,7 @@ earlier note said "two" kills, read from `dmesg`, which is a ring
 buffer holding only the last two). ⛔ **And it progresses nowhere**: the highest checkpoint ever reached
 is **h=800,257**, and the last three resumes were all *from* 800,257 — once the parallel backfill grew to
 ~21.5 GiB, each ~12-minute cycle reloads ~29 GiB of state, walks a few hundred blocks and dies. That is
-[#350](https://github.com/bitcoin-ghost/hazync/issues/350), and it is a resident-state/sizing problem, not a
+[#350](https://github.com/hazync/hazync/issues/350), and it is a resident-state/sizing problem, not a
 configuration one. ⚠ **The two phases alert differently**: each OOM kill fires an alert
 (`OnFailure=hazync-alert@%n.service`), but during the *throttle* that precedes it `systemd` reports
 `active (running)` and nothing fires at all — a 21:41→01:08 freeze passed unnoticed. Judge the frozen
