@@ -27,18 +27,32 @@ cd "$(dirname "$0")/.." || exit 1
 # ghcr.io/bitcoin-ghost/defenwycke instead of .../hazync-deps. A default that a stray env var can
 # shadow is not a default.
 REGISTRY="${HAZYNC_REGISTRY:-ghcr.io}"
-# ⚠ THE REGISTRY OWNER IS NOT THE REPO OWNER, AND THAT IS DELIBERATE. The repository moved to the
-# hazync org, but a GHCR package does NOT move with a repo transfer -- it is owned by the org and
-# merely linked to the repo. The published deps images still live under bitcoin-ghost, and the
-# reproduce/ instructions refer to them. Changing this default would point at a package that does
-# not exist and break reproducible verification, which is the one thing this project sells. Moving
-# them is a separate job: republish under hazync, then change this and re-pin what refers to it.
-OWNER="${HAZYNC_OWNER:-bitcoin-ghost}"
+# ⚠ THE REGISTRY OWNER IS NOT THE REPO OWNER. A GHCR package does NOT move with a repo transfer --
+# it is owned by the org and merely linked to the repo -- so this default stayed at bitcoin-ghost for
+# as long as that was the only place the images existed. Pointing it at a package that does not exist
+# would break reproducible verification, which is the one thing this project sells.
+#
+# ✅ 2026-09-27: the move is done, so this now says hazync. Both published tags were copied by the
+# publish-deps-image workflow and verified to be BYTE-IDENTICAL to the originals -- not on the
+# workflow's word, but by an anonymous pull from outside CI:
+#     e2226e81bd91dd30  sha256:f45e2787f8f17d24716a3a6378c864304b11a62fdc35950976a8347739bb7f9a
+#     0a54d2b21b96dc86  sha256:e65cf528c2c20514592105978b1e282744175ee8836b378cd2bded3eaaadb290
+# bitcoin-ghost still carries them, so an older instruction still resolves.
+OWNER="${HAZYNC_OWNER:-hazync}"
 # Which variant. cpu is the default because it is what `reproduce/Dockerfile` builds from and what
 # anyone standing up a non-GPU box wants; cuda exists for release builds of the CUDA host (#167).
 VARIANT="${1:-cpu}"
 case "$VARIANT" in cpu|cuda) ;; *) echo "usage: $0 [cpu|cuda]" >&2; exit 2 ;; esac
 STAGE="deps-$VARIANT"
+# ⛔⛔ THIS NAME DOES NOT EXIST YET, AND A FIRST PUSH CREATES IT PRIVATE. The published package is
+# plain `hazync-deps` (pre-#167, when there was one stage); the per-variant default arrived a day
+# later and has never been published under. The first push to hazync-deps-cpu/-cuda will therefore
+# CREATE those packages, and ghcr creates a new package PRIVATE -- measured 2026-09-27, when the
+# copy of hazync-deps landed private, passed every digest check, and could not be pulled by anyone
+# outside the org. Flip visibility once at
+# https://github.com/orgs/hazync/packages/container/<name>/settings after the first push, and check
+# it from OUTSIDE with no credential. (The org must also allow public packages at all:
+# https://github.com/organizations/hazync/settings/packages -- hazync had that off by default.)
 NAME="${HAZYNC_DEPS_NAME:-hazync-deps-$VARIANT}"
 PUSH="${HAZYNC_PUSH:-0}"
 
@@ -125,7 +139,7 @@ echo "published: $ref"
 # BOTH, and index 0 was the LOCAL one:
 #
 #     hazync-deps@sha256:f45e2787…                          <- index 0, unusable by anyone else
-#     ghcr.io/bitcoin-ghost/hazync-deps@sha256:f45e2787…     <- the one to publish
+#     ghcr.io/hazync/hazync-deps@sha256:f45e2787…            <- the one to publish
 #
 # The digest itself was right; the reference around it named a repository that exists only on the
 # machine that built it, so the pin instruction this script prints could not resolve for a reader.
