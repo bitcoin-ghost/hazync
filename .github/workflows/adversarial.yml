@@ -225,6 +225,13 @@ jobs:
         # builder feeding both — the rules for who appears (moderation following key rotations,
         # rotated-away keys, fold-only contributors) are not trivial enough to write twice.
         run: cd coordinator && python3 test_prover_lists.py
+      - name: --cards is a target and --min-cards is the floor
+        # ⛔ The end-of-gates check compared survivors against the TARGET, so four healthy fleets were
+        # released on 2026-09-27 — 29 of 30, 28 of 29, 25 of 26 twice — each after paying for every
+        # pre-clock gate. ~$45 of RTX PRO 6000 time and no block proved.
+        run: cd coordinator && python3 test_min_cards.py
+      - name: Min-cards POSITIVE CONTROL (floor == target — must throw away tonight's fleets)
+        run: cd coordinator && python3 test_min_cards.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator
