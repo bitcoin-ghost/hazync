@@ -40,15 +40,21 @@ jobs:
       # ⚠ imagetools copies SERVER SIDE. It never downloads the layers, so a multi-gigabyte image
       # costs seconds and no runner disk. It also preserves the OCI index — the amd64 manifest AND
       # the buildx attestation beside it — which a pull/tag/push would flatten.
+      # ⛔ EVERY INPUT COMES THROUGH env, NOT THROUGH ${{ }} INSIDE THE SCRIPT. GitHub substitutes an
+      # expression into the run block as TEXT before bash ever sees it, so a crafted input is
+      # arbitrary code in a runner that holds packages:write, in the repository that holds the
+      # signing key. The repo's own workflow check refuses it, and caught this on the first try.
       - name: Copy each tag
+        env:
+          TAGS: ${{ inputs.tags }}
+          SOURCE: ${{ inputs.source }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -uo pipefail
           fail=0
-          for t in ${{ inputs.tags }}; do
+          for t in $TAGS; do
             echo "::group::$t"
-            if docker buildx imagetools create \
-                 --tag ghcr.io/${{ github.repository_owner }}/hazync-deps:"$t" \
-                 "${{ inputs.source }}:$t"; then
+            if docker buildx imagetools create --tag "ghcr.io/$OWNER/hazync-deps:$t" "$SOURCE:$t"; then
               echo "copied $t"
             else
               echo "::error::failed to copy $t"; fail=1
@@ -60,12 +66,16 @@ jobs:
       # ⛔ VERIFY BY DIGEST, NOT BY "the push did not error". A copy that lands a different digest is
       # a different image, and the whole point of this one is that reproduce/ can name it exactly.
       - name: Check each copy matches the source digest
+        env:
+          TAGS: ${{ inputs.tags }}
+          SOURCE: ${{ inputs.source }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -uo pipefail
           fail=0
-          for t in ${{ inputs.tags }}; do
-            a=$(docker buildx imagetools inspect "${{ inputs.source }}:$t" --format '{{.Manifest.Digest}}')
-            b=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/hazync-deps:$t" --format '{{.Manifest.Digest}}')
+          for t in $TAGS; do
+            a=$(docker buildx imagetools inspect "$SOURCE:$t" --format '{{.Manifest.Digest}}')
+            b=$(docker buildx imagetools inspect "ghcr.io/$OWNER/hazync-deps:$t" --format '{{.Manifest.Digest}}')
             if [ "$a" = "$b" ]; then
               echo "ok   $t  $a"
             else
