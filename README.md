@@ -48,6 +48,16 @@ Or from the command line — download `hazync-verify-x86_64-linux-gnu` from the
 [full walkthrough](docs/DESIGN_OVERVIEW.md#check-one-yourself-it-takes-about-thirty-seconds) takes
 about thirty seconds.
 
+A proof names the exact program that produced it. The canonical prover is
+
+```
+37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd
+```
+
+and the build is reproducible, so anyone can rebuild from source and check they get the same id. A
+proof made by any other program is a proof of something else — that is what stops "trust us" from
+creeping back in.
+
 ## Where it actually stands
 
 Honest, because overclaiming here would be the whole problem again:
