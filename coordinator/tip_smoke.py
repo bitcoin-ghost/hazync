@@ -1022,6 +1022,13 @@ def main():
                 raise SystemExit(f"--adopt {a.adopt}: only {len(adopted)} of the recorded pods are "
                                  f"still alive; {a.cards} are needed. Lower --cards or rent fresh")
             created = adopted
+            # ⛔ `rented` and `want` are read AFTER this branch (the ssh wait, the prover-fetch
+            # gate and their messages), and both were only ever assigned on the renting path. An
+            # adopted fleet therefore reached `waiting for N of {want}` with `want` unbound and died
+            # with UnboundLocalError — after the pods were already adopted, so the run had a fleet
+            # and no driver. There is no spare to wait for when the fleet is adopted: both are the
+            # number of pods actually in hand.
+            rented = want = len(adopted)
             log(f"ADOPTED {len(created)} live pod(s) from {a.adopt} — nothing rented")
             # ⚠ The record is now THIS run's to maintain: a card dropped at a gate must leave the
             # file, or a later --cleanup would try to release a pod that is already gone.
