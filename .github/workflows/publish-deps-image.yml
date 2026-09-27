@@ -83,3 +83,42 @@ jobs:
             fi
           done
           exit $fail
+
+      # ⛔⛔ A PRIVATE COPY PASSES EVERY CHECK ABOVE AND IS USELESS. Measured 2026-09-27: the first run
+      # of this workflow copied both tags, verified both digests, and exited 0 -- and ghcr.io created
+      # ghcr.io/hazync/hazync-deps as a PRIVATE package, so `curl ghcr.io/token?scope=...:pull`
+      # returned no token at all and nobody outside the org could pull it. The whole point of this
+      # image is that `reproduce/` can name it and anyone can fetch it WITHOUT a credential, which is
+      # exactly the one property neither step above tests: both ran as a logged-in runner.
+      #
+      # ⚠ THIS STEP MUST USE NO CREDENTIAL. Reaching for the runner's token here would make it pass
+      # for the same reason the others do.
+      # ⚠ Visibility cannot be set from a workflow token. A first publish has to be flipped once, by
+      # hand, at https://github.com/orgs/<owner>/packages/container/hazync-deps/settings -- so this
+      # step's job is to REFUSE to call the publish done until that has happened.
+      - name: Anyone can pull it without a credential
+        env:
+          TAGS: ${{ inputs.tags }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -uo pipefail
+          fail=0
+          for t in $TAGS; do
+            tok=$(curl -sS --max-time 20 \
+                  "https://ghcr.io/token?scope=repository:$OWNER/hazync-deps:pull&service=ghcr.io" \
+                  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')
+            if [ -z "$tok" ]; then
+              echo "::error::ghcr granted NO anonymous pull token for $OWNER/hazync-deps — the package is PRIVATE. Flip it to public at https://github.com/orgs/$OWNER/packages/container/hazync-deps/settings then re-run."
+              fail=1; break
+            fi
+            code=$(curl -sS --max-time 25 -o /dev/null -w '%{http_code}' \
+                   -H "Authorization: Bearer $tok" \
+                   -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+                   "https://ghcr.io/v2/$OWNER/hazync-deps/manifests/$t")
+            if [ "$code" = 200 ]; then
+              echo "ok   $t is anonymously pullable (HTTP $code)"
+            else
+              echo "::error::$t is not anonymously pullable (HTTP $code)"; fail=1
+            fi
+          done
+          exit $fail
