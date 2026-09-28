@@ -782,6 +782,21 @@ def main():
                     help="prove only blocks mined AFTER the fleet is ready: the claim floor starts "
                          "at the current tip, so boot is paid while idle and each block is timed "
                          "from a height that did not exist when the run began")
+    # ⛔ THE HOUR MUST NOT BE SPENT WAITING FOR THE THING IT MEASURES (hazync#553). The 2026-09-28 run
+    # started its window the moment 17 cards were ready and then sat 14+ minutes waiting for the chain
+    # to mine a block above the --fresh-tip floor, filling the time with board work. A quarter of the
+    # hour was gone before the first tip block existed, so "blocks proved in one hour" understated the
+    # fleet by whatever the chain happened to be doing. Board fill does NOT start the clock.
+    ap.add_argument("--clock-from-tip", action="store_true",
+                    help="start the --session window at the FIRST TIP BLOCK rather than when the "
+                         "fleet is ready. Waiting and board fill are then billed but not counted "
+                         "against the hour; the summary reports both totals separately")
+    # ⚠ THE BOUND ON WAITING, AND IT IS NOT OPTIONAL. A deferred clock has no deadline until it starts,
+    # so a bridge that stops serving tip bundles would hold a rented fleet indefinitely with every
+    # other guard satisfied. --budget-usd is the other backstop and it CAN be omitted; this cannot.
+    ap.add_argument("--clock-wait-max", type=float, default=2.0,
+                    help="hours to wait for the first tip block before giving up, with "
+                         "--clock-from-tip (default 2.0)")
     # ⛔ AN ESCAPE HATCH, NOT THE DEFAULT. Filling the gaps between tip blocks with board work is
     # what #367 asked for and what the flagship hour measured the cost of not doing -- 31.4 idle
     # minutes, $5.81. This flag exists for the case where a run must be a clean measurement of tip
@@ -875,6 +890,13 @@ def main():
     if a.min_cards > a.cards:
         raise SystemExit(f"--min-cards {a.min_cards} is above --cards {a.cards}: the floor cannot "
                          f"exceed the target")
+
+    # ⚠ A ZERO OR NEGATIVE WAIT WOULD ARM THE CLOCK BY EXPIRING IT -- the deadline is checked before
+    # any tip block can arrive, so the session would stop instead of waiting. Refuse it here rather
+    # than let it read as "the chain stalled".
+    if a.clock_from_tip and a.clock_wait_max <= 0:
+        raise SystemExit("--clock-wait-max must be above 0: a zero wait stops the session before the "
+                         "first tip block can arrive to start its clock")
 
     if a.publish_dest:
         os.environ["HAZYNC_PUBLISH_DEST"] = a.publish_dest
@@ -1677,7 +1699,10 @@ def main():
             # at the frontier is small (h=113,537 is a 595 KB bundle against 16 MB at h=418,268).
             spath = os.path.join(a.rundir, "session.json")
             state = tip_session.new_state(started_at=time.time(), duration_s=a.session * 3600.0,
-                                          fleet_ids=[p["id"] for p in created])
+                                          fleet_ids=[p["id"] for p in created],
+                                          armed=not a.clock_from_tip,
+                                          arm_deadline_s=(a.clock_wait_max * 3600.0
+                                                          if a.clock_from_tip else None))
             tip_session.save(spath, state)
             # ⭐ --fresh-tip: prove only blocks mined AFTER the fleet was ready.
             #
@@ -1979,6 +2004,10 @@ def main():
 
             phase(f"SESSION · {a.session:.1f} h on {len(order)} cards"
                   + (f", budget ${a.budget_usd:.2f}" if a.budget_usd else ""))
+            if a.clock_from_tip:
+                log(f"  ⏱ the clock has NOT started: the {a.session:.1f}-hour window begins at the "
+                    f"first tip block. Board fill until then is billed but not counted against it "
+                    f"(giving up after {a.clock_wait_max:.1f} h of waiting)")
             log(f"  fleet rate ${rate_hr:.3f}/hr across {len(live)} card(s)")
             summ = tip_session.run_session(state=state, path=spath, prove=prove_one,
                                            work_fn=work_fn, now=time.time, sleep=time.sleep,

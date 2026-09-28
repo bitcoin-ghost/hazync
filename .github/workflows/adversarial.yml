@@ -271,6 +271,14 @@ jobs:
         run: cd coordinator && python3 test_adopt_contract.py
       - name: Adopt-contract POSITIVE CONTROL (always terminate — must destroy an adopted fleet)
         run: cd coordinator && python3 test_adopt_contract.py --control
+      - name: The session hour starts at the first TIP block, not when the fleet is ready
+        # ⛔ --fresh-tip makes the session WAIT for a block that did not exist at boot, and the window
+        # used to open before that wait. Measured 2026-09-28: 21 minutes of a one-hour run went on
+        # board fill before the first tip block, so the headline would have been a number about
+        # Bitcoin's block interval, not about the fleet (#553).
+        run: cd coordinator && python3 test_clock_from_tip.py
+      - name: Deferred-clock POSITIVE CONTROL (armed at boot — the wait must eat the hour)
+        run: cd coordinator && python3 test_clock_from_tip.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator

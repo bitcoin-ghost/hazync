@@ -64,9 +64,21 @@ class SessionRefused(RuntimeError):
     """A session-level gate said no."""
 
 
-def new_state(*, started_at, duration_s, fleet_ids=()):
+def new_state(*, started_at, duration_s, fleet_ids=(), armed=True, arm_deadline_s=None):
+    """A fresh session.
+
+    `armed=False` DEFERS THE CLOCK (hazync#553). The window then begins at the first TIP block rather
+    than the moment the fleet was ready, so waiting for the chain to mine a block does not eat the
+    hour being measured. `started_at` is still recorded — it is when the session began, which is what
+    `arm_deadline_s` is measured against and what prices the wait.
+    """
     return {"started_at": float(started_at),
             "duration_s": float(duration_s),
+            # None = the clock has not started yet. An absent key means a session file written before
+            # the deferred clock existed, and `clock_origin` reads that as armed at `started_at`.
+            "armed_at": float(started_at) if armed else None,
+            "arm_deadline_s": float(arm_deadline_s) if arm_deadline_s else None,
+            "spend_at_arm_usd": 0.0 if armed else None,
             "blocks": {},            # range -> {"ok", "wall_s", "digest", "cards", "at"}
             "attempts": {},          # range -> int
             "fleet": sorted(str(f) for f in fleet_ids),
@@ -138,8 +150,53 @@ def terminable(pod_ids, session_fleet):
     return out
 
 
+def clock_origin(state):
+    """When the session's WINDOW began, or None if it has not started yet.
+
+    ⚠ NOT `started_at`. A session started with `armed=False` has been alive — and billing — since
+    `started_at`, but its hour has not begun. The two numbers answer different questions and the
+    whole of hazync#553 is keeping them apart.
+
+    ⛔ AN ABSENT KEY IS AN OLD SESSION FILE, NOT AN UNARMED ONE. `None` means deliberately deferred;
+    a file written before this existed has no `armed_at` at all and must read as armed at
+    `started_at`, or resuming it would hand it a fresh full window it has already spent.
+    """
+    if "armed_at" not in state:
+        return float(state["started_at"])
+    at = state["armed_at"]
+    return None if at is None else float(at)
+
+
+def is_armed(state):
+    return clock_origin(state) is not None
+
+
+def arm_clock(state, at):
+    """Start the window now. Returns True only on the call that actually starts it.
+
+    ⛔ ONLY THE FIRST CALL MOVES IT. The caller arms on the first tip block, and "first" is decided
+    here rather than by the caller remembering — a resumed session must not restart its own hour,
+    and re-arming at each tip block would make the window unbounded.
+    """
+    if is_armed(state):
+        return False
+    state["armed_at"] = float(at)
+    state["spend_at_arm_usd"] = round(float(state.get("spend_usd", 0.0)), 4)
+    return True
+
+
+def waited_s(state, now):
+    """How long the session was alive before its clock started — the boot-and-wait cost."""
+    origin = clock_origin(state)
+    end = float(now) if origin is None else origin
+    return max(0.0, end - float(state["started_at"]))
+
+
 def elapsed_s(state, now):
-    return max(0.0, float(now) - float(state["started_at"]))
+    origin = clock_origin(state)
+    if origin is None:
+        return 0.0                       # the window has not opened; nothing of it is spent
+    return max(0.0, float(now) - origin)
 
 
 def remaining_s(state, now):
@@ -161,6 +218,18 @@ def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
     left = remaining_s(state, now)
     if left <= 0:
         return {"action": "stop", "why": f"the {state['duration_s']/3600:.0f}-hour session is over"}
+    # ⛔ AN UNARMED SESSION HAS NO DEADLINE, SO IT NEEDS THIS ONE. With the clock deferred to the first
+    # tip block, `left` is the full window for as long as no tip arrives -- so a bridge that stops
+    # serving tip bundles, or a floor set above a chain that has stalled, would hold a rented fleet
+    # for ever and every guard above would agree it had plenty of time. `--budget-usd` is the other
+    # backstop and it is OPTIONAL, which is why this one is not.
+    if not is_armed(state) and state.get("arm_deadline_s"):
+        waited = waited_s(state, now)
+        if waited >= float(state["arm_deadline_s"]):
+            return {"action": "stop",
+                    "why": f"waited {waited/60:.1f} min for a tip block and none arrived — the clock "
+                           f"never started, so the fleet is being paid to wait. Check the bridge is "
+                           f"still serving tip bundles above the --fresh-tip floor"}
     # ⛔ THE BUDGET IS CHECKED BEFORE THE NEXT BLOCK, NOT AFTER IT. Checking afterwards means the
     # block that crosses the line has already been paid for in full.
     spent = float(state.get("spend_usd", 0.0))
@@ -198,7 +267,10 @@ def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
                 "why": f"{left/60:.1f} min left but a block takes ~{block_estimate_s/60:.1f} min — "
                        f"starting one now would pay for it in full and discard it"}
 
-    return {"action": "prove", "range": rng}
+    # ⚠ `source` IS CARRIED THROUGH, NOT RE-DERIVED. run_session arms the clock on the first TIP block
+    # and must not guess which blocks those were: board fill and tip work are the same shape by the
+    # time they reach here, and a range number does not say where it came from.
+    return {"action": "prove", "range": rng, "source": (work or {}).get("source")}
 
 
 def record_attempt(state, rng):
@@ -250,15 +322,35 @@ def summary(state, now):
     failed = {r: b for r, b in state["blocks"].items() if not b.get("ok")}
     walls = sorted(b["wall_s"] for b in ok.values() if b.get("wall_s"))
     el = elapsed_s(state, now)
+    # ⛔ THE BLOCKS PROVED BEFORE THE CLOCK ARE NOT THE HOUR'S RESULT. With the clock deferred, a
+    # session fills the wait with board work -- 8 blocks in the first 14 minutes of the 2026-09-28
+    # run -- and quoting the total as "blocks in the hour" would overstate tip performance with
+    # blocks proved before the measurement began. Both numbers are reported; neither is inferred.
+    #
+    # ⚠ STRICTLY AFTER, NOT AT. `at` is when a block FINISHED. The clock is armed between blocks, so
+    # the board block that was running immediately before arming finishes at or just before the
+    # origin -- `>=` counted that one as the hour's work, off by one in the headline figure. Every
+    # block actually started on the clock finishes strictly after it, since proving takes time.
+    origin = clock_origin(state)
+    on_clock = ok if origin is None else {r: b for r, b in ok.items()
+                                         if float(b.get("at") or 0.0) > origin}
+    spend = float(state.get("spend_usd", 0.0))
+    at_arm = state.get("spend_at_arm_usd")
+    on_clock_spend = None if at_arm is None else round(spend - float(at_arm), 4)
     return {"blocks_ok": len(ok),
             "blocks_failed": len(failed),
             "failed_ranges": sorted(failed),
+            "armed": is_armed(state),
+            "blocks_ok_on_clock": len(on_clock),
+            "waited_s": round(waited_s(state, now), 1),
             "elapsed_s": round(el, 1),
             "remaining_s": round(remaining_s(state, now), 1),
             "median_wall_s": walls[len(walls) // 2] if walls else None,
             "fastest_wall_s": walls[0] if walls else None,
-            "spend_usd": round(float(state.get("spend_usd", 0.0)), 4),
-            "usd_per_block": round(float(state.get("spend_usd", 0.0)) / len(ok), 4) if ok else None}
+            "spend_usd": round(spend, 4),
+            "spend_before_clock_usd": round(float(at_arm), 4) if at_arm is not None else None,
+            "spend_on_clock_usd": on_clock_spend,
+            "usd_per_block": round(spend / len(ok), 4) if ok else None}
 
 
 def resume_verdict(state, live_pod_ids, now):
@@ -371,6 +463,22 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
             continue
 
         rng = plan["range"]
+        # ⭐ THE CLOCK STARTS HERE (hazync#553), on the first TIP block, BEFORE it is proved. The first
+        # tip run measured an hour that began when the fleet was ready: it spent 14 minutes waiting
+        # for the chain, so a third of the window was gone before the thing being measured existed.
+        #
+        # ⛔ BEFORE prove(), NOT AFTER. Arming on completion would exclude the first tip block's own
+        # wall time from the hour it starts -- the session would get its full window PLUS one free
+        # block, and the headline figure would be the one number this run exists to be honest about.
+        #
+        # ⚠ BOARD FILL DOES NOT ARM IT. That is the whole point: gap-filling is what the fleet does
+        # while it waits, and it must not consume the window.
+        if plan.get("source") == "tip" and arm_clock(state, t):
+            save(path, state)
+            emit(f"⏱ CLOCK STARTS: {rng} is the first tip block — the "
+                 f"{state['duration_s']/3600:.1f}-hour window runs from now. "
+                 f"Waited {waited_s(state, t)/60:.1f} min for it, "
+                 f"${float(state.get('spend_at_arm_usd') or 0.0):.2f} spent getting here")
         n = record_attempt(state, rng)
         save(path, state)
         emit(f"proving {rng} (attempt {n})")

@@ -57,7 +57,7 @@ with it except the name. `--claim-as` refuses **before anything is rented**.
 export HAZYNC_HOME=/var/lib/hazync/identity-GHOST
 python3 -u coordinator/tip_smoke.py \
   --session 1 --budget-usd 150 \
-  --fresh-tip --claim-as "G H O S T" \
+  --fresh-tip --clock-from-tip --claim-as "G H O S T" \
   --cards 30 --min-cards 18 --spares 10 \
   --gpu-type "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
   --agg-candidates 4 \
@@ -97,6 +97,8 @@ status **into the log** — a background wrapper's exit code is the last command
 | flag | default | what it does |
 |---|---|---|
 | `--fresh-tip` | off | prove only blocks mined **after** the fleet is ready. Boot is paid while idle, and each block is timed from a height that did not exist at launch. **This is what makes a tip-hour claim honest.** |
+| `--clock-from-tip` | off | start the `--session` window at the **first tip block** instead of when the fleet is ready. Pair it with `--fresh-tip`, which makes the session wait for a block that did not exist at launch — otherwise that wait comes out of the hour |
+| `--clock-wait-max H` | 2.0 | with `--clock-from-tip`, give up after this many hours if no tip block ever arrives. A deferred clock has **no other deadline**, so this is what stops a fleet being paid to wait on a bridge that has stopped serving bundles |
 | `--no-board-fill` | off | with `--fresh-tip`, sit idle between tip blocks instead of proving board work. Only for measuring tip latency with nothing else on the fleet |
 | `--gpu-type` | `auto` | `auto` ranks every type with SECURE stock by *measured* cost per proof, then by price for unmeasured cards, and fills from **one** type where it can. Or pin a type by name |
 | `--grow-to N` | 0 | during a session, rent and gate toward N on a background thread; recruits join at a **block boundary** |
@@ -122,7 +124,23 @@ status **into the log** — a background wrapper's exit code is the last command
 | GPU gate | 2–5 min | a throwaway proof per card. Nothing here is proved for the chain |
 | reachability | ~30 s | card-to-card, not driver-to-card |
 | **the live page** | ~2 min after the gates | collector → renderer → publisher start here |
-| the session | `--session` hours | `--fresh-tip` waits for a block that does not exist yet |
+| **waiting for the first tip block** | **0–20+ min, not under your control** | `--fresh-tip` waits for a block that did not exist at launch. Measured 2026-09-28: **21 min**, filled with 20 board blocks. Without `--clock-from-tip` this comes out of the hour |
+| the session | `--session` hours | from the first tip block, with `--clock-from-tip` |
+
+⚠ **The wait for the first tip block is the one phase whose length nothing here controls** — it is
+Bitcoin's block interval, and a 10-minute mean means 20+ minutes is ordinary. With
+`--clock-from-tip` the log says so explicitly before it starts:
+
+```
+⏱ the clock has NOT started: the 1.0-hour window begins at the first tip block
+⏱ CLOCK STARTS: 968983 is the first tip block — the 1.0-hour window runs from now.
+  Waited 20.8 min for it, $14.12 spent getting here
+```
+
+The summary then reports `blocks_ok` (everything, board fill included) **and**
+`blocks_ok_on_clock` (the hour's own result), plus `spend_before_clock_usd` against
+`spend_on_clock_usd`. ⛔ **Quote the on-clock pair for anything about following the tip.**
+`blocks_ok` counts gap-filling done before the measurement began.
 
 ⚠ **The dashboard chain starts after the gates.** Until then `hazync.org/live` serves the **last
 frame of a previous run at HTTP 200** — it looks alive and is showing you something else. Judge by
