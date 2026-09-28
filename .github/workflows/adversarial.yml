@@ -992,6 +992,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_tip_vs_board.py --control
+      - name: The cost model reproduces the measured blocks, and an INDEPENDENT ledger
+        # ⭐ cost(n) = rate/3600 * (serial*n + parallel), so the bill RISES with every card: each one
+        # pays the whole serial floor and buys nothing during it. On 969,018 at 36 cards, 52% of the
+        # bill is serial-floor rent. Card count is a latency lever, never an economy lever (#567).
+        # ⚠ The check has a second arm against docs/history/fleet-economics.jsonl — different days,
+        # fleets and card types, calibrated on none of them — so drift shows up as a changed ratio
+        # rather than as a still-passing self-consistency test.
+        run: cd coordinator && python3 tip_cost.py --check
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
