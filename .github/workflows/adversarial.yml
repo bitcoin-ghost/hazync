@@ -264,6 +264,13 @@ jobs:
         run: cd coordinator && python3 test_grow_feed.py
       - name: Grown-feed POSITIVE CONTROL (fleet left stale — feed_records must refuse)
         run: cd coordinator && python3 test_grow_feed.py --control
+      - name: An adopted fleet survives a gate failure, and the recruiter stops first
+        # ⛔ Every pre-clock gate drop terminated the card, adopted or not, so one wrong --repo
+        # destroyed four hand-picked RTX PRO 6000 on 2026-09-28 (#551). And recruiter.stop() sat
+        # after the harvest, so the recruiter rented a NEW pod 87 s into shutdown.
+        run: cd coordinator && python3 test_adopt_contract.py
+      - name: Adopt-contract POSITIVE CONTROL (always terminate — must destroy an adopted fleet)
+        run: cd coordinator && python3 test_adopt_contract.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator

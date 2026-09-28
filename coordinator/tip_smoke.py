@@ -1212,18 +1212,35 @@ def main():
         # ⚠ These are NOT candidates. The gates need a card that can be reached; one that never
         # answered cannot be gated, cannot be promoted, and will not start answering later.
         never_up = [p["name"] for p in created if p["name"] not in cards]
+        def _release_pod(p, why):
+            """Release a pod a PRE-CLOCK GATE dropped — unless the fleet was adopted.
+
+            ⛔ A DROPPED CARD IS DROPPED FROM THIS RUN, NOT FROM EXISTENCE. --adopt promises the
+            fleet outlives the run, and four separate paths broke that promise: the teardown, the
+            surplus cut (#547), and every gate drop (#551). On 2026-09-28 a wrong --repo failed the
+            staging gate and destroyed four hand-picked RTX PRO 6000 that had taken two rental rounds
+            to assemble — a recoverable operator error cost an unreplaceable fleet, because a
+            specific siting cannot be re-requested from RunPod.
+
+            ⚠ A RENTED pod is still terminated here, and must be: #479 exists because a card failing
+            a gate used to end the whole run instead of being dropped from it.
+            """
+            if a.adopt and not a.release_adopted:
+                log(f"  dropped {p['name']} from the run — {why} (LEFT RUNNING: adopted)")
+                return
+            sponsor_bot.terminate_confirmed(api, p["id"])
+            log(f"  released {p['name']} — {why}")
+
         if never_up:
             log(f"releasing {len(never_up)} pod(s) that never answered ssh: {sorted(never_up)}")
             order, created = _drop_cards(
                 order, created, never_up, "it never answered ssh",
-                release=lambda p: (sponsor_bot.terminate_confirmed(api, p["id"]),
-                                   log(f"  released {p['name']} — it never answered ssh")),
+                release=lambda p: _release_pod(p, "it never answered ssh"),
                 record=lambda kept: json.dump(kept, open(rented_path, "w"), indent=1))
 
         def _drop(order_, created_, bad, why):
             def release(p):
-                sponsor_bot.terminate_confirmed(api, p["id"])
-                log(f"  released {p['name']} — {why}")
+                _release_pod(p, why)
             def record(kept):
                 with open(rented_path, "w") as fh:
                     json.dump(kept, fh, indent=1)
@@ -1387,8 +1404,7 @@ def main():
                 order = [c for c in order if c.cid not in bad]
                 log(f"dropping {sorted(bad)} and re-planning with {len(order)} card(s)")
                 for p in [x for x in created if x["name"] in bad]:
-                    sponsor_bot.terminate_confirmed(api, p["id"])
-                    log(f"  released {p['name']} — it could not reach the aggregate")
+                    _release_pod(p, "it could not reach the aggregate")
                 created = [x for x in created if x["name"] not in bad]
                 with open(rented_path, "w") as fh:
                     json.dump(created, fh, indent=1)
@@ -1482,8 +1498,7 @@ def main():
             # Same treatment as an unreachable card: drop it, release it, re-plan with what is left.
             order = [c for c in order if c.cid not in set(duds)]
             for p in [x for x in created if x["name"] in set(duds)]:
-                sponsor_bot.terminate_confirmed(api, p["id"])
-                log(f"  released {p['name']} — its GPU cannot prove")
+                _release_pod(p, "its GPU cannot prove")
             created = [x for x in created if x["name"] not in set(duds)]
             with open(rented_path, "w") as fh:
                 json.dump(created, fh, indent=1)
@@ -2043,6 +2058,20 @@ def main():
         # released without being terminated.
         # ⚠ Before the harvest, so the loop is not competing for the ssh channel we are about to use,
         # and best-effort by its own design: a card we cannot reach is one about to go away.
+        # ⛔⛔ STOP THE THING THAT SPENDS MONEY FIRST. recruiter.stop() used to sit AFTER the harvest,
+        # which pulls logs from every card and takes minutes. Measured 2026-09-28: the teardown began
+        # at 11:21:58 and the recruiter rented a NEW pod at 11:23:25 — 87 seconds into shutdown — and
+        # gated another in between. The fleet GREW while it was being torn down, and SIGTERM did not
+        # help because the recruiter is a separate thread; the run had to be SIGKILLed and the pods
+        # released by hand through the API.
+        try:
+            if recruiter is not None:
+                recruiter.stop()
+                _rc = recruiter.counts()
+                log(f"recruiter stopped first: rented {_rc['rented']}, rejected {_rc['rejected']}")
+        except Exception as e:                                     # noqa: BLE001
+            log(f"recruiter.stop: {e}")
+
         try:
             if assignment and runner is not None:
                 runner.stop_auto_attach(assignment)
@@ -2105,10 +2134,7 @@ def main():
         # there is no budget cap by decision, so it would bill until an invoice said so. Every pod
         # the recruiter ever rented is in recruited.json for exactly this moment.
         try:
-            if recruiter is not None:
-                recruiter.stop()
-                rc_ = recruiter.counts()
-                log(f"recruiter: rented {rc_['rented']}, rejected {rc_['rejected']}")
+            # (the recruiter was already stopped at the top of the teardown)
             admitted_ids = {p["id"] for p in created}
             orphans = [p for p in recruited if p["id"] not in admitted_ids]
             if orphans:
