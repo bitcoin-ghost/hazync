@@ -125,8 +125,15 @@ start)
             >> "$HZ_OUT" 2>/dev/null
         sleep 5         # reconnect; the gap is visible in the data as missing seconds, not faked
       done
-    ' &
+    ' hazync-tip-stream &
     # $! is the session leader, so its pid IS the process-group id -- which is what stop signals.
+    #
+    # ⛔ THE ARGUMENT AFTER THE SCRIPT IS $0, AND THAT IS WHAT ps SHOWS (hazync#563). Without it a
+    # streamer's cmdline is the LOOP BODY, so `ps -eo args | grep tip-stream` returns clean while
+    # eighteen of them are running -- and that grep is exactly what a person reaches for when an
+    # orderly shutdown did NOT happen. Orphaned streamers are what stacked 4.72x duplicate rows and
+    # what left 46 loops alive 17 hours after a run; the pidfile catches the orderly case, this
+    # catches the other one.
     echo "$! $name" >> "$PIDS"
     n=$((n+1))
   done < "$PODS"

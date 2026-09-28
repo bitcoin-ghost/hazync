@@ -35,6 +35,7 @@ than an f-string at a call site.
 """
 
 import os
+import time
 import re
 
 # The dashboard keys a card by `name`, and that name is also a path component.
@@ -315,8 +316,23 @@ class DashboardFeed:
         #
         # ⚠ Anything that counts rows as seconds is wrong by that factor, which is exactly how the
         # behind-the-chain figure came to report 4,845s for a block that had run 2,560s.
+        # ⛔⛔ AND WAIT FOR IT (hazync#564). `run` is os.spawnve(P_NOWAIT): stop and start were both
+        # spawned and neither awaited, so they RACED. That was harmless only because the old stop did
+        # not work -- it TERMed a subshell blocked in ssh and left the ssh writing. Once #562 made
+        # stop effective, stop began winning the race and killing the generation start had just
+        # launched. Measured live 2026-09-28 at the 18->19 growth event:
+        #
+        #   streaming 19 pods -> .../stream       <- start ran
+        #   0 streamer processes, 0 pidfile entries, captures stale 97s
+        #
+        # The feed was dead for six minutes and the spend on the frame froze at $9.13 while 19 cards
+        # billed. With --grow-to that is one outage per growth event.
+        #
+        # ⚠ BOUNDED. A stop that hangs must not hold up a run; it is best-effort by design and the
+        # caller already tolerates it failing. Waiting a few seconds is the difference between
+        # "the old streamers are gone" and "they are gone, probably, eventually".
         try:
-            self.stop()
+            self.stop_and_wait()
         except Exception:
             pass                      # nothing was streaming yet, which is the normal first call
 
@@ -364,6 +380,34 @@ class DashboardFeed:
         argv, env = stream_cmd(self.rundir, "stop", script=self.script,
                                key=self.key, log_dir=self.log_dir)
         return self.run(argv, env)
+
+    def stop_and_wait(self, timeout_s=20.0, poll_s=0.25):
+        """Stop the streamers and do not return until they are gone (or the timeout expires).
+
+        ⛔ THE CALLER'S NEXT ACT IS TO START A NEW GENERATION, so "asked it to stop" is not good
+        enough -- an effective stop arriving late kills the new set instead of the old one (#564).
+
+        ⚠ WAITS ON THE PIDFILE, NOT ON THE CHILD. `run` is injected and returns whatever the caller
+        chose -- a pid under spawnve, None under a fake -- so there is nothing portable to waitpid on.
+        The pidfile is the streamer's own record and `stop` empties it of everything it killed, so an
+        empty-or-absent pidfile IS the observable "nothing is streaming any more".
+
+        Returns True if the feed is verifiably stopped, False on timeout (the caller carries on
+        either way; a dead feed must never fail a run).
+        """
+        self.stop()
+        pids = os.path.join(self.rundir, "stream.pids")
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            try:
+                with open(pids) as fh:
+                    left = [ln for ln in fh.read().split("\n") if ln.strip()]
+            except OSError:
+                return True                      # no pidfile: nothing was streaming
+            if not left:
+                return True
+            time.sleep(poll_s)
+        return False
 
 
 def feed_records(cards, fleet):

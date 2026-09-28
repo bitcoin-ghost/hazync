@@ -523,7 +523,17 @@ def draw_live(snap, fo):
     # from before the run began. It read as a mostly-broken grid. Anchor to the RUN instead: cell 0
     # is the first block this run proved, and the map fills left-to-right, top-to-bottom across the
     # day. The empty cells then mean "the rest of the day", which is the story.
-    hs = [b['h'] for b in blocks]
+    # ⛔⛔ THE GRID IS THE TIP'S, SO IT PLOTS TIP BLOCKS ONLY (hazync#554). It anchored to min(h)
+    # over EVERY block, so while the fleet filled gaps the grid anchored to BOARD heights and lit
+    # board cells under a caption that says AT THE TIP -- the same conflation the ring was just
+    # cleared of, moved one panel to the right. Caught live on tip hour 3: the grid read
+    # `BLOCKS 132,140-132,145 - BACKFILL` with three lit cells while 0 tip blocks had been proved.
+    #
+    # ⚠ Board work stays visible: the ring's arcs and BOARD - AWAITING TIP caption, the subtitle's
+    # "N board blocks filled while waiting", the per-card traces and the cost tiles all show it. What
+    # it does not do is occupy the six slots that stand for this session's tip blocks.
+    grid_blocks = tip_blocks if tagged else blocks
+    hs = [b['h'] for b in grid_blocks]
     # ⭐ THE WINDOW IS THE SESSION'S, NOT A DAY'S. `session_blocks` is how many blocks the chain will
     # mine in this run (1 h / 600 s = 6); only a run with no declared session falls back to the
     # film's 144. The grid then holds what this run could actually prove, instead of reading as 3%
@@ -539,10 +549,11 @@ def draw_live(snap, fo):
     if hs and max(hs) - lo >= NSLOT:        # a run longer than the window slides to keep the tip
         lo = max(hs) - NSLOT + 1
     hi = lo + NSLOT - 1
-    by_h = {b['h']: b for b in blocks}
+    by_h = {b['h']: b for b in grid_blocks}
     # the ring already says "N / 144 TODAY" — printing the same fraction here made it twice on one frame
     d.text((GX0, GY0 - 26),
-           f'BLOCKS {lo:,}–{hi:,}' + (' · AT THE TIP' if at_tip else ' · BACKFILL'),
+           (f'BLOCKS {lo:,}–{hi:,}' +
+            (' · AT THE TIP' if at_tip else (' · AWAITING TIP' if not hs else ' · BACKFILL'))),
            font=fo['small'], fill=mix(MAP_DONE, GROUND, .9) if at_tip else hx(FAINT))
     for i in range(NSLOT):
         h = lo + i
@@ -569,7 +580,7 @@ def draw_live(snap, fo):
     # ⛔ ONLY FOR A BLOCK THAT HAS A CELL. Outside [lo, hi] there is nowhere for it to land and
     # cell_xy would place it over some other block's square.
     # ⚠ Guarded against a card clock that runs ahead of ours: a negative age is not a fresh block.
-    for b in blocks:
+    for b in grid_blocks:
         t_done = b.get('done_at')
         if not t_done or not (lo <= b['h'] <= hi):
             continue
