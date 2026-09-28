@@ -691,6 +691,54 @@ def assignment_preview(order):
     """chunk -> card, as run_block will hold it. Used before the clock so the probe sees the fleet."""
     return {i: c for i, c in enumerate(order)}
 
+
+# ── segment size is a property of the WEAKEST card in the fleet ──────────────────────────────────
+PO2_22_PEAK_GB = 40.6          # measured: a stock chunk peaked here, so 24 GB cards cannot run it
+PO2_22_MIN_VRAM_GB = 48
+
+
+def resolve_seg_po2(setting, fleet, catalogue=None, api=None):
+    """The po2 to run, and why. Returns (po2_str, reason).
+
+    ⛔ ONE po2 FOR THE WHOLE BLOCK. `segment_limit_po2()` is set on the ExecutorEnv, so the aggregate
+    segments the block once and every worker proves what it is handed -- there is no per-card po2.
+    The fleet is therefore capped by its SMALLEST VRAM, not its average.
+
+    ⭐ po2 22 measured ~11-12% faster on block 962,000 (~7,200 inputs) and peaks ~40.6 GB. On a
+    9,000-segment block that is the difference between 674 s and 597 s against a 600 s gate, so it is
+    not a micro-optimisation at tip scale.
+
+    ⚠ A card whose VRAM we do not know is treated as TOO SMALL. Guessing upward here costs the whole
+    block: every worker OOMs on a segment it cannot hold, and the retry ladder reads as a slow fleet.
+    """
+    if str(setting).lower() != "auto":
+        return str(int(setting)), f"pinned by --seg-po2 {setting}"
+    # \u26d4 THE CATALOGUE IS ONLY BUILT FOR --gpu-type auto, AND A PINNED LIST IS THE NORMAL CASE.
+    # Without this the VRAM lookup is empty on every pinned run, every type reads as unknown, and the
+    # answer silently degrades to 21 -- the safe direction, but wrong, and invisible.
+    if not catalogue and api is not None:
+        try:
+            catalogue = rank_card_types(api)
+        except Exception:                 # noqa: BLE001 -- a failed lookup means 21, not a dead run
+            catalogue = None
+    vram = {}
+    for c in (catalogue or []):
+        if c.get("id") and c.get("vram"):
+            vram[c["id"]] = float(c["vram"])
+    types = sorted({p.get("gpu_type") for p in fleet if p.get("gpu_type")})
+    if not types:
+        return "21", "no fleet card types known — falling back to the safe 21"
+    unknown = [t for t in types if t not in vram]
+    if unknown:
+        return "21", f"VRAM unknown for {unknown[:2]} — 21, because guessing upward OOMs the block"
+    smallest = min(vram[t] for t in types)
+    if smallest >= PO2_22_MIN_VRAM_GB:
+        return "22", (f"every card has >={PO2_22_MIN_VRAM_GB}GB (smallest {smallest:.0f}GB) and po2 22 "
+                      f"peaks ~{PO2_22_PEAK_GB}GB")
+    return "21", (f"the smallest card has {smallest:.0f}GB and po2 22 peaks ~{PO2_22_PEAK_GB}GB — "
+                  f"one card that cannot hold a segment stalls the whole block")
+
+
 def dash_chain(a):
     """The processes that turn telemetry into a published frame, and keep the frames.
 
@@ -838,6 +886,19 @@ def main():
     # of proofs: a gap is a missing link, not a slower result.
     # ⚠ EACH GATE HOLDS AN SSH CHANNEL AND PULLS 411 MB. Unbounded parallelism would saturate the
     # box's uplink and slow the very gates it is overlapping.
+    # ⭐ SEGMENT SIZE, CHOSEN BY THE WEAKEST CARD. po2 22 measured ~11-12% faster on a
+    # NEAR-TIP block (962,000, ~7,200 inputs) but peaks ~40.6 GB, so a 24 GB card cannot run
+    # it at all and the fleet is capped by its smallest VRAM. `auto` reads the fleet.
+    #
+    # ⛔ IT CANNOT BE MIXED. segment_limit_po2() is set on the ExecutorEnv, so the aggregate
+    # segments the block ONCE and every worker proves whatever it is handed.
+    #
+    # ⚠ The note in prover/host/src/main.rs calling 21 and 22 'flat' was measured on block
+    # 130,000 -- a 2011 block with almost no transactions, which says nothing about fold
+    # overhead at 9,000 segments. Judge this at the tip or not at all.
+    ap.add_argument("--seg-po2", default="auto",
+                    help="zkVM segment size: 'auto' (22 when every card has >=48GB, "
+                         "else 21), or a number to pin it")
     ap.add_argument("--gate-parallel", type=int, default=4,
                     help="how many recruits to gate at once (default 4). Gating was serial, which "
                          "capped growth at roughly one card every four minutes")
@@ -1664,6 +1725,10 @@ def main():
 
 
         # ── prove ─────────────────────────────────────────────────────────────────────────────────
+        # ⭐ One po2 for the whole block, set by the weakest card (see resolve_seg_po2).
+        seg_po2, _po2_why = resolve_seg_po2(
+            a.seg_po2, created, locals().get("catalogue"), api=api)
+        log(f"segment size: po2 {seg_po2} \u2014 {_po2_why}")
         runner = tip_runner.FleetRunner(
             ssh, agg, stage_dir=os.path.join(a.rundir, "stage"),
             agg_port=9110, agg_dial=agg_dial,
@@ -1683,6 +1748,7 @@ def main():
             # passing them at runtime has never done anything and is kept only for continuity.
             prove_env={"HAZYNC_LIFTX_HINT": "1", "HAZYNC_FIELD_BIGINT2": "1",
                        "HAZYNC_ECMULT_WINDOW": "21",
+                       "HAZYNC_SEG_PO2": seg_po2,
                        **tip_lifecycle.lever_env(),
                        "HAZYNC_HOST_URL": HOST_URL, "HAZYNC_HOST_BYTES": str(want)})
         os.makedirs(runner.stage_dir, exist_ok=True)

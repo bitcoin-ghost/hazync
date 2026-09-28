@@ -216,9 +216,16 @@ fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 // EVERY prove path calls this so the retry is honoured everywhere. Host-side executor config only — the
 // guest is untouched by this knob, so it does not affect METHOD_ID.
 // Default depends on the backend, because the trade-off does. Bigger segments = fewer of them = less
-// recursion/fold overhead: on GPU that measured ~6% faster than 20 on block 130000 (23.0s vs 24.4s), flat
-// to 22, so 21 is the sweet spot (same speed as 22, less VRAM). But a po2-21 segment also needs ~2x the
-// working memory, and on CPU that is a pure cost — the speed win was never measured there, while an
+// recursion/fold overhead: on GPU that measured ~6% faster than 20 on block 130000 (23.0s vs 24.4s).
+// ⛔ THIS COMMENT USED TO SAY "flat to 22, so 21 is the sweet spot (same speed as 22)". THAT IS WRONG,
+// and reading it cost an evening of wrong advice. It was measured on block 130,000 — a 2011 block with
+// almost no transactions and ~30 segments, where there is barely any fold tree to save. On a TIP block
+// po2 22 measured ~11.5% faster (block 962,000 on an L40S, docs/TOPOLOGY_AND_SETTINGS.md §3.1), and the
+// saving grows with segment count because that is what the fold tree is built from. 21 is the DEFAULT
+// because it peaks ~22 GB and fits a 24 GB card; 22 peaks ~40.6 GB and needs ≥48 GB. Judge po2 on a
+// block the size of the one you are proving, never on a young one.
+// A po2-21 segment also needs ~2x the working memory of 20, and on CPU that is a pure cost — the
+// speed win was never measured there, while an
 // 11 GB box proving block 170 (a 2.3M-cycle block!) hit 8.7 GB RSS and went to swap. Swapping is not a
 // prove *failure*, so the retry ladder below never fires; it just crawls. So: 21 with the cuda feature,
 // the risc0 default of 20 otherwise. HAZYNC_SEG_PO2 overrides either way.
@@ -5468,8 +5475,9 @@ fn segment_mem_cmd() {
         println!("  {:>4}  {:>8.1}  {:>10.2}  {:>10.2}  {:>10.2}", si, s, hwm, kb("VmRSS:"), wire);
     }
 
-    // Lift and join are the price of a SMALL po2. Segment proving throughput turns out to be flat
-    // across po2 (147.6 / 145.9 / 147.8 us per cycle at 18 / 19 / 20), so shrinking segments to fit a
+    // Lift and join are the price of a SMALL po2. Per-CYCLE segment proving throughput is flat
+    // across po2 (147.6 / 145.9 / 147.8 us per cycle at 18 / 19 / 20) — ⚠ which is NOT the same as
+    // total block time being flat, because the fold tree above it is not. So shrinking segments to fit a
     // node's RAM looks free -- until you count recursion. Every segment must be lifted to a succinct
     // receipt and then joined pairwise, and if lift cost is per-SEGMENT rather than per-CYCLE then
     // halving po2 doubles the recursion bill. That is the number that decides whether po2 18 holds up.

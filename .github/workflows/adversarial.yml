@@ -310,6 +310,14 @@ jobs:
         run: cd coordinator && python3 test_aggregate_election.py
       - name: Aggregate-election POSITIVE CONTROL (fastest wins — the 23-worker host must be chosen)
         run: cd coordinator && python3 test_aggregate_election.py --control
+      - name: Segment size is chosen by the WEAKEST card, and it cannot be mixed
+        # ⭐ po2 22 measured ~11-12% faster at the tip (962,000, docs/FLEET_OPERATIONS.md:311) and
+        # peaks ~40.6 GB, so it flips a 6,269-segment block from 674s to 597s — under the gate.
+        # ⛔ But `segment_limit_po2()` is set on the ExecutorEnv, so the aggregate segments the block
+        # ONCE: there is no per-card po2, and one 24 GB card in a fleet of 96 GB cards caps everybody.
+        run: cd coordinator && python3 test_seg_po2.py
+      - name: Segment-size POSITIVE CONTROL (pick on the biggest card — a 24GB card must be starved)
+        run: cd coordinator && python3 test_seg_po2.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
