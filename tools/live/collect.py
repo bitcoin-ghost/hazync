@@ -19,6 +19,11 @@ import argparse, csv, json, math, os, re, time, urllib.request
 
 API = os.environ.get("COORD_URL", "https://api.hazync.org")
 WINDOW_S = 900          # rolling telemetry window kept per card (seconds)
+# ⛔ THE LINE BETWEEN TIP WORK AND GAP-FILLING. The bridge emits no bundle below this, so a height at
+# or above it can only be tip work and anything below it came from the board. Mirrors
+# HAZYNC_TIP_FROM in tip_smoke.py and HAZYNC_BRIDGE_EMIT_FROM on the bridge — if either moves, this
+# moves with it, which is why it reads the same environment variable rather than hard-coding a copy.
+TIP_FROM = int(os.environ.get("HAZYNC_TIP_FROM", "967500"))
 STALE_S = 15            # no sample for this long -> the card is not "up"
 
 
@@ -462,6 +467,17 @@ def blocks_from_cards(cards, state, now, verified=()):
         done_flag = (int(h) in verified or str(h) in finished_by_cards
                      or ((now - a["t1"]) > 5 and not working_on_this))
         out.append({"h": int(h), "arrive": a["t0"],
+                    # ⭐ TIP OR BOARD, DECIDED ONCE, HERE (hazync#554). Every panel downstream used
+                    # to treat one population as the other: `AHEAD OF CHAIN` took the median over
+                    # ALL blocks, and board bundles at the frontier are tiny (16-370 KB against
+                    # 27 MB for tip block 968,983), so they dragged it down. Measured 2026-09-28:
+                    # the frame rendered 9.1x where the tip blocks alone give 2.9x — the headline
+                    # claim of the project, inflated 3.6x by gap-filling.
+                    #
+                    # ⚠ The grid was always right, because it is anchored to the tip window; that is
+                    # WHY the frame disagreed with itself. Tagging at the source is what lets each
+                    # panel ask for the population it actually means.
+                    "kind": "tip" if int(h) >= TIP_FROM else "board",
                     # ⛔ `done` is a BOOLEAN and the pulse needs a TIME. The renderer animates a
                     # block travelling from the join tree to its cell for PULSE seconds after it
                     # finished, so it has to know WHEN that was -- `(now - t1) > 5` cannot say.
@@ -731,7 +747,14 @@ def main():
         # made "updated Ns ago" structurally ZERO in every frame ever rendered (see tip24live).
         # `wall` always advances, so a collector that DIES stops advancing it and the frame can say
         # so. In replay it is also the real clock, so a freshly replayed capture reads as fresh.
-        snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_label,
+        # ⛔ THE PHASE LINE'S CARD COUNT IS LATCHED AT SESSION START (hazync#554). With --grow-to the
+        # fleet changes size during the run, so the frame rendered `SESSION · 1.0 h on 17 cards`
+        # directly above `24/24 up` on 2026-09-28 — the banner contradicting the tile beneath it.
+        # The run's own words are kept; only the number it can no longer know is corrected.
+        phase_out = phase_label
+        if phase_label and cards:
+            phase_out = re.sub(r"\bon \d+ cards\b", f"on {len(cards)} cards", phase_label)
+        snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_out,
                 "session_blocks": state.get("session_blocks"),
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
