@@ -56,11 +56,49 @@ def verify_fleet_empty(runner, cards):
 
 
 def _joins_done(joins):
-    """`joins 12/34` -> 12. The beat's progress signal, and None when there is nothing to read yet."""
+    """`joins 12/34` -> 12, or None when there is nothing to read yet."""
     if not joins:
         return None
     m = re.search(r"joins (\d+)/(\d+)", str(joins))
     return int(m.group(1)) if m else None
+
+
+def _segments_done(segments):
+    """`538/2103 segments` -> 538, or None when there is nothing to read yet."""
+    if not segments:
+        return None
+    m = re.search(r"(\d+)/(\d+) segments", str(segments))
+    return int(m.group(1)) if m else None
+
+
+def progress_units(out):
+    """The beat's progress signal: units of work FINISHED, across both phases (hazync#571).
+
+    \u26d4 IT USED TO BE JOINS ONLY, AND JOINS START LAST. Every segment is proved before the first
+    join exists, so a block whose segment phase outlives CLAIM_GRACE (600 s) never sent a beat in
+    time and lost its claim while still proving. Measured 2026-09-28:
+
+        969,018   ran  691.7 s   first beat fired at 583 s  ->  409, claim already gone
+        969,019   ran 1027.9 s   first beat fired at 869 s  ->  409
+
+    Fifteen of the sixteen rejected beats in thirty days are exactly this -- one per tip block. The
+    work was never lost (a lapsed claim still submits), but the block sat open to every other
+    contributor for 90-430 s while we were mid-proof, so someone else could burn a whole block of
+    GPU racing it.
+
+    \u26d4 AND IT MUST STILL GO FLAT WHEN A FLEET WEDGES (hazync#256). Beating on a timer kept a HUNG
+    prover's claim alive for HOURS, which is why the gate exists at all. This stays EVIDENCE OF WORK:
+    segments finished, then joins finished. A wedged fleet stops finishing both and stops beating.
+
+    \u26a0 MONOTONIC ACROSS THE PHASE CHANGE. `segments` reaches N/N and stops moving while `joins`
+    starts at 0, so summing them never steps backwards -- which matters because the caller only beats
+    when the count RISES, and a decrease would stall the beat for the rest of the block.
+    """
+    segs = _segments_done(out.get("segments"))
+    joins = _joins_done(out.get("joins"))
+    if segs is None and joins is None:
+        return None
+    return (segs or 0) + (joins or 0)
 
 
 class RunAborted(Exception):
@@ -126,7 +164,7 @@ def run_range(*, height, cards, runner, bundle_path, now, sleep, feed=None, on_e
     out = {}
     for tick in range(max_ticks):
         out = runner.aggregate_status()
-        prog = _joins_done(out.get("joins"))
+        prog = progress_units(out)
         if beat is not None and prog is not None and prog > beaten:
             beaten = beat(prog)
         if out.get("verified"):

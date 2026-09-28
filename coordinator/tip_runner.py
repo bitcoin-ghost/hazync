@@ -554,7 +554,13 @@ while time.time() < end:
                 f"{self.workdir}/agg.log 2>/dev/null | tail -8; "
                 f"tail -2 {self.workdir}/agg.err 2>/dev/null; "
                 f"echo \"ALIVE:$(ps -eo comm | grep -c '^hazync-host-cud')\"; "
-                f"echo \"JOINS:$(grep -oE 'joins [0-9]+/[0-9]+' {self.workdir}/agg.log 2>/dev/null | tail -1)\"")
+                f"echo \"JOINS:$(grep -oE 'joins [0-9]+/[0-9]+' {self.workdir}/agg.log 2>/dev/null | tail -1)\"; "
+                # \u26d4 SEGMENTS TOO, OR A LONG BLOCK LOSES ITS CLAIM (hazync#571). The beat's progress
+                # signal was joins only, and joins begin AFTER every segment is proved. A block whose
+                # segment phase runs past CLAIM_GRACE (600 s) therefore never sent a first beat in time:
+                # measured 2026-09-28, 969,018 ran 691.7 s and its first beat fired at 583 s, to a 409.
+                # Fifteen of the sixteen rejected beats in thirty days are exactly this, one per tip block.
+                f"echo \"SEGS:$(grep -oE '[0-9]+/[0-9]+ segments' {self.workdir}/agg.log 2>/dev/null | tail -1)\"")
         out = self.ssh.run(self.agg, body)
         if out is None:
             # Could not ask. Not dead — saying "dead" here would abort a healthy run over one bad ssh.
@@ -567,8 +573,9 @@ while time.time() < end:
                     digest = parts[0]
         alive = any(l.startswith("ALIVE:") and l[6:].strip() not in ("", "0") for l in out.splitlines())
         joins = next((l[6:].strip() for l in out.splitlines() if l.startswith("JOINS:")), "")
+        segs = next((l[5:].strip() for l in out.splitlines() if l.startswith("SEGS:")), "")
         return {"alive": alive, "verified": "VERIFIED" in out, "digest": digest,
-                "joins": joins or None, "unreachable": False}
+                "joins": joins or None, "segments": segs or None, "unreachable": False}
 
 
 # ⛔ THE FILE THE ATTACH LOOP WATCHES, NAMED ONCE (hazync#463). `worker_attach_script` is module-level
