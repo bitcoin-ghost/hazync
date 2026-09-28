@@ -104,7 +104,8 @@ status **into the log** — a background wrapper's exit code is the last command
 | `--allow-tip-gaps` | off | ⛔ prove a tip block even when it is not the child of the last one proved. Produces a proof chain with a hole in it — recovery only |
 | `--no-board-fill` | off | with `--fresh-tip`, sit idle between tip blocks instead of proving board work. Only for measuring tip latency with nothing else on the fleet |
 | `--gpu-type` | `auto` | `auto` ranks every type with SECURE stock by *measured* cost per proof, then by price for unmeasured cards, and fills from **one** type where it can. Or pin a type by name |
-| `--grow-to N` | 0 | during a session, rent and gate toward N on a background thread; recruits join at a **block boundary** |
+| `--grow-to N` | 0 | during a session, rent and gate toward N on a background thread; recruits join at a **block boundary**. ⭐ The target is written to `$RUNDIR/grow_to` and re-read every 45s — **raise or lower it mid-run** with `echo 32 > $RUNDIR/grow_to`. Lowering never releases a card; it just stops recruiting |
+| `--gate-parallel N` | 4 | how many recruits to gate at once. Gating used to be serial, which capped growth at roughly **one card every four minutes** — 18→28 would have taken 40 minutes of a one-hour run |
 | `--adopt FILE` | — | reuse a previous run's `rented.json` instead of renting. Adopted pods are **not** released at the end |
 | `--release-adopted` | off | with `--adopt`, hand them back after all |
 | `--worker-min-mbit` | 0 | release workers the aggregate cannot push to at this rate. 0 = measure and report only |

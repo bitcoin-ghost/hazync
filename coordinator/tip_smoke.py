@@ -836,6 +836,11 @@ def main():
     # prove next, so when 968,984 and 968,985 were mined 5 seconds apart on 2026-09-28 their bundles
     # landed together, the run took 985, and 984 has no proof and never will. The product is a CHAIN
     # of proofs: a gap is a missing link, not a slower result.
+    # ⚠ EACH GATE HOLDS AN SSH CHANNEL AND PULLS 411 MB. Unbounded parallelism would saturate the
+    # box's uplink and slow the very gates it is overlapping.
+    ap.add_argument("--gate-parallel", type=int, default=4,
+                    help="how many recruits to gate at once (default 4). Gating was serial, which "
+                         "capped growth at roughly one card every four minutes")
     ap.add_argument("--tip-max-behind", type=int, default=3,
                     help="how many unproved tip bundles may queue before the session gives up on "
                          "sequence and jumps to the newest, recording the skipped heights "
@@ -2122,13 +2127,39 @@ def main():
                 return True, c, ""
 
             if a.grow_to and a.grow_to > len(order):
+                # ⭐ THE TARGET LIVES IN A FILE, SO IT CAN BE CHANGED MID-RUN (hazync#548). During
+                # tip hour 3 the fleet sat at 18 cards while missing a 600 s gate and the target
+                # could not be raised without restarting -- which would have cost the clock already
+                # spent and landed on the same capacity. A file needs no port, no signal and no
+                # protocol, survives a driver restart, and leaves an audit trail of what was asked.
+                grow_path = os.path.join(a.rundir, "grow_to")
+                try:
+                    with open(grow_path, "w") as fh:
+                        fh.write(f"{a.grow_to}\n")
+                except OSError as exc:
+                    log(f"  ⚠ could not write {grow_path} ({exc}); the target is fixed at "
+                        f"{a.grow_to} for this run")
+
+                def _read_grow_to():
+                    """The live target. ⚠ A missing or unreadable file keeps the current one."""
+                    try:
+                        with open(grow_path) as fh:
+                            txt = fh.read().strip()
+                    except OSError:
+                        return None
+                    if not txt.isdigit():
+                        return None
+                    return int(txt)
+
                 recruiter = tip_recruit.Recruiter(
                     target=a.grow_to, have_fn=lambda: len(order), rent_fn=_recruit_rent,
                     gate_fn=_recruit_gate,
                     release_fn=lambda pod: sponsor_bot.terminate_confirmed(api, pod["id"]),
-                    log=lambda m: log(f"  {m}"), poll_s=45.0).start()
-                log(f"  growing toward {a.grow_to} cards as capacity appears "
-                    f"(recruits gate off the clock and join at a block boundary)")
+                    log=lambda m: log(f"  {m}"), poll_s=45.0,
+                    max_parallel=a.gate_parallel, target_fn=_read_grow_to).start()
+                log(f"  growing toward {a.grow_to} cards as capacity appears, gating up to "
+                    f"{a.gate_parallel} at once (recruits join at a block boundary)")
+                log(f"  ⭐ raise or lower it WITHOUT restarting:  echo 32 > {grow_path}")
 
             def grow_fn():
                 """Admit finished recruits. Called BETWEEN blocks only; never rents or waits."""

@@ -286,6 +286,13 @@ jobs:
         run: cd coordinator && python3 test_dash_chain.py
       - name: Dash-chain POSITIVE CONTROL (no archiver — only the last frame may survive)
         run: cd coordinator && python3 test_dash_chain.py --control
+      - name: The growth target is live, and gating overlaps so a raise arrives in time
+        # ⛔ Two faults, one symptom: the target was fixed at launch, and _tick gated ONE pod on the
+        # recruiter thread (~1 card / 4 min). The operator asked for more cards mid-run and the
+        # honest answer was "it is trying and cannot go faster" (#548).
+        run: cd coordinator && python3 test_grow_to_live.py
+      - name: Grow-to POSITIVE CONTROL (fixed target, serial gating — both must reproduce)
+        run: cd coordinator && python3 test_grow_to_live.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
