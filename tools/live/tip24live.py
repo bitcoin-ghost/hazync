@@ -232,15 +232,41 @@ def draw_live(snap, fo):
     #
     # ⚠ And wall_s, not the sample-counted prove_s: see collect.py. At 1.87 rows/sec from a
     # doubled feed, prove_s ran 1.87x high and was divided by a card count of 1.
-    tot = sorted(b['wall_s'] for b in blocks if b.get('done') and b.get('wall_s'))
+    # ⛔⛔ TIP BLOCKS ONLY (hazync#554). This took the median over EVERY done block, and board fill
+    # between tip blocks is small work: a frontier bundle is 16-370 KB against 27 MB for tip block
+    # 968,983. Measured live 2026-09-28 — 17 board blocks at a 55.9s median against 2 tip blocks at
+    # 205.4s — the frame rendered `AHEAD OF CHAIN 9.1x` where the tip blocks alone give **2.9x**.
+    # The headline claim of the whole project, inflated 3.6x by the work done while WAITING for the
+    # thing it claims to keep up with.
+    #
+    # ⚠ Board fill is not hidden anywhere on this frame; it is simply never counted AS tip
+    # performance. It is real work, it is what #367 asked the fleet to do between tip blocks, and
+    # the ring below still credits it — separately, and labelled.
+    tip_blocks = [b for b in blocks if b.get('kind') == 'tip']
+    board_blocks = [b for b in blocks if b.get('kind') == 'board']
+    # ⚠ A snapshot written by an older collector has no `kind` at all. Falling back to "treat them
+    # all as tip" would restore the exact bug this removes, so an untagged feed reports no figure
+    # rather than a flattering one.
+    tagged = bool(tip_blocks or board_blocks)
+    tot = sorted(b['wall_s'] for b in tip_blocks if b.get('done') and b.get('wall_s'))
     med = tot[len(tot) // 2] if tot else 0.0
     ahead = (PERIOD / med) if med > 0 else 0.0
 
     # ---------------- header
     x = PAD
-    done_n = sum(1 for b in blocks if b.get('done'))
+    # ⛔ THE HEADLINE COUNTS TIP BLOCKS. `19 blocks` next to a grid showing one cell was the most
+    # visible symptom: the grid is anchored to the tip window, so board heights 837,000 below it can
+    # never appear there. Both numbers were right about different things and the frame never said so.
+    done_tip = sum(1 for b in tip_blocks if b.get('done'))
+    done_board = sum(1 for b in board_blocks if b.get('done'))
+    done_n = done_tip if tagged else sum(1 for b in blocks if b.get('done'))
     for s, col in [('Hazync zkVM bitcoin block proofs', hx(TEXT)), (' : ', hx(FAINT)),
-                   (f"{done_n} block{'' if done_n == 1 else 's'}", mix(ACCENT, GROUND, .95)),
+                   (f"{done_n} tip block{'' if done_n == 1 else 's'}" if tagged
+                    else f"{done_n} block{'' if done_n == 1 else 's'}",
+                    mix(ACCENT, GROUND, .95)),
+                   # Board fill stays visible and stays labelled — it is real work, and it is not
+                   # tip performance.
+                   ((f' (+{done_board} board)' if done_board else ''), hx(FAINT)),
                    (' · ', hx(FAINT)),
                    (f"{len(up)} card{'' if len(up) == 1 else 's'}", mix(ACCENT, GROUND, .95)), (' · ', hx(FAINT)),
                    # ⛔ ':,.0f' rounded a real $0.46 to "$0" — the total looked broken when it was
@@ -388,6 +414,11 @@ def draw_live(snap, fo):
     # run that proved all ~6 of its blocks rendered as `6 / 144` — a complete run looking like a 4%
     # one. The run declares its own length in its SESSION line; collect.py parses and latches it.
     # Falls back to the daily window when there is no session (board work, a replay).
+    # ⛔ NUMERATOR AND DENOMINATOR MUST MEASURE THE SAME THING (hazync#554). `session_blocks` is
+    # how many blocks the CHAIN will mine in the session (1 h / 600 s = 6), while the numerator
+    # counted every block including board fill — so the frame rendered `19 / 6 THIS SESSION`, a
+    # fraction whose halves are about different populations and which board work alone can push
+    # past 1. The numerator is now tip blocks; board fill is credited on its own line below.
     _den = snap.get('session_blocks') or WINDOW
     _lab = 'TODAY' if _den == WINDOW else 'THIS SESSION'
     for s, f_, dy, c_ in ((f'/ {_den} {_lab}', 'lab', 22, mix(TEXT, GROUND, .7)),
@@ -578,9 +609,14 @@ def draw_live(snap, fo):
         keeping = ahead >= 1.0
         stat(d, fo, 1180, 'AHEAD OF CHAIN' if keeping else 'BEHIND THE CHAIN', f'{ahead:.1f}×',
              mix(MAP_DONE if keeping else RED, GROUND, .9),
-             sub=f'{med:.0f}s per block · 600s between blocks')
+             sub=f'{med:.0f}s per TIP block · 600s between blocks')
     else:
-        stat(d, fo, 1180, 'AHEAD OF CHAIN', '—', hx(FAINT), sub='no block timed yet')
+        # ⛔ NO TIP BLOCK TIMED YET MEANS NO FIGURE. This used to borrow whatever blocks were
+        # around, so a fleet that had only ever filled gaps still published a confident multiple of
+        # the chain. Waiting for a real tip block is the honest answer and it is usually brief.
+        _sub = ('board fill only so far — no tip block timed yet' if board_blocks
+                else 'no block timed yet')
+        stat(d, fo, 1180, 'AHEAD OF CHAIN', '—', hx(FAINT), sub=_sub)
 
     # ---------------- bars: measured prove/fold per block
     d.text((BX0, BHEAD), 'TIME PER BLOCK', font=fo['small'], fill=hx(FAINT))

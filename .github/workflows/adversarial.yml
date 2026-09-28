@@ -905,6 +905,16 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
+      - name: Board fill is credited but never counted as tip performance (tools/live)
+        # ⛔ `AHEAD OF CHAIN` took the median over EVERY done block, and board bundles at the
+        # frontier are 16-370 KB against 27 MB for a tip block. Measured 2026-09-28: the frame
+        # published 9.1x where the tip blocks alone give 1.7x — the headline claim of the project,
+        # inflated by the work the fleet does while WAITING for the thing the claim is about (#554).
+        run: cd tools/live && python3 test_tip_vs_board.py
+      - name: Tip-vs-board POSITIVE CONTROL (one population — the inflated headline must reproduce)
+        run: |
+          cd tools/live
+          python3 test_tip_vs_board.py --control
       - name: A verified block COUNTS on the dashboard (tools/live)
         # ⛔ `done` was inferred from 5 s of silence. The collector stops when the run ends, BEFORE
         # its own grace period elapses, so the LAST block of every run never counted. Captured
