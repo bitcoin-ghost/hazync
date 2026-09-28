@@ -6065,6 +6065,102 @@ const NOLIFT_TAG: u32 = 0x2000_0000;
 // lift job. Body is the bare receipt, not a pair. With this the coordinator holds no prover.
 const LIFT_TAG: u32 = 0x1000_0000;
 
+// I AM THIS CARD (hazync#570). Bit 27, clear of every tag above and of any segment index. Body is
+// HAZYNC_WORKER_ID as UTF-8; the worker sends it as its first frame on connect AND on every
+// reconnect, because the aggregate sees a reconnect as a brand-new connection.
+//
+// ⛔ WHY IT HAD TO BE ON THE WIRE. The aggregate's `[rtt]` line identified a worker by `peer`, which
+// is the address `accept()` returned — i.e. the EGRESS IP. Several cards on one pod, and several pods
+// behind one NAT, share it: up to eleven cards came back as one `peer` on the 2026-09-21 fleet. So
+// "which card has the slow tail?" was unanswerable from the logs, which is #570, and #550 (group
+// cards into banks by their measured tail) cannot be built on a label that is not per-card.
+//
+// The ephemeral source port does distinguish the CONNECTIONS, but nothing maps a port back to a card,
+// and a reconnect silently changes it. Only the worker knows which card it is, so only the worker can
+// say. Sending it costs one small frame per connection.
+//
+// ⚠ BOTH ENDS SHIP IN ONE BINARY. A fleet run launches the aggregate and every worker from the same
+// pinned HOST_RELEASE, so the two sides always match. The aggregate is written to tolerate a worker
+// that never says hello (it reports `card=?`), which covers an old worker against a new aggregate.
+// The reverse — a new worker against an OLD aggregate — would have its hello read as a receipt, so do
+// not mix releases within a run.
+const HELLO_TAG: u32 = 0x0800_0000;
+
+/// The card name in a hello body, or `None` if it carries nothing usable.
+///
+/// Pure so it can be tested without a socket, exactly like `peer_job_timeout_s`. This is the ONLY
+/// value on the wire a worker chooses freely, and it lands in log lines that `tools/live` and the
+/// tail analysis in #550 parse, so it is bounded and filtered to a character set that cannot forge a
+/// field: no whitespace (which would split a key=value line), and nothing that is not
+/// `[A-Za-z0-9._-]`. A worker that sends nothing usable stays anonymous rather than being trusted.
+fn hello_card_name(body: &[u8]) -> Option<String> {
+    let name: String = String::from_utf8_lossy(body)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .take(40)
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::{hello_card_name, HELLO_TAG, JOIN_TAG, LIFT_TAG, NOLIFT_TAG, RESOLVE_TAG, SEG_EOF};
+
+    #[test]
+    fn a_normal_worker_id_survives_intact() {
+        assert_eq!(hello_card_name(b"hz-smoke-11").as_deref(), Some("hz-smoke-11"));
+        assert_eq!(hello_card_name(b"w0").as_deref(), Some("w0"));
+        assert_eq!(hello_card_name(b"hz_board.5-gpu2").as_deref(), Some("hz_board.5-gpu2"));
+    }
+
+    #[test]
+    fn nothing_usable_stays_anonymous() {
+        // The aggregate prints card=? for each of these rather than inventing a name.
+        assert_eq!(hello_card_name(b""), None);
+        assert_eq!(hello_card_name(b"   \n\t "), None, "whitespace alone is not a name");
+        assert_eq!(hello_card_name(b"!!!@@@"), None, "punctuation alone is not a name");
+    }
+
+    #[test]
+    fn a_name_cannot_forge_another_field() {
+        // ⛔ THE POINT OF FILTERING. The name is printed into a key=value line that tools parse. A
+        // worker claiming to be `a peer=1.2.3.4 rtt_ms=0.1` must not be able to inject either the
+        // separator or a second key, or one card could rewrite another's measurements in the log.
+        let got = hello_card_name(b"a peer=9.9.9.9 rtt_ms=0.1").unwrap();
+        assert!(!got.contains(' '), "no whitespace survives: {got:?}");
+        assert!(!got.contains('='), "no separator survives: {got:?}");
+        assert_eq!(got, "apeer9.9.9.9rtt_ms0.1");
+        assert!(hello_card_name(b"x\ny").unwrap() == "xy", "a newline cannot start a fake line");
+    }
+
+    #[test]
+    fn a_long_name_is_bounded() {
+        let got = hello_card_name(&vec![b'a'; 10_000]).unwrap();
+        assert_eq!(got.len(), 40, "a worker must not be able to print an unbounded line");
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_panic() {
+        // from_utf8_lossy substitutes U+FFFD, which the filter then drops.
+        assert_eq!(hello_card_name(&[0xff, 0xfe, 0x80]), None);
+        assert_eq!(hello_card_name(&[b'h', 0xff, b'z']).as_deref(), Some("hz"));
+    }
+
+    #[test]
+    fn the_hello_tag_collides_with_nothing() {
+        // ⛔ A tag that overlapped a routing bit would send the hello down the job path, and one that
+        // overlapped a segment index would shadow a real segment. Bit 27, nothing else near it.
+        for other in [JOIN_TAG, RESOLVE_TAG, NOLIFT_TAG, LIFT_TAG] {
+            assert_eq!(HELLO_TAG & other, 0, "HELLO_TAG overlaps {other:#x}");
+        }
+        assert_ne!(HELLO_TAG, SEG_EOF);
+        assert_eq!(HELLO_TAG & (JOIN_TAG | RESOLVE_TAG | LIFT_TAG), 0,
+                   "the reader's routing test must not match a hello");
+        // And it is above any plausible segment index: a block would need 134M segments to reach it.
+        assert!(HELLO_TAG > 100_000_000);
+    }
+}
+
 fn pack_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + a.len() + b.len());
     v.extend_from_slice(&(a.len() as u32).to_le_bytes());
@@ -6195,6 +6291,10 @@ fn seg_reconnect(id: &str, addr: &str, s: &mut std::net::TcpStream,
                 *attempt = 0;
                 *last_send_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                // #570: a reconnect is a NEW connection to the aggregate, with a new ephemeral port
+                // and no memory of who we are, so the hello has to go again. Best-effort: if this
+                // write fails the link is already gone and the next send will find that out.
+                write_frame(s, HELLO_TAG, id.as_bytes()).ok();
                 println!("[reconnect] [{id}] reconnected to {addr}");
                 return true;
             }
@@ -6588,6 +6688,9 @@ fn seg_connect_cmd(addr: &str) {
     let quiet = std::env::var("HAZYNC_SEG_QUIET").is_ok();
     let now_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let say = |line: String| if quiet { println!("{line}") } else { println!("{} {line}", now_ms()) };
+    // #570: name ourselves before any work is exchanged, so every [rtt] line the aggregate prints for
+    // this connection can be attributed to THIS card rather than to a shared egress IP.
+    write_frame(&mut s, HELLO_TAG, id.as_bytes()).ok();
     say(format!("[{id}] connected to {addr}"));
 
     let (mut done, t0) = (0usize, Instant::now());
@@ -7047,6 +7150,10 @@ fn seg_serve_cmd() {
                         // shared across peers) because the whole point is that peers differ: on the run this
                         // was sized from, two healthy workers were 7.4x apart at p90.
                         let peer_rtts: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+                        // #570: who this connection says it is. Written once by the reader when the
+                        // hello arrives, read by the reader's [rtt] line and by the writer's timeout
+                        // line. Empty until then, and it stays empty for a worker too old to say.
+                        let card: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
                         // hazync#252: the send INSTANT rides with the job. Assembly's cost was
                         // attributed to geography by inference — run 4 measured 128.7 s where compute
                         // alone predicts ~17 s — and the issue says so in as many words: "that part is
@@ -7064,8 +7171,9 @@ fn seg_serve_cmd() {
                             // #365: peer_rtts is written by the reader (it times each completed round
                             // trip) and read by the writer (it sizes that peer's deadline), so it is
                             // cloned here like inflight/injobs rather than moved into the closure.
-                            let (inflight, injobs, stop, peer_rtts) =
-                                (inflight.clone(), injobs.clone(), stop.clone(), peer_rtts.clone());
+                            let (inflight, injobs, stop, peer_rtts, card) =
+                                (inflight.clone(), injobs.clone(), stop.clone(), peer_rtts.clone(),
+                                 card.clone());
                             let (out, jout, last_out, queue, jobs) =
                                 (out.clone(), jout.clone(), last_out.clone(), queue.clone(), jobs.clone());
                             std::thread::spawn(move || {
@@ -7073,6 +7181,17 @@ fn seg_serve_cmd() {
                                 let ctx = &VerifierContext::default();
                                 loop {
                                     let (i, body) = match read_frame(&mut rs) { Ok(v) => v, Err(_) => break };
+                                    // #570: the hello, before any routing. It is not a job reply, so
+                                    // it must never reach the tag match below -- an unrecognised tag
+                                    // falls through to the SEGMENT path, which would pop a receipt
+                                    // that was never sent and index `out` by a tag bit.
+                                    if i == HELLO_TAG {
+                                        if let Some(name) = hello_card_name(&body) {
+                                            println!("  worker at {peer} is card {name}");
+                                            *card.lock().unwrap() = name;
+                                        }
+                                        continue;
+                                    }
                                     // EVERY job reply lands in jout, keyed by the tag it came
                                     // back under -- joins, resolves AND the merged lift (#161).
                                     //
@@ -7103,7 +7222,12 @@ fn seg_serve_cmd() {
                                         if let Some((_, ref sent_body, at)) = owed {
                                             let kind = if i & RESOLVE_TAG != 0 { "resolve" }
                                                        else if i & LIFT_TAG != 0 { "lift" } else { "join" };
-                                            println!("  [rtt] peer={peer} kind={kind} tag={i:#x} \
+                                            // #570: card= is the worker's own name; peer= stays
+                                            // because it is still what routes, and the two together
+                                            // are what show several cards sharing one egress IP.
+                                            let who = card.lock().unwrap();
+                                            let who = if who.is_empty() { "?" } else { who.as_str() };
+                                            println!("  [rtt] card={who} peer={peer} kind={kind} tag={i:#x} \
 rtt_ms={:.1} bytes_out={} bytes_in={}",
                                                      at.elapsed().as_secs_f64() * 1000.0,
                                                      sent_body.len(), body.len());
@@ -7194,7 +7318,12 @@ rtt_ms={:.1} bytes_out={} bytes_in={}",
                                     // Loud, for the same reason the push-depth clamp is loud: a peer
                                     // dropped in silence reads as "the run is just slow".
                                     let (nseg, njob) = (inflight.lock().unwrap().len(), injobs.lock().unwrap().len());
-                                    println!("  ⛔ peer={peer} has not answered {what} for {age:.0}s \
+                                    // #570: name the card being dropped. "peer 1.2.3.4 was dropped"
+                                    // is useless when eleven cards share that address — it reads as
+                                    // if the whole pod went, and nothing says which GPU to replace.
+                                    let who = { let g = card.lock().unwrap();
+                                                if g.is_empty() { "?".to_string() } else { g.clone() } };
+                                    println!("  ⛔ card={who} peer={peer} has not answered {what} for {age:.0}s \
 (window {win:.0}s from its own {} round trips, HAZYNC_JOB_TIMEOUT_*). Dropping it and requeueing \
 {nseg} segment(s) + {njob} job(s) — hazync#365.",
                                              peer_rtts.lock().unwrap().len());
