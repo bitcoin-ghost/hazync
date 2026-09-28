@@ -968,6 +968,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_tip_vs_board.py --control
+      - name: /api/state does not ship the 19.8 MB verified-range list
+        # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
+        # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
+        # map polled that UNSLIMMED every ten seconds. The old default protected nobody -- no client
+        # could complete the request (#543).
+        run: cd coordinator && python3 test_state_payload.py
+      - name: State-payload POSITIVE CONTROL (vranges by default — the 19.8 MB must come back)
+        run: cd coordinator && python3 test_state_payload.py --control
       - name: A verified block COUNTS on the dashboard (tools/live)
         # ⛔ `done` was inferred from 5 s of silence. The collector stops when the run ends, BEFORE
         # its own grace period elapses, so the LAST block of every run never counted. Captured

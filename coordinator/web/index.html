@@ -247,10 +247,29 @@
       signatures:"ed25519", verify_mode:"real"
     };
   }
+  // ---- polling: a small state every 10 s, the big list only when it can have changed (#543) ----
+  // This page polled the UNSLIMMED /api/state every ten seconds. `vranges` is ~99.95% of that payload
+  // and it grew to 19.8 MB: measured 2026-09-28, /api/state?slim=1 was 9,859 B in 0.16 s against
+  // 19,795,606 B in 33.3 s, and by then the full endpoint was 504-ing at the edge. So the page was
+  // asking for twenty megabytes six times a minute and had stopped being able to load at all.
+  //
+  // /api/vranges has had its own cache and ETag since #35. The verified list only moves when
+  // progress.proven moves, so it is fetched on the first poll and thereafter only when that number
+  // changes -- and If-None-Match turns an unchanged refetch into a 304.
+  var VRANGES=[], VR_AT=-1, VR_BUSY=false;
+  function refreshVranges(proven){
+    if(VR_BUSY || proven===VR_AT) return;                 // nothing new has been proved
+    VR_BUSY=true;
+    fetch(API+'/api/vranges').then(function(r){if(!r.ok)throw 0;return r.json();})
+      .then(function(v){VRANGES=(v&&v.vranges)||[];VR_AT=proven;VR_BUSY=false;
+                        if(VIEW.data){VIEW.data.vranges=VRANGES;renderBoard();}})
+      .catch(function(){VR_BUSY=false;});                  // keep the last good list; never blank the map
+  }
   function poll(){
-    fetch(API+'/api/state').then(function(r){if(!r.ok)throw 0;return r.json()})
-      .then(function(d){showBanner(false);render(d);})
-      .catch(function(){showBanner(true);render(emptyData());});   // unreachable → honest empty state, not fake data
+    fetch(API+'/api/state?slim=1').then(function(r){if(!r.ok)throw 0;return r.json()})
+      .then(function(d){showBanner(false);d.vranges=VRANGES;render(d);
+                        refreshVranges((d.progress&&d.progress.proven)||0);})
+      .catch(function(){showBanner(true);render(emptyData());});   // unreachable -> honest empty state, not fake data
   }
   poll();setInterval(poll,10000);
 </script></body></html>
