@@ -248,6 +248,14 @@ jobs:
         run: cd coordinator && python3 test_tip_recruit.py
       - name: Recruiter POSITIVE CONTROL (counts only the fleet — must over-rent)
         run: cd coordinator && python3 test_tip_recruit.py --control
+      - name: wait_for_ssh returns a dict, and every caller reads it as one
+        # ⛔ The --grow-to gate did `cs[0]` against a dict keyed by pod name, so it raised
+        # KeyError: 0 on the first recruit the feature ever gated on hardware (2026-09-28). Every
+        # recruit was rented, failed instantly and released — the fleet could never have grown, and
+        # it would have looked like bad luck with capacity rather than a defect.
+        run: cd coordinator && python3 test_wait_for_ssh_shape.py
+      - name: "wait_for_ssh POSITIVE CONTROL (`cs[0]` restored — must raise KeyError: 0)"
+        run: cd coordinator && python3 test_wait_for_ssh_shape.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator
