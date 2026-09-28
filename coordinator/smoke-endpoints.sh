@@ -45,6 +45,21 @@ chk() { # name method path expected-code
 chk "GET  /api/meta"      GET  /api/meta        200
 chk "GET  /api/state"     GET  /api/state       200
 chk "GET  /api/state?slim" GET "/api/state?slim=1" 200
+chk "GET  /api/state?full" GET "/api/state?full=1" 200
+# ⛔ AND IT MUST STAY SMALL (hazync#543). A 200 says the handler answered, not that anything can
+# USE the answer: /api/state reached 19,795,606 B and 33.3 s, which shields.io and the browser both
+# gave up on -- the README badges read "inaccessible" and the block map stopped loading. The number
+# below is generous against a ~10 KB slim response and would have caught that at 1% of its size.
+size_chk() { # name path max-bytes
+    local n
+    n=$(curl -s -o /dev/null -w '%{size_download}' --max-time 20 "http://127.0.0.1:$PORT$2")
+    if [ -n "$n" ] && [ "$n" -le "$3" ] 2>/dev/null; then
+        printf '  ok   %-22s %s B (<= %s)\n' "$1" "$n" "$3"
+    else
+        printf '  FAIL %-22s %s B, want <= %s — vranges is probably back on /api/state\n' "$1" "$n" "$3"; fail=1
+    fi
+}
+size_chk "SIZE /api/state"   /api/state        200000
 chk "GET  /api/vranges"   GET  /api/vranges     200
 # 409, not 200: this throwaway instance serves no witnesses, so there is genuinely nothing to claim
 # and refusing is the right answer. What is being asserted is that the endpoint EXISTS and answers —

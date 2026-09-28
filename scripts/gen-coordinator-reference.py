@@ -44,7 +44,7 @@ ROUTES = {
     "GET /api/state":
         "Board snapshot: `progress`, `blocked` (the frontier's next block and why), the board window, "
         "`leaderboard`, `recent` submissions, `claims`, `fold_claims` (#333), `frontier_proof`, `timeline`, `signatures`, "
-        "`verify_mode`. `?slim=1` omits `vranges`. Coalesced for `STATE_CACHE_TTL` (`state_cached`).",
+        "`verify_mode`. ⛔ **`vranges` is NOT included by default** (#543): the list reached 19.8 MB and 33 s and the endpoint 504'd at the edge, so nothing could read it. Fetch it from `/api/vranges`, which has its own cache and `ETag`, or ask for `?full=1`. `?slim=1` is still accepted and is now the default behaviour. Coalesced for `STATE_CACHE_TTL` (`state_cached`).",
     "GET /api/vranges":
         "The full verified-range index (`lo`, `hi`, `handle`, `fold`, `proof` link), built by "
         "`build_vranges`. Single-flight cache for `VRANGES_CACHE_TTL`; weak `ETag`, `304` on "

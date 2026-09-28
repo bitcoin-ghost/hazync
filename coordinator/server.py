@@ -4018,11 +4018,22 @@ class H(BaseHTTPRequestHandler):
         if p.startswith("/api/") and not rate_ok(self._client_ip(), "r", RATE_MAX_GET):
             return self._send(429, {"error": "rate limit — slow down"})
         if p == "/api/state":
-            # ?slim=1 omits vranges — the board polls this every 10s and fetches /api/vranges only when
-            # progress moves. Default keeps vranges so existing clients are unaffected (#35).
-            if parse_qs(urlparse(self.path).query).get("slim", ["0"])[0] not in ("0", "", "false"):
-                return self._send(200, raw=state_cached(slim=True), ctype="application/json")
-            return self._send(200, raw=state_cached(), ctype="application/json")
+            # ⛔⛔ SLIM IS THE DEFAULT NOW (hazync#543). Keeping vranges "so existing clients are
+            # unaffected" stopped being kind once the list outgrew what anyone could fetch:
+            #
+            #     /api/state?slim=1     9,859 B   0.16 s   200
+            #     /api/state           19.8 MB   33.3 s -> 504 at the edge, measured 2026-09-28
+            #
+            # A client that cannot complete a request is not being protected by the default. Every
+            # one of them was already broken, including the four README badges, which rendered
+            # `inaccessible` on the repository front page. vranges has had its own endpoint with its
+            # own cache and ETag since #35, and it is ~99.95% of this payload.
+            #
+            # ⚠ ?full=1 still serves it, so anything that genuinely wants the whole thing in one
+            # response can ask -- and now has to ask, which is the point.
+            q = parse_qs(urlparse(self.path).query)
+            full = q.get("full", ["0"])[0] not in ("0", "", "false")
+            return self._send(200, raw=state_cached(slim=not full), ctype="application/json")
         if p == "/api/vranges":
             raw, etag = vranges_cached()
             if _etag_matches(self.headers.get("If-None-Match"), etag):
