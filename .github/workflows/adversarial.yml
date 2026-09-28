@@ -256,6 +256,14 @@ jobs:
         run: cd coordinator && python3 test_wait_for_ssh_shape.py
       - name: "wait_for_ssh POSITIVE CONTROL (`cs[0]` restored — must raise KeyError: 0)"
         run: cd coordinator && python3 test_wait_for_ssh_shape.py --control
+      - name: A grown fleet reaches the dashboard with its price and GPU name
+        # ⛔ `fleet` is derived from `created` ONCE before the loop, so --grow-to appended the recruit
+        # to the run but not to the feed. feed_records refused it (rightly — price=0 under-reports a
+        # run with no budget cap, dropping it hides a billing pod). Measured 2026-09-28: the fleet
+        # proved a block on 3 cards while the dashboard still showed 2.
+        run: cd coordinator && python3 test_grow_feed.py
+      - name: Grown-feed POSITIVE CONTROL (fleet left stale — feed_records must refuse)
+        run: cd coordinator && python3 test_grow_feed.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator

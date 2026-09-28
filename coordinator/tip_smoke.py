@@ -1936,12 +1936,28 @@ def main():
                 for item in joined:
                     order.append(item["card"])
                     created.append(item["pod"])
-                # ⚠ The feed was written for the fleet that went through the gates; rewrite it, or
-                # the dashboard shows a fleet that no longer matches what is proving.
+                    # ⛔ `fleet` IS DERIVED FROM `created`, ONCE, BEFORE THE LOOP — the same shape of
+                    # bug as `assignment`. Appending to `created` alone left feed_records with a card
+                    # it had no price or GPU name for, and its guard refused (rightly: defaulting the
+                    # price to 0 under-reports a run with no budget cap, and dropping the card hides
+                    # a pod that is proving and being billed). Measured 2026-09-28: the fleet grew to
+                    # 3 and proved a block on 3 cards while the dashboard still showed 2.
+                    # EXTEND, do not rebind — the list is closed over by this function.
+                    pod = item["pod"]
+                    fleet.append({"id": pod["name"], "price": pod["price"],
+                                  "gpu": pod["gpu_type"], "pod_id": pod["id"]})
+                    # ⛔ AND THE SESSION'S OWN RECORD OF ITS FLEET. resume_verdict compares
+                    # state["fleet"] against the pods that are actually alive: a recruit missing from
+                    # it shows up as `extra` on every resume, and if the ORIGINAL cards die while the
+                    # recruits live, `recorded & live` is empty and the session refuses to resume —
+                    # "this is a new fleet, not a resume" — about the fleet it grew itself.
+                    # tip_economics also sizes a run by len(state["fleet"]).
+                    state["fleet"] = sorted(set(state.get("fleet") or ()) | {str(pod["id"])})
                 try:
                     feed.start(tip_dashboard.feed_records(order, fleet)["records"])
                 except Exception as exc:                       # noqa: BLE001
                     log(f"  ⚠ could not rewrite the feed after growing: {exc}")
+                tip_session.save(spath, state)   # the record must survive the driver, as ever
                 names = ", ".join(i["pod"].get("name", "?") for i in joined)
                 return (f"fleet grew by {len(joined)} to {len(order)} cards ({names}) — "
                         f"they join from the next block")
