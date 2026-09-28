@@ -6798,6 +6798,167 @@ fn join_tree_widths(n: usize) -> Vec<usize> {
     widths
 }
 
+/// One block's phases, with the OVERLAP made explicit (hazync#567).
+///
+/// ⛔ WHAT THIS EXISTS FOR. The summary used to print `TOTAL = execution + worker wall + assembly`,
+/// and those windows OVERLAP: the executor publishes each segment as it is produced (one-segment lag),
+/// so connected workers are already proving while it runs — the comment at the executor call says so
+/// in as many words, "that overlap is the entire point of the change". The timers were started 100
+/// lines apart in the same scope and both ran through it, so adding them counted execution twice.
+///
+/// It was not a cosmetic error. It inflated the reported cost of every tip block and produced a
+/// "serial floor" that included a phase which is not serial, and the conclusion drawn from it —
+/// that a 8,924-segment block needs ~102 cards — was wrong by a factor of nearly three.
+///
+/// 📏 The two tables in `docs/history/TIP_HOUR_3_2026-09-28.md` disagreed by exactly this amount, from
+/// two independent measurement paths, and nobody noticed:
+///
+///     969,018   session wall  691.7 s   phase sum  885.6 s   excess 193.9 s   execution 205.8 s
+///     969,019   session wall 1027.9 s   phase sum 1299.0 s   excess 271.1 s   execution 277.3 s
+///
+/// The excess is execution minus the prologue, on both blocks. That is the signature.
+///
+/// ⇒ **The serial floor is `prologue + assembly`, NOT `execution + assembly`.** Execution is hidden
+/// behind the segment phase until the fleet is big enough to outrun the executor, and
+/// `exec_bound_cards` says where that is.
+#[derive(Debug, Clone, Copy)]
+struct BlockPhases {
+    /// Setup before the first segment can be published: bind, allocate, spawn. Genuinely serial.
+    prologue_s: f64,
+    /// The executor's own window. ⚠ CONTAINED IN `segment_s` — never add it to anything.
+    exec_s: f64,
+    /// First segment published → last segment returned. Production and proving, overlapped.
+    segment_s: f64,
+    /// Last segment + join tree + resolves, on the aggregate alone. Genuinely serial.
+    assembly_s: f64,
+}
+
+impl BlockPhases {
+    /// Wall time for the block. The phases that do NOT overlap, so this is the honest total.
+    fn total_s(&self) -> f64 { self.prologue_s + self.segment_s + self.assembly_s }
+
+    /// The part no number of cards can shrink.
+    fn serial_floor_s(&self) -> f64 { self.prologue_s + self.assembly_s }
+
+    /// What the old summary printed. Kept ONLY so a test can assert we never print it again.
+    ///
+    /// ⚠ All four fields, because the old `execution` column was itself `prologue + executor` — its
+    /// timer started before the bind. Summing those columns therefore added the prologue once and the
+    /// executor once, on top of a segment phase that already contained both.
+    fn naive_sum_s(&self) -> f64 {
+        self.prologue_s + self.exec_s + self.segment_s + self.assembly_s
+    }
+
+    /// How much the naive sum over-counted: exactly the executor window, which ran inside the
+    /// segment phase and was then added to it.
+    fn overcount_s(&self) -> f64 { self.naive_sum_s() - self.total_s() }
+
+    /// Fleet size at which EXECUTION becomes the binding constraint rather than proving.
+    ///
+    /// Below this the executor is hidden and cards still buy time; at and above it the segment phase
+    /// cannot go below `exec_s` however many cards join, so #567's executor work is the only lever
+    /// left. `None` when there is nothing to divide.
+    fn exec_bound_cards(&self, cards: usize) -> Option<f64> {
+        if cards == 0 || self.exec_s <= 0.0 { return None; }
+        Some(self.segment_s * cards as f64 / self.exec_s)
+    }
+}
+
+#[cfg(test)]
+mod block_phases_tests {
+    use super::BlockPhases;
+
+    // 969,019 as measured on tip hour 3: the block that produced the "~102 cards" claim.
+    //
+    // 📏 The two figures the run recorded, from independent paths:
+    //   session wall              1027.9 s   (the coordinator's own clock)
+    //   OLD reported execution     277.3 s   (the aggregate's `execution` line)
+    //   OLD phase sum             1299.0 s   ⇒ excess over the wall = 271.1 s
+    //
+    // ⭐ The excess (271.1) is LESS than the reported execution (277.3) by 6.2 s, and that gap is
+    // itself evidence: the old `execution` timer started ~6 s before the first segment could be
+    // published, so it carried the prologue. Splitting them gives prologue 6.2 s and an executor
+    // window of 271.1 s — and the executor window is then exactly the over-count, which is the
+    // property `overcount_s` asserts.
+    const OLD_REPORTED_EXEC: f64 = 277.3;
+    const OBSERVED_EXCESS: f64 = 271.1;
+
+    fn b969019() -> BlockPhases {
+        let prologue_s = OLD_REPORTED_EXEC - OBSERVED_EXCESS;          // 6.2
+        BlockPhases {
+            prologue_s,
+            exec_s: OBSERVED_EXCESS,                                   // the executor alone
+            // What actually elapsed between the first segment going out and the last coming back.
+            segment_s: 1027.9 - 161.9 - prologue_s,
+            assembly_s: 161.9,
+        }
+    }
+
+    #[test]
+    fn the_total_matches_the_session_wall_not_the_old_sum() {
+        let p = b969019();
+        assert!((p.total_s() - 1027.9).abs() < 0.05,
+                "total {} must be the session wall", p.total_s());
+        // ⛔ THE BUG, REPRODUCED: the old arithmetic returns a number 271 s longer than the block took.
+        // The old summary printed 1299.0 s for this block. Reproduce it exactly.
+        assert!((p.naive_sum_s() - 1299.0).abs() < 0.05,
+                "naive sum {} must reproduce the 1299.0 s the run actually printed", p.naive_sum_s());
+        assert!(p.naive_sum_s() > p.total_s() + 200.0,
+                "the old sum must be visibly wrong, or this test proves nothing");
+        assert!((p.overcount_s() - p.exec_s).abs() < 0.001,
+                "the over-count IS the executor window: {} vs {}", p.overcount_s(), p.exec_s);
+    }
+
+    #[test]
+    fn the_serial_floor_excludes_execution() {
+        let p = b969019();
+        assert!((p.serial_floor_s() - 168.1).abs() < 0.01, "floor {}", p.serial_floor_s());
+        // 27% of a 600 s gate, not the 73% that "execution + assembly" produced.
+        assert!(p.serial_floor_s() / 600.0 < 0.30, "floor is {:.0}% of the gate",
+                p.serial_floor_s() / 6.0);
+        assert!(p.exec_s + p.assembly_s > 430.0,
+                "and the old floor really was ~73% — the control for the line above");
+    }
+
+    #[test]
+    fn cards_needed_is_far_below_the_hundred_the_old_floor_implied() {
+        let p = b969019();
+        // Parallel work in card-seconds, from the fleet that actually ran it.
+        let card_s = p.segment_s * 19.0;
+        let budget = 600.0 - p.serial_floor_s();
+        let needed = (card_s / budget).ceil();
+        assert_eq!(needed, 38.0, "needed {needed} cards");
+        assert!(needed < 50.0, "the ~102-card conclusion came from the double-counted floor");
+    }
+
+    #[test]
+    fn execution_becomes_binding_only_on_a_large_fleet() {
+        let p = b969019();
+        let n = p.exec_bound_cards(19).unwrap();
+        // 859.8 s of segment phase on 19 cards vs a 271.1 s executor ⇒ ~60 cards.
+        assert!((n - 60.3).abs() < 0.5, "crossover at {n} cards");
+        // ⇒ 38 cards is still worker-bound, so the fleet lever works there. Past ~59 it does not.
+        assert!(n > 38.0, "if the crossover were below 38, cards could not reach the gate at all");
+    }
+
+    #[test]
+    fn a_fleet_that_outruns_the_executor_reports_no_further_gain() {
+        // Segment phase already down to the executor's window: more cards cannot help.
+        let p = BlockPhases { prologue_s: 6.2, exec_s: 271.1, segment_s: 271.1, assembly_s: 161.9 };
+        assert!((p.exec_bound_cards(60).unwrap() - 60.0).abs() < 0.01);
+        assert!(p.total_s() < 600.0, "and it does make the gate: {:.0}s", p.total_s());
+    }
+
+    #[test]
+    fn degenerate_inputs_do_not_panic() {
+        let z = BlockPhases { prologue_s: 0.0, exec_s: 0.0, segment_s: 0.0, assembly_s: 0.0 };
+        assert_eq!(z.total_s(), 0.0);
+        assert_eq!(z.overcount_s(), 0.0);
+        assert!(z.exec_bound_cards(10).is_none(), "no executor window ⇒ no crossover to report");
+        assert!(b969019().exec_bound_cards(0).is_none(), "no cards ⇒ nothing to divide");
+    }
+}
+
 fn seg_serve_cmd() {
     use risc0_zkvm::{ExecutorImpl, VerifierContext, SegmentReceipt, SuccinctReceipt, ReceiptClaim};
     use risc0_zkvm::sha::Digestible;
@@ -6877,7 +7038,9 @@ fn seg_serve_cmd() {
     // not knowable until execution ends. Segments are therefore published with a ONE-SEGMENT LAG:
     // on producing segment i we publish i-1. The final one is published only once the executor has
     // returned, by which point it is known to be last, so no worker can ever receive it.
-    let t_exec = Instant::now();
+    // hazync#567: the WHOLE block window. TOTAL is now MEASURED here rather than summed from phases
+    // that overlap — see BlockPhases for what the sum got wrong and by how much.
+    let t_block = Instant::now();
 
     // Each segment's bytes sit behind their own Arc, so a sender clones a pointer under the lock
     // instead of ~0.77 MB while other threads wait on it.
@@ -6977,6 +7140,9 @@ fn seg_serve_cmd() {
         .unwrap_or_else(|e| panic!("bind {bind_addr}:{port}: {e}"));
     listener.set_nonblocking(true).ok();
 
+    // #567: everything before this point is genuinely serial — no segment can have been published
+    // yet, so no worker can be busy. This, plus assembly, is the real floor.
+    let prologue_s = t_block.elapsed().as_secs_f64();
     let t_work = Instant::now();
 
     // NO thread::scope HERE, and that is the fix for a deadlock I introduced. The scope's implicit
@@ -6995,6 +7161,11 @@ fn seg_serve_cmd() {
     // is a plain local -- no second shared structure, no mutex.
     let live_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let acc_live = live_peers.clone();
+    // #567: the PEAK, not the live count. The summary is printed after the fold, by which point
+    // workers have dropped — reporting `live_peers` there would divide the segment phase by however
+    // many happened to still be attached, which on a finished run can be one or none.
+    let peak_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let acc_peak = peak_peers.clone();
     let (aq, ao, aw, aj, ajo, alo, atk) =
         (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone(),
          total_known.clone());
@@ -7013,7 +7184,8 @@ fn seg_serve_cmd() {
                     // Incrementing and decrementing in one place keeps them impossible to desynchronise
                     // -- a leaked count would make the no-peers check believe a worker is still there
                     // and never fire, which is the failure this is meant to remove.
-                    acc_live.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let now_live = acc_live.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    acc_peak.fetch_max(now_live, std::sync::atomic::Ordering::Relaxed);
                     let live = acc_live.clone();
                     let (queue, out, wire, jobs, jout, alldone, last_out, total_known) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(),
@@ -7311,6 +7483,10 @@ come back by itself. Start one against this coordinator, or re-run.");
     // to a thread. It does not need to be: the acceptor above is already detached and serving, so
     // running the executor HERE — after the bind — gives the same overlap. Workers connect and prove
     // segment 0 while this call is still producing segment 50.
+    // #567: time the EXECUTOR itself, not the executor plus the setup before it. The old timer
+    // started 100 lines earlier, so `execution` also carried the prologue — which is why the
+    // over-count came to slightly less than the reported execution figure.
+    let t_exec = Instant::now();
     let session = {
         let mut pending: Option<usize> = None;   // the one-segment lag; see the note above
         ExecutorImpl::from_elf(b.build().unwrap(), METHOD_ELF).unwrap()
@@ -7587,14 +7763,26 @@ come back by itself. Start one against this coordinator, or re-run.");
     let asm_s = t_asm.elapsed().as_secs_f64();
     info.receipt.verify(METHOD_ID).expect("PUSH RECEIPT FAILED verify");
 
+    // hazync#567: these phases are NOT a column to add up. `execution` runs INSIDE the segment
+    // phase, so the old `TOTAL = execution + worker wall + assembly` counted it twice and inflated
+    // every block by the executor's window. TOTAL is measured now; the layout says which nest.
+    let phases = BlockPhases { prologue_s, exec_s, segment_s: work_s, assembly_s: asm_s };
     println!();
-    println!("  execution      {exec_s:8.1} s");
-    println!("  worker wall    {work_s:8.1} s   <- pushed, {} segments over the network", total - 1);
-    println!("  assembly       {asm_s:8.1} s   <- last segment + join tree + resolves");
+    println!("  prologue       {prologue_s:8.1} s   <- serial: bind + allocate + spawn");
+    println!("  segment phase  {work_s:8.1} s   <- {} segments produced AND proved, overlapped", total - 1);
+    println!("    of which execution {exec_s:6.1} s   <- INSIDE the line above, not additional");
+    println!("  assembly       {asm_s:8.1} s   <- serial: last segment + join tree + resolves");
     if nres > 0 {
         println!("    of which resolves {res_s:6.1} s   <- {nres} {}", if res_local { "run locally (the default)" } else { "pushed to workers (HAZYNC_RESOLVE_LOCAL=0)" });
     }
-    println!("  TOTAL          {:8.1} s", exec_s + work_s + asm_s);
+    println!("  TOTAL          {:8.1} s   <- MEASURED, not the sum of the above", t_block.elapsed().as_secs_f64());
+    println!("  serial floor   {:8.1} s   <- prologue + assembly; no fleet size reduces it",
+             phases.serial_floor_s());
+    let peak = peak_peers.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(n) = phases.exec_bound_cards(peak) {
+        println!("  {peak} card(s) at peak; execution becomes the binding constraint at ~{n:.0}, \
+and below that cards still buy time — hazync#567");
+    }
     println!();
     println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
     println!("    digest {}", hex(info.receipt.journal.digest().as_bytes()));
