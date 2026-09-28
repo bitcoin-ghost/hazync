@@ -302,6 +302,22 @@ jobs:
         run: cd coordinator && python3 test_beat_progress.py
       - name: Beat-progress POSITIVE CONTROL (joins only — a long block must lose its claim)
         run: cd coordinator && python3 test_beat_progress.py --control
+      - name: The aggregate is elected on cards that can REACH it, then on speed
+        # ⛔ Every segment flows through one card, and it was chosen on throughput alone. Measured
+        # 2026-09-28: hz-smoke-1 won with 33039 Mbit/s to 23 workers over hz-smoke-11 at 13411 to 33.
+        # Nine cards in the winner's own /24 could not reach it, the fleet went 30 -> 21, and the
+        # same host then pulled the 411 MB prover at 53 KB/s and wedged the run (#573).
+        run: cd coordinator && python3 test_aggregate_election.py
+      - name: Aggregate-election POSITIVE CONTROL (fastest wins — the 23-worker host must be chosen)
+        run: cd coordinator && python3 test_aggregate_election.py --control
+      - name: Segment size is chosen by the WEAKEST card, and it cannot be mixed
+        # ⭐ po2 22 measured ~11-12% faster at the tip (962,000, docs/FLEET_OPERATIONS.md:311) and
+        # peaks ~40.6 GB, so it flips a 6,269-segment block from 674s to 597s — under the gate.
+        # ⛔ But `segment_limit_po2()` is set on the ExecutorEnv, so the aggregate segments the block
+        # ONCE: there is no per-card po2, and one 24 GB card in a fleet of 96 GB cards caps everybody.
+        run: cd coordinator && python3 test_seg_po2.py
+      - name: Segment-size POSITIVE CONTROL (pick on the biggest card — a 24GB card must be starved)
+        run: cd coordinator && python3 test_seg_po2.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
@@ -1002,6 +1018,18 @@ jobs:
         run: cd coordinator && python3 join_levels.py --selftest
       - name: Join-level POSITIVE CONTROL (a join that is all compute — the lever must save nothing)
         run: cd coordinator && python3 join_levels.py --selftest --control
+      - name: The cost model reproduces the measured walls, and an INDEPENDENT ledger
+        # ⭐ cost(n) rises with every card: each one pays the whole serial floor, and past the
+        # crossover it pays for a segment phase that can no longer shrink. Card count is a latency
+        # lever, never an economy lever (#567).
+        # ⛔ The serial floor is prologue+assembly, NOT execution+assembly — execution OVERLAPS the
+        # segment phase and the aggregate's summary was adding the two. 969,018 needs 22 cards and
+        # 969,019 needs 38, not the 36 and 102 the double-counted floor implied.
+        # ⚠ Four arms: the phases must reproduce the SESSION WALL (a different clock), the OLD
+        # arithmetic must be reproducibly wrong by exactly the executor window, the derived prologue
+        # must be plausible, and the 22/38-card headlines are pinned. Plus an independent arm over
+        # docs/history/fleet-economics.jsonl, calibrated on none of its rows.
+        run: cd coordinator && python3 tip_cost.py --check
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
