@@ -32,6 +32,7 @@ import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
 import tip_economics                    # noqa: E402
+import tip_chain                        # noqa: E402
 import tip_harvest                      # noqa: E402
 import tip_lifecycle                   # noqa: E402
 import tip_recruit                      # noqa: E402
@@ -748,26 +749,56 @@ def adopt_fleet(api, record_path, expect_names=None):
 
 
 def cleanup(api, rented_path):
-    """Release whatever a dead driver left behind. Safe to run at any time."""
-    try:
-        with open(rented_path) as fh:
-            created = json.load(fh)
-    except (OSError, ValueError):
-        log(f"no rental record at {rented_path} — nothing to clean up")
+    """Release whatever a dead driver left behind. Safe to run at any time.
+
+    ⛔ READ BOTH RECORDS, NEVER JUST ONE (hazync#557). `rented.json` is written by the rent phase and
+    `recruited.json` by the recruiter thread, and a run with `--grow-to` puts cards in the second
+    that the first has never heard of. Measured 2026-09-28: rented.json held 17 while the fleet had
+    grown to 26. Releasing the union is the difference between this command doing its job and
+    reporting success over nine pods still billing at ~$18.81/hr.
+
+    ⚠ This is the RECOVERY path -- it runs precisely when the driver is not around to know better,
+    so it must assume its own bookkeeping is incomplete.
+    """
+    rec_path = os.path.join(os.path.dirname(rented_path), "recruited.json")
+    pods, sources = {}, {}
+    for path, what in ((rented_path, "rented.json"), (rec_path, "recruited.json")):
+        try:
+            with open(path) as fh:
+                for p in json.load(fh):
+                    if p.get("id"):
+                        pods.setdefault(p["id"], p)
+                        sources.setdefault(p["id"], what)
+        except (OSError, ValueError):
+            log(f"  (no usable {what})")
+    if not pods:
+        log(f"no rental record at {rented_path} or {rec_path} — nothing to clean up")
         return 0
-    ids = [p["id"] for p in created]
+    only_rec = [i for i, s in sources.items() if s == "recruited.json"]
+    log(f"cleanup: {len(pods)} pod(s) across both records"
+        + (f", {len(only_rec)} of them known ONLY to recruited.json" if only_rec else ""))
+
+    ids = list(pods)
     v = tip_session.terminable(ids, ids)
     log(f"cleanup: releasing {v['terminate']} (protected={v['protected']} not-ours={v['not_ours']})")
     for pid in v["terminate"]:
         log(f"  {pid}: {'gone' if sponsor_bot.terminate_confirmed(api, pid) else '⛔ STILL LISTED'}")
-    live = {p["id"] for p in api.pods()}
-    left = [p["name"] for p in created if p["id"] in live]
+
+    # ⛔ CHECK THE ACCOUNT, NOT OUR OWN LIST. A pod this command never heard of is exactly the
+    # failure it exists to catch, and comparing only against `pods` can never see one.
+    live = {p["id"]: p.get("name") for p in api.pods()}
+    left = [pods[i].get("name") or i for i in pods if i in live]
+    unknown = [n for i, n in live.items() if i not in pods and not tip_session.is_protected(i)]
     log(f"account check: {'clean' if not left else '⛔ STILL PRESENT: ' + str(left)}")
+    if unknown:
+        log(f"⚠ {len(unknown)} pod(s) on the account that neither record knows about: {unknown} — "
+            f"NOT touched (this command only releases what it can show it rented)")
     if not left:
-        try:
-            os.unlink(rented_path)
-        except OSError:
-            pass
+        for path in (rented_path, rec_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     return 0 if not left else 1
 
 def main():
@@ -787,6 +818,25 @@ def main():
     # to mine a block above the --fresh-tip floor, filling the time with board work. A quarter of the
     # hour was gone before the first tip block existed, so "blocks proved in one hour" understated the
     # fleet by whatever the chain happened to be doing. Board fill does NOT start the clock.
+    # ⛔ THE TIP IS PROVED IN SEQUENCE (hazync#556). The selector asked `highest_tip_bundle` what to
+    # prove next, so when 968,984 and 968,985 were mined 5 seconds apart on 2026-09-28 their bundles
+    # landed together, the run took 985, and 984 has no proof and never will. The product is a CHAIN
+    # of proofs: a gap is a missing link, not a slower result.
+    ap.add_argument("--tip-max-behind", type=int, default=3,
+                    help="how many unproved tip bundles may queue before the session gives up on "
+                         "sequence and jumps to the newest, recording the skipped heights "
+                         "(0 = never jump, always stay sequential). Default 3")
+    # ⚠ A SEQUENTIAL RUN THAT CAN NEVER CATCH UP STOPS FOLLOWING THE TIP AT ALL, which is the thing
+    # the rig exists to demonstrate. The bound above is what keeps "gapless" from quietly becoming
+    # "permanently behind"; the skip is then explicit, in the ledger and in the summary.
+    ap.add_argument("--tip-from", type=int, default=0,
+                    help="start the tip floor just below this height instead of at the current "
+                         "tip, to close a known gap (e.g. --tip-from 968984). Overrides "
+                         "--fresh-tip's floor")
+    ap.add_argument("--allow-tip-gaps", action="store_true",
+                    help="prove a tip block even when it is not the child of the last one proved. "
+                         "⛔ Produces a proof chain with a hole in it; the refusal exists for a "
+                         "reason and this is for recovery only")
     ap.add_argument("--clock-from-tip", action="store_true",
                     help="start the --session window at the FIRST TIP BLOCK rather than when the "
                          "fleet is ready. Waiting and board fill are then billed but not counted "
@@ -1666,6 +1716,35 @@ def main():
                         bok, bwhy = tip_board.fetch_bundle(int(rng), bp)
                     if not bok:
                         raise RuntimeError(f"no bundle for {rng}: {bwhy}")
+
+                # ⭐ IS THIS THE NEXT LINK? (hazync#556) Checked AFTER the bundle is on disk and
+                # BEFORE a single GPU touches it, so a gap costs one file read rather than a block
+                # of fleet time. Only tip work: board blocks are deliberately out of order.
+                #
+                # ⛔ A DECLARED JUMP IS NOT A GAP TO REFUSE. If --tip-max-behind made the selector
+                # skip ahead, the parent is not the block we proved and the check would refuse work
+                # the operator asked for. The link is RESET instead, and the skip is already in the
+                # ledger from pick_tip -- so the hole is recorded once, in one place, either way.
+                if from_tip:
+                    try:
+                        with open(bp) as _fh:
+                            _doc = json.load(_fh)
+                    except (OSError, ValueError) as _exc:
+                        raise RuntimeError(f"bundle for {rng} is unreadable: {_exc}")
+                    _prev = None if int(rng) in jumped else proved_tip.get("header")
+                    v = tip_chain.verdict(_doc, expect_height=int(rng), prev_header=_prev)
+                    tip_note("link", height=int(rng), ok=bool(v["ok"]), linked=bool(v["linked"]),
+                             parent=v["parent"], why=v["why"])
+                    if not v["ok"]:
+                        if a.allow_tip_gaps:
+                            log(f"  ⚠ CHAIN CHECK FAILED and --allow-tip-gaps is set, proving "
+                                f"anyway: {v['why']}")
+                        else:
+                            raise RuntimeError(f"refusing to prove {rng}: {v['why']}")
+                    log("  chain: " + ("LINKED — " if v["linked"] else "unlinked — ") + v["why"])
+                    # Held until the proof succeeds; a block we failed to prove must not become the
+                    # parent the next one is checked against.
+                    staged_header[int(rng)] = tip_chain.bundle_header(_doc)
                 hi_l = {"n": 0}
 
                 def _b(progress):
@@ -1716,8 +1795,19 @@ def main():
             # runs from "this block did not exist" to "its proof is accepted", which is the only
             # figure that supports a claim about following the tip. It also prices boot separately:
             # renting and gating happen while waiting, so they cannot hide inside a block's time.
-            proved_tip = {"h": 0}
-            if a.fresh_tip:
+            # `header` is the 80 bytes of the last tip block we proved — the thing the NEXT bundle
+            # must name as its parent. None until we have proved one, which is why the first tip
+            # block of a session is reported as unlinked rather than as verified (hazync#556).
+            proved_tip = {"h": 0, "header": None}
+            # ⛔ AN EXPLICIT FLOOR BEATS THE FRESH ONE. --fresh-tip sets the floor at the current tip,
+            # so a height that was skipped earlier is below it for ever and no later run can reach
+            # back for it. 968,984 and 968,986 are in exactly that position after 2026-09-28.
+            if a.tip_from:
+                proved_tip["h"] = int(a.tip_from) - 1
+                log(f"TIP FROM: floor set at {a.tip_from - 1} — the next tip block proved will be "
+                    f"{a.tip_from}, to close a known gap"
+                    + (" (overriding --fresh-tip)" if a.fresh_tip else ""))
+            elif a.fresh_tip:
                 t0h = tip_board.highest_tip_bundle(a.bridge_host)
                 if t0h:
                     proved_tip["h"] = int(t0h)
@@ -1761,6 +1851,14 @@ def main():
             # run backwards. The lag that matters is measured from the former.
             tipledger = os.path.join(a.rundir, "tip_ledger.jsonl")
             seen_at = {}
+            # ⚠ Noted ONCE each. work_fn runs every loop, so an unguarded skip line would fill the
+            # ledger with the same gap and make it unreadable as evidence.
+            gap_noted = set()
+            # Heights the selector reached by JUMPING. The chain check refuses an UNEXPECTED gap;
+            # a jump the operator's own --tip-max-behind asked for is declared, so it resets the
+            # link rather than failing it. Without this the two features would contradict.
+            jumped = set()
+            staged_header = {}
 
             def tip_note(event, **kv):
                 rec = {"event": event, "t": round(time.time(), 3),
@@ -1771,14 +1869,49 @@ def main():
                 except OSError:
                     pass          # a ledger that cannot be written must never stop a run
 
+            def pick_tip():
+                """The next tip height to prove, IN SEQUENCE, and what taking it skips (hazync#556).
+
+                ⛔ THE LOWEST UNPROVED, NOT THE HIGHEST. `highest_tip_bundle` was the selector, so two
+                blocks mined seconds apart meant the lower one was skipped for good: 968,984 and
+                968,985 both appeared at 13:24:59 on 2026-09-28 and only 985 was ever proved.
+
+                ⛔ AND `appeared` IS WRITTEN FOR EVERY BUNDLE, NOT JUST THE MAXIMUM. The old loop
+                noted only the height it selected, so 968,984 has no `appeared` line in the tip
+                ledger at all -- the file that exists to be the audit trail read as complete and
+                gapless while a block went by unproven. A fix that leaves the evidence blind is not
+                a fix.
+
+                Returns (chosen, skipped, newest).
+                """
+                hs = tip_board.tip_bundles_above(a.bridge_host, proved_tip["h"])
+                now_t = time.time()
+                for h in hs:
+                    if h not in seen_at:
+                        seen_at[h] = now_t
+                        tip_note("appeared", height=int(h))
+                if not hs:
+                    return None, [], None
+                newest = hs[-1]
+                # ⚠ The policy is a pure function in tip_board so it can be tested without a bridge,
+                # an ssh hop or a fleet. This closure only does the bookkeeping around it.
+                chosen, skipped = tip_board.choose_tip(hs, a.tip_max_behind)
+                for h in skipped:
+                    if h not in gap_noted:
+                        gap_noted.add(h)
+                        tip_note("skipped", height=int(h), chose=int(chosen),
+                                 why=f"{len(hs)} tip bundles were waiting, above "
+                                     f"--tip-max-behind {a.tip_max_behind}")
+                        log(f"  ⛔ SKIPPING tip block {h} — {len(hs)} bundles waiting, jumping "
+                            f"to {chosen}. This leaves a hole in the proof chain.")
+                return chosen, skipped, newest
+
             def work_fn():
                 # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
                 # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
-                t = tip_board.highest_tip_bundle(a.bridge_host)
-                if t and t not in seen_at:
-                    seen_at[t] = time.time()
-                    tip_note("appeared", height=int(t))
-                pending = t if (t and t > proved_tip["h"]) else None
+                pending, skipped, t = pick_tip()
+                if skipped:
+                    jumped.update(int(x) for x in [pending])
                 # ⛔ --fresh-tip MEANS TIP ONLY. Without this, next_work() falls through to BOARD
                 # work whenever no fresh tip is waiting -- and a driver configured with
                 # --claim-source ssh fetches from the bridge's tip_bundles, which holds nothing
@@ -1831,16 +1964,18 @@ def main():
                 filter counted `bundle_<h>.json.tmp` -- the file the bridge is still writing -- as an
                 available tip. Abandoning a board block for a bundle that does not exist yet would
                 throw away real work and then fail to fetch the thing it was thrown away for.
+
+                ⚠ THE SAME SELECTOR AS work_fn, ON PURPOSE (hazync#556). If this said "a tip is
+                waiting" about the HIGHEST bundle while work_fn then proved the LOWEST, the board
+                block would be abandoned for one height and the fleet would start another -- and the
+                log would name the wrong block as the reason. One picker, one answer.
                 """
                 try:
-                    t = tip_board.highest_tip_bundle(a.bridge_host)
+                    chosen, _skipped, _newest = pick_tip()
                 except Exception:
                     return None                      # ⚠ never abort a healthy block on an ssh blip
-                if t and int(t) > proved_tip["h"]:
-                    if int(t) not in seen_at:
-                        seen_at[int(t)] = time.time()
-                        tip_note("appeared", height=int(t))
-                    return f"tip block {t} is waiting and the tip comes first"
+                if chosen:
+                    return f"tip block {chosen} is waiting and the tip comes first"
                 return None
 
             def prove_one(rng):
@@ -1861,6 +1996,12 @@ def main():
                             "why": exc.why, "wall_s": exc.elapsed_s}
                 if from_tip:
                     proved_tip["h"] = int(rng)
+                    # ⛔ ONLY NOW. The parent for the next check is the last block we actually
+                    # PROVED — promoting it at fetch time would let a failed block become the link
+                    # the next one is measured against, and the chain would verify against
+                    # something that was never proved.
+                    proved_tip["header"] = staged_header.pop(int(rng), None)
+                    staged_header.clear()
                     # chain tip NOW, so the lag is against the real chain rather than our own clock
                     try:
                         tip_now = tip_board.highest_tip_bundle(a.bridge_host)
@@ -1993,6 +2134,24 @@ def main():
                     # "this is a new fleet, not a resume" — about the fleet it grew itself.
                     # tip_economics also sizes a run by len(state["fleet"]).
                     state["fleet"] = sorted(set(state.get("fleet") or ()) | {str(pod["id"])})
+                # ⛔ AND THE RENTAL RECORD ON DISK (hazync#557). This is the FOURTH structure derived
+                # from the fleet and written once before the session loop -- `assignment` (#540),
+                # `fleet` and `state["fleet"]` (#547), and now this. A clean teardown hid it, because
+                # the release loop walks `created` and then sweeps `recruited`.
+                #
+                # It bites on the RECOVERY path. `--cleanup --rundir` is what releases the fleet when
+                # a driver is SIGKILLed or the box reboots, and it reads ONLY this file. Measured
+                # 2026-09-28: rented.json held 17 pods while the fleet had grown to 26, so cleanup
+                # would have released 17, reported success, and left nine RTX PRO 6000 billing at
+                # ~$18.81/hr. There is no budget cap by decision, so nothing else would have stopped
+                # them.
+                try:
+                    with open(rented_path, "w") as fh:
+                        json.dump(created, fh, indent=1)
+                except OSError as exc:
+                    log(f"  ⛔ COULD NOT UPDATE {rented_path} ({exc}) — if this driver dies, "
+                        f"`--cleanup` will not know about the {len(joined)} card(s) just added. "
+                        f"Release them by hand from recruited.json.")
                 try:
                     feed.start(tip_dashboard.feed_records(order, fleet)["records"])
                 except Exception as exc:                       # noqa: BLE001
@@ -2015,7 +2174,16 @@ def main():
                                            idle_s=30.0, block_estimate_s=estimate_s,
                                            budget_usd=(a.budget_usd or None), spend_fn=spend_fn,
                                            grow_fn=grow_fn)
+            # ⛔ A GAP MUST BE IN THE SUMMARY, NOT ONLY IN THE LEDGER (hazync#556). The 2026-09-28
+            # skip was absent from the session summary, the dashboard grid, the run log AND the tip
+            # ledger — four artifacts, no trace. Whatever else this run reports, it reports its holes.
+            summ["tip_blocks_skipped"] = sorted(gap_noted)
+            summ["tip_chain_gapless"] = not gap_noted
             log("SESSION " + json.dumps(summ, indent=1))
+            if gap_noted:
+                log(f"⛔ THE PROOF CHAIN HAS {len(gap_noted)} HOLE(S): {sorted(gap_noted)} — these "
+                    f"heights had bundles and were never proved. Close them with "
+                    f"--tip-from <height>.")
             return 0
 
         if a.claim:
