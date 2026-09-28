@@ -48,7 +48,21 @@ class Recruiter:
     """
 
     def __init__(self, *, target, have_fn, rent_fn, gate_fn, release_fn,
-                 log=lambda _m: None, poll_s=30.0, sleep=time.sleep):
+                 log=lambda _m: None, poll_s=30.0, sleep=time.sleep,
+                 max_parallel=4, target_fn=None):
+        # ⛔ GATING WAS SERIAL, AND THAT IS WHY RAISING THE TARGET DID NOT HELP (hazync#548). _tick
+        # rented ONE pod and gated it on this thread -- ssh, a 411 MB prover fetch, a GPU smoke and a
+        # reachability probe -- then slept poll_s. Measured 2026-09-28: about one card every four
+        # minutes, so 18 -> 28 would have taken ~40 minutes of a 60-minute window. The operator asked
+        # for more cards and the honest answer was "it is already trying, and it cannot go faster".
+        #
+        # ⚠ BOUNDED. Each gate holds an ssh channel and pulls 411 MB; unbounded parallelism would
+        # saturate the box's uplink and slow the gates it is trying to overlap.
+        self._max_parallel = max(1, int(max_parallel))
+        # ⛐ The target may change WHILE THE RUN IS LIVE. `target_fn` is re-read every tick so an
+        # operator can raise it without restarting; `set_target` is the in-process equivalent.
+        self._target_fn = target_fn
+        self._gating = 0
         self.target = int(target)
         self._have = have_fn
         self._rent = rent_fn
@@ -75,7 +89,20 @@ class Recruiter:
     def counts(self):
         with self._lock:
             return {"ready": len(self._ready), "pending": self._pending,
-                    "rented": self.rented, "rejected": self.rejected}
+                    "rented": self.rented, "rejected": self.rejected,
+                    "target": self.target, "gating": self._gating}
+
+    def set_target(self, n):
+        """Change the target while the run is live. Returns (old, new).
+
+        ⚠ LOWERING IT NEVER RELEASES A CARD. A fleet that is already proving is not something a
+        dashboard number should be able to destroy; a lower target simply stops recruiting. Cards
+        already gated and waiting are still handed over -- they are rented and paid for either way.
+        """
+        n = max(0, int(n))
+        with self._lock:
+            old, self.target = self.target, n
+        return old, n
 
     # ---- the thread's side -------------------------------------------------------------------
     def start(self):
@@ -104,24 +131,51 @@ class Recruiter:
             self._sleep(self._poll_s)
 
     def _tick(self):
+        # ⭐ RE-READ THE TARGET EVERY TICK (hazync#548). The operator could not raise --grow-to on a
+        # live run, and asked to during tip hour 3 while the fleet sat at 18 cards against a 600 s
+        # gate it was missing. A file in the rundir is the whole mechanism: auditable, survives a
+        # driver restart, and needs no new port, socket or signal.
+        if self._target_fn is not None:
+            try:
+                t = self._target_fn()
+            except Exception as exc:          # noqa: BLE001 -- a bad control file must not stop us
+                t = None
+                self._log(f"recruiter: could not read the target: {type(exc).__name__}: {exc}")
+            if t is not None and int(t) != self.target:
+                old_t, new_t = self.set_target(t)
+                self._log(f"recruiter: target changed {old_t} -> {new_t} while the run is live")
+
         with self._lock:
             need = wanted(have=self._have(), pending=self._pending,
                           ready=len(self._ready), target=self.target)
-        if need <= 0:
+            room = self._max_parallel - self._gating
+        start_n = min(int(need), max(0, int(room)))
+        if start_n <= 0:
             return
-        pod = self._rent()
-        if not pod:
-            return                        # no capacity this minute; try again next poll
-        with self._lock:
-            self._pending += 1
-            self.rented += 1
-        self._log(f"recruiter: rented {pod.get('name')} — gating it off the clock")
+        # ⛔ GATING USED TO BE SERIAL, ON THIS THREAD. ssh + a 411 MB prover fetch + a GPU smoke +
+        # reachability is minutes, and the loop then slept poll_s on top: about one card every four
+        # minutes measured 2026-09-28. Renting is quick, so rent here and hand each gate to its own
+        # thread; `_pending` counts them so `wanted` cannot over-rent while they run.
+        for _ in range(start_n):
+            pod = self._rent()
+            if not pod:
+                return                        # no capacity this minute; try again next poll
+            with self._lock:
+                self._pending += 1
+                self._gating += 1
+                self.rented += 1
+            self._log(f"recruiter: rented {pod.get('name')} — gating it off the clock")
+            threading.Thread(target=self._gate_one, args=(pod,), daemon=True).start()
+
+    def _gate_one(self, pod):
+        """Gate one recruit to completion. Its own thread, so several overlap (hazync#548)."""
         try:
             ok, card, why = self._gate(pod)
-        except Exception as exc:          # noqa: BLE001
+        except Exception as exc:              # noqa: BLE001
             ok, card, why = False, None, f"{type(exc).__name__}: {exc}"
         with self._lock:
             self._pending -= 1
+            self._gating -= 1
         if ok and card is not None:
             with self._lock:
                 self._ready.append({"pod": pod, "card": card})
@@ -132,5 +186,5 @@ class Recruiter:
             self._log(f"recruiter: releasing {pod.get('name')} — {why}")
             try:
                 self._release(pod)
-            except Exception as exc:      # noqa: BLE001
+            except Exception as exc:          # noqa: BLE001
                 self._log(f"recruiter: ⛔ could not release {pod.get('name')}: {exc}")
