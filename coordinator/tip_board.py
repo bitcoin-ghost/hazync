@@ -35,6 +35,7 @@ level, not in an error path. Public keys and handles are public and are fine to 
 import argparse
 import base64
 import json
+import socket
 import os
 import pathlib
 import sys
@@ -261,6 +262,34 @@ def highest_bundle_cmd(remote_dir):
             f"| sed 's/[^0-9]//g' | grep -v '^$' | sort -n | tail -1")
 
 
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+
+def _bridge_cmd(host, remote_cmd):
+    """The argv to run `remote_cmd` on the bridge host — locally when the bridge IS this box.
+
+    ⛔ THE BRIDGE IS OFTEN THE MACHINE YOU ARE ON, AND SSH-TO-SELF DOES NOT WORK. The tip driver runs
+    on hazync-coord, which is also the tip-bridge host. `ssh hazync-coord` from hazync-coord fails
+    twice over: the alias lives in an operator's ~/.ssh/config and does not resolve on the box, and
+    root there has no authorized_key for itself. Measured 2026-09-28 during a live tip hour:
+
+        ssh: Could not resolve hostname hazync-coord: Temporary failure in name resolution
+        highest_tip_bundle(hazync-coord) -> None
+        highest_tip_bundle(localhost)    -> None   (BatchMode: no key for root@localhost)
+
+    highest_tip_bundle then returned None, --fresh-tip's floor stayed at 0, and the run proved BOARD
+    work for its whole session while reporting itself healthy. It cost $9.04 before anyone noticed,
+    and the only symptom was one ⚠ line at start-up saying the floor stayed at 0.
+
+    scripts/check-unit-drift.sh has run its probe locally for `localhost` since 2026-09-18 for
+    exactly this reason; this path never learned the same lesson.
+    """
+    h = (host or "").strip()
+    if h in LOCAL_HOSTS or h == socket.gethostname():
+        return ["bash", "-lc", remote_cmd]
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", h, remote_cmd]
+
+
 def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
     """The highest tip height whose BUNDLE exists, or None. This is the tip-work signal.
 
@@ -289,7 +318,7 @@ def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=No
     import subprocess
     run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=120))
     cmd = highest_bundle_cmd(remote_dir)
-    r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, cmd])
+    r = run(_bridge_cmd(host, cmd))
     if getattr(r, "returncode", 1) != 0:
         return None
     out = (getattr(r, "stdout", b"") or b"").decode(errors="replace").strip()
@@ -316,7 +345,7 @@ def fetch_bundle_ssh(height, dest, host, remote_dir="/var/lib/hazync/tip_bundles
     import subprocess
     remote = f"{remote_dir}/bundle_{int(height)}.json"
     run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=600))
-    r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, f"cat {remote}"])
+    r = run(_bridge_cmd(host, f"cat {remote}"))
     if getattr(r, "returncode", 1) != 0:
         err = (getattr(r, "stderr", b"") or b"").decode(errors="replace").strip()[:120]
         return False, f"{host}:{remote}: {err or 'not found (the bridge may not have reached EMIT_FROM yet)'}"
