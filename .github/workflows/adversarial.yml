@@ -933,6 +933,24 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
+      - name: A streamer stop kills the writer, and a doubled second cannot inflate the money
+        # ⛔ `kill $pid` hit the SUBSHELL; the `ssh` was its child, reparented, still appending.
+        # #500 already called stop before every start — the calls did nothing. Measured 2026-09-28:
+        # 5.07 rows/sec per card, 4.72x across 348,723 rows, 46 orphans alive 17 h later, and the
+        # frame published $200 of spend against $41.56 actually billed (#554).
+        run: cd tools/live && python3 test_streamer_stop.py
+      - name: Streamer-stop POSITIVE CONTROL (kill the leader only — the writer must survive)
+        run: |
+          cd tools/live
+          python3 test_streamer_stop.py --control
+      - name: The grid holds what THIS RUN can prove, and board fill sits outside the ring
+        # ⛔ 144 cells is 24 hours of chain. A one-hour run can produce ~6 tip blocks, so the grid
+        # was ~96% empty by construction and the ring read `0 / 144 TODAY` from the first frame.
+        run: cd tools/live && python3 test_session_window.py
+      - name: Session-window POSITIVE CONTROL (a fixed day's canvas — must reproduce)
+        run: |
+          cd tools/live
+          python3 test_session_window.py --control
       - name: Board fill is credited but never counted as tip performance (tools/live)
         # ⛔ `AHEAD OF CHAIN` took the median over EVERY done block, and board bundles at the
         # frontier are 16-370 KB against 27 MB for a tip block. Measured 2026-09-28: the frame

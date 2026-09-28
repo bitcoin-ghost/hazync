@@ -122,12 +122,16 @@ class StreamCursor:
     WINDOW_S samples and is read from the END of the file instead.
     """
 
-    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h", "last_h")
+    __slots__ = ("offset", "ino", "size", "secs", "by_block", "peak", "peak_h", "last_h",
+                 "last_sec")
 
     def __init__(self):
         self.offset, self.ino, self.size = 0, None, 0
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
+        # ⛔ THE LAST WHOLE SECOND ALREADY COUNTED FOR MONEY. Two streamers writing the same card
+        # means the same second arrives several times, and `secs` IS the spend.
+        self.last_sec = None
         # ⚠ SURVIVES THE TICK. The height carried forward (hazync#498) must persist between reads,
         # or it resets every second and carries nothing.
         self.last_h = ""
@@ -137,6 +141,7 @@ class StreamCursor:
         self.secs, self.by_block = 0, {}
         self.peak, self.peak_h = 0.0, None
         self.last_h = ""
+        self.last_sec = None
 
 
 def _tail_lines(path, nbytes):
@@ -201,7 +206,7 @@ def read_streams(rundir, now, cursors=None):
             if cur is None:
                 with open(path) as fh:
                     newrows = fh.readlines()
-                secs, by_block = 0, {}
+                secs, by_block, last_sec = 0, {}, None
                 peak, peak_h = 0.0, None
                 last_h = ""
             else:
@@ -228,7 +233,7 @@ def read_streams(rundir, now, cursors=None):
                 cut = blob.rfind(b"\n") + 1
                 cur.offset += cut
                 newrows = blob[:cut].decode("utf8", "replace").splitlines(keepends=True)
-                secs, by_block = cur.secs, cur.by_block
+                secs, by_block, last_sec = cur.secs, cur.by_block, cur.last_sec
                 peak, peak_h = cur.peak, cur.peak_h
                 last_h = cur.last_h
         except OSError:
@@ -241,6 +246,25 @@ def read_streams(rundir, now, cursors=None):
             f = line.rstrip("\n").split(",")
             if len(f) < 11:
                 continue
+            # ⛔⛔ ONE SECOND IS COUNTED ONCE, WHATEVER THE FEED DOES. `secs` is the money: it is
+            # multiplied by the card's hourly rate and reported as spend. A doubled feed therefore
+            # doubles the bill on the frame, and the feed HAS doubled -- twice. Measured 2026-09-28:
+            # 5.07 rows/sec per card, 10 in the worst second, 4.72x across 348,723 rows, and the
+            # frame published $200 against $41.56 actually billed.
+            #
+            # The cause is fixed in tip-stream.sh (process groups, so a stop kills the ssh too). This
+            # is the second line of defence, and it is the one that makes the NUMBER safe rather than
+            # the process: a duplicate second cannot inflate spend even if the feed doubles again.
+            #
+            # ⚠ Keyed on the row's OWN timestamp, not on arrival: rows from two writers interleave,
+            # and a monotonic "has it advanced" test would drop the wrong ones.
+            try:
+                whole = int(float(f[0]))
+            except (TypeError, ValueError):
+                continue
+            if whole == last_sec:
+                continue
+            last_sec = whole
             secs += 1
 
             # ⛔ FINISHING MUST NOT LOOK LIKE NOT STARTING. The join tree's leaf dot is green when
@@ -307,7 +331,7 @@ def read_streams(rundir, now, cursors=None):
             elif f[7] in ("proving", "executed"):
                 e["prove"] += 1
         if cur is not None:
-            cur.secs, cur.by_block = secs, by_block
+            cur.secs, cur.by_block, cur.last_sec = secs, by_block, last_sec
             cur.peak, cur.peak_h = peak, peak_h
             cur.last_h = last_h
 

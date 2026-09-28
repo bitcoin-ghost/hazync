@@ -49,6 +49,32 @@ TRACE = ['#f7931a', '#6fb3c4', '#5cc77e', '#e8a94f', '#b8879b', '#7aa2f7',
          '#d4694f', '#9ece6a', '#c0a36e', '#89ddff', '#e0af68', '#73daca']
 
 
+
+# ── the grid is sized to the SESSION, not to a day ───────────────────────────────────────────────
+# ⛔ 144 CELLS IS 24 HOURS OF CHAIN. On a one-hour run at most ~6 tip blocks can ever exist, so the
+# grid was ~96% empty by construction and read as "3 of 144" — and before the SESSION line is
+# latched the ring said `0 / 144 TODAY` from the very first frame. The operator called both.
+#
+# The box stays exactly where it was; only the number of slots and their size change, so a short run
+# gets a few large cells and a 24-hour run gets the film's 12x12 of small ones.
+GRID_W = GCOL * (GCELL + GGAP) - GGAP          # the area the 144-cell grid occupied
+
+def grid_geom(n):
+    """(cols, cell, gap) for `n` slots inside the original grid box."""
+    n = max(1, int(n))
+    if n >= GCOL * GROWS:                       # a full day: the film's geometry, untouched
+        return GCOL, GCELL, GGAP
+    cols = max(1, min(n, int(math.ceil(math.sqrt(n)))))
+    rows = int(math.ceil(n / cols))
+    gap = GGAP if n > 12 else GGAP * 3          # a few big cells want daylight between them
+    cell = min((GRID_W - (cols - 1) * gap) / cols, (GRID_W - (rows - 1) * gap) / rows)
+    return cols, cell, gap
+
+
+def grid_xy(i, cols, cell, gap):
+    return GX0 + (i % cols) * (cell + gap), GY0 + (i // cols) * (cell + gap)
+
+
 def stat(d, fo, x, label, value, col, sub=None):
     d.text((x, SL_Y), label, font=fo['small'], fill=hx(FAINT))
     d.text((x, SV_Y), value, font=fo['stat'], fill=col)
@@ -264,9 +290,6 @@ def draw_live(snap, fo):
                    (f"{done_n} tip block{'' if done_n == 1 else 's'}" if tagged
                     else f"{done_n} block{'' if done_n == 1 else 's'}",
                     mix(ACCENT, GROUND, .95)),
-                   # Board fill stays visible and stays labelled — it is real work, and it is not
-                   # tip performance.
-                   ((f' (+{done_board} board)' if done_board else ''), hx(FAINT)),
                    (' · ', hx(FAINT)),
                    (f"{len(up)} card{'' if len(up) == 1 else 's'}", mix(ACCENT, GROUND, .95)), (' · ', hx(FAINT)),
                    # ⛔ ':,.0f' rounded a real $0.46 to "$0" — the total looked broken when it was
@@ -281,6 +304,12 @@ def draw_live(snap, fo):
     sub = (f"{ts} UTC · block {live_h:,} · {cur['segs']:,} segments"
            if (live_h and cur) else
            f"{ts} UTC · tip {tip:,} · waiting for the next block")
+    # ⭐ BOARD FILL IS REPORTED HERE, NOT IN THE RING AND NOT IN THE HEADLINE (hazync#554). It is real
+    # work and it is credited — but the ring counts the blocks this run exists to prove, and mixing
+    # gap-filling into that number is what made `19 / 6 THIS SESSION` possible. Putting it in the
+    # header instead pushed the spend off the right-hand edge, which is its own kind of dishonest.
+    if done_board:
+        sub += f"  ·  {done_board} board block{'' if done_board == 1 else 's'} filled while waiting"
     d.text((PAD, 90), sub, font=fo['lab'], fill=hx(DIM))
     d.line([PAD, 122, W - PAD, 122], fill=hx(RULE))
 
@@ -504,19 +533,29 @@ def draw_live(snap, fo):
     # is the first block this run proved, and the map fills left-to-right, top-to-bottom across the
     # day. The empty cells then mean "the rest of the day", which is the story.
     hs = [b['h'] for b in blocks]
+    # ⭐ THE WINDOW IS THE SESSION'S, NOT A DAY'S. `session_blocks` is how many blocks the chain will
+    # mine in this run (1 h / 600 s = 6); only a run with no declared session falls back to the
+    # film's 144. The grid then holds what this run could actually prove, instead of reading as 3%
+    # of a day that was never going to happen.
+    NSLOT = int(snap.get('session_blocks') or WINDOW)
+    gcols, gcell, ggap = grid_geom(NSLOT)
+    # ⛔ MEASURED AGAINST THE DAY, NOT AGAINST THE GRID. Using NSLOT here meant a 6-slot hour
+    # demanded a block within 6 heights of the tip to call itself "at the tip" — so a live tip run
+    # rendered as BACKFILL. Whether we are at the tip is a fact about the chain; the grid's size is
+    # a presentation choice and must not change the answer.
     at_tip = bool(tip) and any(h > tip - WINDOW for h in hs)
-    lo = min(hs) if hs else (tip - WINDOW + 1 if tip else 1)
-    if hs and max(hs) - lo >= WINDOW:       # a run longer than the window slides to keep the tip
-        lo = max(hs) - WINDOW + 1
-    hi = lo + WINDOW - 1
+    lo = min(hs) if hs else (tip - NSLOT + 1 if tip else 1)
+    if hs and max(hs) - lo >= NSLOT:        # a run longer than the window slides to keep the tip
+        lo = max(hs) - NSLOT + 1
+    hi = lo + NSLOT - 1
     by_h = {b['h']: b for b in blocks}
     # the ring already says "N / 144 TODAY" — printing the same fraction here made it twice on one frame
     d.text((GX0, GY0 - 26),
            f'BLOCKS {lo:,}–{hi:,}' + (' · AT THE TIP' if at_tip else ' · BACKFILL'),
            font=fo['small'], fill=mix(MAP_DONE, GROUND, .9) if at_tip else hx(FAINT))
-    for i in range(WINDOW):
+    for i in range(NSLOT):
         h = lo + i
-        cx, cy = cell_xy(i)
+        cx, cy = grid_xy(i, gcols, gcell, ggap)
         b = by_h.get(h)
         if b and b.get('done'):
             col = mix(MAP_DONE, GROUND, .92)
@@ -526,7 +565,7 @@ def draw_live(snap, fo):
             col = mix(MAP_PROVING, GROUND, .6)
         else:
             col = mix(TEXT, GROUND, .07)
-        d.rectangle([cx, cy, cx + GCELL, cy + GCELL], fill=col)
+        d.rectangle([cx, cy, cx + gcell, cy + gcell], fill=col)
     # ---------------- the pulse: a finished block travels from the tree to its own cell
     # Ported from the film (tip24c.py), which had it and this renderer never did. It is the only
     # thing on the frame that marks the MOMENT a block finishes: every other element shows a state,
@@ -547,7 +586,7 @@ def draw_live(snap, fo):
         if not (0.0 <= age < PULSE_S):
             continue
         f = age / PULSE_S
-        cx, cy = cell_xy(b['h'] - lo)
+        cx, cy = grid_xy(b['h'] - lo, gcols, gcell, ggap)
         tx_, ty_ = cx + GCELL / 2, cy + GCELL / 2
         px, py = TX1 + (tx_ - TX1) * f, RCY + (ty_ - RCY) * f
         # ⛔ THE LINE, NOT A TRAVELLING DOT. The pulse used to draw a bright dot sliding from the

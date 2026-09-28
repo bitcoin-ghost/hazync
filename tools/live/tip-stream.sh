@@ -103,29 +103,78 @@ start)
   n=0
   while read -r _id name ip port _cost _gpu; do
     [ -n "${name:-}" ] || continue
-    (
+    # ⛔ ITS OWN PROCESS GROUP, VIA setsid. `( ... ) &` records the SUBSHELL's pid, and killing a
+    # subshell does NOT kill the `ssh` it is blocked on -- the ssh is reparented and goes on
+    # appending to this very csv. Every `start` therefore stacked another writer on top of the last:
+    # measured 2026-09-28, 5.07 rows/sec per card where 1 is expected, 10 in the worst second,
+    # 4.72x duplication across 348,723 rows. Anything counting rows as seconds was wrong by that
+    # factor -- the frame published $200 of spend against $41.56 actually billed.
+    # A process group can be signalled as a whole, so the ssh dies with its loop.
+    # ⚠ PASSED THROUGH THE ENVIRONMENT, NOT INTERPOLATED. The loop body is single-quoted so the
+    # OUTER shell does not expand it; each streamer reads its own target from these five vars.
+    HZ_BODY="$body" HZ_OUT="$STREAM/$name.csv" HZ_KEY="$K" HZ_PORT="$port" HZ_IP="$ip" \
+    setsid bash -c '
       while true; do
-        # ⛔ NO -n HERE. The body is fed to `bash -s` on STDIN, and -n points stdin at /dev/null —
+        # ⛔ NO -n HERE. The body is fed to `bash -s` on STDIN, and -n points stdin at /dev/null --
         # the remote shell then gets an EMPTY script, exits at once, and this loop reconnects every
         # 5 s forever writing nothing. Measured: 1 minute of "streaming", 0 lines, no error anywhere.
         # ServerAlive*: a dead pod drops in ~30 s instead of hanging.
         ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
             -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
-            -i "$K" -p "$port" root@"$ip" "bash -s" <<< "$body" >> "$STREAM/$name.csv" 2>/dev/null
-        sleep 5           # reconnect; the gap is visible in the data as missing seconds, not faked
+            -i "$HZ_KEY" -p "$HZ_PORT" root@"$HZ_IP" "bash -s" <<< "$HZ_BODY" \
+            >> "$HZ_OUT" 2>/dev/null
+        sleep 5         # reconnect; the gap is visible in the data as missing seconds, not faked
       done
-    ) &
+    ' &
+    # $! is the session leader, so its pid IS the process-group id -- which is what stop signals.
     echo "$! $name" >> "$PIDS"
     n=$((n+1))
   done < "$PODS"
   echo "streaming $n pods -> $STREAM  (stop with: $0 stop)"
   ;;
 stop)
+  # ⛔⛔ THREE FAULTS, ONE SYMPTOM. This used to `kill "$pid"` and then blindly truncate $PIDS.
+  #   1. SIGTERM to a bash loop blocked in `ssh` is deferred until the child exits, and an ssh to a
+  #      live pod does not exit. The loop survived.
+  #   2. Even when it died, the `ssh` was its CHILD -- reparented, still appending to the same csv.
+  #   3. `: > "$PIDS"` ran regardless, so survivors became permanently unreachable.
+  # Every `start` therefore stacked another writer: 5.07 rows/sec per card, 4.72x duplication, and
+  # 46 orphaned loops still running 17 hours later. The dashboard counts rows as seconds, so it
+  # published $200 of spend against $41.56 actually billed.
+  # Now: signal the whole PROCESS GROUP, escalate to KILL, VERIFY, and keep whatever survived.
   [ -s "$PIDS" ] || { echo "nothing recorded in $PIDS"; exit 0; }
+
+  # ⚠ `kill -- -PGID` signals the group. The leading `-` on the pid is the whole point; without it
+  # only the leader is signalled and the ssh lives on.
   while read -r pid name; do
-    kill "$pid" 2>/dev/null && echo "stopped $name ($pid)"
+    [ -n "${pid:-}" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   done < "$PIDS"
-  : > "$PIDS"
+  sleep 2
+  while read -r pid name; do
+    [ -n "${pid:-}" ] || continue
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  done < "$PIDS"
+  sleep 1
+
+  # ⛔ VERIFY, AND KEEP WHAT WOULD NOT DIE. A stop that reports success over a live writer is how
+  # this went unnoticed for two runs; a pidfile emptied over a survivor is how it became permanent.
+  survivors=""; stopped=0; alive=0
+  while read -r pid name; do
+    [ -n "${pid:-}" ] || continue
+    if kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null; then
+      echo "⛔ STILL ALIVE after TERM+KILL: $name ($pid) — it is still writing to $STREAM/$name.csv"
+      survivors="$survivors$pid $name
+"
+      alive=$((alive+1))
+    else
+      echo "stopped $name ($pid)"
+      stopped=$((stopped+1))
+    fi
+  done < "$PIDS"
+  printf '%s' "$survivors" > "$PIDS"
+  echo "stopped $stopped, still alive $alive"
+  [ "$alive" -eq 0 ] || exit 1
   ;;
 status)
   now=$(date +%s)
