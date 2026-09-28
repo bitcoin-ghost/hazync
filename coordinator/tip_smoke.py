@@ -1366,12 +1366,30 @@ def main():
                     log(f"  {c.cid}: egress UNTESTED (no streamer, or no worker answered)")
                     continue
                 log(f"  {c.cid}: {mbit:.0f} Mbit/s to {len(per)} worker(s)")
-                if mbit > best[1]:
+                # ⛔⛔ REACHABILITY FIRST, THROUGHPUT SECOND (hazync#573). Ranking on Mbit/s alone
+                # elected a card that 9 of its own /24 could not reach, and the fleet went 30 -> 21
+                # before a single block was proved. Measured 2026-09-28:
+                #
+                #     hz-smoke-1 : 33039 Mbit/s to 23 worker(s)   <- chosen, on speed alone
+                #     hz-smoke-11: 13411 Mbit/s to 33 worker(s)   <- ten more cards
+                #
+                # A card that cannot reach the aggregate is worth NOTHING, and surplus bandwidth
+                # above what the block needs is worth nothing either: a 9,600-segment block under
+                # 600 s wants ~166 Mbit/s and every candidate that night was 50-200x that. So
+                # throughput was never the binding constraint and reachability always was.
+                #
+                # ⚠ `per` is the probe's PER-WORKER result, so len(per) is how many workers this
+                # candidate actually reached. It was measured and logged all along and simply
+                # never entered the ranking.
+                #
+                # ⚠ --agg-min-mbit still rejects a genuinely slow candidate; this only decides
+                # WHICH of the acceptable ones wins.
+                if (len(per), mbit) > (len(best[2]), best[1]):
                     best = (c, mbit, per)
         agg = best[0] or cand[0]
         if best[0] is not None:
-            log(f"aggregate: {agg.cid} at {best[1]:.0f} Mbit/s "
-                f"(best of {len(cand)} candidate(s))")
+            log(f"aggregate: {agg.cid} reaches {len(best[2])} worker(s) at {best[1]:.0f} Mbit/s "
+                f"(best of {len(cand)} candidate(s) — most REACHABLE first, then fastest)")
             # ⛔ A FLOOR, BECAUSE THE BEST OF A BAD SET IS STILL BAD. The rate a block needs is
             # roughly segments x ~1.3 MB x 8 / target_seconds (1.1-1.3 MB/segment measured over two
             # runs), so a 9,600-segment block under 600 s wants ~166 Mbit/s. Default 0 = report only,

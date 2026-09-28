@@ -302,6 +302,14 @@ jobs:
         run: cd coordinator && python3 test_beat_progress.py
       - name: Beat-progress POSITIVE CONTROL (joins only — a long block must lose its claim)
         run: cd coordinator && python3 test_beat_progress.py --control
+      - name: The aggregate is elected on cards that can REACH it, then on speed
+        # ⛔ Every segment flows through one card, and it was chosen on throughput alone. Measured
+        # 2026-09-28: hz-smoke-1 won with 33039 Mbit/s to 23 workers over hz-smoke-11 at 13411 to 33.
+        # Nine cards in the winner's own /24 could not reach it, the fleet went 30 -> 21, and the
+        # same host then pulled the 411 MB prover at 53 KB/s and wedged the run (#573).
+        run: cd coordinator && python3 test_aggregate_election.py
+      - name: Aggregate-election POSITIVE CONTROL (fastest wins — the 23-worker host must be chosen)
+        run: cd coordinator && python3 test_aggregate_election.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
