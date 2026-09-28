@@ -749,26 +749,56 @@ def adopt_fleet(api, record_path, expect_names=None):
 
 
 def cleanup(api, rented_path):
-    """Release whatever a dead driver left behind. Safe to run at any time."""
-    try:
-        with open(rented_path) as fh:
-            created = json.load(fh)
-    except (OSError, ValueError):
-        log(f"no rental record at {rented_path} — nothing to clean up")
+    """Release whatever a dead driver left behind. Safe to run at any time.
+
+    ⛔ READ BOTH RECORDS, NEVER JUST ONE (hazync#557). `rented.json` is written by the rent phase and
+    `recruited.json` by the recruiter thread, and a run with `--grow-to` puts cards in the second
+    that the first has never heard of. Measured 2026-09-28: rented.json held 17 while the fleet had
+    grown to 26. Releasing the union is the difference between this command doing its job and
+    reporting success over nine pods still billing at ~$18.81/hr.
+
+    ⚠ This is the RECOVERY path -- it runs precisely when the driver is not around to know better,
+    so it must assume its own bookkeeping is incomplete.
+    """
+    rec_path = os.path.join(os.path.dirname(rented_path), "recruited.json")
+    pods, sources = {}, {}
+    for path, what in ((rented_path, "rented.json"), (rec_path, "recruited.json")):
+        try:
+            with open(path) as fh:
+                for p in json.load(fh):
+                    if p.get("id"):
+                        pods.setdefault(p["id"], p)
+                        sources.setdefault(p["id"], what)
+        except (OSError, ValueError):
+            log(f"  (no usable {what})")
+    if not pods:
+        log(f"no rental record at {rented_path} or {rec_path} — nothing to clean up")
         return 0
-    ids = [p["id"] for p in created]
+    only_rec = [i for i, s in sources.items() if s == "recruited.json"]
+    log(f"cleanup: {len(pods)} pod(s) across both records"
+        + (f", {len(only_rec)} of them known ONLY to recruited.json" if only_rec else ""))
+
+    ids = list(pods)
     v = tip_session.terminable(ids, ids)
     log(f"cleanup: releasing {v['terminate']} (protected={v['protected']} not-ours={v['not_ours']})")
     for pid in v["terminate"]:
         log(f"  {pid}: {'gone' if sponsor_bot.terminate_confirmed(api, pid) else '⛔ STILL LISTED'}")
-    live = {p["id"] for p in api.pods()}
-    left = [p["name"] for p in created if p["id"] in live]
+
+    # ⛔ CHECK THE ACCOUNT, NOT OUR OWN LIST. A pod this command never heard of is exactly the
+    # failure it exists to catch, and comparing only against `pods` can never see one.
+    live = {p["id"]: p.get("name") for p in api.pods()}
+    left = [pods[i].get("name") or i for i in pods if i in live]
+    unknown = [n for i, n in live.items() if i not in pods and not tip_session.is_protected(i)]
     log(f"account check: {'clean' if not left else '⛔ STILL PRESENT: ' + str(left)}")
+    if unknown:
+        log(f"⚠ {len(unknown)} pod(s) on the account that neither record knows about: {unknown} — "
+            f"NOT touched (this command only releases what it can show it rented)")
     if not left:
-        try:
-            os.unlink(rented_path)
-        except OSError:
-            pass
+        for path in (rented_path, rec_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     return 0 if not left else 1
 
 def main():
@@ -2104,6 +2134,24 @@ def main():
                     # "this is a new fleet, not a resume" — about the fleet it grew itself.
                     # tip_economics also sizes a run by len(state["fleet"]).
                     state["fleet"] = sorted(set(state.get("fleet") or ()) | {str(pod["id"])})
+                # ⛔ AND THE RENTAL RECORD ON DISK (hazync#557). This is the FOURTH structure derived
+                # from the fleet and written once before the session loop -- `assignment` (#540),
+                # `fleet` and `state["fleet"]` (#547), and now this. A clean teardown hid it, because
+                # the release loop walks `created` and then sweeps `recruited`.
+                #
+                # It bites on the RECOVERY path. `--cleanup --rundir` is what releases the fleet when
+                # a driver is SIGKILLed or the box reboots, and it reads ONLY this file. Measured
+                # 2026-09-28: rented.json held 17 pods while the fleet had grown to 26, so cleanup
+                # would have released 17, reported success, and left nine RTX PRO 6000 billing at
+                # ~$18.81/hr. There is no budget cap by decision, so nothing else would have stopped
+                # them.
+                try:
+                    with open(rented_path, "w") as fh:
+                        json.dump(created, fh, indent=1)
+                except OSError as exc:
+                    log(f"  ⛔ COULD NOT UPDATE {rented_path} ({exc}) — if this driver dies, "
+                        f"`--cleanup` will not know about the {len(joined)} card(s) just added. "
+                        f"Release them by hand from recruited.json.")
                 try:
                     feed.start(tip_dashboard.feed_records(order, fleet)["records"])
                 except Exception as exc:                       # noqa: BLE001

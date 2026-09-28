@@ -292,6 +292,13 @@ jobs:
         run: cd coordinator && python3 test_tip_chain.py
       - name: Chain-link POSITIVE CONTROL (no linkage check — the gap must be accepted)
         run: cd coordinator && python3 test_tip_chain.py --control
+      - name: --cleanup releases grown cards too, and every fleet record is updated together
+        # ⛔ rented.json held 17 while the fleet had grown to 26 (2026-09-28). --cleanup reads it and
+        # is the recovery path when a driver is SIGKILLed, so it would have released 17, reported
+        # success, and left nine cards billing at ~$451/day (#557).
+        run: cd coordinator && python3 test_cleanup_union.py
+      - name: Cleanup-union POSITIVE CONTROL (rented.json only — recruits must survive)
+        run: cd coordinator && python3 test_cleanup_union.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator
