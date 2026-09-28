@@ -15,6 +15,7 @@ import argparse, json, math, os, time
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw
 
+import tip24grid
 from tip24e import (W, H, PAD, LX0, LX1, LTOP, LROW, LYTOP, LYBOT, RCX, RCY, ROUT, RIN,
                     TX0, TX1, GCELL, GGAP, GCOL, GROWS, GX0, GY0, GKEY_Y,
                     SL_Y, SV_Y, BX0, BX1, BH, BHEAD, BY1, FOOT_Y,
@@ -51,28 +52,18 @@ TRACE = ['#f7931a', '#6fb3c4', '#5cc77e', '#e8a94f', '#b8879b', '#7aa2f7',
 
 
 # ── the grid is sized to the SESSION, not to a day ───────────────────────────────────────────────
-# ⛔ 144 CELLS IS 24 HOURS OF CHAIN. On a one-hour run at most ~6 tip blocks can ever exist, so the
-# grid was ~96% empty by construction and read as "3 of 144" — and before the SESSION line is
-# latched the ring said `0 / 144 TODAY` from the very first frame. The operator called both.
-#
-# The box stays exactly where it was; only the number of slots and their size change, so a short run
-# gets a few large cells and a 24-hour run gets the film's 12x12 of small ones.
-GRID_W = GCOL * (GCELL + GGAP) - GGAP          # the area the 144-cell grid occupied
+# The arithmetic lives in tip24grid, which imports no PIL and can therefore be TESTED — this module
+# and tip24e both pull in Pillow at import time, and CI has none.
+GRID_W = tip24grid.box_width(GCOL, GCELL, GGAP)
+
 
 def grid_geom(n):
-    """(cols, cell, gap) for `n` slots inside the original grid box."""
-    n = max(1, int(n))
-    if n >= GCOL * GROWS:                       # a full day: the film's geometry, untouched
-        return GCOL, GCELL, GGAP
-    cols = max(1, min(n, int(math.ceil(math.sqrt(n)))))
-    rows = int(math.ceil(n / cols))
-    gap = GGAP if n > 12 else GGAP * 3          # a few big cells want daylight between them
-    cell = min((GRID_W - (cols - 1) * gap) / cols, (GRID_W - (rows - 1) * gap) / rows)
-    return cols, cell, gap
+    """(cols, cell, gap) for `n` slots, in the film's own geometry."""
+    return tip24grid.grid_geom(n, cols=GCOL, cell=GCELL, gap=GGAP, rows=GROWS)
 
 
 def grid_xy(i, cols, cell, gap):
-    return GX0 + (i % cols) * (cell + gap), GY0 + (i // cols) * (cell + gap)
+    return tip24grid.grid_xy(i, GX0, GY0, cols, cell, gap)
 
 
 def stat(d, fo, x, label, value, col, sub=None):

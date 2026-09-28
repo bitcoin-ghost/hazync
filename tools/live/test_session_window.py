@@ -27,7 +27,20 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from tip24e import GCOL, GROWS, GCELL, GGAP  # noqa: E402
+import tip24grid  # noqa: E402
+
+# \u26d4 NOT `from tip24e import ...`. tip24e imports PIL at module scope and CI has no Pillow, so
+# importing it dies with ModuleNotFoundError before a single assertion runs -- which is exactly how
+# the first version of this test failed in CI while passing locally. The constants are read from its
+# SOURCE instead, so there is still one source of truth and a drift in the film's geometry is caught
+# here rather than silently diverging.
+_src24e = open(os.path.join(HERE, "tip24e.py"), encoding="utf8").read()
+_m = re.search(r"^GCOL, GCELL, GGAP = (\d+), (\d+), (\d+)", _src24e, re.M)
+assert _m, "could not read the grid geometry out of tip24e.py"
+GCOL, GCELL, GGAP = (int(x) for x in _m.groups())
+_mn = re.search(r"^GROWS = NBLOCKS // GCOL", _src24e, re.M)
+_nb = re.search(r"^NBLOCKS = (\d+)", _src24e, re.M)
+GROWS = (int(_nb.group(1)) // GCOL) if (_mn and _nb) else 12
 
 CONTROL = "--control" in sys.argv
 fails = 0
@@ -62,18 +75,21 @@ else:
 
 # ── the geometry fills the same box, so a short run gets a few LARGE cells ───────────────────────
 if not CONTROL:
-    import tip24live as T
+    GRID_W = tip24grid.box_width(GCOL, GCELL, GGAP)
+
+    def geom(n):
+        return tip24grid.grid_geom(n, cols=GCOL, cell=GCELL, gap=GGAP, rows=GROWS)
 
     for want, label in ((6, "one hour"), (36, "six hours"), (144, "a day")):
-        cols, cell, gap = T.grid_geom(want)
+        cols, cell, gap = geom(want)
         rows = math.ceil(want / cols)
         w = cols * cell + (cols - 1) * gap
         h = rows * cell + (rows - 1) * gap
-        check(w <= T.GRID_W + 0.5 and h <= T.GRID_W + 0.5,
+        check(w <= GRID_W + 0.5 and h <= GRID_W + 0.5,
               f"{label} ({want} slots): {cols}x{rows} of {cell:.0f}px fits the box "
-              f"({w:.0f}x{h:.0f} <= {T.GRID_W})")
-    cols6, cell6, _ = T.grid_geom(6)
-    cols144, cell144, _ = T.grid_geom(144)
+              f"({w:.0f}x{h:.0f} <= {GRID_W})")
+    cols6, cell6, _ = geom(6)
+    cols144, cell144, _ = geom(144)
     check(cell6 > cell144 * 3,
           f"an hour's cells are far larger than a day's ({cell6:.0f}px vs {cell144:.0f}px) — the "
           f"grid is legible instead of three lit squares in a field of 141")
