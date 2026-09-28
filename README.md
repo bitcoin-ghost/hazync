@@ -1,9 +1,9 @@
 # Hazync
 
-[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://hazync.org/)
-[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://hazync.org/)
-[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://hazync.org/)
-[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
+[![blocks proven](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate%3Fslim%3D1&query=%24.progress.proven&label=blocks%20proven&color=1f6feb&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![chain tip](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate%3Fslim%3D1&query=%24.progress.tip&label=chain%20tip&color=30363d&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![share of chain](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate%3Fslim%3D1&query=%24.progress.pct&label=%2525%20of%20chain&color=8957e5&style=flat-square&cacheSeconds=300)](https://hazync.org/)
+[![provers](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.hazync.org%2Fapi%2Fstate%3Fslim%3D1&query=%24.progress.contributors&label=provers&color=238636&style=flat-square&cacheSeconds=300)](CONTRIBUTING.md)
 
 **Sync Bitcoin from a proof, not from trust.**
 
