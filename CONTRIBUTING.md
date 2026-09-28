@@ -30,6 +30,14 @@ started at 20.
 
 Download the prebuilt prover — it's the **canonical guest**, so the coordinator accepts your proofs. Needs an NVIDIA GPU and its driver; no CUDA toolkit.
 
+⛔ **Take the LATEST release, not one you already have.** A worker signs the blocks it claims, and
+since **16 September 2026** the party coordinator accepts only signed claims. Workers up to v0.21.4
+do not sign, so every claim they make is refused with:
+
+```
+this coordinator accepts only signed claims: update your worker
+```
+
 ```
 # the prover binary (canonical guest, GPU)
 curl -LO https://github.com/hazync/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
@@ -288,6 +296,10 @@ If `verify-any` prints `STARK verification FAILED ... METHOD_ID MISMATCH` instea
   under CUDA 13 (see `prover/build-release.sh`). `GPU=1 ./provision-vps.sh` installs CUDA 12.8 for
   that reason (`HAZYNC_CUDA_VER` pins another 12.x). If you are downloading the prebuilt binary you are not building, and it does not
   apply to you. If proving genuinely cannot find the GPU, check the driver with `nvidia-smi`.
+- `this coordinator accepts only signed claims: update your worker` — your worker predates v0.21.5 and
+  does not sign its claims. The party has required signed claims since 16 September 2026
+  (`CLAIM_REQUIRE_SIG`). Download the current `hazync-worker` from the latest release; your identity
+  in `~/.hazync` is unchanged and your existing blocks still count.
 - The coordinator rejects your proof with a `METHOD_ID` mismatch — you're proving with a non-canonical guest. Use the prebuilt binary, or reproduce the canonical id with `reproduce/Dockerfile`.
 - Anything else, open an issue on the repo.
 
