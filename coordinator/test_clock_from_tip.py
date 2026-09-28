@@ -187,6 +187,36 @@ else:
     check(s2["spend_on_clock_usd"] == 31.5,
           f"and the hour carries only its own cost (got {s2['spend_on_clock_usd']})")
 
+# ── 8. the window starts when the BUNDLE APPEARED, not when the loop reached it ────────────────
+# ⛔ Arming at "now" hands the fleet every second between a block becoming provable and this loop
+# picking it up — free time, excluded from the hour, in the one measurement the hour exists to make.
+# Measured 2026-09-28: 968,985's bundle appeared 12:24:59Z, proving began 12:25:31Z — 32 s. A board
+# block in flight makes that gap much larger.
+LATENCY = 32.0
+st8 = S.new_state(started_at=T0, duration_s=HOUR, armed=False, arm_deadline_s=2 * HOUR)
+appeared = T0 + WAIT_S
+reached = appeared + LATENCY
+if CONTROL:
+    S.arm_clock(st8, reached)                      # the old behaviour: arm at "now"
+else:
+    _app = appeared
+    S.arm_clock(st8, min(_app, reached))
+if CONTROL:
+    check(round(S.remaining_s(st8, reached), 1) == HOUR,
+          f"control: the window still has a full {HOUR/60:.0f} min at the moment work starts — "
+          f"the {LATENCY:.0f}s of our own latency fell outside it")
+else:
+    check(round(S.remaining_s(st8, reached), 1) == round(HOUR - LATENCY, 1),
+          f"our own {LATENCY:.0f}s of latency is INSIDE the hour "
+          f"({S.remaining_s(st8, reached)/60:.2f} min left, not 60.00)")
+    check(round(S.waited_s(st8, reached), 1) == WAIT_S,
+          "and the wait is still measured to the appearance, not past it")
+    # ⚠ A clock that runs backwards must never start the window in the future.
+    st9 = S.new_state(started_at=T0, duration_s=HOUR, armed=False, arm_deadline_s=2 * HOUR)
+    S.arm_clock(st9, min(reached + 999, reached))
+    check(round(S.remaining_s(st9, reached), 1) == HOUR,
+          "an appeared_at in the FUTURE is clamped to now, never granting extra window")
+
 print()
 if fails:
     print("FAIL: " + str(fails) + " assertion(s)")

@@ -270,7 +270,10 @@ def plan_next(state, now, *, work, block_estimate_s=None, budget_usd=None):
     # ⚠ `source` IS CARRIED THROUGH, NOT RE-DERIVED. run_session arms the clock on the first TIP block
     # and must not guess which blocks those were: board fill and tip work are the same shape by the
     # time they reach here, and a range number does not say where it came from.
-    return {"action": "prove", "range": rng, "source": (work or {}).get("source")}
+    # ⚠ `appeared_at` rides along so run_session can start the window at the moment the bundle
+    # became provable rather than the moment this loop reached it.
+    return {"action": "prove", "range": rng, "source": (work or {}).get("source"),
+            "appeared_at": (work or {}).get("appeared_at")}
 
 
 def record_attempt(state, rng):
@@ -473,9 +476,22 @@ def run_session(*, state, path, prove, work_fn, now, sleep,
         #
         # ⚠ BOARD FILL DOES NOT ARM IT. That is the whole point: gap-filling is what the fleet does
         # while it waits, and it must not consume the window.
-        if plan.get("source") == "tip" and arm_clock(state, t):
+        #
+        # ⭐⭐ AND IT STARTS WHEN THE BUNDLE APPEARED, NOT WHEN WE GOT ROUND TO IT. Arming at `t` gave
+        # the fleet every second between a block becoming provable and this loop picking it up --
+        # free time, excluded from the hour, in the one measurement the hour exists to make. Measured
+        # 2026-09-28: 968,985's bundle appeared at 12:24:59Z and proving began at 12:25:31Z, so 32 s
+        # of our own latency would have fallen outside the window. A board block in flight can make
+        # that gap much larger.
+        #
+        # `appeared_at` is when the BUNDLE first existed -- the earliest instant this fleet could
+        # have begun. Clamped to `t` so a bad clock can never start the window in the future, and
+        # falling back to `t` when the caller does not supply one.
+        _app = plan.get("appeared_at")
+        _arm_at = min(float(_app), t) if isinstance(_app, (int, float)) else t
+        if plan.get("source") == "tip" and arm_clock(state, _arm_at):
             save(path, state)
-            emit(f"⏱ CLOCK STARTS: {rng} is the first tip block — the "
+            emit(f"⏱ CLOCK STARTS at the moment {rng}'s bundle appeared — the "
                  f"{state['duration_s']/3600:.1f}-hour window runs from now. "
                  f"Waited {waited_s(state, t)/60:.1f} min for it, "
                  f"${float(state.get('spend_at_arm_usd') or 0.0):.2f} spent getting here")

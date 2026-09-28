@@ -1951,6 +1951,15 @@ def main():
                                    f"floor {proved_tip['h']} (--no-board-fill: the gap is not "
                                    f"filled with board work)"}
                 out = tip_controller.next_work(pending, claim_fn)
+                # ⭐ WHEN THE BUNDLE APPEARED, so the session's window can start there rather than
+                # at the moment this loop reached it. `seen_at` is stamped by pick_tip the first time
+                # a height is seen on the bridge, which is the earliest instant this fleet could have
+                # begun proving it. Only meaningful for tip work; board work never arms the clock.
+                if out.get("source") == "tip" and out.get("range") is not None:
+                    try:
+                        out["appeared_at"] = seen_at.get(int(out["range"]))
+                    except (TypeError, ValueError):
+                        out["appeared_at"] = None
                 if out.get("source") == "idle" and a.fresh_tip and pending is None:
                     # Both are true here and only one of them is the interesting one.
                     out["why"] = (f"waiting for the chain — bridge tip {t or '?'}, "
