@@ -992,6 +992,16 @@ jobs:
         run: |
           cd tools/live
           python3 test_tip_vs_board.py --control
+      - name: Per-level join cost, and what HAZYNC_JOIN_LOCAL_MAX would save
+        # ⭐ Lever 2 proves the NARROW top levels on the aggregate instead of shipping each pair over
+        # the network. It is OFF by default, held "pending a fleet run" because it measured +0.4-1.6s
+        # — on 3 A40s whose join p50 rtt was 1596 ms. Real multi-DC join rtt p50 is 17.1 s, and the
+        # lever's whole value is the trip it removes, so that measurement could not show it (#252).
+        # ⛔ The control makes a join ALL compute: with no trip to remove the lever must save nothing,
+        # and a level of one pair must break exactly even.
+        run: cd coordinator && python3 join_levels.py --selftest
+      - name: Join-level POSITIVE CONTROL (a join that is all compute — the lever must save nothing)
+        run: cd coordinator && python3 join_levels.py --selftest --control
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
