@@ -692,7 +692,7 @@ def assignment_preview(order):
     return {i: c for i, c in enumerate(order)}
 
 def dash_chain(a):
-    """The three processes that turn telemetry into a published frame.
+    """The processes that turn telemetry into a published frame, and keep the frames.
 
     ⚠ `collect.py` reaches the coordinator for chain facts and carries on without it, so a run is
     never blocked by the board being unreachable — the frame simply omits the chain figures.
@@ -707,6 +707,20 @@ def dash_chain(a):
     if a.publish_dest:
         chain.append(("publisher", ["/bin/bash", os.path.join(a.live_rig, "publish.sh"),
                                     "--loop", os.path.join(a.live_rig, "frame.png")]))
+    # \u2b50 AND THE ARCHIVER, SO THE RUN LEAVES A TIMELAPSE INSTEAD OF ONE PNG. `publish.sh`
+    # rewrites a single frame.png; the previous frame is gone. That is right for a live page and
+    # useless afterwards -- the most legible artifact a tip run can produce is the hour compressed
+    # into a few seconds, and after the run there is nothing left to compress.
+    #
+    # \u26d4 IT WAS NEVER IN THIS CHAIN. Measured 2026-09-28: nothing was archiving, and the archiver
+    # was started by hand 49 minutes in, so the run's frames from 12:45 to 13:34 do not exist. The
+    # run that needs it least is the one someone is watching; started here, no one has to remember.
+    #
+    # \u26a0 Deduped by CONTENT by the script itself, so an idle fleet does not outweigh the minutes
+    # that matter, and it writes into the RUNDIR -- the frames belong to the run, not to the rig.
+    chain.append(("archiver", ["/bin/bash", os.path.join(a.live_rig, "frame-archive.sh"),
+                               os.path.join(a.live_rig, "frame.png"),
+                               os.path.join(a.rundir, "frames"), "3"]))
     return chain
 
 

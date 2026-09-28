@@ -279,6 +279,13 @@ jobs:
         run: cd coordinator && python3 test_clock_from_tip.py
       - name: Deferred-clock POSITIVE CONTROL (armed at boot — the wait must eat the hour)
         run: cd coordinator && python3 test_clock_from_tip.py --control
+      - name: The run starts its frame archiver, so an hour leaves a timelapse
+        # ⛔ frame-archive.sh existed and was in nobody's start-up path. Tip hour 2 ran from 12:45
+        # with nothing archiving; it was started by hand at 13:34, so the gate phase, the first tip
+        # block and the growth from 17 to 24 cards have no frames and cannot be recovered.
+        run: cd coordinator && python3 test_dash_chain.py
+      - name: Dash-chain POSITIVE CONTROL (no archiver — only the last frame may survive)
+        run: cd coordinator && python3 test_dash_chain.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
