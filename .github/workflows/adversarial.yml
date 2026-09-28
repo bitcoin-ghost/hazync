@@ -293,6 +293,15 @@ jobs:
         run: cd coordinator && python3 test_grow_to_live.py
       - name: Grow-to POSITIVE CONTROL (fixed target, serial gating — both must reproduce)
         run: cd coordinator && python3 test_grow_to_live.py --control
+      - name: A long proof keeps its claim, and a WEDGED fleet still loses its claim
+        # ⛔ The beat's progress signal was joins only, and joins start after every segment is
+        # proved. Measured 2026-09-28: 969,018 ran 691.7 s and its first beat fired at 583 s, past
+        # the 600 s grace, to a 409. Fifteen of sixteen rejected beats in 30 days are this (#571).
+        # ⛔⛔ The control that matters is the SECOND half: beating on a timer is what #256 removed,
+        # because it kept a hung prover's claim alive for hours.
+        run: cd coordinator && python3 test_beat_progress.py
+      - name: Beat-progress POSITIVE CONTROL (joins only — a long block must lose its claim)
+        run: cd coordinator && python3 test_beat_progress.py --control
       - name: Tip blocks are proved in sequence, and a jump names what it skips
         # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
         # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
