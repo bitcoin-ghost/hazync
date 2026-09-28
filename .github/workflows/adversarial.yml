@@ -940,6 +940,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_collect_incremental.py --control
+      - name: Stopping the old streamers finishes before the new ones start
+        # ⛔ stop and start were both spawned with P_NOWAIT and neither awaited. Harmless only while
+        # the stop did not work; once #562 made it effective it began killing the generation start
+        # had just launched. Live 2026-09-28: feed dead 6 min, frame froze at $9.13 while 19 cards
+        # billed (#564). ⚠ A call-order assertion would have passed the whole time.
+        run: cd coordinator && python3 test_feed_restart_race.py
+      - name: Feed-restart POSITIVE CONTROL (fire-and-forget stop — must kill the new feed)
+        run: cd coordinator && python3 test_feed_restart_race.py --control
       - name: A streamer stop kills the writer, and a doubled second cannot inflate the money
         # ⛔ `kill $pid` hit the SUBSHELL; the `ssh` was its child, reparented, still appending.
         # #500 already called stop before every start — the calls did nothing. Measured 2026-09-28:
