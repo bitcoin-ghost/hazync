@@ -1892,10 +1892,15 @@ def main():
                 reachability. Admitting a card that skipped them would put exactly those failures
                 inside a block instead of before it, where they cost the whole fleet's wall clock.
                 """
+                # ⛔ wait_for_ssh RETURNS A DICT KEYED BY POD NAME, not a list. `cs[0]` raised
+                # KeyError: 0 on the first recruit this feature ever gated on real hardware
+                # (2026-09-28), so every recruit was rented, failed instantly and released — the
+                # feature could never have added a card. The main path has always read it as a dict
+                # (`order = [cards[n] for n in sorted(cards)]`); this was the one caller that did not.
                 cs, _pm = wait_for_ssh(api, [pod], ssh, need=1)
                 if not cs:
                     return False, None, "it never answered ssh"
-                c = cs[0]
+                c = next(iter(cs.values()))
                 if not prepare(ssh, c, block_path=(None if a.claim else a.block_path),
                                block_name=block_name, repo_hint=a.repo):
                     return False, None, "it could not be staged"
