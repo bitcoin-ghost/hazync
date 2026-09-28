@@ -99,6 +99,9 @@ status **into the log** — a background wrapper's exit code is the last command
 | `--fresh-tip` | off | prove only blocks mined **after** the fleet is ready. Boot is paid while idle, and each block is timed from a height that did not exist at launch. **This is what makes a tip-hour claim honest.** |
 | `--clock-from-tip` | off | start the `--session` window at the **first tip block** instead of when the fleet is ready. Pair it with `--fresh-tip`, which makes the session wait for a block that did not exist at launch — otherwise that wait comes out of the hour |
 | `--clock-wait-max H` | 2.0 | with `--clock-from-tip`, give up after this many hours if no tip block ever arrives. A deferred clock has **no other deadline**, so this is what stops a fleet being paid to wait on a bridge that has stopped serving bundles |
+| `--tip-max-behind N` | 3 | how many unproved tip bundles may queue before the session gives up on sequence and jumps to the newest, **recording every height it skips**. `0` = never jump, stay sequential whatever the cost |
+| `--tip-from H` | — | start the tip floor just below `H`, to close a known gap. Overrides `--fresh-tip`'s floor, which sets itself at the current tip and so can never reach back |
+| `--allow-tip-gaps` | off | ⛔ prove a tip block even when it is not the child of the last one proved. Produces a proof chain with a hole in it — recovery only |
 | `--no-board-fill` | off | with `--fresh-tip`, sit idle between tip blocks instead of proving board work. Only for measuring tip latency with nothing else on the fleet |
 | `--gpu-type` | `auto` | `auto` ranks every type with SECURE stock by *measured* cost per proof, then by price for unmeasured cards, and fills from **one** type where it can. Or pin a type by name |
 | `--grow-to N` | 0 | during a session, rent and gate toward N on a background thread; recruits join at a **block boundary** |
@@ -108,7 +111,7 @@ status **into the log** — a background wrapper's exit code is the last command
 | `--agg-candidates` | 3 | how many cards to measure before choosing the aggregate |
 | `--claim-as HANDLE` | — | refuse to start unless this box's claim identity is HANDLE |
 | `--budget-usd` | 0 | stop when spend reaches this. Charged every loop at the **live** fleet rate |
-| `--cleanup` | — | release whatever `rented.json` records, and exit |
+| `--cleanup` | — | release every pod **both** `rented.json` and `recruited.json` record, and exit. Reports pods on the account that neither knows about, without touching them |
 
 ---
 
@@ -145,6 +148,49 @@ The summary then reports `blocks_ok` (everything, board fill included) **and**
 ⚠ **The dashboard chain starts after the gates.** Until then `hazync.org/live` serves the **last
 frame of a previous run at HTTP 200** — it looks alive and is showing you something else. Judge by
 `Last-Modified`, never by the status code.
+
+---
+
+## The proof chain, and how it breaks
+
+The product is a **chain** of block proofs, so a height that goes by unproved is a missing link, not
+a slower result. Two things guard it, and you should know what each one refuses.
+
+**The session proves the lowest unproved tip bundle**, not the newest. On 2026-09-28 blocks 968,984
+and 968,985 were mined 5 seconds apart, both bundles appeared together, the old selector took the
+newest, and 968,984 has no proof to this day. If more than `--tip-max-behind` bundles queue up the
+session jumps to the newest and writes a `skipped` line per abandoned height into `tip_ledger.jsonl`,
+logs it, and puts the list in the session summary as `tip_blocks_skipped`.
+
+**Each bundle is checked against the last block proved**, after it is fetched and before any GPU
+touches it. The bundle names the block it builds on, and we hold the previous block's header, so
+this is a real linkage test rather than an integer comparison:
+
+```
+in_tip == witness.header[4:36] == reversed(getblockhash h-1)
+```
+
+A refusal reads `refusing to prove <h>: block <h> builds on <x> but the block we proved last hashes
+to <y> — this is a GAP or a fork, not the next link`. It also refuses a bundle whose stated height
+differs from the one asked for, and one whose `in_tip` disagrees with its own header.
+
+⚠ The **first** tip block of a session has nothing to link to and logs `unlinked`, with the reason.
+That is expected; an unverifiable link must never be reported as a verified one.
+
+### Closing a gap
+
+`--fresh-tip` sets the floor at the current tip, so a skipped height sits below it for ever and no
+later run can reach back. Use `--tip-from`:
+
+```sh
+python3 coordinator/tip_smoke.py --session 0.5 --tip-from 968984 --claim-as "G H O S T" \
+  --bridge-host localhost --cards 20 --min-cards 12 ...
+```
+
+⛔ **Do not pass `--fresh-tip` on a gap-closing run** — it is overridden, and combining them only
+makes the intent unclear. The bridge retains every bundle back to the emit floor (1,489 of them,
+oldest 967,500, as of 2026-09-28, and nothing prunes them on that box), so a gap can be closed at
+any time.
 
 ---
 
