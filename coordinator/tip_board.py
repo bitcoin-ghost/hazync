@@ -262,6 +262,21 @@ def highest_bundle_cmd(remote_dir):
             f"| sed 's/[^0-9]//g' | grep -v '^$' | sort -n | tail -1")
 
 
+def bundles_above_cmd(remote_dir, above):
+    """Every COMPLETE bundle height above `above`, ascending. Same filter as `highest_bundle_cmd`.
+
+    ⛔ THE SAME `.tmp` TRAP APPLIES HERE. `sed 's/[^0-9]//g'` on `bundle_968317.json.tmp` yields
+    `968317`, indistinguishable from a finished bundle, so the `grep -E '^bundle_[0-9]+\\.json$'`
+    ahead of it is what makes the answer true — not the sed. Kept identical to the pipeline above
+    rather than re-derived, because these two must never disagree about what counts as a bundle.
+
+    ⚠ `ls -U` and no shell glob: this directory reaches hundreds of thousands of entries and
+    `bundle_*` overflows the argument list.
+    """
+    return (f"ls -U {remote_dir} 2>/dev/null | grep -E '^bundle_[0-9]+\\.json$' "
+            f"| sed 's/[^0-9]//g' | grep -v '^$' | sort -n | awk '$1 > {int(above)}'")
+
+
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
 
 
@@ -323,6 +338,58 @@ def highest_tip_bundle(host, remote_dir="/var/lib/hazync/tip_bundles", runner=No
         return None
     out = (getattr(r, "stdout", b"") or b"").decode(errors="replace").strip()
     return int(out) if out.isdigit() else None
+
+
+def tip_bundles_above(host, above, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
+    """Every provable tip height above `above`, ascending. `[]` on any failure.
+
+    ⛔ WHY THIS EXISTS (hazync#556). The session asked `highest_tip_bundle` what to prove next, so
+    when two blocks were mined 5 seconds apart their bundles landed together and the LOWER one was
+    skipped for good. Measured 2026-09-28: 968,984 (mined 13:24:22) and 968,985 (13:24:27) both
+    appeared at 13:24:59; the run proved 985 and 984 has no proof and never will.
+
+    The product is a CHAIN of proofs, so a gap is a missing link rather than a slower result — and
+    nothing reported it. Seeing the whole pending list, not just its maximum, is what lets the caller
+    prove in order and name what it chose to skip.
+
+    ⚠ An error is `[]`, the same as "nothing waiting", exactly as `highest_tip_bundle` returns None
+    for both. That is deliberate here too: a session must never abandon a healthy board block, or
+    trip a fault guard, because of one ssh blip on the bridge.
+    """
+    import subprocess
+    run = runner or (lambda cmd: subprocess.run(cmd, capture_output=True, timeout=120))
+    r = run(_bridge_cmd(host, bundles_above_cmd(remote_dir, above)))
+    if getattr(r, "returncode", 1) != 0:
+        return []
+    out = (getattr(r, "stdout", b"") or b"").decode(errors="replace")
+    return sorted(int(x) for x in out.split() if x.isdigit())
+
+
+def next_tip_bundle(host, above, remote_dir="/var/lib/hazync/tip_bundles", runner=None):
+    """The LOWEST provable tip height above `above`, or None — the sequential tip signal."""
+    hs = tip_bundles_above(host, above, remote_dir=remote_dir, runner=runner)
+    return hs[0] if hs else None
+
+
+def choose_tip(heights, max_behind):
+    """Which pending tip height to prove, and which that abandons. Returns (chosen, skipped).
+
+    ⛔ SEQUENCE FIRST. `heights` is every unproved bundle, ascending; the answer is normally its
+    FIRST element. Taking the last is what skipped 968,984 on 2026-09-28.
+
+    ⚠ BUT SEQUENCE CANNOT BE ABSOLUTE. A fleet that falls behind and insists on order proves
+    ever-older blocks while newer ones pile up -- it stops following the tip at all, which is the
+    property the rig exists to demonstrate. Past `max_behind` pending bundles it jumps to the newest
+    and RETURNS what that abandons, so the caller can record the hole rather than create it quietly.
+
+    `max_behind` of 0 or None means never jump: stay in sequence whatever the cost.
+    """
+    hs = sorted(int(h) for h in heights or ())
+    if not hs:
+        return None, []
+    if max_behind and len(hs) > int(max_behind):
+        return hs[-1], hs[:-1]
+    return hs[0], []
 
 
 def fetch_bundle_ssh(height, dest, host, remote_dir="/var/lib/hazync/tip_bundles", runner=None):

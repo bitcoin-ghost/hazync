@@ -32,6 +32,7 @@ import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
 import tip_driver                       # noqa: E402
 import tip_economics                    # noqa: E402
+import tip_chain                        # noqa: E402
 import tip_harvest                      # noqa: E402
 import tip_lifecycle                   # noqa: E402
 import tip_recruit                      # noqa: E402
@@ -787,6 +788,25 @@ def main():
     # to mine a block above the --fresh-tip floor, filling the time with board work. A quarter of the
     # hour was gone before the first tip block existed, so "blocks proved in one hour" understated the
     # fleet by whatever the chain happened to be doing. Board fill does NOT start the clock.
+    # ⛔ THE TIP IS PROVED IN SEQUENCE (hazync#556). The selector asked `highest_tip_bundle` what to
+    # prove next, so when 968,984 and 968,985 were mined 5 seconds apart on 2026-09-28 their bundles
+    # landed together, the run took 985, and 984 has no proof and never will. The product is a CHAIN
+    # of proofs: a gap is a missing link, not a slower result.
+    ap.add_argument("--tip-max-behind", type=int, default=3,
+                    help="how many unproved tip bundles may queue before the session gives up on "
+                         "sequence and jumps to the newest, recording the skipped heights "
+                         "(0 = never jump, always stay sequential). Default 3")
+    # ⚠ A SEQUENTIAL RUN THAT CAN NEVER CATCH UP STOPS FOLLOWING THE TIP AT ALL, which is the thing
+    # the rig exists to demonstrate. The bound above is what keeps "gapless" from quietly becoming
+    # "permanently behind"; the skip is then explicit, in the ledger and in the summary.
+    ap.add_argument("--tip-from", type=int, default=0,
+                    help="start the tip floor just below this height instead of at the current "
+                         "tip, to close a known gap (e.g. --tip-from 968984). Overrides "
+                         "--fresh-tip's floor")
+    ap.add_argument("--allow-tip-gaps", action="store_true",
+                    help="prove a tip block even when it is not the child of the last one proved. "
+                         "⛔ Produces a proof chain with a hole in it; the refusal exists for a "
+                         "reason and this is for recovery only")
     ap.add_argument("--clock-from-tip", action="store_true",
                     help="start the --session window at the FIRST TIP BLOCK rather than when the "
                          "fleet is ready. Waiting and board fill are then billed but not counted "
@@ -1666,6 +1686,35 @@ def main():
                         bok, bwhy = tip_board.fetch_bundle(int(rng), bp)
                     if not bok:
                         raise RuntimeError(f"no bundle for {rng}: {bwhy}")
+
+                # ⭐ IS THIS THE NEXT LINK? (hazync#556) Checked AFTER the bundle is on disk and
+                # BEFORE a single GPU touches it, so a gap costs one file read rather than a block
+                # of fleet time. Only tip work: board blocks are deliberately out of order.
+                #
+                # ⛔ A DECLARED JUMP IS NOT A GAP TO REFUSE. If --tip-max-behind made the selector
+                # skip ahead, the parent is not the block we proved and the check would refuse work
+                # the operator asked for. The link is RESET instead, and the skip is already in the
+                # ledger from pick_tip -- so the hole is recorded once, in one place, either way.
+                if from_tip:
+                    try:
+                        with open(bp) as _fh:
+                            _doc = json.load(_fh)
+                    except (OSError, ValueError) as _exc:
+                        raise RuntimeError(f"bundle for {rng} is unreadable: {_exc}")
+                    _prev = None if int(rng) in jumped else proved_tip.get("header")
+                    v = tip_chain.verdict(_doc, expect_height=int(rng), prev_header=_prev)
+                    tip_note("link", height=int(rng), ok=bool(v["ok"]), linked=bool(v["linked"]),
+                             parent=v["parent"], why=v["why"])
+                    if not v["ok"]:
+                        if a.allow_tip_gaps:
+                            log(f"  ⚠ CHAIN CHECK FAILED and --allow-tip-gaps is set, proving "
+                                f"anyway: {v['why']}")
+                        else:
+                            raise RuntimeError(f"refusing to prove {rng}: {v['why']}")
+                    log("  chain: " + ("LINKED — " if v["linked"] else "unlinked — ") + v["why"])
+                    # Held until the proof succeeds; a block we failed to prove must not become the
+                    # parent the next one is checked against.
+                    staged_header[int(rng)] = tip_chain.bundle_header(_doc)
                 hi_l = {"n": 0}
 
                 def _b(progress):
@@ -1716,8 +1765,19 @@ def main():
             # runs from "this block did not exist" to "its proof is accepted", which is the only
             # figure that supports a claim about following the tip. It also prices boot separately:
             # renting and gating happen while waiting, so they cannot hide inside a block's time.
-            proved_tip = {"h": 0}
-            if a.fresh_tip:
+            # `header` is the 80 bytes of the last tip block we proved — the thing the NEXT bundle
+            # must name as its parent. None until we have proved one, which is why the first tip
+            # block of a session is reported as unlinked rather than as verified (hazync#556).
+            proved_tip = {"h": 0, "header": None}
+            # ⛔ AN EXPLICIT FLOOR BEATS THE FRESH ONE. --fresh-tip sets the floor at the current tip,
+            # so a height that was skipped earlier is below it for ever and no later run can reach
+            # back for it. 968,984 and 968,986 are in exactly that position after 2026-09-28.
+            if a.tip_from:
+                proved_tip["h"] = int(a.tip_from) - 1
+                log(f"TIP FROM: floor set at {a.tip_from - 1} — the next tip block proved will be "
+                    f"{a.tip_from}, to close a known gap"
+                    + (" (overriding --fresh-tip)" if a.fresh_tip else ""))
+            elif a.fresh_tip:
                 t0h = tip_board.highest_tip_bundle(a.bridge_host)
                 if t0h:
                     proved_tip["h"] = int(t0h)
@@ -1761,6 +1821,14 @@ def main():
             # run backwards. The lag that matters is measured from the former.
             tipledger = os.path.join(a.rundir, "tip_ledger.jsonl")
             seen_at = {}
+            # ⚠ Noted ONCE each. work_fn runs every loop, so an unguarded skip line would fill the
+            # ledger with the same gap and make it unreadable as evidence.
+            gap_noted = set()
+            # Heights the selector reached by JUMPING. The chain check refuses an UNEXPECTED gap;
+            # a jump the operator's own --tip-max-behind asked for is declared, so it resets the
+            # link rather than failing it. Without this the two features would contradict.
+            jumped = set()
+            staged_header = {}
 
             def tip_note(event, **kv):
                 rec = {"event": event, "t": round(time.time(), 3),
@@ -1771,14 +1839,49 @@ def main():
                 except OSError:
                     pass          # a ledger that cannot be written must never stop a run
 
+            def pick_tip():
+                """The next tip height to prove, IN SEQUENCE, and what taking it skips (hazync#556).
+
+                ⛔ THE LOWEST UNPROVED, NOT THE HIGHEST. `highest_tip_bundle` was the selector, so two
+                blocks mined seconds apart meant the lower one was skipped for good: 968,984 and
+                968,985 both appeared at 13:24:59 on 2026-09-28 and only 985 was ever proved.
+
+                ⛔ AND `appeared` IS WRITTEN FOR EVERY BUNDLE, NOT JUST THE MAXIMUM. The old loop
+                noted only the height it selected, so 968,984 has no `appeared` line in the tip
+                ledger at all -- the file that exists to be the audit trail read as complete and
+                gapless while a block went by unproven. A fix that leaves the evidence blind is not
+                a fix.
+
+                Returns (chosen, skipped, newest).
+                """
+                hs = tip_board.tip_bundles_above(a.bridge_host, proved_tip["h"])
+                now_t = time.time()
+                for h in hs:
+                    if h not in seen_at:
+                        seen_at[h] = now_t
+                        tip_note("appeared", height=int(h))
+                if not hs:
+                    return None, [], None
+                newest = hs[-1]
+                # ⚠ The policy is a pure function in tip_board so it can be tested without a bridge,
+                # an ssh hop or a fleet. This closure only does the bookkeeping around it.
+                chosen, skipped = tip_board.choose_tip(hs, a.tip_max_behind)
+                for h in skipped:
+                    if h not in gap_noted:
+                        gap_noted.add(h)
+                        tip_note("skipped", height=int(h), chose=int(chosen),
+                                 why=f"{len(hs)} tip bundles were waiting, above "
+                                     f"--tip-max-behind {a.tip_max_behind}")
+                        log(f"  ⛔ SKIPPING tip block {h} — {len(hs)} bundles waiting, jumping "
+                            f"to {chosen}. This leaves a hole in the proof chain.")
+                return chosen, skipped, newest
+
             def work_fn():
                 # ⛔ A TIP BLOCK IS "WAITING" ONLY IF ITS BUNDLE EXISTS. Asking the node for its height
                 # would report a tip the fleet cannot prove: nothing is emitted below EMIT_FROM.
-                t = tip_board.highest_tip_bundle(a.bridge_host)
-                if t and t not in seen_at:
-                    seen_at[t] = time.time()
-                    tip_note("appeared", height=int(t))
-                pending = t if (t and t > proved_tip["h"]) else None
+                pending, skipped, t = pick_tip()
+                if skipped:
+                    jumped.update(int(x) for x in [pending])
                 # ⛔ --fresh-tip MEANS TIP ONLY. Without this, next_work() falls through to BOARD
                 # work whenever no fresh tip is waiting -- and a driver configured with
                 # --claim-source ssh fetches from the bridge's tip_bundles, which holds nothing
@@ -1831,16 +1934,18 @@ def main():
                 filter counted `bundle_<h>.json.tmp` -- the file the bridge is still writing -- as an
                 available tip. Abandoning a board block for a bundle that does not exist yet would
                 throw away real work and then fail to fetch the thing it was thrown away for.
+
+                ⚠ THE SAME SELECTOR AS work_fn, ON PURPOSE (hazync#556). If this said "a tip is
+                waiting" about the HIGHEST bundle while work_fn then proved the LOWEST, the board
+                block would be abandoned for one height and the fleet would start another -- and the
+                log would name the wrong block as the reason. One picker, one answer.
                 """
                 try:
-                    t = tip_board.highest_tip_bundle(a.bridge_host)
+                    chosen, _skipped, _newest = pick_tip()
                 except Exception:
                     return None                      # ⚠ never abort a healthy block on an ssh blip
-                if t and int(t) > proved_tip["h"]:
-                    if int(t) not in seen_at:
-                        seen_at[int(t)] = time.time()
-                        tip_note("appeared", height=int(t))
-                    return f"tip block {t} is waiting and the tip comes first"
+                if chosen:
+                    return f"tip block {chosen} is waiting and the tip comes first"
                 return None
 
             def prove_one(rng):
@@ -1861,6 +1966,12 @@ def main():
                             "why": exc.why, "wall_s": exc.elapsed_s}
                 if from_tip:
                     proved_tip["h"] = int(rng)
+                    # ⛔ ONLY NOW. The parent for the next check is the last block we actually
+                    # PROVED — promoting it at fetch time would let a failed block become the link
+                    # the next one is measured against, and the chain would verify against
+                    # something that was never proved.
+                    proved_tip["header"] = staged_header.pop(int(rng), None)
+                    staged_header.clear()
                     # chain tip NOW, so the lag is against the real chain rather than our own clock
                     try:
                         tip_now = tip_board.highest_tip_bundle(a.bridge_host)
@@ -2015,7 +2126,16 @@ def main():
                                            idle_s=30.0, block_estimate_s=estimate_s,
                                            budget_usd=(a.budget_usd or None), spend_fn=spend_fn,
                                            grow_fn=grow_fn)
+            # ⛔ A GAP MUST BE IN THE SUMMARY, NOT ONLY IN THE LEDGER (hazync#556). The 2026-09-28
+            # skip was absent from the session summary, the dashboard grid, the run log AND the tip
+            # ledger — four artifacts, no trace. Whatever else this run reports, it reports its holes.
+            summ["tip_blocks_skipped"] = sorted(gap_noted)
+            summ["tip_chain_gapless"] = not gap_noted
             log("SESSION " + json.dumps(summ, indent=1))
+            if gap_noted:
+                log(f"⛔ THE PROOF CHAIN HAS {len(gap_noted)} HOLE(S): {sorted(gap_noted)} — these "
+                    f"heights had bundles and were never proved. Close them with "
+                    f"--tip-from <height>.")
             return 0
 
         if a.claim:

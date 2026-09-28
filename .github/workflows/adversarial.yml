@@ -279,6 +279,19 @@ jobs:
         run: cd coordinator && python3 test_clock_from_tip.py
       - name: Deferred-clock POSITIVE CONTROL (armed at boot — the wait must eat the hour)
         run: cd coordinator && python3 test_clock_from_tip.py --control
+      - name: Tip blocks are proved in sequence, and a jump names what it skips
+        # ⛔ `highest_tip_bundle` was the selector, so 968,984 and 968,985 — mined 5 seconds apart,
+        # bundles landed together — meant 984 was skipped for good, with no trace in the summary,
+        # the grid, the log or the tip ledger (#556).
+        run: cd coordinator && python3 test_tip_sequential.py
+      - name: Sequential-tip POSITIVE CONTROL (highest wins — the skip must reproduce)
+        run: cd coordinator && python3 test_tip_sequential.py --control
+      - name: A tip bundle is proved only if it is the child of the last one proved
+        # ⛔ Nothing ever asked whether the block about to be proved chained to the previous one.
+        # Verified against mainnet: bundle.in_tip == header[4:36] == getblockhash(h-1) (#556).
+        run: cd coordinator && python3 test_tip_chain.py
+      - name: Chain-link POSITIVE CONTROL (no linkage check — the gap must be accepted)
+        run: cd coordinator && python3 test_tip_chain.py --control
       - name: Prover-lists POSITIVE CONTROL (a second hand-rolled ranking — must be caught)
         run: |
           cd coordinator
