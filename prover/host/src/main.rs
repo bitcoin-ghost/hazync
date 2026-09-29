@@ -6188,6 +6188,85 @@ fn unpack_pair(body: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 #[cfg(test)]
+mod participant_count_tests {
+    //! Counting PARTICIPANTS: distinct cards, never connections (hazync#567 follow-up).
+    //!
+    //! ⛔ MEASURED, tip hour 4, 2026-09-29. The summary printed "81 card(s) at peak" for a fleet of
+    //! **38**. The count was the peak of `live_peers`, which increments per CONNECTION: a worker is
+    //! re-armed for every block, and a reconnect can overlap its predecessor's reader thread, which
+    //! has not yet reached the decrement at the end. Roughly 2x inflation.
+    //!
+    //! ⛔ AND IT WAS NOT COSMETIC. It fed `exec_bound_cards`, so the crossover printed 133 cards for
+    //! 969,118 where the honest figure is ~62 — an operator reading it would conclude the executor was
+    //! nowhere near binding when the fleet was already 60% of the way there.
+    //!
+    //! The fix is possible only because of #570: a card now says its own name, so reconnects collapse.
+    use std::collections::HashSet;
+
+    /// What the fix does: distinct names, plus connections that never identified themselves.
+    fn participants(events: &[Option<&str>]) -> (usize, usize) {
+        let mut named: HashSet<&str> = HashSet::new();
+        let mut unnamed = 0usize;
+        for e in events {
+            match e {
+                Some(n) => { named.insert(n); }
+                None => unnamed += 1,
+            }
+        }
+        (named.len(), unnamed)
+    }
+
+    /// What it used to do: one per connection, whatever it was.
+    fn connections(events: &[Option<&str>]) -> usize { events.len() }
+
+    /// Hour 4's shape: 38 cards, each connecting once per block over 21 blocks.
+    fn hour4() -> Vec<Option<&'static str>> {
+        const NAMES: [&str; 38] = ["w1","w2","w3","w4","w5","w6","w7","w8","w9","w10","w11","w12",
+            "w13","w14","w15","w16","w17","w18","w19","w20","w21","w22","w23","w24","w25","w26","w27",
+            "w28","w29","w30","w31","w32","w33","w34","w35","w36","w37","w38"];
+        let mut v = Vec::new();
+        for _block in 0..21 { for n in NAMES { v.push(Some(n)); } }
+        v
+    }
+
+    #[test]
+    fn a_card_that_reconnects_is_still_one_card() {
+        let (named, unnamed) = participants(&hour4());
+        assert_eq!((named, unnamed), (38, 0), "798 connections from 38 cards is 38 cards");
+        // ⛔ THE CONTROL: the old rule, on the same events.
+        assert_eq!(connections(&hour4()), 798);
+        assert!(connections(&hour4()) > named * 20,
+                "the old rule inflates by the number of blocks — which is how 38 read as 81");
+    }
+
+    #[test]
+    fn an_unidentified_connection_is_reported_separately_not_merged() {
+        // A pre-#570 worker cannot be de-duplicated. Counting all of them as ONE card would understate
+        // the fleet exactly as badly as counting each connection overstated it.
+        let ev = vec![Some("w1"), Some("w1"), None, None, Some("w2")];
+        assert_eq!(participants(&ev), (2, 2), "2 named, 2 unidentified — not 3, and not 5");
+    }
+
+    #[test]
+    fn the_crossover_moves_with_the_honest_count() {
+        // 969,118: segment phase 258.6 s, executor window 157.7 s.
+        let p = super::BlockPhases { prologue_s: 0.0, exec_s: 157.7, segment_s: 258.6, assembly_s: 38.4 };
+        let honest = p.exec_bound_cards(38).unwrap();
+        let inflated = p.exec_bound_cards(81).unwrap();
+        assert!((honest - 62.3).abs() < 1.0, "honest crossover ~62 cards, got {honest}");
+        assert!((inflated - 132.8).abs() < 1.0, "the inflated count printed ~133, got {inflated}");
+        assert!(inflated > honest * 2.0,
+                "⛔ a 2x miscount doubles the crossover, which is the number an operator acts on");
+    }
+
+    #[test]
+    fn degenerate_cases() {
+        assert_eq!(participants(&[]), (0, 0));
+        assert_eq!(participants(&[None]), (0, 1), "an unnamed connection is not a named card");
+    }
+}
+
+#[cfg(test)]
 mod hello_wire_tests {
     //! The hello over a REAL socket (hazync#570).
     //!
@@ -7444,11 +7523,25 @@ fn seg_serve_cmd() {
     // is a plain local -- no second shared structure, no mutex.
     let live_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let acc_live = live_peers.clone();
-    // #567: the PEAK, not the live count. The summary is printed after the fold, by which point
-    // workers have dropped — reporting `live_peers` there would divide the segment phase by however
-    // many happened to still be attached, which on a finished run can be one or none.
-    let peak_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let acc_peak = peak_peers.clone();
+    // #567: the summary is printed after the fold, by which point workers have dropped — reporting
+    // `live_peers` there would divide the segment phase by however many happened to still be
+    // attached, which on a finished run can be one or none.
+    //
+    // ⛔⛔ AND IT MUST COUNT CARDS, NOT CONNECTIONS. The first version took the peak of `live_peers`,
+    // which is incremented per CONNECTION. Measured on tip hour 4, 2026-09-29: a 38-card fleet
+    // reported "81 card(s) at peak", because a worker is re-armed for every block and a reconnect can
+    // overlap its predecessor's thread — the old connection has not yet reached the decrement at the
+    // end of its reader. Roughly 2x inflation, and it fed straight into the crossover figure (printed
+    // 133 cards for 969,118 where the real number is ~62).
+    //
+    // ⇒ Count DISTINCT card names, which #570's hello makes available. A connection that never says
+    // hello cannot be de-duplicated, so it is tallied separately and reported as such rather than
+    // silently counted as a card.
+    let cards_seen: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let unnamed_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let acc_seen = cards_seen.clone();
+    let acc_unnamed = unnamed_conns.clone();
     let (aq, ao, aw, aj, ajo, alo, atk) =
         (queue.clone(), out.clone(), wire.clone(), jobs.clone(), jout.clone(), last_out.clone(),
          total_known.clone());
@@ -7467,9 +7560,15 @@ fn seg_serve_cmd() {
                     // Incrementing and decrementing in one place keeps them impossible to desynchronise
                     // -- a leaked count would make the no-peers check believe a worker is still there
                     // and never fire, which is the failure this is meant to remove.
-                    let now_live = acc_live.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    acc_peak.fetch_max(now_live, std::sync::atomic::Ordering::Relaxed);
+                    acc_live.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Counted here; the hello below moves it into `cards_seen` by name.
+                    acc_unnamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let live = acc_live.clone();
+                    // ⚠ Cloned PER CONNECTION, like every other Arc here. Referencing `acc_seen`
+                    // inside the closure moves it on the first accept and the second one will not
+                    // compile — which is the borrow checker catching the same "built once before the
+                    // loop" mistake that #540 hit three times at runtime.
+                    let (conn_seen, conn_unnamed) = (acc_seen.clone(), acc_unnamed.clone());
                     let (queue, out, wire, jobs, jout, alldone, last_out, total_known) =
                         (aq.clone(), ao.clone(), aw.clone(), aj.clone(), ajo.clone(), acc_alldone.clone(),
                          alo.clone(), atk.clone());
@@ -7526,6 +7625,7 @@ fn seg_serve_cmd() {
                             let (inflight, injobs, stop, peer_rtts, card) =
                                 (inflight.clone(), injobs.clone(), stop.clone(), peer_rtts.clone(),
                                  card.clone());
+                            let (seen, unnamed) = (conn_seen.clone(), conn_unnamed.clone());
                             let (out, jout, last_out, queue, jobs) =
                                 (out.clone(), jout.clone(), last_out.clone(), queue.clone(), jobs.clone());
                             std::thread::spawn(move || {
@@ -7540,6 +7640,10 @@ fn seg_serve_cmd() {
                                     if i == HELLO_TAG {
                                         if let Some(name) = hello_card_name(&body) {
                                             println!("  worker at {peer} is card {name}");
+                                            // ⚠ A set, so a RECONNECT from the same card is not a
+                                            // second card — which is the whole bug being fixed.
+                                            seen.lock().unwrap().insert(name.clone());
+                                            unnamed.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                             *card.lock().unwrap() = name;
                                         }
                                         continue;
@@ -8087,10 +8191,14 @@ come back by itself. Start one against this coordinator, or re-run.");
     println!("  TOTAL          {:8.1} s   <- MEASURED, not the sum of the above", t_block.elapsed().as_secs_f64());
     println!("  serial floor   {:8.1} s   <- prologue + assembly; no fleet size reduces it",
              phases.serial_floor_s());
-    let peak = peak_peers.load(std::sync::atomic::Ordering::Relaxed);
-    if let Some(n) = phases.exec_bound_cards(peak) {
-        println!("  {peak} card(s) at peak; execution becomes the binding constraint at ~{n:.0}, \
-and below that cards still buy time — hazync#567");
+    // ⚠ DISTINCT CARDS, not connections — see the note at `cards_seen`.
+    let named = cards_seen.lock().unwrap().len();
+    let unnamed = unnamed_conns.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(n) = phases.exec_bound_cards(named + unnamed) {
+        let extra = if unnamed > 0 { format!(" + {unnamed} unidentified connection(s)") }
+                    else { String::new() };
+        println!("  {named} card(s) by name{extra}; execution becomes the binding constraint at \
+~{n:.0}, and below that cards still buy time — hazync#567");
     }
     println!();
     println!(">>> PUSH-TRANSPORT RECEIPT VERIFIED against METHOD_ID");
