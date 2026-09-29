@@ -15,7 +15,7 @@ OUTPUT  snapshot.json, rewritten atomically every tick. The renderer only ever r
 ⛔ Nothing here is synthesised except under --demo, which exists so the renderer can be tested with
 no pods running. A card with no recent sample is reported up:false rather than given a plausible curve.
 """
-import argparse, csv, json, math, os, re, time, urllib.request
+import argparse, csv, json, math, os, re, threading, time, urllib.request
 
 API = os.environ.get("COORD_URL", "https://api.hazync.org")
 WINDOW_S = 900          # rolling telemetry window kept per card (seconds)
@@ -25,6 +25,49 @@ WINDOW_S = 900          # rolling telemetry window kept per card (seconds)
 # moves with it, which is why it reads the same environment variable rather than hard-coding a copy.
 TIP_FROM = int(os.environ.get("HAZYNC_TIP_FROM", "967500"))
 STALE_S = 15            # no sample for this long -> the card is not "up"
+
+
+# ⛔⛔ THE CHAIN LOOKUP MUST NOT BLOCK THE LOOP (hazync#591). `chain_facts` is a synchronous HTTP
+# request with a 10 s timeout, and it used to be called inline every tick — so one slow or
+# unreachable call froze the ENTIRE snapshot: cards, blocks, spend, progress, all of it. Observed
+# 2026-09-29, with the API perfectly healthy (5/5 HTTP 200) and this laptop's network saturated by 81
+# ssh streams feeding the rig: the page stopped for up to 10 s at a time and the operator asked
+# whether the feed had died. It had not. STALE_S is 60, so the frame could not even say so.
+#
+# ⇒ One background thread refreshes it; the loop reads the last good value and never waits. A stale
+# chain reading is a degraded INDICATOR, which is honest; a frozen page is a lie about everything.
+_CHAIN = {"v": {"ok": False, "error": "not read yet"}, "at": 0.0}
+_CHAIN_LOCK = threading.Lock()
+
+
+def chain_cached(max_age_s=90.0):
+    """The last good chain reading, with its age. Never blocks."""
+    with _CHAIN_LOCK:
+        v, at = dict(_CHAIN["v"]), _CHAIN["at"]
+    if at and (time.time() - at) > max_age_s:
+        v = dict(v)
+        v["stale_s"] = round(time.time() - at, 1)
+    return v
+
+
+def _chain_refresh_loop(every_s=10.0):
+    while True:
+        got = chain_facts()
+        # ⚠ Only a GOOD reading replaces the cache. A failed fetch must not erase a chain tip we
+        # already know — that would turn a transient network blip into "the chain is unknown".
+        if got.get("ok") is not False:
+            with _CHAIN_LOCK:
+                _CHAIN["v"], _CHAIN["at"] = got, time.time()
+        else:
+            with _CHAIN_LOCK:
+                _CHAIN["v"] = dict(_CHAIN["v"], last_error=got.get("error"))
+        time.sleep(every_s)
+
+
+def start_chain_thread():
+    t = threading.Thread(target=_chain_refresh_loop, daemon=True, name="chain")
+    t.start()
+    return t
 
 
 def chain_facts():
@@ -42,6 +85,28 @@ def chain_facts():
 # Bitcoin's mean inter-block time. The ring's denominator is a COUNT OF BLOCKS, and on a one-hour
 # run that count is ~6, not the 144 of a full day.
 BLOCK_PERIOD_S = 600.0
+
+
+def pid_is_a_collector(pid):
+    """True only if `pid` is a LIVE process running this collector.
+
+    ⛔ Three ways a bare `/proc/<pid>` check says yes when the answer is no:
+      * a ZOMBIE — exited, not yet reaped — keeps its /proc entry, and `cmdline` is EMPTY;
+      * a RECYCLED pid belongs to something else entirely, whose cmdline names something else;
+      * the process may be ours already, which the caller handles separately.
+
+    Reading `cmdline` settles all of them, and reading it is also the liveness test: the file
+    disappears with the process.
+
+    ⚠ `/proc/<pid>/comm` is NOT usable here — it truncates at 15 characters, so every python process
+    reads as `python3` and a collector cannot be told from any other script.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            argv = fh.read().split(b"\0")
+    except (OSError, ValueError):
+        return False                      # gone, or not a pid we can inspect
+    return any(b"collect.py" in a for a in argv)
 
 
 def session_clock(rundir):
@@ -722,6 +787,16 @@ def main():
     #
     # ⚠ The lock records a PID and is checked for LIVENESS, so a collector killed with -9 (which
     # leaves no chance to clean up) does not wedge the next run for ever.
+    #
+    # ⛔ BUT EXISTENCE IS NOT LIVENESS (hazync#583). `/proc/<pid>` exists for a ZOMBIE — a process
+    # that has exited and not yet been reaped — and for a pid the kernel has RECYCLED to something
+    # unrelated. Hit 2026-09-29: the collector was stopped and its replacement refused to start,
+    # naming a pid that was no longer collecting anything. The remedy the message offers is
+    # `--steal`, which is the flag that DISABLES the check, so the documented way out of a false
+    # positive is the same as the way out of a real conflict — and an operator who meets it twice
+    # stops reading it.
+    #
+    # ⇒ Ask whether the pid is a COLLECTOR, not whether it is a number with a /proc entry.
     lock = os.path.abspath(a.out) + ".owner"
     if not a.once:
         held = None
@@ -730,7 +805,7 @@ def main():
         except (OSError, ValueError):
             held = None
         if held and held != os.getpid():
-            alive = os.path.exists(f"/proc/{held}")
+            alive = pid_is_a_collector(held)
             if alive and not a.steal:
                 raise SystemExit(
                     f"⛔ pid {held} is already collecting into {a.out}.\n"
@@ -743,6 +818,11 @@ def main():
                 fh.write(str(os.getpid()))
         except OSError as exc:
             print(f"[collect] ⚠ could not write {lock}: {exc}", flush=True)
+
+    # ⛔ Start the chain refresher BEFORE the loop, and only for --loop: a one-shot run fetches
+    # synchronously above. A daemon thread dies with the process, so there is nothing to stop.
+    if not a.once:
+        start_chain_thread()
 
     state = {}
     # One cursor per card, carried across ticks. A fresh cursor reads the file whole, so --once and
@@ -771,7 +851,10 @@ def main():
             sb = session_blocks(phase_label)
             if sb:
                 state["session_blocks"] = sb
-            chain = chain_facts()
+            # ⚠ --once has no background thread to have populated the cache, and a one-shot caller
+            # (a test, a manual capture) wants the real answer rather than "not read yet". The cost
+            # is bounded by chain_facts' own timeout and there is no loop to freeze.
+            chain = chain_facts() if a.once else chain_cached()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
                 try:
