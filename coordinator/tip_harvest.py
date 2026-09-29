@@ -162,7 +162,7 @@ def harvest(ssh, cards, agg, outdir):
     every file that came back AND every one that did not, because "we fetched nothing" and "there was
     nothing to fetch" are different failures and a silent skip makes them look identical.
     """
-    got, missed = {}, {}
+    got, missed, absent = {}, {}, {}
     agg_cid = getattr(agg, "cid", None)
     for key, card in cards.items():
         # ⚠ NAMED BY THE CARD, NOT BY THE DICT KEY. `assignment` is {chunk_index: Card}, so keying the
@@ -178,18 +178,50 @@ def harvest(ssh, cards, agg, outdir):
         except OSError as e:
             missed[str(cid)] = [f"mkdir: {e}"]
             continue
+        # ⛔⛔ ASK WHAT IS THERE FIRST (hazync#588). Fetching blind and calling every failure "a dying
+        # pod refuses connections" asserts a cause this code cannot know, and on 2026-09-29 it was
+        # wrong for every card: mode 6 never runs pod-prove.sh, so `run.log`, `prove.log` and
+        # `facts.json` DO NOT EXIST — they are chunk-mode artefacts. The harvest reported them as lost
+        # to dying pods, I believed it, and I told the operator we had lost data. Nothing was lost.
+        #
+        # The tell was in the report itself: the "missing" files were the LAST N of the list for
+        # EVERY card, identically. A dying-pod race is random; list order is not.
+        #
+        # One `ls` per card costs one round trip and replaces up to five failed fetches, so it is
+        # also cheaper than the thing it replaces.
+        wd = getattr(card, "workdir", "/workspace")
+        present = None
+        try:
+            out = ssh.run(card, "cd %s 2>/dev/null && ls -1 %s 2>/dev/null"
+                                % (wd, " ".join(names)))
+            if out is not None:
+                present = {ln.strip().split("/")[-1] for ln in out.splitlines() if ln.strip()}
+        except Exception:
+            present = None                              # unreachable: fall back to trying
         for n in names:
+            # ⚠ `present is None` means we could not ASK, which is a different fact from "not there".
+            # In that case still try the fetch, so an ls that fails for its own reasons cannot make
+            # the harvest skip a file that exists.
+            if present is not None and n not in present:
+                absent.setdefault(str(cid), []).append(n)
+                continue
             local = os.path.join(d, n)
             try:
-                ok = ssh.fetch(card, f"{getattr(card, 'workdir', '/workspace')}/{n}", local)
-            except Exception as e:                      # a dying pod refuses connections; keep going
-                ok, e = False, e
+                ok = ssh.fetch(card, f"{wd}/{n}", local)
+            except Exception:                           # a dying pod refuses connections; keep going
+                ok = False
             if ok:
                 got.setdefault(str(cid), []).append(n)
             else:
                 missed.setdefault(str(cid), []).append(n)
-    return {"fetched": got, "missing": missed,
-            "cards": len(cards), "files": sum(len(v) for v in got.values())}
+    # ⚠ COUNT WHAT LANDED ON DISK, not what was attempted. The old count reported 39 files where 77
+    # were written, so the harvest understated its own success by half — on the one step whose entire
+    # job is answering "did we keep the evidence".
+    on_disk = 0
+    for root, _dirs, files in os.walk(os.path.join(outdir, "logs")):
+        on_disk += len(files)
+    return {"fetched": got, "missing": missed, "absent": absent,
+            "cards": len(cards), "files": on_disk}
 
 
 def read_logs(rundir):

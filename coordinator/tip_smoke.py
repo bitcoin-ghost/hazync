@@ -2465,8 +2465,31 @@ def main():
                 man = tip_harvest.harvest(ssh, assignment, agg, a.rundir)
                 log(f"harvested {man['files']} log file(s) from {man['cards']} card(s) "
                     f"-> {os.path.join(a.rundir, 'logs')}")
+                # ⛔ TWO DIFFERENT FACTS, NAMED DIFFERENTLY (hazync#588). "not on the pod" is normal
+                # — mode 6 never runs pod-prove.sh, so run.log/prove.log/facts.json do not exist —
+                # while "could not fetch" means a pod went away with evidence on it. Reporting both
+                # as "a dying pod refuses connections" made a clean harvest look like data loss, and
+                # I relayed that to the operator as lost data. It was not.
+                if man.get("absent"):
+                    n_abs = sum(len(v) for v in man["absent"].values())
+                    kinds = sorted({f for v in man["absent"].values() for f in v})
+                    log(f"  · {n_abs} file(s) not present on the pods (normal for this mode): "
+                        f"{', '.join(kinds[:5])}")
                 if man["missing"]:
-                    log(f"  ⚠ not fetched (a dying pod refuses connections): {man['missing']}")
+                    n_miss = sum(len(v) for v in man["missing"].values())
+                    log(f"  ⛔ {n_miss} file(s) EXIST but could not be fetched — evidence lost: "
+                        f"{man['missing']}")
+                # ⭐ Say positively that the one artefact everything depends on arrived.
+                _aggh = os.path.join(a.rundir, "logs", str(getattr(runner.agg, "cid", "")),
+                                     "agg-history.log")
+                if os.path.exists(_aggh):
+                    try:
+                        _n = sum(1 for _ in open(_aggh, errors="replace"))
+                        log(f"  ✅ agg-history.log: {_n} lines (the per-block accounting and [rtt])")
+                    except OSError:
+                        pass
+                else:
+                    log("  ⛔ agg-history.log is MISSING — the per-block accounting is gone")
                 agg_text, worker_texts = tip_harvest.read_logs(a.rundir)
                 txt, blob = tip_harvest.report(agg_text, worker_texts,
                                                getattr(runner, "agg_started_ms", None))

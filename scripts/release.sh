@@ -268,6 +268,10 @@ elif ./scripts/embeds-method-id.sh "$CU" "$CANON"; then
     echo "  !    that is a BYTE check, not a run. Nothing here has proved this binary works on a GPU —"
     echo "       smoke it on a real card and pass $_att=<measured id> to gate on that instead."
     export "$_att=$CANON"
+    # ⛔ Mark the PROVENANCE so check-dist.sh does not report this as an operator attestation
+    # (hazync#579). Without it the log reads "attested canonical from a capable host" on a box with
+    # no card — the strongest wording available and the least true one.
+    export "${_att}_SOURCE=bytes"
 else
     # Say which of the two failures this is. "belongs to a different guest" is what check-dist.sh
     # prints next, and it is wrong for a binary that is simply unreadable here.

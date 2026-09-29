@@ -82,7 +82,26 @@ for f in "$DIST"/*; do
             # attestation on the next line, so an accepted artifact still carried a FAIL in the log --
             # and anything grepping ^FAIL saw a failure that did not happen.
             if [ "${!att:-}" = "$CANON" ]; then
-                echo "  ok   $b attested canonical from a capable host (via $att; cannot execute here: missing ${lib:-a shared library})"
+                # ⛔⛔ SAY WHERE THE ATTESTATION CAME FROM (hazync#579). This printed "attested
+                # canonical from a capable host" for BOTH cases, and release.sh's byte-check branch
+                # sets the same variable itself — so a release cut on a GPU-less box always took the
+                # weaker path while the log claimed the stronger one. The clause after the semicolon
+                # even contradicted the one before it: "from a capable host ... cannot execute here".
+                #
+                # They are not equivalent. An operator attestation means someone RAN the binary on a
+                # real card and read the id back; the fallback means this byte sequence occurs in the
+                # file. Both are reasonable, only one has seen the artifact work.
+                # ⚠ INDIRECT EXPANSION WITH A DEFAULT. `"${!att}_SOURCE"` expands the VALUE of $att
+                # and appends a literal, so it is always non-empty and tests nothing; and an `eval`
+                # on an unset name aborts under `set -u`. Name the variable, then expand it once.
+                src_var="${att}_SOURCE"
+                if [ "${!src_var:-}" = "bytes" ]; then
+                    echo "  ok   $b carries $CANON8 IN ITS BYTES (cannot execute here: missing ${lib:-a shared library})"
+                    echo "       ⚠ NOT a run. Nothing has proved this binary works on a GPU — smoke it"
+                    echo "         on a card and set $att to the MEASURED id to gate on that instead."
+                else
+                    echo "  ok   $b attested canonical by an operator who ran it (via $att; cannot execute here: missing ${lib:-a shared library})"
+                fi
             else
                 echo "FAIL $b cannot be verified on this machine (missing ${lib:-a shared library})"
                 echo "       This is NOT evidence the artifact is wrong — it cannot run here at all."
