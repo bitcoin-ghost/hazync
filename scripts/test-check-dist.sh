@@ -25,8 +25,28 @@ check() { if [ "$1" = 1 ]; then echo "  ok   $2"; else echo "  FAIL $2"; fails=$
 out=$(env "$ATT=$CANON" ./scripts/check-dist.sh "$T/dist" 2>&1); rc=$?
 check "$([ $rc = 0 ] && echo 1)" "attested canonical: exit 0 (got $rc)"
 check "$(printf '%s\n' "$out" | grep -q '^FAIL' || echo 1)" "attested canonical: no FAIL line in the output"
-check "$(printf '%s\n' "$out" | grep -q 'attested canonical from a capable host.*libcuda.so.1' && echo 1)" \
-      "attested canonical: says it was attested AND why it could not run here"
+# ⚠ THE WORDING CHANGED ON PURPOSE (hazync#579). This used to pin "attested canonical from a capable
+# host", which was printed for BOTH the operator path and release.sh's byte-check fallback -- so a
+# release cut on a GPU-less box always took the weaker path while the log claimed the stronger one.
+# The two now print different sentences, and this test covers both rather than only the one.
+check "$(printf '%s\n' "$out" | grep -q 'attested canonical by an operator who ran it.*libcuda.so.1' && echo 1)" \
+      "attested by an OPERATOR: says who attested it AND why it could not run here"
+check "$(printf '%s\n' "$out" | grep -q 'IN ITS BYTES' || echo 1)" \
+      "⛔ and does NOT claim a byte check when an operator supplied the id"
+
+# ⛔ THE CASE #579 EXISTS FOR: release.sh sets the attestation ITSELF from a byte check, and marks the
+# provenance. That must read as a byte check, and must warn, and must not claim anyone ran anything.
+# ⚠ BOTH variables, as release.sh sets them: the id AND its provenance. Setting only the provenance
+# leaves no attestation at all, so check-dist correctly takes the unattested FAIL path — which is what
+# my first version of this case did, and it looked like a code bug rather than a test bug.
+out=$(env "$ATT=$CANON" "${ATT}_SOURCE=bytes" ./scripts/check-dist.sh "$T/dist" 2>&1); rc=$?
+check "$([ $rc = 0 ] && echo 1)" "byte-sourced: still exit 0 (got $rc)"
+check "$(printf '%s\n' "$out" | grep -q 'IN ITS BYTES' && echo 1)" \
+      "byte-sourced: says the id was read from the BYTES"
+check "$(printf '%s\n' "$out" | grep -q 'NOT a run' && echo 1)" \
+      "byte-sourced: warns it is not a run and says how to gate on one"
+check "$(printf '%s\n' "$out" | grep -q 'capable host\|operator who ran it' || echo 1)" \
+      "⛔⛔ byte-sourced: does NOT claim a capable host or an operator — the whole point of #579"
 
 out=$(env -u "$ATT" ./scripts/check-dist.sh "$T/dist" 2>&1); rc=$?
 check "$([ $rc = 1 ] && echo 1)" "unattested: exit 1 (got $rc)"
