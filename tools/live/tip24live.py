@@ -593,6 +593,34 @@ def draw_live(snap, fo):
         else:
             col = mix(TEXT, GROUND, .07)
         d.rectangle([cx, cy, cx + gcell, cy + gcell], fill=col)
+
+        # ⭐ THE BLOCK NUMBER, FROM THE MOMENT THE CELL HAS A BLOCK (hazync#586). The grid said how
+        # many blocks were in each state and never WHICH, so after a run five green cells told you
+        # nothing without going back to the log — and while a bug was being chased (the cells that
+        # reverted green→orange, #582) the operator could only describe the symptom, not name the
+        # block.
+        #
+        # ⚠ Only for a cell that HAS a block. An empty slot is a slot the chain has not filled;
+        # labelling it would invent a block that does not exist.
+        if b:
+            # Full height where it fits, last three digits where it does not. ⚠ A truncated number
+            # is only honest because the caption above states the range (`BLOCKS lo–hi`), so the
+            # prefix is recoverable from the same frame. Without that this would be ambiguous
+            # between runs a hundred blocks apart.
+            full = f"{h:,}"
+            lab = full if d.textlength(full, font=fo['small']) <= gcell - 8 else str(h)[-3:]
+            # ⛔ INK PER STATE. A single fixed colour disappears against one of the three fills:
+            # done and live are near-opaque accent, pending is 60 % toward it, empty is almost the
+            # page. Judge against the fill this cell actually got.
+            # ⚠ `mix()` takes HEX STRINGS (it calls hx() on both), so the already-mixed `col` tuple
+            # cannot be passed back in — doing so raises `'tuple' object has no attribute 'lstrip'`
+            # from inside hx. Both inks are built from the palette constants instead.
+            if b.get('done') or h == live_h:
+                ink = mix(GROUND, TEXT, .12)         # near-background dark, on a bright cell
+            else:
+                ink = mix(TEXT, GROUND, .85)         # bright, on the dim pending cell
+            tw = d.textlength(lab, font=fo['small'])
+            d.text((cx + (gcell - tw) / 2, cy + gcell / 2 - 8), lab, font=fo['small'], fill=ink)
     # ---------------- the pulse: a finished block travels from the tree to its own cell
     # Ported from the film (tip24c.py), which had it and this renderer never did. It is the only
     # thing on the frame that marks the MOMENT a block finishes: every other element shows a state,

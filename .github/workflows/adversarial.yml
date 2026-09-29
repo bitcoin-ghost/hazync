@@ -1162,6 +1162,24 @@ jobs:
         run: |
           cd tools/live
           python3 test_pulse.py --control
+
+      - name: Every grid cell with a block shows its height, in an ink you can read
+        # ⛔ The grid coloured cells by state and carried no label, so it said how many blocks were in
+        # each state and never WHICH — and while the green→orange reversion was being chased (#582)
+        # the operator could only describe the symptom, not name the block that flipped.
+        # ⚠ The baseline renders the SAME snapshot with the label code removed, so the pixel count is
+        # the TEXT. Diffing against an empty grid measured the cell's own fill (~22,000 px) and would
+        # have passed with no label drawn at all.
+        # ⛔ Pillow, like every other step here that renders: the runner has no PIL, and without it
+        # this failed 12 assertions with `ModuleNotFoundError` buried in each one. A missing dependency
+        # reads exactly like a broken feature.
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live && python3 test_grid_numbers.py
+      - name: Grid-label POSITIVE CONTROL (one ink for all states — it must go invisible)
+        run: |
+          python3 -m pip install --quiet Pillow
+          cd tools/live && python3 test_grid_numbers.py --control
       - name: The bridge-progress check behaves on every path (hazync#467)
         # ⛔ During catch-up the bridge emits NO bundles, so check-bundle-gap has nothing to compare
         # and a stall is invisible: it does not crash, so alert.conf stays quiet. Measured 2026-09-22
