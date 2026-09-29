@@ -1008,6 +1008,14 @@ jobs:
         run: |
           cd tools/live
           python3 test_tip_vs_board.py --control
+      - name: The #570 hello frame, over a real socket
+        # ⛔ #570 put a NEW FRAME on the wire between the aggregate and every worker, and the unit tests
+        # only cover the tag arithmetic and the name filter — neither touches write_frame/read_frame.
+        # The failure that would hurt is FRAMING DESYNC: one byte wrong and every later frame misaligns,
+        # so a worker returns garbage receipts and it looks like a bad card, not a handshake bug.
+        # ⛔ Includes a control that mis-frames a hello ON PURPOSE and proves the stream shifts — without
+        # it these tests would also pass if read_frame ignored lengths entirely.
+        run: cd prover/host && cargo test --quiet hello_wire
       - name: Per-level join cost, and what HAZYNC_JOIN_LOCAL_MAX would save
         # ⭐ Lever 2 proves the NARROW top levels on the aggregate instead of shipping each pair over
         # the network. It is OFF by default, held "pending a fleet run" because it measured +0.4-1.6s
