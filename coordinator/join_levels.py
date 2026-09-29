@@ -15,6 +15,29 @@ guaranteed not to show it. A big win at a wide ceiling is a 3-card artifact, and
 answer this: how many pairs each level had, what a join cost there, and therefore exactly what any
 `HAZYNC_JOIN_LOCAL_MAX` would have saved. This reads harvested logs and says so.
 
+⛔⛔ AND THE ANSWER, MEASURED, IS THAT LEVER 2 DOES NOT HELP — my prediction above was WRONG.
+Run against tip hour 4 (2026-09-29, 38x RTX PRO 6000 over 9 sites, 9,366 labelled joins, 12 levels),
+NO value of HAZYNC_JOIN_LOCAL_MAX comes out positive:
+
+    level  pairs     p50      p90       max
+        0   4690  3688ms   9208ms   51562ms
+        1   2343  3409ms   8007ms   44578ms
+        8     17   498ms    629ms     716ms
+       11      2   619ms    957ms     957ms
+
+    max=1  +0.0s   max=2  -0.7s   max=4  -2.7s   max=16  -8.0s
+
+The narrow top levels cost **~500-620 ms**, not the 17.1 s extrapolated above from a DIFFERENT run
+(968340, board blocks, 6 DCs). At that price a local join (~645 ms of compute) is SLOWER than shipping
+the pair out, so taking levels local loses time. ⚠ The 17.1 s figure was never wrong as a measurement;
+it was wrong as a substitute for the number this lever actually depends on, which is the RTT at the
+levels being moved — and those are the cheapest levels, not the dearest.
+
+⇒ **THE COST IS AT THE WIDE END.** Level 0 has p50 3.7 s against a max of 51.6 s, and per card the p90
+ranges 2,957 ms to 16,437 ms — a 5.6x spread across 37 cards. The fold waits for the slowest peer at
+every level, so that tail sets the wall. That is hazync#550's target, and it is not addressable by
+moving joins around; it is addressable by not renting the slow card, or by not waiting for it.
+
 ⚠ IT PREDICTS, IT DOES NOT MEASURE. The saving is `distributed critical path - local critical path`
 per level, and the local side needs a per-join COMPUTE cost, which a `[rtt]` line does not carry (it
 is transport + compute together). Supply it with `--compute-ms`, or accept the default derived from
