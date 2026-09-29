@@ -44,6 +44,34 @@ def chain_facts():
 BLOCK_PERIOD_S = 600.0
 
 
+def session_clock(rundir):
+    """(armed_at, duration_s) for the run's own hour, from $RUNDIR/session.json, or (None, None).
+
+    ⛔ WHY THE FRAME NEEDS IT (operator, 2026-09-29: "there is no overall timer for the hour run, so
+    it is hard to track progress versus time"). The frame showed how many blocks were done and what
+    the session's denominator was, but never where the session WAS — so `2 / 6` could mean two blocks
+    in six minutes or two in fifty, which is the difference between on track and failing.
+
+    ⚠ `armed_at` is None until the first tip block arms the deferred clock (--clock-from-tip). That is
+    a real state, not missing data: everything before it is billed and excluded from the hour, and the
+    frame must say PRE-CLOCK rather than imply the hour has begun.
+    """
+    try:
+        with open(os.path.join(rundir, "session.json")) as fh:
+            d = json.load(fh)
+    except Exception:
+        return None, None
+    at = d.get("armed_at")
+    dur = d.get("duration_s")
+    try:
+        at = float(at) if at is not None else None
+        dur = float(dur) if dur is not None else None
+    except (TypeError, ValueError):
+        return None, None
+    # A non-positive duration would render a divide-by-zero or a full bar on an unstarted run.
+    return at, (dur if (dur and dur > 0) else None)
+
+
 def session_blocks(phase_text):
     """Blocks this session can expect, parsed from its own `SESSION · X h ...` line.
 
@@ -446,7 +474,16 @@ def blocks_from_cards(cards, state, now, verified=()):
     _active = [c for c in cards
                if c.get("up") and c.get("phase") in ("proving", "assembling", "executed")]
     _named = {str(c.get("block")) for c in _active if c.get("block")}
-    _newest = max((int(h) for h in agg), default=None)
+    # ⛔⛔ MOST RECENTLY ACTIVE, NOT NUMERICALLY HIGHEST (observed live 2026-09-29). This was
+    # `max(int(h) for h in agg)`, i.e. the biggest HEIGHT. A tip-following session interleaves board
+    # work at the frontier (133,100) with tip blocks (969,119), so the biggest height is ALWAYS the
+    # tip block — even while every card is provably busy on a board block. The finished tip block
+    # therefore kept the benefit of the doubt, `working_on_this` stayed true, and `done` flipped back
+    # to false: the headline count fell to 0 and its grid tile went from green back to orange, every
+    # time board fill ran. Ordering by last sample instead asks the question that was meant: which
+    # height was the fleet touching most recently.
+    _newest = max(agg, key=lambda h: agg[h]["t1"], default=None)
+    _newest = int(_newest) if _newest is not None else None
     out = []
     for h, a in agg.items():
         n_cards = max(1, len(a["cards"]))
@@ -488,8 +525,21 @@ def blocks_from_cards(cards, state, now, verified=()):
         # cannot possibly belong to it.
         working_on_this = bool(_active) and (str(h) in _named
                                              or (not _named and int(h) == _newest))
+        # ⛔⛔ DONE IS A LATCH. A block that has verified cannot become unverified, but every input
+        # here is a live reading that can go away: `verified` is parsed out of $RUNDIR/phase and the
+        # run OVERWRITES that line (in session mode it reads `SESSION · 1.0 h on 35 cards` and names
+        # no height at all, so the "authoritative" source is empty), `finished_by_cards` needs a card
+        # still reporting phase=done for that height, and the silence rule can be overridden by
+        # activity on another block. Any of those lapsing used to un-finish a finished block.
+        #
+        # Latching in `state` makes the frame monotonic in the one direction that is physically true.
+        # It is also why this fix does not depend on the phase line ever carrying the height.
+        _latched = state.setdefault("done_heights", set())
         done_flag = (int(h) in verified or str(h) in finished_by_cards
+                     or int(h) in _latched
                      or ((now - a["t1"]) > 5 and not working_on_this))
+        if done_flag:
+            _latched.add(int(h))
         out.append({"h": int(h), "arrive": a["t0"],
                     # ⭐ TIP OR BOARD, DECIDED ONCE, HERE (hazync#554). Every panel downstream used
                     # to treat one population as the other: `AHEAD OF CHAIN` took the median over
@@ -778,8 +828,11 @@ def main():
         phase_out = phase_label
         if phase_label and cards:
             phase_out = re.sub(r"\bon \d+ cards\b", f"on {len(cards)} cards", phase_label)
+        _armed_at, _sess_dur = session_clock(a.rundir)
         snap = {"t": now, "wall": time.time(), "demo": bool(a.demo), "phase": phase_out,
                 "session_blocks": state.get("session_blocks"),
+                # The run's own hour: when it armed, and how long it is. See session_clock().
+                "clock_armed_at": _armed_at, "session_duration_s": _sess_dur,
                 "chain": chain, "cards": cards, "blocks": blocks,
                 "fleet": {"cards": len(cards), "up": len(up), "cost_hr": round(rate, 2),
                           "spend_usd": round(spend_total, 4)}}

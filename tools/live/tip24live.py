@@ -302,6 +302,31 @@ def draw_live(snap, fo):
     if done_board:
         sub += f"  ·  {done_board} board block{'' if done_board == 1 else 's'} filled while waiting"
     d.text((PAD, 90), sub, font=fo['lab'], fill=hx(DIM))
+
+    # ⭐ THE HOUR ITSELF (operator, 2026-09-29: "there is no overall timer for the hour run, so it is
+    # hard to track progress versus time"). The frame said how many blocks were done and what the
+    # denominator was, but never where the session WAS — so `2 / 6` could mean two blocks in six
+    # minutes or two in fifty, and those are opposite verdicts.
+    #
+    # ⚠ PRE-CLOCK IS A REAL STATE, NOT MISSING DATA. With --clock-from-tip the hour does not begin
+    # until the first tip block arms it; everything before is billed and excluded. Saying 00:00 there
+    # would imply the hour had started and quietly make a waiting run look like a failing one.
+    #
+    # ⚠ NO PACE CLAIM. It reports elapsed, total and remaining, and lets the ring's count sit beside
+    # it. An "on pace for N" would be an extrapolation from a handful of blocks whose sizes vary by
+    # 4x, and the project has already published one inflated headline that way.
+    _armed = snap.get('clock_armed_at')
+    _dur = snap.get('session_duration_s')
+    if _dur:
+        if _armed:
+            _el = max(0.0, now - float(_armed))
+            _left = max(0.0, float(_dur) - _el)
+            _ht = f"HOUR {mmss(_el)} of {mmss(_dur)}  ·  {mmss(_left)} left"
+            _hc = mix(OK, GROUND, .8) if _left > 0 else mix(ACCENT, GROUND, .9)
+        else:
+            _ht = f"PRE-CLOCK  ·  the {mmss(_dur)} window starts at the first tip block"
+            _hc = hx(DIM)
+        d.text((W - PAD - d.textlength(_ht, font=fo['lab']), 90), _ht, font=fo['lab'], fill=_hc)
     d.line([PAD, 122, W - PAD, 122], fill=hx(RULE))
 
     # ---------------- left: one lane per card, REAL power samples
@@ -580,23 +605,17 @@ def draw_live(snap, fo):
     # ⛔ ONLY FOR A BLOCK THAT HAS A CELL. Outside [lo, hi] there is nowhere for it to land and
     # cell_xy would place it over some other block's square.
     # ⚠ Guarded against a card clock that runs ahead of ours: a negative age is not a fresh block.
-    for b in grid_blocks:
-        t_done = b.get('done_at')
-        if not t_done or not (lo <= b['h'] <= hi):
-            continue
-        age = now - t_done
-        if not (0.0 <= age < PULSE_S):
-            continue
-        f = age / PULSE_S
-        cx, cy = grid_xy(b['h'] - lo, gcols, gcell, ggap)
-        tx_, ty_ = cx + GCELL / 2, cy + GCELL / 2
-        px, py = TX1 + (tx_ - TX1) * f, RCY + (ty_ - RCY) * f
-        # ⛔ THE LINE, NOT A TRAVELLING DOT. The pulse used to draw a bright dot sliding from the
-        # join tree to the block's cell. Two problems with it: on a still frame it reads as a stray
-        # object near the tree's convergence point rather than as motion, and it was mistaken for the
-        # tree's root more than once. The faint line alone says the same thing -- this block just
-        # landed in that cell -- without putting a moving object on a page that is mostly states.
-        d.line([TX1, RCY, px, py], fill=mix(OK, GROUND, .18), width=2)
+    # ⛔ NO FINISH PULSE (operator, 2026-09-29: "the green line that points from folding to proving
+    # is shit — get rid of it"). It began as a travelling dot, became a faint line when the dot read
+    # as a stray object near the tree's convergence point, and the line had the same defect in a
+    # subtler form: it drew a relationship between the join tree and a grid cell that does not exist
+    # on the page, and it crossed the whole frame to do it.
+    #
+    # ⚠ WHAT THIS GIVES UP, STATED PLAINLY. The pulse was the only element that marked the MOMENT a
+    # block finished; everything else shows a state, so a block completing now looks the same as one
+    # that completed ten minutes ago. The cell turning green (MAP_DONE) still says it landed, which
+    # is the part a viewer actually reads. `done_at` is still carried by collect.py, so a
+    # cell-local flash could be added later without reinstating a line across the frame.
 
     kx = GX0
     for lbl, c_ in (('proving', MAP_PROVING), ('folding', MAP_FOLDING), ('done', MAP_DONE)):
