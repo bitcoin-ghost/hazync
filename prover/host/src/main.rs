@@ -6187,6 +6187,178 @@ fn unpack_pair(body: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&body[4..4 + la], &body[8 + la..8 + la + lb]))
 }
 
+#[cfg(test)]
+mod hello_wire_tests {
+    //! The hello over a REAL socket (hazync#570).
+    //!
+    //! ⛔ WHY A SOCKET AND NOT A UNIT TEST. #570 put a new frame on the wire between the aggregate and
+    //! every worker, and `mod hello_tests` only checks the tag arithmetic and the name filter — neither
+    //! touches `write_frame`/`read_frame`. The failure that would actually hurt is FRAMING DESYNC: if the
+    //! hello's length prefix were wrong by a byte, every subsequent frame on that connection would
+    //! misalign, and the symptom would be a worker returning garbage receipts rather than anything
+    //! naming a handshake. A tip run would fail in a way that looks like a bad card.
+    //!
+    //! So these drive the real functions across a real TCP connection, in the real order: hello first,
+    //! then work. Nothing here needs a prover or a GPU, which is the point — it is the part of #570 that
+    //! could be tested before the release and was not.
+    use super::{hello_card_name, read_frame, write_frame, HELLO_TAG, JOIN_TAG, LIFT_TAG,
+                RESOLVE_TAG, SEG_EOF};
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+
+    /// A connected pair on the loopback. Port 0 so concurrent tests cannot collide.
+    ///
+    /// ⛔ BOTH ENDS CARRY A READ TIMEOUT, and that is not decoration. A test here that misaligns the
+    /// stream on purpose can make `read_frame` take a garbage length (0x77000000 in one case), try to
+    /// allocate ~2 GB and then block in `read_exact` for ever. That hung the suite for 12 minutes at
+    /// 0% CPU with no output — and a hanging test reports nothing, so it is worse than a failing one.
+    /// With a timeout the same mistake fails in 5 seconds and says which read it was.
+    fn pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = l.accept().expect("accept");
+        for s in [&client, &server] {
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout");
+        }
+        (client, server)
+    }
+
+    #[test]
+    fn a_hello_then_work_arrives_in_order_and_intact() {
+        let (mut w, mut agg) = pair();
+        // The worker's side, exactly as seg-connect does it: hello on connect, then it answers work.
+        write_frame(&mut w, HELLO_TAG, b"hz-smoke-11").expect("hello");
+        write_frame(&mut w, JOIN_TAG | 0x0003_0001, b"a-join-receipt").expect("join reply");
+
+        let (t1, b1) = read_frame(&mut agg).expect("read hello");
+        assert_eq!(t1, HELLO_TAG, "the first frame is the hello");
+        assert_eq!(hello_card_name(&b1).as_deref(), Some("hz-smoke-11"));
+
+        // ⛔ THE DESYNC CHECK. If the hello's framing were wrong this tag and body would be shredded.
+        let (t2, b2) = read_frame(&mut agg).expect("read join");
+        assert_eq!(t2, JOIN_TAG | 0x0003_0001, "the NEXT frame is undamaged: {t2:#x}");
+        assert_eq!(b2, b"a-join-receipt", "and so is its body");
+    }
+
+    #[test]
+    fn the_aggregates_routing_test_skips_a_hello() {
+        // This is the branch the reader takes: HELLO_TAG must not match the job routing mask, or it
+        // would fall through to the SEGMENT path and pop a receipt that was never sent (#161's shape).
+        assert_eq!(HELLO_TAG & (JOIN_TAG | RESOLVE_TAG | LIFT_TAG), 0);
+        assert_ne!(HELLO_TAG, SEG_EOF, "and it must not be mistaken for end-of-stream");
+    }
+
+    #[test]
+    fn an_empty_hello_body_still_frames_correctly() {
+        // A worker with HAZYNC_WORKER_ID unset to empty sends a zero-length body. It must not be read
+        // as SEG_EOF (which carries no length at all) and must not eat the next frame's header.
+        let (mut w, mut agg) = pair();
+        write_frame(&mut w, HELLO_TAG, b"").expect("empty hello");
+        write_frame(&mut w, 7u32, b"segment-0").expect("segment");
+        let (t1, b1) = read_frame(&mut agg).expect("read");
+        assert_eq!((t1, b1.len()), (HELLO_TAG, 0));
+        assert!(hello_card_name(&b1).is_none(), "and it leaves the card anonymous");
+        let (t2, b2) = read_frame(&mut agg).expect("read next");
+        assert_eq!((t2, &b2[..]), (7u32, &b"segment-0"[..]), "the next frame survived");
+    }
+
+    #[test]
+    fn a_long_name_crosses_the_wire_whole_and_is_bounded_on_arrival() {
+        // The sender does not truncate; the RECEIVER bounds it. Both halves matter: a 10 KB name must
+        // not desync the stream, and must not print 10 KB into the log either.
+        let (mut w, mut agg) = pair();
+        let long = vec![b'a'; 10_000];
+        write_frame(&mut w, HELLO_TAG, &long).expect("long hello");
+        write_frame(&mut w, 1u32, b"after").expect("after");
+        let (t, b) = read_frame(&mut agg).expect("read");
+        assert_eq!(t, HELLO_TAG);
+        assert_eq!(b.len(), 10_000, "the wire carried it whole");
+        assert_eq!(hello_card_name(&b).unwrap().len(), 40, "and the parser bounds it to 40");
+        assert_eq!(read_frame(&mut agg).expect("after").0, 1u32, "stream still aligned");
+    }
+
+    #[test]
+    fn a_worker_that_never_says_hello_is_not_broken_by_this() {
+        // Backward compatibility, over the socket: a pre-#570 worker's first frame is a work reply.
+        // The aggregate must read it as such, not wait for a handshake that never comes.
+        let (mut w, mut agg) = pair();
+        write_frame(&mut w, LIFT_TAG, b"lifted").expect("lift reply");
+        let (t, b) = read_frame(&mut agg).expect("read");
+        assert_eq!(t, LIFT_TAG, "an old worker's first frame routes normally");
+        assert_eq!(b, b"lifted");
+    }
+
+    #[test]
+    fn control_a_mis_framed_hello_really_does_desync_the_stream() {
+        // ⛔⛔ THE CONTROL FOR THIS WHOLE MODULE. Every test above passes today, which on its own says
+        // nothing: they would also pass if `read_frame` ignored lengths entirely. So break the framing
+        // deliberately — declare 11 bytes and send 10 — and prove the next frame comes back WRONG.
+        // If this test ever starts failing, the desync checks above have stopped being able to detect
+        // the thing they exist for.
+        let (mut w, mut agg) = pair();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&HELLO_TAG.to_le_bytes());
+        buf.extend_from_slice(&(11u32).to_le_bytes());       // claims 11
+        buf.extend_from_slice(b"hz-smoke-1");                // sends 10
+        buf.extend_from_slice(&JOIN_TAG.to_le_bytes());      // the next frame's header
+        buf.extend_from_slice(&(4u32).to_le_bytes());
+        buf.extend_from_slice(b"work");
+        w.write_all(&buf).expect("write");
+        w.flush().expect("flush");
+
+        let (t1, b1) = read_frame(&mut agg).expect("read hello");
+        assert_eq!(t1, HELLO_TAG);
+        // It swallowed the first byte of the NEXT frame's tag to reach its declared 11.
+        assert_eq!(b1.len(), 11, "the over-read happened: 10 sent, 11 consumed");
+        assert_eq!(b1[10], 0x00, "and the stolen byte is JOIN_TAG's low LE byte");
+        // ⭐ AND THE NAME SURVIVES IT, which is worth knowing rather than asserting away: the stolen
+        // byte is a NUL, and `hello_card_name`'s filter drops anything outside [A-Za-z0-9._-]. So the
+        // sanitiser happens to make the NAME robust to this corruption — which is exactly why the name
+        // is NOT a usable desync signal, and the following TAG is.
+        assert_eq!(hello_card_name(&b1).as_deref(), Some("hz-smoke-1"));
+
+        // ⛔⛔ DO NOT CALL read_frame AGAIN HERE. I did, and it hung the whole suite for 12 minutes at
+        // 0% CPU. After the over-read the stream is misaligned, so read_frame took `00 00 80 04` as the
+        // tag and then `00 00 00 77` as the LENGTH — 0x77000000, ~2 GB — and sat in read_exact waiting
+        // for bytes that will never arrive, having first tried to allocate it. On an 8 GB box that is a
+        // memory hazard as well as a hang, and a hanging test reports nothing at all.
+        //
+        // Read the next four bytes directly instead: deterministic, no allocation, and it asserts the
+        // same thing more precisely.
+        let mut next_tag = [0u8; 4];
+        agg.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("timeout");
+        std::io::Read::read_exact(&mut agg, &mut next_tag).expect("four more bytes");
+        assert_ne!(u32::from_le_bytes(next_tag), JOIN_TAG,
+                   "⛔ a mis-framed hello MUST shift the following tag — it came back intact as {:#x}, \
+which would mean these tests cannot detect a framing bug at all",
+                   u32::from_le_bytes(next_tag));
+        // Precisely: the tag is shifted left by the one stolen byte.
+        assert_eq!(next_tag, [0x00, 0x00, 0x80, 0x04],
+                   "the stream is shifted by exactly one byte, as the over-read implies");
+    }
+
+    #[test]
+    fn a_hello_split_across_writes_still_reassembles() {
+        // ⚠ TCP is a STREAM: nothing guarantees one write_frame arrives as one read. read_frame uses
+        // read_exact, so this must hold — but "must" is why it is tested rather than assumed.
+        let (mut w, mut agg) = pair();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&HELLO_TAG.to_le_bytes());
+        buf.extend_from_slice(&(11u32).to_le_bytes());
+        buf.extend_from_slice(b"hz-smoke-11");
+        let (head, tail) = buf.split_at(6);            // mid-length-prefix, the nastiest split
+        w.write_all(head).expect("head");
+        w.flush().expect("flush");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        w.write_all(tail).expect("tail");
+        w.flush().expect("flush");
+        let (t, b) = read_frame(&mut agg).expect("read");
+        assert_eq!(t, HELLO_TAG);
+        assert_eq!(hello_card_name(&b).as_deref(), Some("hz-smoke-11"));
+    }
+}
+
 fn write_frame(s: &mut std::net::TcpStream, idx: u32, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     s.write_all(&idx.to_le_bytes())?;

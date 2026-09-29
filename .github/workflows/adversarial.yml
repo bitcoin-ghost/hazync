@@ -438,7 +438,7 @@ jobs:
         run: |
           cd coordinator
           python3 test_aggregate_choice.py --control
-      - name: Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)
+      - name: "Board work fills the gaps and gives way to the tip within a tick (hazync#367, #506)"
         run: cd coordinator && python3 test_board_fill.py
       - name: Board-fill POSITIVE CONTROL (preemption removed — the tip must wait for the board block)
         run: |
@@ -1072,7 +1072,7 @@ jobs:
           cd tools/live
           python3 test_stale_feed.py --control
 
-      - name: A block renders as a cycle — prove to 100, hold, fold to 100 (hazync#481, #482)
+      - name: "A block renders as a cycle — prove to 100, hold, fold to 100 (hazync#481, #482)"
         run: |
           python3 -m pip install --quiet Pillow   # renders frames through the real renderer
           cd tools/live && python3 test_block_cycle.py
@@ -1370,6 +1370,11 @@ jobs:
         run: |
           HAZYNC_BASE="$HOME/hazync-build" cargo test --manifest-path leaf-differential/Cargo.toml --release
       - name: Bridge <-> guest BIP30 agreement (host unit tests)
+        # ⚠ THIS RUNS THE WHOLE prover/host SUITE, not just BIP30 — 60 tests, and it is the ONLY place
+        # they run in CI, because building this crate needs the risc0 guest toolchain that the light jobs
+        # do not have. It therefore covers `hello_wire_tests` (the #570 frame over a real socket),
+        # `hello_tests` and `block_phases_tests` (#567). Do not narrow it to a filter without moving
+        # those somewhere that still runs them.
         # MOVED HERE FROM accumulator-tests, for the same reason leaf-differential moved: prover/host
         # depends on the `methods` crate, whose build script builds the GUEST — so it needs the RISC0
         # toolchain, which the fast job deliberately does not install. It failed with

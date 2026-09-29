@@ -43,7 +43,7 @@ BIN=/workspace/hazync-host-cuda
 #    planner restarted the card every ~100 s for ever. A DOWNLOAD THAT SUCCEEDED REPORTED FAILURE.
 #    ⚠ The driver exports HAZYNC_HOST_URL/HAZYNC_HOST_BYTES so both ends agree by construction; the
 #    default below is only for the standalone callers (mile3.sh, run_continuous.sh).
-BIN_URL="${HAZYNC_HOST_URL:-https://github.com/hazync/hazync/releases/download/v0.22.0/hazync-host-x86_64-linux-gnu-cuda}"
+BIN_URL="${HAZYNC_HOST_URL:-https://github.com/hazync/hazync/releases/download/v0.22.1/hazync-host-x86_64-linux-gnu-cuda}"
 # ⛔ SIZE DERIVED FROM THE URL, NOT A CONSTANT. A constant is a second place to forget.
 EXPECT_BIN_BYTES="${HAZYNC_HOST_BYTES:-$(curl -fsSLI "$BIN_URL" 2>/dev/null \
   | awk 'BEGIN{IGNORECASE=1} /^content-length:/{v=$2} END{gsub(/\r/,"",v); print v}')}"
