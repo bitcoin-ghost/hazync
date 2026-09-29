@@ -319,12 +319,48 @@ while time.time() < end:
             print(f"    forwarding to every worker: {' '.join(sorted(_lv))}")
         script = worker_attach_script(_lv)
         target = f"{self.agg.ip}:{self.agg_dial}"   # what a worker dials, not what seg-serve binds
-        for chunk, card in cards.items():
-            if card == self.agg:
-                continue                       # the aggregator serves; it does not dial itself
-            self.ssh.run(card, script)
-            self.ssh.run(card, f"cd /workspace && nohup setsid bash ./autoattach.sh {target} w{chunk} "
-                               f"> aa.log 2>&1 < /dev/null & disown; exit 0")
+        # ⛔⛔ ONE SSH PER CARD, AND ALL CARDS AT ONCE (hazync#584). This was two sequential
+        # `ssh.run` calls inside a serial loop — 37 workers x 2 = 74 cold handshakes to pods on three
+        # continents, once PER BLOCK.
+        #
+        # 📏 MEASURED over all 21 blocks of tip hour 4, 2026-09-29:
+        #     arm   1828 s  41 %   <- more than all proving and folding combined
+        #     work  1503 s  34 %
+        #     stage  629 s  14 %
+        #     idle   447 s  10 %
+        # 86-96 s on every block regardless of size; on a board block doing 5-18 s of real work that
+        # is ~85 % of the block, with 37 GPUs idle throughout at $2.09/card/hr.
+        #
+        # Two changes, both mechanical:
+        #   1. The script already ends `chmod +x …; echo ARMED`, so the launch can ride on the same
+        #      connection instead of paying a second handshake.
+        #   2. Nothing about arming card 7 depends on card 6, so they go in parallel. The gating path
+        #      already does this (--gate-parallel, #566); this is the same shape.
+        #
+        # ⚠ A FAILURE USED TO BE SILENT. `ssh.run` returns None on failure and both calls ignored it,
+        # so a card that never armed simply never attached and the aggregate waited for a worker that
+        # was never coming. Now counted and named.
+        work = [(chunk, card) for chunk, card in cards.items() if card != self.agg]
+        if not work:
+            return
+        def _arm(item):
+            chunk, card = item
+            body = (f"{script}\n"
+                    f"cd /workspace && nohup setsid bash ./autoattach.sh {target} w{chunk} "
+                    f"> aa.log 2>&1 < /dev/null & disown; exit 0")
+            return card, self.ssh.run(card, body)
+        n = min(len(work), ARM_PARALLEL)
+        failed = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+            for card, out in pool.map(_arm, work):
+                if out is None:
+                    failed.append(getattr(card, "cid", card))
+        if failed:
+            # ⛔ Loud. A card that did not arm cannot attach, and the symptom downstream is an
+            # aggregate sitting at 0/N segments with no indication why.
+            print(f"    ⛔ {len(failed)} card(s) FAILED to arm and will not attach: "
+                  f"{', '.join(str(c) for c in failed[:6])}"
+                  f"{' …' if len(failed) > 6 else ''}")
 
     # ── phase 3 ────────────────────────────────────────────────────────────────────────────────────
     def stop_auto_attach(self, cards):
@@ -583,6 +619,12 @@ while time.time() < end:
 # `stop_auto_attach` touched a workdir-relative path instead, a non-default workdir would make it
 # touch a file NOBODY READS — a teardown that reports success and stops nothing.
 ATTACH_STOP = "/workspace/attach.stop"
+
+
+# How many cards to arm at once (hazync#584). Arming was serial and cost ~86 s per block; nothing
+# about arming one card depends on another. ⚠ Not unbounded: each is an ssh process, and the gating
+# path found that fanning out too wide on a laptop starves the run's own ssh channel.
+ARM_PARALLEL = int(os.environ.get("HAZYNC_ARM_PARALLEL", "12"))
 
 
 def worker_attach_script(levers):
