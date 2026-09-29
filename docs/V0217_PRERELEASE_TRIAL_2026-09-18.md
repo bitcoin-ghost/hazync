@@ -46,6 +46,11 @@ because this tests **topology**; the 16 MB block took ~60 min on two slices.
 | assembly | 25.1 s | 13.7 s | |
 | **TOTAL** | **331.5 s** | **130.9 s** | **2.53×** |
 
+> ⚠ **Correction (hazync#567).** Those TOTALs are sums of overlapping phases: `execution` runs inside the
+> worker phase, so each is ~9 s high. The real walls are ~322 s and ~122 s, and the speedup is therefore
+> **2.64×**, not 2.53× — removing a fixed serial component from both sides *raises* the ratio. The
+> conclusion of this trial is unaffected; the phase figures are sound and only their sum was wrong.
+
 Work divided across all three cards, 72 segments and 71 joins accounted for exactly:
 
 | worker | card | segments | joins |
