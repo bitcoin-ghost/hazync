@@ -308,6 +308,57 @@ def measured_cost_per_proof(path=ECONOMICS):
     return per_block[point]["best"], label
 
 
+# ⛔⛔ EXECUTION IS 54% OF A TIP BLOCK AND IT IS SERIAL CPU WORK ON THE AGGREGATE (hazync#567).
+#
+# 📏 Measured, tip hour 4: of a tip block's wall, the segment phase is 86% and the EXECUTOR's own
+# window is 54% — and the segment phase can never fall below it, because a segment cannot be proved
+# before it is produced. 969,118 carried a hard 157.7 s floor whatever the fleet size.
+#
+# ⛔ AND IT CANNOT BE PARALLELISED WITHOUT MOVING METHOD_ID. Chunk mode (guest mode 4) does distribute
+# execution, but yields KIND_CHUNK and the coordinator requires KIND_RANGE; `fold_range` (mode 7)
+# composes ranges ACROSS HEIGHTS, not within one block; and the guest asserts the domain tag
+# (`assert!(l.kind == KIND_RANGE && rr.kind == KIND_RANGE)`, H8). Splitting one block's execution is a
+# GUEST change, so it is out.
+#
+# ⇒ What is left is WHICH CARD executes. The aggregate is elected on reachability then network
+# throughput and its CPU is never measured — while hour 3 recorded TWELVE distinct host CPUs on one
+# fleet, from EPYC 7452 (~3.35 GHz) to i5-13600K (~5.1 GHz boost). Picking the aggregate blind to that
+# may routinely put the executor on the slowest core in the fleet, and fixing it costs no rent.
+#
+# ⚠ THIS IS A HYPOTHESIS, NOT A MEASUREMENT. Nothing here has shown execution scales with single-core
+# speed; it is strongly implied by single-threaded witness generation and unverified. So the probe
+# REPORTS by default and only ranks on CPU under --agg-prefer-cpu. That is the same discipline lever 1
+# and lever 2 shipped under, and lever 2's confident prediction measured NEGATIVE.
+def probe_cpu(ssh, card):
+    """(model, single_core_score, cores) for a card, or (None, None, None).
+
+    The score is deliberately crude and self-relative: a fixed integer loop timed on ONE core. It is
+    not a benchmark anyone should quote — it exists to order candidates against each other on the same
+    evening, which is the only comparison that matters here.
+    """
+    body = (
+        "MODEL=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//'); "
+        "CORES=$(nproc 2>/dev/null); "
+        # ⚠ `time` on a shell builtin loop, not python: the pods are not guaranteed a python, and a
+        # process launch would dominate a short measurement.
+        "S=$( { TIMEFORMAT=%R; time (i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done) ; } 2>&1 ); "
+        "echo \"CPUPROBE|$MODEL|$CORES|$S\"")
+    out = ssh.run(card, body)
+    if not out:
+        return None, None, None
+    for ln in out.splitlines():
+        if ln.startswith("CPUPROBE|"):
+            _, model, cores, secs = (ln.split("|") + ["", "", ""])[:4]
+            try:
+                secs = float(secs)
+            except ValueError:
+                return (model or None), None, (int(cores) if cores.isdigit() else None)
+            # Higher is better, so invert: a shorter loop time is a faster core.
+            score = (1.0 / secs) if secs > 0 else None
+            return (model or None), score, (int(cores) if cores.isdigit() else None)
+    return None, None, None
+
+
 def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
     """Every type with SECURE stock and enough VRAM, best-known-value first.
 
@@ -946,6 +997,14 @@ def main():
     # ⚠ Default 0 = REPORT, do not refuse. A block needs roughly segments x ~1.3 MB x 8 / target_s
     # (1.1-1.3 MB/segment measured over two runs), so 9,600 segments under 600 s wants ~166 Mbit/s --
     # but the right floor depends on the block and the target, so the operator sets it.
+    ap.add_argument("--agg-prefer-cpu", action="store_true",
+                    help="rank aggregate candidates on single-core CPU speed (after "
+                         "reachability, before link speed). The executor runs on the "
+                         "aggregate alone and is ~54%% of a tip block's wall (hazync#567), "
+                         "and hour 3 saw TWELVE distinct host CPUs on one fleet. ⚠ OFF by "
+                         "default: the CPU is always measured and reported, but nothing has "
+                         "yet shown execution scales with this score — lever 2 was predicted "
+                         "to save 36s and measured NEGATIVE. Turn it on to test it.")
     ap.add_argument("--agg-min-mbit", type=float, default=0.0,
                     help="refuse to start if the best aggregate candidate is below this Mbit/s")
     ap.add_argument("--no-board-fill", action="store_true",
@@ -1415,7 +1474,8 @@ def main():
         cand = [c for c in order if 9110 in portmap.get(c.cid, {})][:a.agg_candidates]
         if not cand:
             raise SystemExit("no card has a published 9110 — workers could never attach")
-        best = (None, -1.0, {})
+        best = (None, -1.0, {}, 0.0)
+        cpu_note = {}
         if len(cand) > 1 and a.agg_candidates > 1:
             phase(f"PREPARING · measuring the link on {len(cand)} aggregate candidate(s)")
             for c in cand:
@@ -1431,7 +1491,13 @@ def main():
                     # ⚠ "could not test" is not "it failed" — the same rule the reachability gate uses.
                     log(f"  {c.cid}: egress UNTESTED (no streamer, or no worker answered)")
                     continue
-                log(f"  {c.cid}: {mbit:.0f} Mbit/s to {len(per)} worker(s)")
+                # #567: measure the CPU too. The executor runs HERE, serially, for 54% of a tip
+                # block's wall — and until now the election never looked at it.
+                cmodel, cscore, ccores = probe_cpu(ssh, c)
+                cpu_note[c.cid] = (cmodel, cscore, ccores)
+                _cpu = (f", cpu {cscore:.1f} ({(cmodel or '?')[:26]}, {ccores or '?'} cores)"
+                        if cscore else ", cpu UNMEASURED")
+                log(f"  {c.cid}: {mbit:.0f} Mbit/s to {len(per)} worker(s){_cpu}")
                 # ⛔⛔ REACHABILITY FIRST, THROUGHPUT SECOND (hazync#573). Ranking on Mbit/s alone
                 # elected a card that 9 of its own /24 could not reach, and the fleet went 30 -> 21
                 # before a single block was proved. Measured 2026-09-28:
@@ -1450,12 +1516,39 @@ def main():
                 #
                 # ⚠ --agg-min-mbit still rejects a genuinely slow candidate; this only decides
                 # WHICH of the acceptable ones wins.
-                if (len(per), mbit) > (len(best[2]), best[1]):
-                    best = (c, mbit, per)
+                # ⚠ CPU RANKS ONLY WHEN ASKED (--agg-prefer-cpu). Reachability stays first in both
+                # cases: a fast core that half the fleet cannot reach is worth less than nothing, which
+                # is what #573 cost us. With the flag, CPU comes second and throughput third, because
+                # surplus bandwidth is measurably not the binding constraint (every candidate in hour 4
+                # was 50-200x what a block needs) while the executor demonstrably is.
+                _sc = cpu_note.get(c.cid, (None, None, None))[1] or 0.0
+                key = (len(per), _sc, mbit) if a.agg_prefer_cpu else (len(per), mbit)
+                bkey = ((len(best[2]), best[3], best[1]) if a.agg_prefer_cpu
+                        else (len(best[2]), best[1]))
+                if key > bkey:
+                    best = (c, mbit, per, _sc)
         agg = best[0] or cand[0]
         if best[0] is not None:
+            _m, _sc, _co = cpu_note.get(agg.cid, (None, None, None))
+            _how = ("most REACHABLE first, then CPU, then fastest link" if a.agg_prefer_cpu
+                    else "most REACHABLE first, then fastest link")
             log(f"aggregate: {agg.cid} reaches {len(best[2])} worker(s) at {best[1]:.0f} Mbit/s "
-                f"(best of {len(cand)} candidate(s) — most REACHABLE first, then fastest)")
+                f"(best of {len(cand)} candidate(s) — {_how})")
+            # ⭐ SAY WHAT THE EXECUTOR IS ABOUT TO RUN ON. 54% of a tip block's wall happens on this
+            # one CPU, and before #567 the frame and the log never named it, so execution could not be
+            # attributed to anything afterwards.
+            if _sc:
+                _spread = [v[1] for v in cpu_note.values() if v[1]]
+                _rng = (f"; candidates spanned {min(_spread):.1f}-{max(_spread):.1f}"
+                        if len(_spread) > 1 else "")
+                log(f"  executor will run on {(_m or 'an unnamed CPU')} — cpu score {_sc:.1f}, "
+                    f"{_co or '?'} cores{_rng}")
+                if not a.agg_prefer_cpu and len(_spread) > 1 and _sc < max(_spread):
+                    log(f"  ⚠ a candidate had a FASTER core ({max(_spread):.1f} vs {_sc:.1f}) and was "
+                        f"not preferred — execution is ~54% of a tip block (#567). "
+                        f"--agg-prefer-cpu ranks on it.")
+            else:
+                log("  ⚠ the executor's CPU was not measured, so execution cannot be attributed to it")
             # ⛔ A FLOOR, BECAUSE THE BEST OF A BAD SET IS STILL BAD. The rate a block needs is
             # roughly segments x ~1.3 MB x 8 / target_seconds (1.1-1.3 MB/segment measured over two
             # runs), so a 9,600-segment block under 600 s wants ~166 Mbit/s. Default 0 = report only,

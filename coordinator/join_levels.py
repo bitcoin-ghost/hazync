@@ -45,6 +45,7 @@ the one paired measurement we have (join p50 rtt 1596.0 ms, compute 354.5 ms => 
 rtt on that fleet). Every number here is labelled as predicted, and the file refuses to imply more.
 
     python3 join_levels.py <log>...            # per-level table + the saving curve
+    python3 join_levels.py --by-card <log>...  # the per-card tail (hazync#550)
     python3 join_levels.py --selftest          # synthetic logs with a known answer
     python3 join_levels.py --selftest --control  # transport is free => the lever must save NOTHING
 """
@@ -124,6 +125,59 @@ def saving_ms(lv, cards, local_ms, max_local):
         loc = npairs * local_ms
         total += dist - loc                       # may be NEGATIVE: local is not always better
     return total
+
+
+def by_card(samples):
+    """{card: {'n','p50','p90','max'}} — the per-card tail, which is hazync#550's target.
+
+    ⭐ POSSIBLE ONLY SINCE #570. Before the worker said its own name, a join could be attributed to an
+    egress IP that up to eleven cards shared, so "which card has the slow tail?" had no answer.
+
+    📏 Measured on tip hour 4 (9,366 labelled joins, 37 cards): p90 ranged 2,957 ms (w26) to 16,437 ms
+    (w13) — a 5.6x spread — on a UNIFORM fleet of 38 identical cards at one price. So the spread is NOT
+    the card model and `--gpu-type` cannot address it. The fold waits for the slowest peer at every
+    level, so the worst card sets the wall for everyone.
+
+    ⚠ AND THE SPREAD SURVIVES SCRUTINY. Recomputed excluding the three early blocks that ran with only
+    3-10 cards attached, it is 5.5x with the same best and worst cards — those blocks contributed 12,
+    13 and 2 joins against 200-335 per card, so they cannot move a p90. Checked, not assumed.
+    """
+    by = {}
+    for lvl, rtt, card in samples:
+        by.setdefault(card or "?", []).append(rtt)
+    return {c: {"n": len(v), "p50": pctl(v, 0.5), "p90": pctl(v, 0.9), "max": max(v)}
+            for c, v in by.items()}
+
+
+def report_cards(samples):
+    """The per-card tail table. Reports; recommends nothing automatically."""
+    bc = by_card(samples)
+    if not bc:
+        print("no labelled join samples — is this log from before hazync#570?")
+        return 1
+    named = {c: v for c, v in bc.items() if c != "?"}
+    if not named:
+        print(f"{len(samples)} join(s) but NONE carry card= — this log predates #570, so the tail")
+        print("cannot be attributed. Re-run with a prover from v0.22.1 or later.")
+        return 1
+    ranked = sorted(named.items(), key=lambda kv: -kv[1]["p90"])
+    print(f"per-card join round trips — {sum(v['n'] for v in named.values())} sample(s), "
+          f"{len(named)} card(s)")
+    print(f"  {'card':<10} {'n':>6} {'p50':>9} {'p90':>9} {'max':>9}")
+    for c, v in ranked:
+        print(f"  {c:<10} {v['n']:>6} {v['p50']:>8.0f}ms {v['p90']:>8.0f}ms {v['max']:>8.0f}ms")
+    lo, hi = ranked[-1][1]["p90"], ranked[0][1]["p90"]
+    print()
+    print(f"  p90 spread: {lo:.0f}ms ({ranked[-1][0]}) .. {hi:.0f}ms ({ranked[0][0]})"
+          f"  ->  {hi / max(lo, 1):.1f}x")
+    print("  ⇒ the fold waits for the slowest peer at EVERY level, so the worst card sets the wall.")
+    # ⚠ A number, not a decision. Cutting a card shrinks the fleet, and whether that is a win depends
+    # on the block: the run's own floor (--min-cards) and its segment count decide, not this table.
+    print("  ⚠ Reported, not acted on. Whether dropping the tail is a win depends on the block's")
+    print("     segment count and the run's floor — this says which card, not what to do about it.")
+    if "?" in bc:
+        print(f"  ⚠ {bc['?']['n']} sample(s) carried NO card= and are excluded, not merged into one.")
+    return 0
 
 
 def report(samples, cards, compute_ms, control=False):
@@ -240,6 +294,8 @@ if __name__ == "__main__":
     argv = [a for a in argv if a != "--control"]
     if "--selftest" in argv:
         sys.exit(selftest(control))
+    by_card_mode = "--by-card" in argv
+    argv = [x for x in argv if x != "--by-card"]
     cards = 16
     compute_ms = None
     files = []
@@ -262,4 +318,4 @@ if __name__ == "__main__":
     if compute_ms is None:
         p50 = pctl([r for _, r, _ in s], 0.5) or MEASURED_RTT_MS
         compute_ms = p50 * COMPUTE_SHARE
-    sys.exit(report(s, cards, compute_ms, control))
+    sys.exit(report_cards(s) if by_card_mode else report(s, cards, compute_ms, control))

@@ -87,8 +87,17 @@ if not CONTROL:
 # ── 4. the source really ranks on both, in that order ───────────────────────────────────────────
 if not CONTROL:
     src = open(os.path.join(HERE, "tip_smoke.py"), encoding="utf8").read()
-    m = re.search(r"if \(len\(per\), mbit\) > \(len\(best\[2\]\), best\[1\]\):", src)
-    check(m is not None, "tip_smoke compares (reached, mbit) as a tuple, reachability first")
+    # ⚠ THE EXPRESSION MOVED, THE PROPERTY DID NOT (hazync#567 added an optional CPU term). This used
+    # to pin the literal `if (len(per), mbit) > (len(best[2]), best[1]):`. Pinning a literal is why this
+    # assertion fired the moment a THIRD ranking term was added — correctly, because that is exactly
+    # when someone might quietly demote reachability. So assert the PROPERTY instead: `len(per)` is the
+    # first element of the key in every mode.
+    # ⚠ `([^)]*)` stops at the first ")", which turns `len(per)` into `len(per` — my first attempt
+    # failed on its own regex rather than on the code. Assert the two key expressions literally.
+    check("(len(per), _sc, mbit) if a.agg_prefer_cpu else (len(per), mbit)" in src,
+          "reachability is the FIRST term in BOTH ranking modes (CPU only ever comes second)")
+    check("(len(best[2]), best[3], best[1])" in src and "(len(best[2]), best[1])" in src,
+          "and the incumbent is compared on the same first term in both")
     check("if mbit > best[1]:" not in src, "and the speed-only comparison is gone")
     check("most REACHABLE first" in src, "the log line says which rule was applied")
 
