@@ -209,6 +209,19 @@ jobs:
       - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
         run: cd coordinator && python3 test_agg_cpu.py --control
 
+      - name: Banking cards by measured tail concentrates the tail (hazync#550)
+        # ⭐ The fold waits for the slowest peer at EVERY level, so one bad link sets the wall for the
+        # whole block -- and adding cards does not fix a tail, it adds levels for it to appear at.
+        # 📏 Tip hour 4: per-card join p90 spanned 2,957-16,437 ms, a 5.6x spread on a UNIFORM fleet
+        # at one price, so it is not the card model and --gpu-type cannot address it.
+        # ⛔ The failure guarded is a grouping that looks principled and separates nothing: ANY
+        # partition yields banks and every one reports a worst peer, so the report alone proves
+        # nothing. The control banks by NAME and must come out visibly worse -- if the two modes
+        # agree, the tool is not measuring what it claims.
+        run: cd coordinator && python3 test_card_banks.py
+      - name: Card-banks POSITIVE CONTROL (bank by name — it must NOT separate the tail)
+        run: cd coordinator && python3 test_card_banks.py --control
+
       - name: Every block's aggregate log survives the run (hazync#526)
         # ⛔ `rm -f agg.log` ran before each seg-serve, so only the LAST block of a run still had its
         # segment count and join timings. The board-fill trial proved four blocks and could report
