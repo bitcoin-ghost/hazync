@@ -34,6 +34,7 @@ import tip_driver                       # noqa: E402
 import tip_economics                    # noqa: E402
 import tip_chain                        # noqa: E402
 import tip_harvest                      # noqa: E402
+import tip_stage                        # noqa: E402
 import tip_lifecycle                   # noqa: E402
 import tip_recruit                      # noqa: E402
 import tip_run                          # noqa: E402
