@@ -1008,13 +1008,27 @@ jobs:
         run: |
           cd tools/live
           python3 test_tip_vs_board.py --control
-      - name: The cost model reproduces the measured blocks, and an INDEPENDENT ledger
-        # ⭐ cost(n) = rate/3600 * (serial*n + parallel), so the bill RISES with every card: each one
-        # pays the whole serial floor and buys nothing during it. On 969,018 at 36 cards, 52% of the
-        # bill is serial-floor rent. Card count is a latency lever, never an economy lever (#567).
-        # ⚠ The check has a second arm against docs/history/fleet-economics.jsonl — different days,
-        # fleets and card types, calibrated on none of them — so drift shows up as a changed ratio
-        # rather than as a still-passing self-consistency test.
+      - name: Per-level join cost, and what HAZYNC_JOIN_LOCAL_MAX would save
+        # ⭐ Lever 2 proves the NARROW top levels on the aggregate instead of shipping each pair over
+        # the network. It is OFF by default, held "pending a fleet run" because it measured +0.4-1.6s
+        # — on 3 A40s whose join p50 rtt was 1596 ms. Real multi-DC join rtt p50 is 17.1 s, and the
+        # lever's whole value is the trip it removes, so that measurement could not show it (#252).
+        # ⛔ The control makes a join ALL compute: with no trip to remove the lever must save nothing,
+        # and a level of one pair must break exactly even.
+        run: cd coordinator && python3 join_levels.py --selftest
+      - name: Join-level POSITIVE CONTROL (a join that is all compute — the lever must save nothing)
+        run: cd coordinator && python3 join_levels.py --selftest --control
+      - name: The cost model reproduces the measured walls, and an INDEPENDENT ledger
+        # ⭐ cost(n) rises with every card: each one pays the whole serial floor, and past the
+        # crossover it pays for a segment phase that can no longer shrink. Card count is a latency
+        # lever, never an economy lever (#567).
+        # ⛔ The serial floor is prologue+assembly, NOT execution+assembly — execution OVERLAPS the
+        # segment phase and the aggregate's summary was adding the two. 969,018 needs 22 cards and
+        # 969,019 needs 38, not the 36 and 102 the double-counted floor implied.
+        # ⚠ Four arms: the phases must reproduce the SESSION WALL (a different clock), the OLD
+        # arithmetic must be reproducibly wrong by exactly the executor window, the derived prologue
+        # must be plausible, and the 22/38-card headlines are pinned. Plus an independent arm over
+        # docs/history/fleet-economics.jsonl, calibrated on none of its rows.
         run: cd coordinator && python3 tip_cost.py --check
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
