@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Tests for the pulse in tip24live.py — a finished block travelling to its cell.
+"""No connector is drawn from the join tree to the grid, and a finished block still reads as finished.
 
-The pulse is the only thing on the frame that marks the MOMENT a block finishes; every other element
-shows a state, so a block completing looks identical to one that completed ten minutes ago. It is
-also the easiest thing to get subtly wrong: fire for the wrong block, fire for ever, or fire for a
-block that has no cell to land in. These render real frames and compare pixels, because "the code
-ran" says nothing about whether anything was drawn.
+⛔ WHAT CHANGED, AND WHY THE OLD TEST IS GONE. This file used to assert the opposite: that a block
+finishing drew a faint line from the tree's convergence point to that block's grid cell, and that the
+line MOVED across the frame over PULSE_S. The operator removed it on 2026-09-29 — *"the green line
+that points from folding to proving is shit — get rid of it"* — so those assertions were enforcing
+behaviour the page is not supposed to have any more, and they failed as soon as it went.
 
-  python3 test_pulse.py            # assertions; exit 0 on success
-  python3 test_pulse.py --control  # the age window is removed; MUST fail
+⚠ WHAT THAT GIVES UP, AND WHY THIS TEST STILL EXISTS. The pulse was the only element marking the
+MOMENT a block finished; every other element shows a state, so a block completing now looks identical
+to one that completed ten minutes ago. That loss is deliberate, but the thing it was protecting is
+not: a finished block must still be VISIBLE as finished. So this now pins both halves —
+no connector, and the cell is green.
+
+⛔ IT RENDERS REAL FRAMES AND COMPARES PIXELS. "The code ran" says nothing about what was drawn, and
+the whole class of bug here is drawing nothing, or drawing it in the wrong place.
+
+  python3 test_pulse.py            # no connector; a done block's cell is green
+  python3 test_pulse.py --control  # reinstate a connector in the source — it MUST be detected
 """
 import json
 import os
@@ -18,7 +27,7 @@ import tempfile
 
 CONTROL = "--control" in sys.argv
 HERE = os.path.dirname(os.path.abspath(__file__))
-
+SRC = open(os.path.join(HERE, "tip24live.py"), encoding="utf8").read()
 fails = []
 
 
@@ -28,143 +37,113 @@ def check(ok, what):
         fails.append(what)
 
 
-try:
-    from PIL import Image, ImageChops
-except ImportError:
-    print("  ⛔ Pillow is not installed — the renderer cannot be exercised at all.")
-    print("     This is a REAL missing dependency, not a reason to skip: the live renderer died on")
-    print("     exactly this on the tip box on 2026-09-20 and the public page kept serving a stale")
-    print("     frame. Install Pillow rather than making this test silently pass.")
-    sys.exit(1)
-
-WORK = tempfile.mkdtemp(prefix="pulse_")
-RENDER = os.path.join(HERE, "tip24live.py")
-COLLECT = os.path.join(HERE, "collect.py")
-
-# The control removes the age window, so the pulse fires for every block on every frame.
-SRC = open(RENDER, encoding="utf8").read()
-if CONTROL:
-    assert "if not (0.0 <= age < PULSE_S):" in SRC, "the guard this control removes is not there"
-    SRC = SRC.replace("if not (0.0 <= age < PULSE_S):\n            continue",
-                      "if False:\n            continue")
-    RENDER = os.path.join(WORK, "tip24live_control.py")
-    open(RENDER, "w", encoding="utf8").write(SRC)
-
-# ⚠ The control copy of the renderer lives outside this directory, so its `from tip24e import …`
-# (and tip24e's own `from tip24c import …`) only resolve with HERE on the path.
-ENV = dict(os.environ, PYTHONPATH=HERE + os.pathsep + os.environ.get("PYTHONPATH", ""))
-
-subprocess.run(["python3", COLLECT, "--demo", "--once", "--out", f"{WORK}/base.json"],
-               capture_output=True, check=True, env=ENV)
-BASE = json.load(open(f"{WORK}/base.json"))
-NOW = BASE["t"]
+WORK = tempfile.mkdtemp(prefix="pulse-")
+TIP = 969119
 
 
-RENDER_FAILURES = []
+def snap(done_age_s):
+    """A snapshot with one finished tip block, `done_age_s` ago."""
+    now = 1790000000.0
+    return {
+        "t": now, "tip": TIP, "session_blocks": 6,
+        "cards": [{"name": "hz-1", "up": True, "cost_hr": 2.09, "phase": "idle",
+                   "block": None, "power": [100.0]}],
+        "blocks": [{"h": TIP, "kind": "tip", "done": True, "wall_s": 121.1,
+                    "done_at": now - done_age_s, "arrive": now - 300, "segs": 2000,
+                    "cost": 5.0, "cards": 38}],
+    }
 
 
-def frame(ages, name):
-    """Render one frame; `ages` maps block index -> seconds since it finished.
+def frame(done_age_s, name, src=None):
+    """Render a frame; returns its path. `src` overrides tip24live.py for the control."""
+    sp = os.path.join(WORK, f"{name}.json")
+    with open(sp, "w") as fh:
+        json.dump(snap(done_age_s), fh)
+    out = os.path.join(WORK, f"{name}.png")
+    script = os.path.join(HERE, "tip24live.py")
+    if src is not None:
+        script = os.path.join(WORK, "tip24live_control.py")
+        with open(script, "w") as fh:
+            fh.write(src)
+    r = subprocess.run([sys.executable, script, "--snap", sp, "--out", out],
+                       capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        check(False, f"render {name} failed: {(r.stderr or '')[-300:]}")
+        return None
+    return out
 
-    A render that produces no file is RECORDED, not raised: on the live page that is a frozen
-    dashboard, which is the failure worth naming rather than a traceback out of the harness.
+
+def connector_pixels(png):
+    """Pixels in the corridor BETWEEN the tree and the grid that are pulse-coloured.
+
+    ⚠ Sampled in the band the old line crossed, away from the ring and the grid themselves, so a
+    green grid cell cannot be mistaken for a connector.
     """
-    s = json.loads(json.dumps(BASE))
-    for b in s["blocks"]:
-        b["done_at"] = NOW - 600
-    for i, age in ages.items():
-        s["blocks"][i]["done_at"] = NOW - age
-    json.dump(s, open(f"{WORK}/{name}.json", "w"))
-    r = subprocess.run(["python3", RENDER, "--once", "--snap", f"{WORK}/{name}.json",
-                        "--out", f"{WORK}/{name}.png"], capture_output=True, text=True, env=ENV)
-    if not os.path.exists(f"{WORK}/{name}.png"):
-        RENDER_FAILURES.append((name, ((r.stdout or "") + (r.stderr or "")).strip()[:90]))
-        return None
-    return Image.open(f"{WORK}/{name}.png").convert("RGB")
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    w, h = im.size
+    n = 0
+    for y in range(int(h * 0.42), int(h * 0.58)):
+        for x in range(int(w * 0.48), int(w * 0.70)):
+            r, g, b = im.getpixel((x, y))
+            if g > r + 14 and g > b + 14 and g > 60:      # greenish and not near-black
+                n += 1
+    return n
 
 
-quiet = frame({}, "quiet")                       # nothing finished recently
+def green_cells(png):
+    """Greenish pixels in the grid band — a finished block's cell."""
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    w, h = im.size
+    n = 0
+    for y in range(int(h * 0.62), int(h * 0.95)):
+        for x in range(int(w * 0.70), w - 4):
+            r, g, b = im.getpixel((x, y))
+            if g > r + 14 and g > b + 14 and g > 60:
+                n += 1
+    return n
 
 
-def moved(im):
-    if im is None or quiet is None:
-        return None
-    return ImageChops.difference(quiet, im).getbbox()
+# ── 1. the frame renders at all ─────────────────────────────────────────────────────────────────
+fresh = frame(1.0, "fresh")
+check(fresh is not None, "a frame with a just-finished block renders")
 
+# ── 2. the finished block is still VISIBLY finished ─────────────────────────────────────────────
+if fresh:
+    gc = green_cells(fresh)
+    check(gc > 40, f"the finished block's cell is green ({gc} px) — removing the pulse must not "
+                   f"remove the only sign a block landed")
 
-# ── 1. a block that just finished draws something ────────────────────────────────────────────────
-bb = moved(frame({-1: 1.0}, "fresh"))
-check(bb is not None, "a block that finished 1 s ago draws a pulse")
+# ── 3. ⛔ NO CONNECTOR, at any age in what used to be the pulse window ──────────────────────────
+if not CONTROL and fresh:
+    found = {age: connector_pixels(f) for age, f in
+             ((a, frame(a, f"age{int(a*10)}")) for a in (0.5, 2.0, 4.0, 5.5)) if f}
+    check(all(v < 25 for v in found.values()),
+          f"no connector is drawn between the tree and the grid at any age ({found})")
+    check("d.line([TX1, RCY" not in SRC,
+          "and the source no longer draws it")
+    check("px, py" not in SRC,
+          "⚠ nor keeps the pulse geometry as dead code — it was removed, not just stopped")
 
-# ── 2. ⛔ IT TRAVELS. A pulse pinned at the tree apex is not a pulse ──────────────────────────────
-spans = []
-for age in (0.5, 2.0, 4.0, 5.5):
-    b = moved(frame({-1: age}, f"t{age}"))
-    spans.append((age, b[2] if b else None))
-check(all(x is not None for _, x in spans), f"the pulse draws at every age in flight ({spans})")
-rights = [x for _, x in spans if x]
-# ⚠ Guarded against an empty list: under the control NOTHING renders, and an IndexError out of the
-# harness would hide which assertion actually detected the removed guard.
-check(len(rights) >= 2 and rights == sorted(rights) and rights[-1] > rights[0] + 50,
-      f"⛔ it MOVES toward the grid: right edge "
-      f"{rights[0] if rights else 'n/a'} → {rights[-1] if rights else 'n/a'} across 0.5 s → 5.5 s")
-
-# ── 3. ⛔ AND IT STOPS. A pulse that never expires paints every finished block for ever ───────────
-check(moved(frame({-1: 20.0}, "old")) is None,
-      "⛔ a block that finished 20 s ago draws NOTHING — past PULSE_S the pulse is over")
-
-# ── 4. a snapshot with no done_at at all must still render ───────────────────────────────────────
-s = json.loads(json.dumps(BASE))
-for b in s["blocks"]:
-    b.pop("done_at", None)
-json.dump(s, open(f"{WORK}/legacy.json", "w"))
-r = subprocess.run(["python3", RENDER, "--once", "--snap", f"{WORK}/legacy.json",
-                    "--out", f"{WORK}/legacy.png"], capture_output=True, text=True, env=ENV)
-check(os.path.exists(f"{WORK}/legacy.png"),
-      f"⚠ a snapshot from an older collector (no done_at) still renders — the pulse simply does not "
-      f"fire, rather than the frame failing ({r.stderr[:80]})")
-
-# ── 5. ⚠ a clock that runs ahead of ours is not a fresh block ────────────────────────────────────
-check(moved(frame({-1: -30.0}, "future")) is None,
-      "⚠ a done_at in the FUTURE (a card clock ahead of ours) does not fire a pulse")
-
-# ── 6. ⛔ EVERY FRAME MUST RENDER ─────────────────────────────────────────────────────────────────
-# ⏰ The failure mode this once caught is GONE, and that is deliberate. The pulse used to draw a
-# travelling dot whose radius was `7 - 3 * f`; without the age window f reached 100, the radius went
-# to -293, PIL refused the ellipse and the renderer produced NO FRAME AT ALL. The dot was removed on
-# request (a moving token read as a stray object on a page that is otherwise all states), so nothing
-# drives a negative radius any more and this assertion can no longer detect a missing age window.
-#
-# It is KEPT because "every frame renders" is worth asserting on its own — a frozen dashboard is the
-# failure the staleness banner exists to expose. The age window is now caught by checks 3, 4 and 5
-# instead, which is stronger: three independent detectors rather than one incidental PIL crash.
-check(not RENDER_FAILURES,
-      f"⛔ every frame rendered ({RENDER_FAILURES[:2]})")
-
-# ⚠ NAME EVERY ONE. Removing the age window is now caught by three assertions: the pulse stops
-# moving (it is pinned at the frame edge at every age), a long-finished block still draws, and a
-# future done_at draws. Listing a subset would let an unrelated breakage ride inside a "CONTROL OK".
-EXPECTED_CONTROL_FAILURES = {
-    "it MOVES toward the grid",
-    "a block that finished 20 s ago draws NOTHING",
-    "a done_at in the FUTURE",
-}
+# ── 4. THE CONTROL: put a connector back and prove this test can see it ─────────────────────────
+if CONTROL:
+    # Reinstate exactly the line that was removed, at a fixed mid-frame position.
+    marker = "    # ⛔ NO FINISH PULSE (operator, 2026-09-29"
+    assert marker in SRC, "the comment marking the removal is not there — rebase this control"
+    inject = ("    for _b in grid_blocks:\n"
+              "        if _b.get('done_at'):\n"
+              "            d.line([TX1, RCY, TX1 + 300, RCY + 40], fill=mix(OK, GROUND, .18), width=2)\n"
+              "            break\n")
+    ctrl = SRC.replace(marker, inject + marker, 1)
+    f = frame(1.0, "control", src=ctrl)
+    if f:
+        px = connector_pixels(f)
+        check(px >= 25,
+              f"control: a reinstated connector IS detected ({px} px) — so assertion 3 can fail")
 
 print()
-if CONTROL:
-    hit = {e for e in EXPECTED_CONTROL_FAILURES if any(e in f for f in fails)}
-    if hit == EXPECTED_CONTROL_FAILURES:
-        print("CONTROL OK — the age window was removed and the assertion that detects it failed, "
-              "as it must:")
-        for e in sorted(hit):
-            print(f"  - {e}")
-        sys.exit(0)
-    print("CONTROL FAILED — a pulse that never expires went undetected.")
-    for e in sorted(EXPECTED_CONTROL_FAILURES - hit):
-        print(f"  should have failed and did not: {e}")
-    sys.exit(1)
-
 if fails:
-    print(f"FAILED {len(fails)}: " + "; ".join(fails))
+    print(f"FAIL {len(fails)}: " + "; ".join(fails))
     sys.exit(1)
-print("all good")
+print("PASS (" + ("control" if CONTROL else "real") + ")")
