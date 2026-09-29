@@ -359,7 +359,12 @@ def rank_card_types(api, vram_floor=VRAM_FLOOR_GB, economics=ECONOMICS):
                             c["usd_per_proof"] if c["usd_per_proof"] is not None else c["price"]))
     return out
 
-HOST_RELEASE = "v0.22.0"
+# ⚠ BUMP THIS WITH EVERY RELEASE WHOSE INSTRUMENTATION THE FLEET NEEDS. `test_host_pin.py`
+# enforces it against docs/history/releases/, because this pin sat on v0.21.0 for SEVEN releases
+# and every run proved correctly while producing none of the evidence the fleet exists for.
+# v0.22.1 is what puts `card=` on the [rtt] line (#570) and the corrected phase summary (#567)
+# on the cards — without it a run still cannot say WHICH card has the slow tail.
+HOST_RELEASE = "v0.22.1"
 HOST_URL = (f"https://github.com/hazync/hazync/releases/download/{HOST_RELEASE}/"
             "hazync-host-x86_64-linux-gnu-cuda")
 
