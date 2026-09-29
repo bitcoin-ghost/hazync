@@ -1911,10 +1911,25 @@ def main():
                     # --claim-source governs where a TIP bundle comes from. The board has exactly
                     # one source, /api/witness, and it does not depend on that flag.
                     src = "ssh" if from_tip else "api"
+                    # 📏 TIME THIS LEG ON ITS OWN (hazync#598). The bundle crosses the orchestrator
+                    # twice — down from the bridge here, up to the aggregate in start_range_aggregate
+                    # — and the run log covers both in ONE window, so it cannot say which costs the
+                    # 49-164 s a tip block spends staging. The two have opposite fixes.
                     if src == "ssh":
-                        bok, bwhy = tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host)
+                        (bok, bwhy), fetch_s = tip_stage.timed(
+                            lambda: tip_board.fetch_bundle_ssh(int(rng), bp, a.bridge_host))
                     else:
-                        bok, bwhy = tip_board.fetch_bundle(int(rng), bp)
+                        (bok, bwhy), fetch_s = tip_stage.timed(
+                            lambda: tip_board.fetch_bundle(int(rng), bp))
+                    try:
+                        _nb = os.path.getsize(bp) if bok else 0
+                    except OSError:
+                        _nb = 0
+                    _row = tip_stage.record(a.rundir, rng, "fetch", fetch_s, _nb, ok=bool(bok),
+                                            note=f"from {src}")
+                    log(f"  stage: fetched {_nb/1e6:.1f} MB in {fetch_s:.1f}s"
+                        f"{' at %.2f MB/s' % _row['mbytes_per_s'] if 'mbytes_per_s' in _row else ''}"
+                        f" (leg 1 of 2, from {src})")
                     if not bok:
                         raise RuntimeError(f"no bundle for {rng}: {bwhy}")
 
