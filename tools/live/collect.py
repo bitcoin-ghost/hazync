@@ -251,8 +251,13 @@ def _tail_lines(path, nbytes):
     return lines
 
 
-def read_streams(rundir, now, cursors=None):
+def read_streams(rundir, now, cursors=None, until=None):
     """Read every card's stream.
+
+    `until`, when set, ignores every sample newer than that epoch, so a FINISHED capture can be
+    replayed as it looked at any moment of the run rather than only at its end. That is what turns a
+    run into a timelapse: the archived frames cannot serve for one, because the renderer changes
+    under them mid-run and the archiver captures whichever collector happens to own frame.png.
 
     `cursors` is a dict name -> StreamCursor. Pass one and each file is read INCREMENTALLY from where
     the last tick stopped; omit it and every file is read whole, exactly as before -- which is what
@@ -354,6 +359,11 @@ def read_streams(rundir, now, cursors=None):
             try:
                 whole = int(float(f[0]))
             except (TypeError, ValueError):
+                continue
+            # ⚠ `continue`, not `break`: rows from two writers interleave (see the dedupe note
+            # above), so a file is not strictly ordered and breaking would truncate a card's history
+            # at the first out-of-order sample.
+            if until is not None and whole > until:
                 continue
             if whole == last_sec:
                 continue
@@ -661,6 +671,34 @@ def blocks_from_cards(cards, state, now, verified=()):
     return out
 
 
+def chain_at(ledger_path, t):
+    """The chain as the run knew it at `t`, from tip_ledger.jsonl.
+
+    The ledger records an `appeared` event per tip block and `chain_tip_now` on acceptance, which is
+    what the header and the grid need. Same shape chain_facts() returns, with ok False when there is
+    nothing to go on -- the renderer already handles that.
+    """
+    tip, best = 0, 0.0
+    try:
+        with open(ledger_path) as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                ts = float(e.get("t") or 0)
+                if not ts or ts > t:
+                    continue
+                for key in ("chain_tip_now", "height"):
+                    h = e.get(key)
+                    if isinstance(h, int) and ts >= best:
+                        tip, best = max(tip, h), ts
+    except OSError:
+        pass
+    return {"tip": tip, "frontier": 0, "proven": 0, "folded": 0,
+            "pct": 0.0, "contributors": 0, "ok": bool(tip)}
+
+
 def newest_sample(rundir):
     """Epoch of the most recent sample on disk, or 0. Used by --replay so a FINISHED capture renders
     as it looked live: wall-clock staleness would otherwise mark every card down."""
@@ -772,6 +810,10 @@ def main():
     ap.add_argument("--at", type=float, default=0.62,
                     help="demo only: fraction (0..1) of the simulated 24-hour day to render")
     ap.add_argument("--cards", type=int, default=30, help="demo only: fleet size")
+    ap.add_argument("--as-of", type=float, default=0.0,
+                    help="replay a finished capture as it looked at this epoch (implies no network)")
+    ap.add_argument("--tip-ledger", default="",
+                    help="tip_ledger.jsonl, so --as-of can resolve the chain tip at that moment")
     ap.add_argument("--replay", action="store_true",
                     help="anchor 'now' to the newest sample, so a finished capture renders as live")
     ap.add_argument("--steal", action="store_true",
@@ -830,7 +872,9 @@ def main():
     cursors = {}
     while True:
         now = time.time()
-        if a.replay and not a.demo:
+        if a.as_of:
+            now = a.as_of
+        elif a.replay and not a.demo:
             ns = newest_sample(a.rundir)
             if ns:
                 now = ns + 0.5          # just after the last sample: the fleet reads as live
@@ -843,7 +887,7 @@ def main():
             chain = {"tip": tip, "frontier": 74927, "proven": 75443, "folded": 62306,
                      "pct": 7.75, "contributors": 7, "ok": True}
         else:
-            cards = read_streams(a.rundir, now, cursors)
+            cards = read_streams(a.rundir, now, cursors, until=(a.as_of or None))
             phase_label = read_phase(a.rundir)
             # ⚠ LATCH IT. The phase line is rewritten as the run proceeds ("PROVING block ..."), so
             # the SESSION header is only visible for part of the run. Read it once and keep it, or
@@ -854,7 +898,13 @@ def main():
             # ⚠ --once has no background thread to have populated the cache, and a one-shot caller
             # (a test, a manual capture) wants the real answer rather than "not read yet". The cost
             # is bounded by chain_facts' own timeout and there is no loop to freeze.
-            chain = chain_facts() if a.once else chain_cached()
+            # ⛔ NO NETWORK UNDER --as-of. The chain API answers about NOW, so a replay of an
+            # earlier moment would have the final tip painted over every frame of it -- the grid
+            # would read "AT THE TIP" against a height the run had not yet seen.
+            if a.as_of:
+                chain = chain_at(a.tip_ledger, a.as_of)
+            else:
+                chain = chain_facts() if a.once else chain_cached()
             t0f = os.path.join(a.rundir, "t0")          # written by mile3.sh at T0
             if os.path.exists(t0f) and "since" not in state:
                 try:
