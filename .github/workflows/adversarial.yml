@@ -1030,6 +1030,15 @@ jobs:
         # must be plausible, and the 22/38-card headlines are pinned. Plus an independent arm over
         # docs/history/fleet-economics.jsonl, calibrated on none of its rows.
         run: cd coordinator && python3 tip_cost.py --check
+      - name: Arming is one ssh per card, concurrent, and a failure is named
+        # 📏 Measured over 21 blocks of tip hour 4: arm 1828s (41%) against work 1503s (34%) — more
+        # time spent on ssh handshakes than on all proving and folding combined. It was 2 calls per
+        # worker in a serial loop, 74 cold handshakes to three continents, once PER BLOCK.
+        # ⛔ And a failed arm was SILENT: ssh.run returns None and both calls ignored it, so a card
+        # that never armed never attached and the aggregate sat at 0/N segments saying nothing.
+        run: cd coordinator && python3 test_arm_parallel.py
+      - name: Arming POSITIVE CONTROL (2 calls per card, serial — the old cost must reproduce)
+        run: cd coordinator && python3 test_arm_parallel.py --control
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
