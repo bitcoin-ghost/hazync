@@ -1050,6 +1050,16 @@ jobs:
         run: cd tools/live && python3 test_collector_resilience.py
       - name: Collector POSITIVE CONTROL (inline fetch + bare /proc check — both must reproduce)
         run: cd tools/live && python3 test_collector_resilience.py --control
+      - name: A tip bundle landing just before a board claim still wins
+        # 📏 Tip hour 4: 969,121's bundle appeared 08:55:29 and a board block was claimed 08:55:33 —
+        # four seconds later — costing 191s of tip latency. ⚠ Precedence is NOT weak in general
+        # (969,122 was taken in the same second the fleet freed up); the hole is the window between
+        # the caller reading the bridge and next_work claiming.
+        # ⛔ It cannot be reproduced by timing, so the test drives the selection path with a bridge
+        # that answers "nothing" then "here is a tip block" — the sequence the live failure took.
+        run: cd coordinator && python3 test_tip_precedence_race.py
+      - name: Tip-precedence POSITIVE CONTROL (no re-check — the board claim must win)
+        run: cd coordinator && python3 test_tip_precedence_race.py --control
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
