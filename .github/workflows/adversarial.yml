@@ -196,6 +196,19 @@ jobs:
           cd coordinator
           python3 test_worker_gate.py --control
 
+      - name: The aggregate's CPU is measured and reported, and ranks only when asked
+        # ⛔ Execution is 54% of a tip block's wall and is SERIAL CPU WORK on the aggregate — and it
+        # cannot be parallelised without moving METHOD_ID (chunk mode yields KIND_CHUNK, fold_range
+        # composes across HEIGHTS, and the guest asserts the H8 domain tag). So the remaining lever is
+        # WHICH card executes, and the election never looked at the CPU while hour 3 saw twelve
+        # distinct host CPUs on one fleet.
+        # ⚠ A HYPOTHESIS, not a measurement: the probe reports always and ranks only under
+        # --agg-prefer-cpu. Lever 2 was predicted to save 36s on this kind of reasoning and measured
+        # NEGATIVE, which is why the default does not change.
+        run: cd coordinator && python3 test_agg_cpu.py
+      - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
+        run: cd coordinator && python3 test_agg_cpu.py --control
+
       - name: Every block's aggregate log survives the run (hazync#526)
         # ⛔ `rm -f agg.log` ran before each seg-serve, so only the LAST block of a run still had its
         # segment count and join timings. The board-fill trial proved four blocks and could report
