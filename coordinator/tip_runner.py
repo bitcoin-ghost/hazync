@@ -19,6 +19,7 @@ import time
 
 import tip_driver
 import tip_lifecycle
+import tip_stage
 
 
 # How many cards to touch at once. 23 sequential ssh calls made phase 0 the longest part of a run.
@@ -501,8 +502,19 @@ while time.time() < end:
         to whichever workers have dialled in, so the cards do nothing until they attach.
         """
         remote = posixpath.join(self.workdir, f"bundle_{height}.json")
-        if not self.ssh.push(self.agg, bundle_path, remote):
-            return False, f"could not stage {bundle_path} onto {self.agg.cid}"
+        # 📏 TIME THIS LEG ON ITS OWN (hazync#598). `stage` was 629 s of tip hour 4 and 49-164 s per
+        # tip block, but the run log covers the pull and this push in ONE window, so it cannot say
+        # which of them costs it — and the two have opposite fixes. Timed, never gated: this changes
+        # no route and no default.
+        pushed, push_s = tip_stage.timed(lambda: self.ssh.push(self.agg, bundle_path, remote))
+        try:
+            nbytes = os.path.getsize(bundle_path)
+        except OSError:
+            nbytes = 0
+        tip_stage.record(self.stage_dir, height, "push", push_s, nbytes, ok=bool(pushed),
+                         note=f"-> {self.agg.cid}")
+        if not pushed:
+            return False, f"could not stage {bundle_path} onto {self.agg.cid} (after {push_s:.1f}s)"
         # ⛔ CONFIRM IT LANDED. `scp` exiting 0 is not evidence -- the same silent-drop that once staged
         # 21 of 22 chunks and left seg-serve panicking with nothing useful in any log.
         size = (self.ssh.run(self.agg, f"stat -c%s {remote} 2>/dev/null || echo 0") or "0").strip()

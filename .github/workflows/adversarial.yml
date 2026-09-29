@@ -1065,6 +1065,18 @@ jobs:
         run: cd coordinator && python3 test_arm_parallel.py
       - name: Arming POSITIVE CONTROL (2 calls per card, serial — the old cost must reproduce)
         run: cd coordinator && python3 test_arm_parallel.py --control
+
+      - name: The two legs a tip bundle travels are timed separately (hazync#598)
+        # 📏 stage was 629 s of tip hour 4 (14 %) and 49-164 s on a tip block before any GPU starts,
+        # against 6 s on a board block. The bundle crosses the orchestrator TWICE -- down from the
+        # bridge, up to the aggregate -- and the run log covers both in ONE window.
+        # ⛔ The two halves have OPPOSITE fixes: if the push dominates, send from the bridge or stage
+        # ahead; if the pull dominates, the orchestrator should not hold the bytes at all. The
+        # control feeds one combined timing and the verdict must REFUSE to name a winner rather than
+        # crowning the only leg it has -- an answer that would read exactly like a measurement.
+        run: cd coordinator && python3 test_stage_legs.py
+      - name: Stage-legs POSITIVE CONTROL (one combined timing — the verdict must decline)
+        run: cd coordinator && python3 test_stage_legs.py --control
       - name: The collector does not block on a third party, and its lock asks what the pid IS
         # ⛔ #591: chain_facts() is a 10s synchronous HTTP call and was called inline every tick, so
         # one unreachable request froze the ENTIRE snapshot — cards, blocks, spend. Observed with the
