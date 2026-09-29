@@ -2058,7 +2058,15 @@ def main():
                             "why": f"waiting for the chain — bridge tip {t or '?'}, "
                                    f"floor {proved_tip['h']} (--no-board-fill: the gap is not "
                                    f"filled with board work)"}
-                out = tip_controller.next_work(pending, claim_fn)
+                # ⛔ #585: hand next_work a way to ASK AGAIN just before it claims board work. The
+                # `pending` above was read at the top of this tick; a bundle landing in between used
+                # to lose the fleet for a whole board block (191 s, measured 2026-09-29).
+                # ⚠ Re-reads the bridge, which costs one ssh — but only on the path where board work
+                # is about to be claimed, and only when no tip was already pending. `pick_tip`'s
+                # `seen_at` guard makes a second call idempotent: a height already noted is not
+                # re-noted, so the tip ledger does not gain duplicate `appeared` lines.
+                out = tip_controller.next_work(pending, claim_fn,
+                                               recheck_tip_fn=lambda: pick_tip()[0])
                 # ⭐ WHEN THE BUNDLE APPEARED, so the session's window can start there rather than
                 # at the moment this loop reached it. `seen_at` is stamped by pick_tip the first time
                 # a height is seen on the bridge, which is the earliest instant this fleet could have

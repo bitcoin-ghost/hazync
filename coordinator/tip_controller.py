@@ -184,7 +184,7 @@ def slow_tail(rates, *, fraction=None, keep_min=1):
     return sorted(slow, key=lambda w: live[w])[:max(0, droppable)]
 
 
-def next_work(tip_block, claim_fn):
+def next_work(tip_block, claim_fn, recheck_tip_fn=None):
     """What to prove next: the tip block if one is waiting, else the board's next block.
 
     ⛔ THE BOARD BLOCK COMES FROM THE COORDINATOR'S HANDOUT, NEVER FROM frontier+1 COMPUTED HERE. The
@@ -199,6 +199,28 @@ def next_work(tip_block, claim_fn):
     """
     if tip_block is not None:
         return {"source": "tip", "range": str(tip_block)}
+    # ⛔⛔ RE-ASK BEFORE CLAIMING BOARD WORK (hazync#585). `tip_block` is a value computed by the
+    # caller BEFORE this function runs, so a bundle that lands in the gap loses to a board claim that
+    # then holds the fleet for its whole duration.
+    #
+    # 📏 MEASURED, tip hour 4, 2026-09-29. Bundle times from the bridge against the run's own log:
+    #     969,121's bundle appeared 08:55:29
+    #     board block 133152 claimed  08:55:33   <- FOUR SECONDS later
+    #     tip 969,121 not started until 08:58:40 <- 191 s late
+    #
+    # ⚠ Tip precedence is NOT weak in general — 969,122 was taken in the same second the fleet freed
+    # up, and 133,087 was abandoned 3 s after 969,118's bundle landed. The hole is exactly this
+    # window: the interval between the caller reading the bridge and this function claiming.
+    #
+    # One extra read of a value the caller already knows how to compute closes it. The abandon path
+    # stays as the second line of defence for a bundle that lands mid-block.
+    if recheck_tip_fn is not None:
+        try:
+            late = recheck_tip_fn()
+        except Exception:
+            late = None            # ⚠ a failed re-check must not stop the run claiming board work
+        if late is not None:
+            return {"source": "tip", "range": str(late), "late_arrival": True}
     rng = claim_fn()
     if rng is None:
         # ⚠ THE REASON TRAVELS WITH THE VERDICT (hazync#505). The session used to supply one fixed
