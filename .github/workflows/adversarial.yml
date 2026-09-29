@@ -1039,6 +1039,17 @@ jobs:
         run: cd coordinator && python3 test_arm_parallel.py
       - name: Arming POSITIVE CONTROL (2 calls per card, serial — the old cost must reproduce)
         run: cd coordinator && python3 test_arm_parallel.py --control
+      - name: The collector does not block on a third party, and its lock asks what the pid IS
+        # ⛔ #591: chain_facts() is a 10s synchronous HTTP call and was called inline every tick, so
+        # one unreachable request froze the ENTIRE snapshot — cards, blocks, spend. Observed with the
+        # API healthy (5/5 200s) and the laptop's network saturated by the rig's own 81 ssh streams.
+        # STALE_S is 60, so a 10s freeze did not even raise the staleness banner.
+        # ⛔ #583: the lock checked /proc/<pid>, which exists for a ZOMBIE and for a RECYCLED pid.
+        # ⚠ The control must reproduce BOTH, and the real arm must still detect a live collector —
+        # a fix that disarms the guard would pass a naive test.
+        run: cd tools/live && python3 test_collector_resilience.py
+      - name: Collector POSITIVE CONTROL (inline fetch + bare /proc check — both must reproduce)
+        run: cd tools/live && python3 test_collector_resilience.py --control
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
