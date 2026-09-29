@@ -55,11 +55,41 @@ HOUR3 = {
     969020: (2104,  83.9, 211.7,  53.4, 22, None),   # ⚠ wall not recorded — excluded from costs
 }
 
-# Fleet rate per card per hour. 15x 4090 billed $11.10/hr for the whole fleet, i.e. $0.74/card/hr.
-# ⚠ A card TYPE is not a price tier: the 2026-09-27 launch saw `stockStatus: Low` mean both 1 and 38
-# available cards in the same minute.
-RATES = {"RTX 4090": 0.74, "A40": 0.46, "RTX PRO 4500": 0.46, "RTX PRO 6000": 0.77}
-DEFAULT_RATE = RATES["RTX PRO 6000"]
+# Fleet rate per card per hour.
+#
+# ⛔⛔ THE PRO 6000 FIGURE HERE WAS INVENTED. The first version of this file used $0.77/hr for the
+# PRO 6000 and nothing measured it — I put the number in. The live price is $2.09, so every dollar
+# figure this file produced was wrong by ~2.7x, and they were quoted in a PR body and on an issue
+# before anyone queried a RunPod price. An unmeasured constant in a file whose whole purpose is
+# costing is worse than no file. → the project rule: only measured numbers.
+#
+# 📏 READ FROM THE LIVE CATALOGUE 2026-09-29 07:44Z (`rank_card_types`), SECURE stock:
+RATES = {
+    "RTX 4090": 0.74,                  # also corroborated: 15x billed $11.10/hr for the fleet
+    "L4": 0.49,
+    "RTX PRO 4000 Blackwell": 0.57,
+    "RTX PRO 4500 Blackwell": 0.72,
+    "RTX 6000 Ada": 0.84,
+    "A100 80GB PCIe": 1.59,
+    "A100-SXM4-80GB": 1.59,
+    "RTX PRO 6000 Blackwell SE": 2.09,
+    "RTX PRO 6000 Blackwell WE": 2.19,
+    "H100 NVL": 3.19,
+    "H100 80GB HBM3": 3.49,
+}
+# ⚠ A40 is GONE from the catalogue as of this reading, so its old $0.46 is not quotable any more —
+# which is the other reason a hardcoded table rots: the row can disappear.
+#
+# ⚠ AND THESE MOVE. A price read at 07:44Z is a price at 07:44Z. Anything deciding real spend should
+# call `rank_card_types(api)` rather than read this table, which exists so the report has a default.
+DEFAULT_RATE = RATES["RTX PRO 6000 Blackwell SE"]
+
+# ⛔⛔ AND THE CALIBRATION'S CARD TYPE IS UNKNOWN. docs/history/TIP_HOUR_3_2026-09-28.md never records
+# what it rented, which is precisely the failure that file's own predecessor warned about ("check the
+# FLEET: line before comparing two runs"). So the 1.65-1.83 card-seconds/segment below belong to a card
+# nobody can name. Back-solving its $4.29 of boot spend over 7.0 min on ~22 pods puts it near
+# $1.6-1.9/card/hr, i.e. A100-class — NOT the 4090 and NOT the PRO 6000. Treat every card-count here as
+# "cards of that unnamed type", and re-derive once a run records its own fleet.
 
 # po2 22 measured ~11.5% faster on a TIP block (962,000 on an L40S). It needs >=48 GB.
 PO2_22_SPEEDUP = 0.115
