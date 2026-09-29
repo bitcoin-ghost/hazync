@@ -7,7 +7,11 @@ minute, so use the live API; the snapshot below is dated.
 
 ## Release
 
-- **Latest: [v0.22.0](https://github.com/hazync/hazync/releases/tag/v0.22.0)**, published
+- **Latest: [v0.22.1](https://github.com/hazync/hazync/releases/tag/v0.22.1)**, published
+  2026-09-29 ([notes](history/releases/RELEASE_NOTES_v0.22.1.md)) — measurement release: `[rtt]` now names
+  the card (#570) and the aggregate's phase summary no longer double-counts execution (#567). METHOD_ID
+  is unchanged, so proofs interoperate with every earlier release.
+- **[v0.22.0](https://github.com/hazync/hazync/releases/tag/v0.22.0)**, published
   2026-09-27 ([notes](history/releases/RELEASE_NOTES_v0.22.0.md)) — sponsorship and donations live, with the
   first sponsored block paid over Lightning and proved by a bot that rented a card for it (#520-#524); the
   bridge follows the chain head with reorg detection and an undo log (#484); the aggregate chosen on its
