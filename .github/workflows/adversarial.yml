@@ -1073,6 +1073,16 @@ jobs:
         run: cd coordinator && python3 test_tip_precedence_race.py
       - name: Tip-precedence POSITIVE CONTROL (no re-check — the board claim must win)
         run: cd coordinator && python3 test_tip_precedence_race.py --control
+      - name: The harvest distinguishes an absent file from an unreachable pod
+        # ⛔ Tip hour 4's teardown reported "not fetched (a dying pod refuses connections)" for
+        # run.log/prove.log/facts.json on EVERY card. Those are chunk-mode artefacts; mode 6 never
+        # writes them, so nothing refused anything and no data was lost — but I believed the message
+        # and told the operator we had lost evidence. It also said 39 files where 77 were on disk.
+        # ⚠ The tell: the "missing" files were the LAST N of the list, identically, for every card.
+        # A dying-pod race is random; list order is not.
+        run: cd coordinator && python3 test_harvest_report.py
+      - name: Harvest POSITIVE CONTROL (fetch blind, blame a dying pod — the false alarm must return)
+        run: cd coordinator && python3 test_harvest_report.py --control
       - name: /api/state does not ship the 19.8 MB verified-range list
         # ⛔ The four README badges rendered "inaccessible" on the repository front page. /api/state
         # was 19,795,606 B / 33.3 s and finally 504 at the edge, of which vranges is 99.95%; the block
