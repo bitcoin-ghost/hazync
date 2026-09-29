@@ -1063,6 +1063,19 @@ jobs:
         run: cd tools/live && python3 test_collector_resilience.py
       - name: Collector POSITIVE CONTROL (inline fetch + bare /proc check — both must reproduce)
         run: cd tools/live && python3 test_collector_resilience.py --control
+
+      - name: A finished capture can be replayed as it looked at any moment of the run
+        # ⛔ A tip run's most legible artifact is the hour compressed into a few seconds, and the
+        # archived PNGs cannot give one. Measured on the tip hour 4 capture (1,748 frames): they span
+        # MORE THAN ONE RUN (the earliest show tip 968,367 on a 15-card fleet, because the archiver
+        # watches frame.png and captures whichever collector owns it), the renderer was FIXED during
+        # the run so the page changes appearance partway through, and none of them carries the grid
+        # block numbers that shipped afterwards in #586/#595.
+        # ⚠ The control drops the cutoff: without it every frame is the END state, and a timelapse
+        # that is secretly one still image is exactly the failure nobody would question.
+        run: cd tools/live && python3 test_replay_as_of.py
+      - name: Replay POSITIVE CONTROL (cutoff ignored — every frame must collapse to the end state)
+        run: cd tools/live && python3 test_replay_as_of.py --control
       - name: A tip bundle landing just before a board claim still wins
         # 📏 Tip hour 4: 969,121's bundle appeared 08:55:29 and a board block was claimed 08:55:33 —
         # four seconds later — costing 191s of tip latency. ⚠ Precedence is NOT weak in general
