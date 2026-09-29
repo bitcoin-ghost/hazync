@@ -20,6 +20,17 @@ import tempfile
 
 CONTROL = "--control" in sys.argv
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ⛔ SAY SO ONCE, AT THE TOP. Without Pillow every render subprocess dies and the test prints twelve
+# separate failures, each one a pixel assertion reporting `None px`, with the real reason —
+# ModuleNotFoundError — buried inside a truncated traceback. It reads as a broken feature, and that is
+# how it reached CI on this branch. A missing tool is not a failing assertion.
+try:
+    import PIL  # noqa: F401
+except ImportError:
+    print("SKIPPED-NOT: Pillow is missing. This test renders real frames and cannot run without it.")
+    print("             python3 -m pip install Pillow")
+    sys.exit(2)          # ⚠ not 0 — a dependency this test needs being absent is a failure to run it.
 SRC = open(os.path.join(HERE, "tip24live.py"), encoding="utf8").read()
 fails = []
 
