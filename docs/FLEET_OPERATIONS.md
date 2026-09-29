@@ -297,6 +297,24 @@ assembly          948.1 s   <- last segment + join tree + resolves
 TOTAL            3694.4 s
 ```
 
+⛔ **That `TOTAL` is ~123.6 s too high, and the summary no longer prints in this shape** (hazync#567).
+`execution` OVERLAPS the segment phase — the executor publishes each segment as it is produced, so
+workers prove while it runs — and the old summary added the two windows. The real wall for this run was
+about **3,571 s**. Since v0.22.1 the aggregate prints:
+
+```
+prologue            6.2 s   <- serial: bind + allocate + spawn
+segment phase    2622.7 s   <- 2,352 segments produced AND proved, overlapped
+  of which execution 123.6 s   <- INSIDE the line above, not additional
+assembly          948.1 s   <- serial: last segment + join tree + resolves
+TOTAL            3577.0 s   <- MEASURED, not the sum of the above
+serial floor      954.3 s   <- prologue + assembly; no fleet size reduces it
+```
+
+⚠ **Do not add these columns.** `execution` is nested inside the segment phase, and `TOTAL` is measured
+from one whole-block timer. The floor that matters for fleet sizing is `prologue + assembly`, and the
+summary also prints the fleet size past which the executor — not proving — sets the wall.
+
 Both tips matched what the board recorded for that range, and the receipt was **229,754 bytes — the same
 size as the one submitted for the same block from a single card**. The two paths are interchangeable by
 construction: one helper writes the input stream for both.
