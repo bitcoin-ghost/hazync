@@ -575,7 +575,93 @@ def _err_tail(stderr, keep=4):
     picked = (signal or lines)[-keep:]
     return " | ".join(picked) if picked else "(no error output)"
 
-import contextlib, fcntl
+import contextlib
+
+# ⛔ PORTABLE FILE LOCKING (hazync#616). `fcntl` is POSIX-only and does not exist on Windows, so
+# importing it at module scope made the whole worker unimportable there -- one import standing
+# between every Windows machine with an NVIDIA card and this project. The contribute page says
+# "Linux on x86-64" because the prover only ever shipped for it; there are 11 provers on the board.
+#
+# ⚠ The two platforms are NOT interchangeable, and pretending they are is how this breaks quietly:
+#   * fcntl.flock locks the WHOLE FILE and blocks until it is free.
+#   * msvcrt.locking locks a BYTE RANGE from the current position, and LK_LOCK gives up after about
+#     ten attempts rather than blocking, so it must be retried to get blocking semantics.
+try:
+    import fcntl
+    msvcrt = None
+except ImportError:                     # Windows
+    fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        # ⚠ NEITHER. Not a case anyone plans for, but the first version raised ModuleNotFoundError
+        # here and took the whole worker down over a LOCK -- on a platform that has no lock to take.
+        # The existing philosophy for "cannot lock" is already written below: proceed rather than
+        # refuse to work. A missing lock loses serialisation; a hard exit loses the worker.
+        msvcrt = None
+
+
+def _lock_exclusive(fh, cap_s=7200.0):
+    """Block until `fh` holds an exclusive lock. Raises OSError if locking is unusable here.
+
+    ⚠ `cap_s` exists only for the Windows path. On POSIX the kernel blocks and the wait is genuinely
+    unbounded, which is correct -- a fold can hold the GPU for twenty minutes and waiting is the
+    point. On Windows the retry loop cannot tell "someone else holds it" from "this filesystem
+    cannot lock", so it gives up after `cap_s` and raises; the caller then proceeds unlocked, which
+    is exactly what the POSIX path already does when flock itself fails.
+    """
+    if fcntl is not None:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return
+    if msvcrt is None:
+        raise OSError("no file locking on this platform")   # caller proceeds unlocked
+    fh.seek(0)
+    t0 = time.time()
+    while True:
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            if time.time() - t0 > cap_s:
+                raise
+            time.sleep(0.5)
+
+
+def _kill_group(pid, sig):
+    """Kill a child AND everything it spawned. Never raises for a process that is already gone.
+
+    ⛔ THE GRANDCHILDREN ARE THE POINT. A prover launches the host binary, which holds the GPU
+    allocation; killing only the direct child orphans it and the card stays busy -- the "stale
+    receipts / busy card" class this guards against. POSIX gets that from a process GROUP, which is
+    why every launch site passes start_new_session=True.
+
+    ⚠ WINDOWS HAS NO PROCESS GROUPS IN THIS SENSE, so it uses `taskkill /T`, which walks the tree.
+    ⛔ UNTESTED ON WINDOWS -- there is no Windows machine in this project's CI. It is written to be
+    correct and is not claimed to be verified; see hazync#616.
+    """
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except (OSError, ProcessLookupError):
+            pass
+        return
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _unlock(fh):
+    """Release a lock taken by `_lock_exclusive`. Never raises -- the body has already run."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        else:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    except Exception:
+        pass
 
 @contextlib.contextmanager
 def gpu_lock(what="prove"):
@@ -615,7 +701,7 @@ def gpu_lock(what="prove"):
     try:
         fh = open(path, "a+")
         t0 = time.time()
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        _lock_exclusive(fh)
         waited = time.time() - t0
         if waited > 5:
             print(f"  (waited {waited:.0f}s for the GPU — another worker was {what}ing)", flush=True)
@@ -629,7 +715,7 @@ def gpu_lock(what="prove"):
     finally:
         if fh is not None:
             try:
-                fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+                _unlock(fh); fh.close()
             except Exception:
                 pass
 
@@ -782,7 +868,7 @@ def _prove_watched(argv, env, work, label, _beat_range=None, _beat_pk=None, _bea
                                           f"-- last: {st['line']}")
             if stalled:
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)      # the whole group; releases the GPU memory
+                    _kill_group(proc.pid, signal.SIGKILL)    # the whole group; releases the GPU memory
                 except ProcessLookupError:
                     pass
                 break
@@ -1347,7 +1433,7 @@ def _prove_distributed(rng, work, env, claimed, port, want_local):
         for p in procs:
             if p.poll() is None:
                 try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                    _kill_group(p.pid, signal.SIGTERM)
                 except (OSError, ProcessLookupError):
                     pass
         for p in procs:
@@ -1355,7 +1441,7 @@ def _prove_distributed(rng, work, env, claimed, port, want_local):
                 p.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    _kill_group(p.pid, signal.SIGKILL)
                 except (OSError, ProcessLookupError):
                     pass
 
