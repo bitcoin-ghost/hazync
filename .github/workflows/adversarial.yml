@@ -1343,6 +1343,20 @@ jobs:
           grep -q '^import server' coordinator/seam_fuzz.py || { echo "::error::seam_fuzz no longer imports server — server.py has lost its compile coverage"; exit 1; }
           grep -q '^import server' coordinator/parse_fuzz.py || { echo "::error::parse_fuzz no longer imports server — server.py has lost its compile coverage"; exit 1; }
 
+      - name: A prebuilt guest can be embedded, and ONLY the canonical one (hazync#615)
+        # 📏 The guest ELF carries the BUILD MACHINE'S PATHS inside it -- 8 occurrences on one laptop,
+        # all panic/debug strings from dependencies -- so the image id is PATH-DEPENDENT and
+        # reproduce/Dockerfile's fixed WORKDIR is what makes it reproducible. Measured 2026-09-30 from
+        # an unmodified tree with every flag unset: native gives fb4d7352…, the container 37987b85….
+        # ⇒ That, not any toolchain limit, is why there is one supported platform: a native macOS or
+        # Windows host would embed a non-canonical guest and have every proof rejected (exit 78).
+        # ⭐ The guest is platform-INDEPENDENT, so it is built once in the container and every
+        # platform embeds THOSE bytes -- a CI artifact, never a committed or published 70 MB file.
+        # ⛔ The control removes the id comparison and must let a wrong guest through, which is what
+        # the check exists to stop: shipping a program that is not the one proofs attest to.
+        run: ./prover/test-prebuilt-guest.sh
+      - name: Prebuilt-guest POSITIVE CONTROL (id check removed — a wrong guest must be accepted)
+        run: ./prover/test-prebuilt-guest.sh --control
       - name: Prove-path segment guards (risc0 segment-boundary bug can't recur silently)
         run: ./prover/check_seg_guards.sh
       - name: "Standalone verifier — builds, verifies, and rejects a non-genesis proof (#19, #24)"
