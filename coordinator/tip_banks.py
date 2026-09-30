@@ -38,10 +38,24 @@ chose. The default `ks` stops at ten, and inside that window hour 4 does flatten
 Of course it does -- past a point it is measuring a tiny fleet, not a tail. So `tail_prize` now
 reports how many cards are LEFT at each step and refuses a step that leaves fewer than MIN_FLEET.
 
-⛔ AND THE DATACENTRE LABEL IS NOT THE SIGNAL. Decomposing the variance of log(rtt) over the same
-13,676 joins: 31.4 % is WHEN the join happened, 21.6 % is WHICH LEVEL of the tree, 17.3 % is WHICH
-CARD, and only **12.7 % is WHICH DATACENTRE**. Grouping by `dc` would capture almost none of it.
-#550's own wording — bank by measured link, not by a datacentre label — is what the data supports.
+⛔ AND THE DATACENTRE LABEL IS NOT THE SIGNAL — REPLICATED ON TWO RUNS. Decomposing the variance
+of log(rtt):
+
+                        hour 4            hour 5
+                   (37 cards, 9 dc)   (6 cards, 2 dc)
+    WHEN (batch)        31.4 %            26.1 %
+    WHICH LEVEL         21.6 %            28.6 %
+    WHICH CARD          17.3 %            17.5 %      <- near identical across both
+    WHICH DATACENTRE    12.7 %             7.8 %      <- smallest in both
+
+⭐ The CARD share lands within 0.2 points on two runs whose fleets differ sixfold, which is the
+strongest thing measured here. And `dc` is the smallest term in both, so grouping by it would
+capture almost none of the spread. #550's own wording -- bank by measured link, not by a datacentre
+label -- is what the data supports.
+
+⚠ Hour 5's dc row rests on TWO groups covering four of its six cards, so on its own it is weak; it
+does not contradict hour 4 and is not independent confirmation either. Cited as replication of the
+ORDERING, not of the number.
 
 ⚠ AND THE CARD EFFECT IS SMALLER AND LESS STABLE THAN THE SPREAD SUGGESTS. Measured against the
 cards it joined alongside, rather than against the whole run, the per-card effect is 6.5x
