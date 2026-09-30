@@ -39,9 +39,10 @@ this coordinator accepts only signed claims: update your worker
 ```
 
 ```
+# the checksum list first — everything below is verified against it before it runs
+curl -LO https://github.com/hazync/hazync/releases/latest/download/SHA256SUMS.txt
 # the prover binary (canonical guest, GPU)
 curl -LO https://github.com/hazync/hazync/releases/latest/download/hazync-host-x86_64-linux-gnu-cuda
-chmod +x hazync-host-x86_64-linux-gnu-cuda
 # the contributor CLI and the fleet launcher — both SIGNED release artifacts, covered by
 # SHA256SUMS.txt.asc. run-workers.sh used to come unsigned from raw.githubusercontent, on the line
 # right after this comment claimed a signature; it is the script that launches your fleet, so it is
@@ -50,10 +51,22 @@ curl -fLO https://github.com/hazync/hazync/releases/latest/download/hazync-worke
 curl -fLO https://github.com/hazync/hazync/releases/latest/download/hazync-run-workers.sh
 ln -sf hazync-run-workers.sh run-workers.sh   # shorter to type; the real file keeps the asset name,
                                               # which is what SHA256SUMS.txt lists
-chmod +x hazync-worker hazync-run-workers.sh
+
+# ⛔ CHECK WHAT ARRIVED BEFORE RUNNING IT. Three OK lines, or stop.
+grep -E ' (hazync-host-x86_64-linux-gnu-cuda|hazync-worker|hazync-run-workers.sh)$' SHA256SUMS.txt \
+  | sha256sum -c -
+
+chmod +x hazync-host-x86_64-linux-gnu-cuda hazync-worker hazync-run-workers.sh
 ln -sf hazync-worker hazync      # a shorter name to type; the real file keeps the asset name
-sudo apt install -y python3-cryptography
+sudo apt install -y python3-cryptography   # Debian/Ubuntu — other systems below
 ```
+
+⚠ **`cryptography` is the only thing here that wants root**, and only on Debian and Ubuntu. The
+worker needs it for one job — signing your claims — and says so if it is missing. Elsewhere, or
+without sudo, use `pip install --user cryptography`; on **Debian 12 and Ubuntu 24.04 and newer** pip
+refuses to touch the system Python (PEP 668), so it is
+`python3 -m venv ~/.hazync-venv && ~/.hazync-venv/bin/pip install cryptography`, then run the worker
+with `~/.hazync-venv/bin/python3`.
 
 (`run-workers.sh` is optional — it keeps several workers going for you. Keep it **next to** the
 CLI; it finds `hazync-worker` or `hazync` beside itself. `MODE=fold` runs folders instead of
@@ -69,10 +82,17 @@ only ever needs one.)
 > worked and the "no GPU still works" path did not. Fixed — the CPU binary now links the prover in
 > too. You only need `r0vm` if you deliberately set `RISC0_PROVER=ipc`.
 
-**Keep the asset filenames.** `SHA256SUMS.txt` lists them, so downloading with `-LO` means
-`sha256sum -c --ignore-missing SHA256SUMS.txt` verifies what you got. Renaming on download
-(`-o host`) makes it report *"no file was verified"* — which looks like a signature problem and is
-not. Symlink or rename afterwards if you want shorter names.
+**Keep the asset filenames.** `SHA256SUMS.txt` lists them, so downloading with `-LO` lets the check
+above match them. Renaming on download (`-o host`) makes it report *"no file was verified"* — which
+looks like a signature problem and is not. Symlink or rename afterwards if you want shorter names.
+
+⚠ The check greps the three lines it wants and pipes them to `sha256sum -c -`, rather than using
+`--ignore-missing`. Measured against the real release: that form exits 1 on a tampered file, on an
+**absent** file, and when nothing was downloaded. `--ignore-missing` cannot catch the absent case by
+definition — and a verification step that passes when the file is not there is worse than none.
+
+`SHA256SUMS.txt.asc` signs that list with the maintainer's key, for anyone wanting the stronger
+check.
 
 Take the CLI from the **release**, not from a raw source URL: it holds your ed25519 signing key and
 decides what gets submitted under your name, so it is the artifact most worth having a signature on.
