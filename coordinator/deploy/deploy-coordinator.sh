@@ -40,6 +40,37 @@ FORCE="${FORCE:-0}"
 die() { echo "FATAL: $*" >&2; exit 1; }
 say() { printf '  %s\n' "$*"; }
 
+# ⛔ A BARE BRANCH NAME RESOLVES TO THE BOX'S LOCAL BRANCH, AND NOTHING EVER UPDATES THAT.
+# `git fetch` moves refs/remotes/origin/*; it does not touch refs/heads/*. Nobody pulls on a
+# deployment box, so a local `main` stays wherever it was when the checkout was made -- while
+# origin/main moves on. Every check downstream still passes: the ref resolves, the checkout succeeds,
+# server.py "changes", the service restarts and reports active, and /api/state answers 200.
+#
+# Measured 2026-09-30: `deploy-coordinator.sh main` deployed 03541e3 (v0.21.6-4) while origin/main was
+# f413da2 (v0.22.1-17). The two fixes being deployed were in neither the file nor the running service,
+# and the deploy reported success. The ONLY tell was `git describe` printing a version that made no
+# sense -- this script's own closing claim is what exposed it.
+#
+# ⚠ Refuse rather than silently preferring the remote: guessing which one the operator meant is how a
+# deploy script earns distrust. Naming the exact command costs one re-run and no ambiguity.
+check_ref_is_not_a_stale_local_branch() {
+    git show-ref --verify --quiet "refs/heads/$TAG" || return 0
+    git show-ref --verify --quiet "refs/remotes/origin/$TAG" || return 0
+    local lo ro
+    lo=$(git rev-parse "refs/heads/$TAG")
+    ro=$(git rev-parse "refs/remotes/origin/$TAG")
+    [ "$lo" = "$ro" ] && return 0
+    echo "REFUSING: '$TAG' is ambiguous on this box and the two do not agree:" >&2
+    echo "    local  $TAG        $(git rev-parse --short "$lo")  $(git describe --tags --always "$lo" 2>/dev/null)" >&2
+    echo "    origin/$TAG $(git rev-parse --short "$ro")  $(git describe --tags --always "$ro" 2>/dev/null)" >&2
+    echo >&2
+    echo "git checkout '$TAG' would take the LOCAL branch, which no fetch ever updates, and every" >&2
+    echo "check after it would still pass. Deploy the remote ref or a tag, explicitly:" >&2
+    echo "  · $0 origin/$TAG" >&2
+    echo "  · $0 <a tag>" >&2
+    exit 1
+}
+
 [ -n "$TAG" ] || die "usage: $0 <tag|ref> [--force]   (e.g. $0 v0.13.1)"
 [ -d "$REPO/.git" ] || die "REPO=$REPO is not a git checkout — this script deploys BY checkout, so there must be one"
 cd "$REPO" || die "cannot cd to $REPO"
@@ -75,6 +106,7 @@ say "$SERVED before: ${before_sha:0:16}"
 
 if [ "$DRY_RUN" = 1 ]; then
     git fetch --tags --quiet origin || die "fetch failed"
+    check_ref_is_not_a_stale_local_branch
     target=$(git rev-parse --verify --quiet "${TAG}^{commit}") || die "no such tag/ref: $TAG"
     after_sha=$(git show "$TAG:$SERVED" 2>/dev/null | sha256sum | cut -d' ' -f1)
     say "would check out: $TAG ($(git rev-parse --short "$target"))"
@@ -105,6 +137,7 @@ tar czf "$BACKUP" -C "$REPO" coordinator/ 2>/dev/null && say "backup: $BACKUP ($
     || say "WARNING: backup failed — continuing, the checkout is recoverable from git regardless"
 
 git fetch --tags --quiet origin || die "fetch failed — not deploying against a stale remote"
+check_ref_is_not_a_stale_local_branch
 git rev-parse --verify --quiet "${TAG}^{commit}" >/dev/null || die "no such tag/ref: $TAG"
 git -c advice.detachedHead=false checkout -f "$TAG" --quiet || die "checkout failed"
 say "now at: $(git describe --tags --always) ($(git rev-parse --short HEAD))"
