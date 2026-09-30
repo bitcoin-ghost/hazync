@@ -1262,6 +1262,20 @@ jobs:
       - name: Bridge-progress POSITIVE CONTROL (stall guard removed — must be missed)
         run: ./coordinator/deploy/test-bridge-progress.sh --control
 
+      - name: A deploy refuses a branch name that means two commits on the box
+        # ⛔ Measured in production 2026-09-30: `deploy-coordinator.sh main` deployed 03541e3
+        # (v0.21.6-4) while origin/main was f413da2 (v0.22.1-17). `git fetch` moves
+        # refs/remotes/origin/*, never refs/heads/*, and nobody pulls on a deployment box.
+        # ⛔⛔ EVERY CHECK AFTER IT PASSED -- ref resolved, checkout succeeded, server.py's hash
+        # changed, the unit restarted, systemd said active, /api/state answered 200, and it printed
+        # "== deployed main ==". Two fixes were in neither the file nor the running service. The only
+        # tell was `git describe` printing a version that made no sense.
+        # ⚠ The control strips the guard and asserts the stale local branch WINS, which is the
+        # production failure reproduced rather than described.
+        run: ./coordinator/deploy/test-deploy-ref.sh
+      - name: Deploy-ref POSITIVE CONTROL (guard removed — the stale local branch must win)
+        run: ./coordinator/deploy/test-deploy-ref.sh --control
+
       - name: Alerts still say something (no destination is loud, a crash loop alerts once, the watchdog sees a dead coordinator)
         # 2026-09-14: the G1 check above had failed on the coordinator every night since 2026-09-12 and
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
