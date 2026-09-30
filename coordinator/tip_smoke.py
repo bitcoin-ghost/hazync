@@ -444,7 +444,7 @@ def binary_size():
 
 
 def slow_worker_cut(order, per, *, need, floor=0.0):
-    """Which workers to release so the aggregate is not feeding a tail (hazync#527).
+    """Which workers to release so the aggregate is not feeding a tail (hazync#526).
 
     Returns (drop_cids, ranked) where `ranked` is [(cid, mbit_or_None)] worst-first among droppable
     cards, for the log. Pure: it releases nothing and asks nothing of the network.
@@ -1612,7 +1612,7 @@ def main():
         # head of the list as the aggregate, and a mismatch would arm the wrong card.
         order = [agg] + [c for c in order if c.cid != agg.cid]
 
-        # ── ⛔ and cut the tail the aggregate has to feed (hazync#527) ───────────────────────────
+        # ── ⛔ and cut the tail the aggregate has to feed (hazync#526) ───────────────────────────
         # The same probe that chose the aggregate already measured EVERY worker individually; only
         # the total was being used. `best[2]` is {cid: Mbit/s} from the winning candidate, so this
         # costs nothing extra and happens before the clock starts.
@@ -1635,7 +1635,7 @@ def main():
 
         # ⛔ WRITE THE PROBE DOWN. Until now the only record of what the cut ranked on was six
         # truncated numbers in a log that hour 4 did not even keep. Costs nothing and is the
-        # difference between checking the probe against the run and arguing about it (#527/#550).
+        # difference between checking the probe against the run and arguing about it (#526/#550).
         _pr = tip_stage.write_probe_record(a.rundir, probes, elected=agg.cid,
                                           dropped=w_drop, floor=a.worker_min_mbit)
         log(f"probe: {len(probes)} candidate(s) recorded to {tip_stage.PROBE}"

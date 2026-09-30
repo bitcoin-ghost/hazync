@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The aggregate is not left feeding a tail (hazync#527).
+"""The aggregate is not left feeding a tail (hazync#526).
 
 ⛔ WHY. The fold waits for the SLOWEST peer at every level, so one bad link sets the wall clock for
 the whole block. Measured on block 968,340, 7,986 join samples:

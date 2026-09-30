@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The aggregate probe's FULL result reaches the run's artefacts (hazync#527 / hazync#550).
+"""The aggregate probe's FULL result reaches the run's artefacts (hazync#526 / hazync#550).
 
 ⛔ WHY. `slow_worker_cut` ranks on the probe, and the probe reached the run log as prose, truncated:
 

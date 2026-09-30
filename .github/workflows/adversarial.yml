@@ -184,7 +184,7 @@ jobs:
           cd coordinator
           python3 test_donations_record.py --control
 
-      - name: The aggregate is not left feeding a tail (hazync#527)
+      - name: The aggregate is not left feeding a tail (hazync#526)
         # ⛔ The fold waits for the SLOWEST peer at every level, so one bad link sets the wall clock.
         # Block 968,340: join RTTs 0.4 s to 107.4 s, 31.8 minutes, three blocks behind. Renting more
         # cards does not fix a tail — it adds join levels for it to appear at. Gates on the link the
@@ -209,7 +209,7 @@ jobs:
       - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
         run: cd coordinator && python3 test_agg_cpu.py --control
 
-      - name: The aggregate probe's FULL result reaches the run's artefacts (hazync#527/#550)
+      - name: The aggregate probe's FULL result reaches the run's artefacts (hazync#526/#550)
         # ⛔ `slow_worker_cut` ranks on the probe, and the probe reached the run log as PROSE,
         # truncated to six with "+3 more" -- and tip hour 4's run log was never saved into its run
         # directory at all, so that run's probe data is gone. Nothing could be checked.
