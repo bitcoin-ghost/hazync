@@ -1,13 +1,38 @@
-# Every minute. A tip block arrives about every ten, so this is not about speed -- it is about the gap
-# between a bundle being written and the coordinator being able to offer its block, which is dead time
-# in the under-ten-minute target.
+# Every 15 s. A tip block arrives about every ten minutes, so this is not about speed -- it is about
+# the gap between a bundle being written and the coordinator being able to offer its block, which is
+# dead time in the under-ten-minute target.
+#
+# ⛔ 60 s WAS MEASURED TO MATTER, 2026-09-30. `/api/witness/<h>` already serves the tip bundle from
+# BRIDGE_DIR, byte-identical to the one a run proves:
+#
+#     969,306  26,893,180 B   two-leg ssh path 25.0 s      GET /api/witness  1.38 s
+#     969,305  29,756,765 B   two-leg ssh path 73.5 s      GET /api/witness  3.41 s
+#     sha256 of the served bundle == sha256 of the bundle tip hour 5 proved
+#
+# So an aggregate that fetched the bundle itself would take the orchestrator's home uplink out of the
+# path entirely (hazync#598). But that only works if the COORDINATOR'S COPY IS THERE -- and on a 60 s
+# timer it lags by up to 60 s, averaging 30. Trading 25-73 s of transfer for 0-60 s of waiting is not
+# a win. At 15 s it is.
+#
+# ⛔⛔ AND WHY NOT A .path UNIT, WHICH WOULD BE ~1 s. Because the bridge does not write one bundle at
+# a time: during a catch-up walk from EMIT_FROM it writes them continuously. An inotify trigger per
+# file turns into a trigger storm, and this service carries `OnFailure=hazync-alert@%n.service`, so
+# systemd's start-rate limiting would page a human for a directory doing exactly what it should.
+# 15 s is bounded, cannot storm, introduces no new failure mode, and is one line to revert. If ~1 s
+# is ever actually needed, a .path unit needs TriggerLimitIntervalSec set with it, not instead of it.
+#
+# ⚠ THE PUSH IS CHEAP WHEN THERE IS NOTHING TO DO. It selects `bundle_*.json` against a watermark
+# stamp and rsyncs with --ignore-existing, so an empty run is a directory listing, and the unit is
+# Nice=10 / IOSchedulingClass=idle. 4x the frequency of nothing is still nothing.
 [Unit]
-Description=Push new tip bundles to the coordinator every minute
+Description=Push new tip bundles to the coordinator every 15 s
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=60s
-AccuracySec=10s
+OnUnitActiveSec=15s
+# ⚠ AccuracySec must come DOWN with the interval. Left at 10s, systemd may coalesce a 15 s timer into
+# a window comparable to the interval itself, so the thing being tightened would not tighten.
+AccuracySec=2s
 Persistent=false
 
 [Install]
