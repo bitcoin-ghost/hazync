@@ -221,10 +221,15 @@ jobs:
         # nothing. The control banks by NAME and must come out visibly worse -- if the two modes
         # agree, the tool is not measuring what it claims.
         # ⛔⛔ AND a worst-peer ratio read as a SPEEDUP. What the fold waits for is the slowest join
-        # in each batch, separately; dropping hour 4's worst card takes 12.9% off that and the worst
-        # ten take 30.2%, against a headline ratio of 12.7x. tail_prize measures it, must stay far
-        # below the ratio on tail-shaped data, must SATURATE past the tail, and must find ~nothing
-        # on a fleet with no tail at all.
+        # in each batch, separately; dropping hour 4's worst card takes 12.9% off that, against a
+        # headline ratio of 12.7x. tail_prize measures it, must stay far below the ratio on
+        # tail-shaped data, must FLATTEN once the tail is gone, and must find ~nothing on a fleet
+        # with no tail at all.
+        # ⛔ AND THE PRIZE IS NOT A CONSTANT: replicated on hour 5's six cards the worst card alone
+        # takes 45.2% off, because one bad card in six sets the wall nearly every batch. So every
+        # row must report how many cards are LEFT, and a step leaving fewer than MIN_FLEET must not
+        # be reported at all -- the first version happily offered "drop 5 of 6 cards: 82.2% off",
+        # which is the wall time of a one-card fleet.
         run: cd coordinator && python3 test_card_banks.py
       - name: Card-banks POSITIVE CONTROL (bank by name — it must NOT separate the tail)
         run: cd coordinator && python3 test_card_banks.py --control

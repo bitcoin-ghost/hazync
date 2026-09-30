@@ -12,7 +12,9 @@ UNIFORM fleet** of 38 identical cards at one price. Not the card model; `--gpu-t
 worst peers read as a speedup**. "5.1x better worst peer" is true and means far less than it sounds,
 because the fold waits for the slowest join in each batch separately and most batches are not the
 one the worst card ruined. Measured, dropping hour 4's worst card takes 12.9 % off the fold's
-waiting, and the worst ten take 30.2 % — so the prize is bounded by about a third, not a multiple.
+waiting, and the worst five take 27.8 %. ⚠ And the prize is NOT a constant: replicated on hour 5's
+six-card fleet the worst card alone takes off 45.2 %, because one bad card in six sets the wall in
+nearly every batch. A bank suffers its worst member far more than the whole fleet does.
 `tail_prize` must therefore stay far below the worst-peer ratio on tail-shaped data, and its own
 control is a fleet with NO tail, where it must find almost nothing to win.
 
@@ -112,8 +114,11 @@ def batches_for(spec, n_batches=50):
 
 
 # ⚠ HOUR 4'S SHAPE, not two even clusters: 30 cards packed between 3,500 and 4,500 ms and five
-# with a real tail. That is what makes the curve SATURATE — once the tail is gone the pack sets the
-# wall, and the 31st card removed buys almost nothing. An evenly spread fleet cannot show that.
+# with a real tail. That is what makes the curve FLATTEN past the tail — once the tail is gone the
+# pack sets the wall, and the next card removed buys almost nothing. An evenly spread fleet cannot
+# show that. ⛔ "Flatten", not "saturate": on hour 4's real data the curve climbs again far past
+# this window (49.5 % at twenty-two of thirty-seven), because by then it is measuring a small fleet
+# rather than a tail. I published "saturates" and it was the shape of the window I chose.
 PACK = {f"p{i:02d}": (3500 + i * 33, 200) for i in range(30)}
 TAIL = {"t1": (12000, 200), "t2": (16000, 200), "t3": (21000, 200),
         "t4": (32000, 200), "t5": (45000, 200)}
@@ -121,8 +126,9 @@ TAILED = {**PACK, **TAIL}
 B = batches_for(TAILED)
 worst_first = sorted(TAILED, key=lambda c: -TAILED[c][0])
 base, curve = tip_banks.tail_prize(B, worst_first, ks=(1, 2, 3, 5, 8, 12))
-frac = dict((k, f) for k, _, f in curve)
-print(f"       prize curve: {[(k, round(f * 100, 1)) for k, _, f in curve]}")
+frac = dict((k, f) for k, _, _, f in curve)
+left = dict((k, n) for k, n, _, _ in curve)
+print(f"       prize curve: {[(k, left[k], round(f * 100, 1)) for k, _, _, f in curve]}")
 if not CONTROL:
     check(abs(base - 50 * 45000) < 1.0,
           f"the baseline is the slowest card in each batch, summed ({base:.0f} vs {50 * 45000})")
@@ -135,19 +141,38 @@ if not CONTROL:
           f"{ratio_says:.1f}x — the ratio is not a speedup")
     check(frac[5] > frac[1],
           f"clearing the whole tail helps more ({frac[5] * 100:.1f} % vs {frac[1] * 100:.1f} %)")
-    # ⛔ AND IT MUST SATURATE. Past the tail, each further card removed leaves the pack setting the
-    # wall. On hour 4 the curve goes 12.9 % at one and 30.2 % at ten; a tool whose prize kept
-    # climbing would be telling us to rent nothing.
+    # ⛔ AND IT MUST FLATTEN ONCE THE TAIL IS GONE. Past the five tail cards, each further card
+    # removed leaves the tight pack setting the wall, so the next seven buy almost nothing. A tool
+    # whose prize kept climbing here would be telling us to rent nothing.
     check(frac[12] - frac[5] < 0.05,
-          f"⛔ and it SATURATES: {frac[5] * 100:.1f} % for the five tail cards, still only "
-          f"{frac[12] * 100:.1f} % for twelve — past the tail the pack sets the wall")
+          f"⛔ it FLATTENS past the tail: {frac[5] * 100:.1f} % for the five tail cards, still only "
+          f"{frac[12] * 100:.1f} % for twelve — the pack sets the wall")
+    # ⚠ Every row says how many cards are LEFT, because a prize is meaningless without it.
+    check(all(left[k] == len(TAILED) - k for k in frac),
+          f"and each row reports the surviving fleet ({left})")
+
+    # ── ⛔ THE GUARD: a prize that leaves no fleet is not reported at all ────────────────────────
+    # Measured on hour 5: six rankable cards, and the first version happily reported "drop the
+    # worst 5 — 82.2 % off", which is the wall time of a ONE-CARD fleet.
+    six = {f"s{i}": (3000 + i * 2000, 200) for i in range(6)}
+    _, small = tip_banks.tail_prize(batches_for(six), sorted(six, key=lambda c: -six[c][0]),
+                                   ks=(1, 2, 3, 4, 5))
+    ks_reported = [k for k, _, _, _ in small]
+    check(ks_reported == [1, 2, 3],
+          f"⛔ on six cards only k<=3 is reported, not 4 or 5 — {ks_reported} (MIN_FLEET="
+          f"{tip_banks.MIN_FLEET})")
+    check(all(n >= tip_banks.MIN_FLEET for _, n, _, _ in small),
+          "and every reported row leaves a real fleet standing")
+    _, none_left = tip_banks.tail_prize(batches_for({"a": (1, 9), "b": (2, 9)}), ["a", "b"])
+    check(none_left == [],
+          f"⚠ with two cards there is NO prize to report, not a prize of zero ({none_left})")
     # ⛔ POSITIVE CONTROL, inline: on a fleet with NO tail there is nothing to win, and a tool that
     # reports a big prize anyway is measuring the partition rather than the tail.
     flat = {c: (5000, 200) for c in TAILED}
     _, fc = tip_banks.tail_prize(batches_for(flat), sorted(flat))
-    check(all(f < 0.01 for _, _, f in fc),
+    check(all(f < 0.01 for _, _, _, f in fc),
           f"⛔ control: with every card identical the prize is ~0 "
-          f"({max(f for _, _, f in fc) * 100:.2f} % at best), not a partition artefact")
+          f"({max(f for _, _, _, f in fc) * 100:.2f} % at best), not a partition artefact")
 
 # ── the card effect is measured against the batch, not against the run ──────────────────────────
 # ⚠ Two batches, one slow and one fast for EVERYONE: a card that only appears in the slow batch
