@@ -337,13 +337,27 @@ def probe_cpu(ssh, card):
     not a benchmark anyone should quote — it exists to order candidates against each other on the same
     evening, which is the only comparison that matters here.
     """
+    # ⛔⛔ POSIX sh, NOT BASH. `ssh.run` wraps every body in `sh -c`, and on these pods /bin/sh is
+    # DASH. The first version timed the loop with `TIMEFORMAT=%R; time ( ... )` -- both bash-only --
+    # and dash answered:
+    #
+    #     sh: 1: Syntax error: word unexpected (expecting ")")
+    #
+    # so the command exited non-zero, `ssh.run` returned None, and every card on every run reported
+    # `cpu UNMEASURED`. It never worked. ⚠ It LOOKED fine by hand, because the pods' LOGIN shell is
+    # bash -- the bug only appears through `sh -c`, which is the only way the driver ever calls it.
+    #
+    # ⚠ Integer arithmetic and printf, because dash has no floating point: nanoseconds are divided
+    # into whole seconds and milliseconds and reassembled, so the wire format stays `<sec>.<ms>`.
     body = (
         "MODEL=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//'); "
         "CORES=$(nproc 2>/dev/null); "
-        # ⚠ `time` on a shell builtin loop, not python: the pods are not guaranteed a python, and a
-        # process launch would dominate a short measurement.
-        "S=$( { TIMEFORMAT=%R; time (i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done) ; } 2>&1 ); "
-        "echo \"CPUPROBE|$MODEL|$CORES|$S\"")
+        "T0=$(date +%s%N 2>/dev/null); "
+        "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done; "
+        "T1=$(date +%s%N 2>/dev/null); "
+        "NS=$((T1-T0)); "
+        "printf 'CPUPROBE|%s|%s|%d.%03d\\n' \"$MODEL\" \"$CORES\" "
+        "$((NS/1000000000)) $((NS%1000000000/1000000))")
     out = ssh.run(card, body)
     if not out:
         return None, None, None
