@@ -528,7 +528,10 @@ while time.time() < end:
                              note=f"already on {self.agg.cid} (staged ahead)")
             return True, "already staged"
 
-        pushed, push_s = tip_stage.timed(lambda: self.ssh.push(self.agg, bundle_path, remote))
+        # 📏 -C: 37.3 s -> 15.2 s on a real 41.7 MB bundle, measured 2026-09-30. A bundle is JSON
+        # and compresses 2.5x; receipts are STARK proofs and do not, which is why this is per-call.
+        pushed, push_s = tip_stage.timed(
+            lambda: self.ssh.push(self.agg, bundle_path, remote, compress=True))
         tip_stage.record(self.stage_dir, height, "push", push_s, nbytes, ok=bool(pushed),
                          note=f"-> {self.agg.cid}")
         if not pushed:
