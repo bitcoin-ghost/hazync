@@ -212,12 +212,19 @@ jobs:
       - name: Banking cards by measured tail concentrates the tail (hazync#550)
         # ⭐ The fold waits for the slowest peer at EVERY level, so one bad link sets the wall for the
         # whole block -- and adding cards does not fix a tail, it adds levels for it to appear at.
-        # 📏 Tip hour 4: per-card join p90 spanned 2,957-16,437 ms, a 5.6x spread on a UNIFORM fleet
+        # 📏 Tip hour 4: per-card join p90 spanned 3,562-45,253 ms, a 12.7x spread on a UNIFORM fleet
         # at one price, so it is not the card model and --gpu-type cannot address it.
+        # ⛔ Published as 5.6x from agg-history.log alone -- half the harvest, missing the live
+        # agg.log that holds the run's worst tail. It named the wrong worst card. Pass every log.
         # ⛔ The failure guarded is a grouping that looks principled and separates nothing: ANY
         # partition yields banks and every one reports a worst peer, so the report alone proves
         # nothing. The control banks by NAME and must come out visibly worse -- if the two modes
         # agree, the tool is not measuring what it claims.
+        # ⛔⛔ AND a worst-peer ratio read as a SPEEDUP. What the fold waits for is the slowest join
+        # in each batch, separately; dropping hour 4's worst card takes 12.9% off that and the worst
+        # ten take 30.2%, against a headline ratio of 12.7x. tail_prize measures it, must stay far
+        # below the ratio on tail-shaped data, must SATURATE past the tail, and must find ~nothing
+        # on a fleet with no tail at all.
         run: cd coordinator && python3 test_card_banks.py
       - name: Card-banks POSITIVE CONTROL (bank by name — it must NOT separate the tail)
         run: cd coordinator && python3 test_card_banks.py --control

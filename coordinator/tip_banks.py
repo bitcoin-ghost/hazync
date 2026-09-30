@@ -3,21 +3,47 @@
 
 ⭐ WHY. The fold waits for the slowest peer at every level, so one bad link sets the wall clock for
 the whole block — and **adding cards does not fix a tail, it adds levels for the tail to appear at.**
-Measured on tip hour 4 (9,366 labelled joins, 37 cards): per-card join p90 ranged 2,957 ms to
-16,437 ms, a **5.6x spread on a UNIFORM fleet** of 38 identical cards at one price. So the spread is
+Measured on tip hour 4 (13,676 labelled joins, 37 cards): per-card join p90 ranged 3,562 ms to
+45,253 ms, a **12.7x spread on a UNIFORM fleet** of 38 identical cards at one price. So the spread is
 not the card model, and `--gpu-type` cannot address it.
 
-Today that measurement is used only to CUT (`--worker-min-mbit`, `slow_worker_cut`). #550 proposes
-using it to GROUP: cards that feed each other quickly form a bank, and each bank takes its own block.
-A bank's wall is set by its slowest member, so segregating the tail into one bank leaves the other
-bank with a far better worst peer.
+⛔ THAT WAS PUBLISHED AS 5.6x AND 5.6x WAS HALF A HARVEST — `agg-history.log` alone, 9,366 of 13,676
+joins, missing the live `agg.log` that holds the run's worst tail. **Pass every aggregate log.**
+
+Today that measurement is used only to CUT (`--worker-min-mbit`, `slow_worker_cut`, which defaults
+to 0.0 and did not fire in hour 4). #550 proposes using it to GROUP: cards that feed each other
+quickly form a bank, and each bank takes its own block. A bank's wall is set by its slowest member,
+so segregating the tail into one bank leaves the other bank with a far better worst peer.
+
+⛔⛔ BUT A RATIO OF WORST PEERS OVERSTATES THE PRIZE, BY ABOUT THREEFOLD. "5.1x better worst peer"
+is what this tool reported for hour 4, and it invites the reading that a bank would prove 5x faster.
+What the fold actually waits for is the slowest join in each batch that is in flight together, and
+that is measurable from the same logs: summed over hour 4's 619 batches it is 6,416 s, and removing
+the worst card entirely takes off **12.9 %**. The worst five take off 27.8 %, and it then SATURATES
+— 30.2 % for ten. So the tail is concentrated in about five of 37 cards and the ceiling on any
+banking or cutting scheme is roughly a third of the fold's waiting, not a multiple of it.
+`tail_prize` computes this, so the number is measured rather than asserted.
+
+⛔ AND THE DATACENTRE LABEL IS NOT THE SIGNAL. Decomposing the variance of log(rtt) over the same
+13,676 joins: 31.4 % is WHEN the join happened, 21.6 % is WHICH LEVEL of the tree, 17.3 % is WHICH
+CARD, and only **12.7 % is WHICH DATACENTRE**. Grouping by `dc` would capture almost none of it.
+#550's own wording — bank by measured link, not by a datacentre label — is what the data supports.
+
+⚠ AND THE CARD EFFECT IS SMALLER AND LESS STABLE THAN THE SPREAD SUGGESTS. Measured against the
+cards it joined alongside, rather than against the whole run, the per-card effect is 6.5x
+(0.46x .. 2.98x) — and a card's p90 in the first half of the run predicts its second half with
+Spearman rho +0.44. A slow card tends to stay slow; it is not a fixed property, so a bank assignment
+made once at the start of a run decays.
 
 ⛔ WHAT THIS TOOL DOES NOT DO — AND WHY IT STOPS SHORT ON PURPOSE.
 
-  * It does not predict a block time. It reports each bank's WORST PEER, which is arithmetic over
-    measured joins. Turning that into a saving needs a model of the join tree under a different
-    fleet size, and this project has a scar from exactly that: lever 2 was predicted to save ~36 s
-    from a plausible model and measured NEGATIVE.
+  * It does not predict a block time. It reports each bank's WORST PEER and, given cohorts, the
+    measured share of the fold's waiting that the tail accounts for. Turning either into a block
+    time needs a model of the join tree under a different fleet size, and this project has a scar
+    from exactly that: lever 2 was predicted to save ~36 s from a plausible model and measured
+    NEGATIVE.
+  * `tail_prize` is an UPPER BOUND, not a saving. The dropped cards' segments still have to be
+    proved by someone, and a second bank pays its own fold. It bounds the prize.
   * It does not turn anything on. Two banks need TWO AGGREGATES and two concurrent blocks — the
     aggregate executes a specific block and cannot be shared (#506). That orchestration is not
     built. This answers "is it worth building?", not "switch it on".
@@ -30,6 +56,7 @@ Under-sampled cards are named and excluded, never quietly merged.
     python3 tip_banks.py --banks 2 <log>...
     python3 tip_banks.py --banks 2 --control <log>...   # bank by NAME — must fail to separate it
 """
+import math
 import os
 import sys
 
@@ -70,12 +97,62 @@ def banks(ranked, n_banks, by_name=False):
     return out
 
 
+def cohort_effect(groups, min_samples=MIN_SAMPLES):
+    """{card: factor} — each card's rtt relative to the cards it joined ALONGSIDE (1.0 = average).
+
+    ⛔ WHY NOT JUST RANK BY p90. A p90 compares a card against the whole run, and hour 4 got slower
+    for everyone as the blocks grew: a card that attached late inherits that and looks slow for a
+    reason that is nothing to do with it. Dividing by its own batch's average removes the run's
+    trend, and on hour 4 it takes the apparent 12.7x spread down to a 6.5x card effect.
+
+    ⚠ Geometric, via logs, because a round trip is multiplicative — a card that is twice as slow at
+    3 s and twice as slow at 30 s is one effect, not two. Cards under `min_samples` are omitted.
+    """
+    tot = {}
+    for g in groups:
+        if len(g) < 2:
+            continue                       # ⚠ a batch of one has no cohort to be compared against
+        mean = sum(math.log(r) for _, r, _ in g) / len(g)
+        for _, rtt, card in g:
+            if card:
+                tot.setdefault(card, []).append(math.log(rtt) - mean)
+    return {c: math.exp(sum(v) / len(v)) for c, v in tot.items() if len(v) >= min_samples}
+
+
+def tail_prize(groups, order, ks=(1, 2, 3, 5, 8, 10)):
+    """What dropping the worst k cards takes off the time the FOLD ACTUALLY WAITS.
+
+    ⭐ THE QUANTITY THAT MATTERS. A bank's "worst peer" is one number over a whole run; the fold
+    waits for the slowest join in each batch, separately, every time. Summing the max of each batch
+    is therefore the measured thing a tail costs — and it is much less than the worst-peer ratio
+    implies, because most batches are not the one the worst card ruined.
+
+    Returns (baseline_ms, [(k, remaining_ms, fraction_saved)]).
+
+    ⛔ AN UPPER BOUND, NOT A SAVING. The dropped cards' segments still have to be proved by someone,
+    and a second bank pays its own fold. On hour 4 the curve is 12.9 % for one card, 27.8 % for five
+    and 30.2 % for ten: concentrated in a handful of cards, and saturating.
+    """
+    usable = [g for g in groups if g]
+    base = sum(max(r for _, r, _ in g) for g in usable)
+    out = []
+    for k in ks:
+        if k > len(order):
+            break
+        drop = set(order[:k])
+        left = [max((r for _, r, c in g if c not in drop), default=None) for g in usable]
+        left = [x for x in left if x is not None]
+        rem = sum(left)
+        out.append((k, rem, 1.0 - rem / base if base else 0.0))
+    return base, out
+
+
 def worst_peer(bank, stats):
     """The p90 of the slowest card in this bank — what sets its wall at every level."""
     return max(stats[c]["p90"] for c in bank) if bank else None
 
 
-def report(samples, n_banks, by_name=False):
+def report(samples, n_banks, by_name=False, batches=None):
     ranked, thin, unlabelled = rank_cards(samples)
     if not ranked:
         print("no card has enough labelled joins to rank — is this log from before hazync#570?")
@@ -113,6 +190,31 @@ def report(samples, n_banks, by_name=False):
     print("  ⚠ This is a ratio of MEASURED worst peers, not a predicted block time. Turning it into")
     print("     a saving needs a model of the join tree at a different fleet size, and lever 2 was")
     print("     predicted to save ~36s from that kind of model and measured NEGATIVE.")
+
+    # ⛔ AND THE RATIO ABOVE OVERSTATES IT. What the fold waits for is the slowest join in each batch
+    # that was in flight together, which these same logs can answer -- so answer it rather than let
+    # the ratio be read as a speedup.
+    if batches:
+        eff = cohort_effect(batches)
+        base, curve = tail_prize(batches, sorted(eff, key=lambda c: -eff[c]))
+        print()
+        print(f"  ⛔ WHAT THE FOLD ACTUALLY WAITS FOR — the slowest join in each of "
+              f"{len([g for g in batches if g])} batch(es) that were in flight together, summed:"
+              f" {base / 1000:.0f} s")
+        for k, rem, frac in curve:
+            print(f"     drop the worst {k:<2}  {rem / 1000:7.0f} s   {frac * 100:5.1f} % off")
+        if eff:
+            hi = max(eff.values())
+            lo = min(eff.values())
+            print(f"  ⚠ card effect measured against the cards it joined ALONGSIDE: {lo:.2f}x .. "
+                  f"{hi:.2f}x = {hi / max(lo, 1e-9):.1f}x, against {fleet_worst / max(fleet_best, 1):.1f}x"
+                  f" for the raw p90 spread above.")
+        print("  ⛔ An UPPER BOUND, not a saving: the dropped cards' segments still have to be proved")
+        print("     by someone, and a second bank pays its own fold. It bounds the prize.")
+    else:
+        print("  ⚠ No batch grouping was supplied, so the share of the fold's WAITING that this tail")
+        print("     accounts for is not shown — and the worst-peer ratio above overstates it about")
+        print("     threefold on hour 4. Run this on log FILES to get it.")
     print("  ⛔ Nothing is switched on by this. Two banks need TWO AGGREGATES and two concurrent")
     print("     blocks — the aggregate executes a specific block and cannot be shared (#506).")
     if thin:
@@ -135,15 +237,19 @@ def main():
     if not argv:
         print(__doc__.strip().splitlines()[-1].strip())
         return 2
-    lines = []
+    # ⛔ PER FILE, and the batches added rather than the LINES concatenated: a batch at the end of
+    # one log would otherwise fuse with a batch at the start of the next.
+    lines, batches = [], []
     for p in argv:
         try:
             with open(p, errors="replace") as fh:
-                lines.extend(fh.readlines())
+                own = fh.readlines()
         except OSError as e:
             print(f"cannot read {p}: {e}")
             return 2
-    return report(join_levels.parse(lines), n, by_name=by_name)
+        lines.extend(own)
+        batches.extend(join_levels.cohorts(own))
+    return report(join_levels.parse(lines), n, by_name=by_name, batches=batches)
 
 
 if __name__ == "__main__":

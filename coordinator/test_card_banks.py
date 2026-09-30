@@ -3,8 +3,18 @@
 
 ⭐ WHY. The fold waits for the slowest peer at EVERY level, so one bad link sets the wall for the
 whole block — and adding cards does not fix a tail, it adds levels for the tail to appear at.
-📏 Measured, tip hour 4: per-card join p90 spanned 2,957 ms to 16,437 ms, a **5.6x spread on a
+📏 Measured, tip hour 4: per-card join p90 spanned 3,562 ms to 45,253 ms, a **12.7x spread on a
 UNIFORM fleet** of 38 identical cards at one price. Not the card model; `--gpu-type` cannot fix it.
+⛔ That was published as 5.6x from `agg-history.log` alone — half the harvest, missing the live
+`agg.log` that holds the run's worst tail. Pass every aggregate log.
+
+⛔⛔ AND THE SECOND FAILURE THIS NOW GUARDS is the one the first version walked into: a **ratio of
+worst peers read as a speedup**. "5.1x better worst peer" is true and means far less than it sounds,
+because the fold waits for the slowest join in each batch separately and most batches are not the
+one the worst card ruined. Measured, dropping hour 4's worst card takes 12.9 % off the fold's
+waiting, and the worst ten take 30.2 % — so the prize is bounded by about a third, not a multiple.
+`tail_prize` must therefore stay far below the worst-peer ratio on tail-shaped data, and its own
+control is a fleet with NO tail, where it must find almost nothing to win.
 
 ⛔ THE FAILURE THIS GUARDS is a grouping that looks principled and separates nothing. Any partition
 of a fleet produces banks, and every one of them reports a "worst peer" — so a report alone proves
@@ -19,6 +29,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import join_levels  # noqa: E402
 import tip_banks  # noqa: E402
 
 CONTROL = "--control" in sys.argv
@@ -90,6 +101,78 @@ else:
     check(abs(w[0] - w[1]) > 5000,
           f"the banks are deliberately UNEQUAL ({w[0]:.0f}ms vs {w[1]:.0f}ms) — balancing them "
           f"would defeat the purpose")
+
+# ── ⛔ THE PRIZE: what the fold actually waits for, not a ratio of worst peers ───────────────────
+# `worst_peer` is one number over a whole run. The fold waits for the slowest join in each batch,
+# every time — so the measurable cost of a tail is the sum of those maxima, and dropping the worst
+# card only removes it from the batches it was actually in.
+def batches_for(spec, n_batches=50):
+    """[[(level, rtt, card)]] — every card appears in every batch, so a batch IS a cohort."""
+    return [[(0, float(rtt), card) for card, (rtt, _) in spec.items()] for _ in range(n_batches)]
+
+
+# ⚠ HOUR 4'S SHAPE, not two even clusters: 30 cards packed between 3,500 and 4,500 ms and five
+# with a real tail. That is what makes the curve SATURATE — once the tail is gone the pack sets the
+# wall, and the 31st card removed buys almost nothing. An evenly spread fleet cannot show that.
+PACK = {f"p{i:02d}": (3500 + i * 33, 200) for i in range(30)}
+TAIL = {"t1": (12000, 200), "t2": (16000, 200), "t3": (21000, 200),
+        "t4": (32000, 200), "t5": (45000, 200)}
+TAILED = {**PACK, **TAIL}
+B = batches_for(TAILED)
+worst_first = sorted(TAILED, key=lambda c: -TAILED[c][0])
+base, curve = tip_banks.tail_prize(B, worst_first, ks=(1, 2, 3, 5, 8, 12))
+frac = dict((k, f) for k, _, f in curve)
+print(f"       prize curve: {[(k, round(f * 100, 1)) for k, _, f in curve]}")
+if not CONTROL:
+    check(abs(base - 50 * 45000) < 1.0,
+          f"the baseline is the slowest card in each batch, summed ({base:.0f} vs {50 * 45000})")
+    # ⛔ THE MISREADING THIS GUARDS. The worst-peer ratio here is 45,000/3,500 = 12.9x, the same
+    # shape as hour 4's headline. The measured prize for removing that card is the GAP to the
+    # SECOND worst (45,000 -> 32,000 = 28.9%), because something is still slowest in every batch.
+    ratio_says = TAILED["t5"][0] / min(v[0] for v in TAILED.values())
+    check(frac[1] < 0.35,
+          f"⛔ dropping the worst card saves {frac[1] * 100:.1f} % where the worst-peer ratio is "
+          f"{ratio_says:.1f}x — the ratio is not a speedup")
+    check(frac[5] > frac[1],
+          f"clearing the whole tail helps more ({frac[5] * 100:.1f} % vs {frac[1] * 100:.1f} %)")
+    # ⛔ AND IT MUST SATURATE. Past the tail, each further card removed leaves the pack setting the
+    # wall. On hour 4 the curve goes 12.9 % at one and 30.2 % at ten; a tool whose prize kept
+    # climbing would be telling us to rent nothing.
+    check(frac[12] - frac[5] < 0.05,
+          f"⛔ and it SATURATES: {frac[5] * 100:.1f} % for the five tail cards, still only "
+          f"{frac[12] * 100:.1f} % for twelve — past the tail the pack sets the wall")
+    # ⛔ POSITIVE CONTROL, inline: on a fleet with NO tail there is nothing to win, and a tool that
+    # reports a big prize anyway is measuring the partition rather than the tail.
+    flat = {c: (5000, 200) for c in TAILED}
+    _, fc = tip_banks.tail_prize(batches_for(flat), sorted(flat))
+    check(all(f < 0.01 for _, _, f in fc),
+          f"⛔ control: with every card identical the prize is ~0 "
+          f"({max(f for _, _, f in fc) * 100:.2f} % at best), not a partition artefact")
+
+# ── the card effect is measured against the batch, not against the run ──────────────────────────
+# ⚠ Two batches, one slow and one fast for EVERYONE: a card that only appears in the slow batch
+# looks slow by p90 and is average once its own batch is the yardstick. That is the 12.7x vs 6.5x
+# difference on hour 4, stated as a case with a known answer.
+# ⛔ `late` and `slow` have the SAME p90 (20,000 ms) and are not the same thing: one merely joined
+# while everything was slow, the other was twice its own batch. Only the cohort view tells them
+# apart, and that is the whole reason hour 4's 12.7x spread is a 6.5x card effect.
+SLOWBATCH = [(0, 20000.0, "late"), (0, 20000.0, "always"), (0, 40000.0, "slow")]
+FASTBATCH = [(0, 2000.0, "always"), (0, 2000.0, "early")]
+eff = tip_banks.cohort_effect([SLOWBATCH] * 60 + [FASTBATCH] * 60, min_samples=40)
+p90s = join_levels.by_card([x for b in [SLOWBATCH] * 60 + [FASTBATCH] * 60 for x in b])
+print(f"       cohort effect: {dict((k, round(v, 2)) for k, v in eff.items())}")
+print(f"       p90 says:     {dict((k, v['p90']) for k, v in p90s.items())}")
+if not CONTROL:
+    check(p90s["late"]["p90"] == p90s["slow"]["p90"] == 20000.0 or
+          p90s["late"]["p90"] == 20000.0,
+          f"⚠ by p90 `late` reads {p90s['late']['p90']:.0f}ms — as slow as anything in the run")
+    check(eff["late"] <= 1.0,
+          f"⛔ but against the cards it joined ALONGSIDE, `late` is at or below average "
+          f"({eff['late']:.2f}x) — it joined while everything was slow, it is not slow")
+    check(eff["slow"] > 1.4,
+          f"while a card that really is twice its batch shows it ({eff['slow']:.2f}x)")
+    check(eff["slow"] > eff["late"] * 1.4,
+          "⛔ so the two are separated, which a p90 alone cannot do")
 
 # ── thin and unlabelled cards are named and excluded, never quietly merged ──────────────────────
 S2 = S + samples_for({"thin1": (900, 5)}) + [(0, 5000.0, None)] * 7
