@@ -16,27 +16,35 @@ answer this: how many pairs each level had, what a join cost there, and therefor
 `HAZYNC_JOIN_LOCAL_MAX` would have saved. This reads harvested logs and says so.
 
 ⛔⛔ AND THE ANSWER, MEASURED, IS THAT LEVER 2 DOES NOT HELP — my prediction above was WRONG.
-Run against tip hour 4 (2026-09-29, 38x RTX PRO 6000 over 9 sites, 9,366 labelled joins, 12 levels),
+Run against tip hour 4 (2026-09-29, 38x RTX PRO 6000 over 9 sites, 13,676 labelled joins, 13 levels),
 NO value of HAZYNC_JOIN_LOCAL_MAX comes out positive:
 
     level  pairs     p50      p90       max
-        0   4690  3688ms   9208ms   51562ms
-        1   2343  3409ms   8007ms   44578ms
-        8     17   498ms    629ms     716ms
-       11      2   619ms    957ms     957ms
+        0   6845  4433ms  12740ms   51563ms
+        1   3421  4059ms  14334ms   50896ms
+        8     25   482ms    629ms     716ms
+       11      3   619ms    957ms     957ms
 
-    max=1  +0.0s   max=2  -0.7s   max=4  -2.7s   max=16  -8.0s
+    max=1  -0.5s   max=2  -0.5s   max=4  -2.2s   max=16  -15.7s
 
-The narrow top levels cost **~500-620 ms**, not the 17.1 s extrapolated above from a DIFFERENT run
-(968340, board blocks, 6 DCs). At that price a local join (~645 ms of compute) is SLOWER than shipping
+The narrow top levels cost **~480-620 ms**, not the 17.1 s extrapolated above from a DIFFERENT run
+(968340, board blocks, 6 DCs). At that price a local join (~758 ms of compute) is SLOWER than shipping
 the pair out, so taking levels local loses time. ⚠ The 17.1 s figure was never wrong as a measurement;
 it was wrong as a substitute for the number this lever actually depends on, which is the RTT at the
 levels being moved — and those are the cheapest levels, not the dearest.
 
 ⇒ **THE COST IS AT THE WIDE END.** Level 0 has p50 3.7 s against a max of 51.6 s, and per card the p90
-ranges 2,957 ms to 16,437 ms — a 5.6x spread across 37 cards. The fold waits for the slowest peer at
-every level, so that tail sets the wall. That is hazync#550's target, and it is not addressable by
+ranges 3,562 ms to 45,253 ms — a **12.7x** spread across 37 cards. The fold waits for the slowest peer
+at every level, so that tail sets the wall. That is hazync#550's target, and it is not addressable by
 moving joins around; it is addressable by not renting the slow card, or by not waiting for it.
+
+⛔⛔ **THAT SPREAD WAS FIRST PUBLISHED AS 5.6x, AND 5.6x WAS HALF A HARVEST.** The aggregate keeps TWO
+logs — `agg-history.log` for the blocks it has finished and `agg.log` for the one it is on — and the
+original figure read only the first: 9,366 of 13,676 joins. The 4,310 omitted joins hold the worst
+tail in the run, so the worst card was misidentified as well as under-measured (w13 at 16,437 ms; it
+is actually **w12 at 45,253 ms**). Measured: the two files share ZERO identical (card, tag, rtt)
+triples, so reading both double-counts nothing. ⚠ **Pass every aggregate log, not the live one.**
+The lever-2 verdict above is UNCHANGED by the full harvest — re-run, it is more negative, not less.
 
 ⚠ IT PREDICTS, IT DOES NOT MEASURE. The saving is `distributed critical path - local critical path`
 per level, and the local side needs a per-join COMPUTE cost, which a `[rtt]` line does not carry (it
@@ -77,6 +85,39 @@ def parse(lines):
         if not m or m.group("kind") != "join":
             continue
         out.append((level_of(int(m.group("tag"), 16)), float(m.group("rtt")), m.group("card")))
+    return out
+
+
+def cohorts(lines):
+    """[[(level, rtt_ms, card)]] — joins grouped into the batches that were IN FLIGHT TOGETHER.
+
+    ⭐ WHY THIS IS NEEDED AT ALL. `by_card` compares a card against the whole run, but the run got
+    slower for everyone as blocks grew, so a card that joined mostly late looks slow for a reason
+    that is nothing to do with it. Comparing a card only against the cards it was joining ALONGSIDE
+    removes that, and it is the difference between a 12.7x spread and a 6.5x card effect.
+
+    ⛔ HOW THE GROUPING IS RECOVERABLE. The aggregate does not timestamp an `[rtt]` line, so file
+    order is not per-join arrival order. But the lines are DUMPED in contiguous runs when a batch
+    returns, and a contiguous run is therefore one contemporaneous batch. Verified on tip hour 4:
+    619 runs of median width 24 on a 37-card fleet, and within a run the RTTs are tightly clustered
+    (212-300 ms in the first, 551-589 ms in the second) while the run as a whole spans 250x. ⚠ 34 of
+    the 619 are 1 or 2 wide -- the narrow top levels -- and they are kept, because the fold waits
+    for those too.
+
+    ⚠ Any non-join line ends a batch, including the `join tree:` summary and progress lines. ⛔ A
+    FILE BOUNDARY IS NOT VISIBLE HERE — concatenate the lines of two logs and a batch at the end of
+    one fuses with a batch at the start of the next. Call this per file and add the lists.
+    """
+    out, cur = [], []
+    for ln in lines:
+        s = parse([ln])
+        if s:
+            cur.append(s[0])
+        elif cur:
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
     return out
 
 
@@ -133,14 +174,27 @@ def by_card(samples):
     ⭐ POSSIBLE ONLY SINCE #570. Before the worker said its own name, a join could be attributed to an
     egress IP that up to eleven cards shared, so "which card has the slow tail?" had no answer.
 
-    📏 Measured on tip hour 4 (9,366 labelled joins, 37 cards): p90 ranged 2,957 ms (w26) to 16,437 ms
-    (w13) — a 5.6x spread — on a UNIFORM fleet of 38 identical cards at one price. So the spread is NOT
-    the card model and `--gpu-type` cannot address it. The fold waits for the slowest peer at every
-    level, so the worst card sets the wall for everyone.
+    📏 Measured on tip hour 4 (13,676 labelled joins, 37 cards): p90 ranged 3,562 ms (w26) to
+    45,253 ms (w12) — a **12.7x spread** — on a UNIFORM fleet of 38 identical cards at one price. So
+    the spread is NOT the card model and `--gpu-type` cannot address it. The fold waits for the
+    slowest peer at every level, so the worst card sets the wall for everyone.
 
-    ⚠ AND THE SPREAD SURVIVES SCRUTINY. Recomputed excluding the three early blocks that ran with only
-    3-10 cards attached, it is 5.5x with the same best and worst cards — those blocks contributed 12,
-    13 and 2 joins against 200-335 per card, so they cannot move a p90. Checked, not assumed.
+    ⛔ THE FIRST PUBLISHED FIGURE WAS 5.6x AND IT WAS HALF A HARVEST — `agg-history.log` alone, 9,366
+    of 13,676 joins, missing the live `agg.log` that holds the run's worst tail. It named w13 (16,437
+    ms) as the worst card; w12 is nearly three times worse. Pass EVERY aggregate log.
+
+    ⚠ THE SPREAD SURVIVES SCRUTINY, and this part was checked on the full harvest. Excluding the
+    three early blocks that ran with only 3-10 cards attached leaves the same best and worst cards --
+    those blocks contributed 12, 13 and 2 joins against 200-600 per card, so they cannot move a p90.
+
+    ⛔ BUT A p90 SPREAD IS NOT THE PRIZE. It compares each card against the whole run, and the run
+    got slower for EVERYONE as blocks grew, and the prize -- what the fold's waiting would actually
+    lose with the tail gone -- is 12.9 % for the worst card and 30.2 % for the worst ten, not a
+    multiple. Measured on the same 13,676 joins, decomposing the
+    variance of log(rtt): 31.4 % is WHEN a join happened, 21.6 % is WHICH LEVEL, 17.3 % is WHICH
+    CARD and only 12.7 % is WHICH DATACENTRE. Controlled for the cohort a card joined alongside, the
+    card effect is 6.5x (0.46x .. 2.98x), not 12.7x -- and it is only moderately persistent
+    (Spearman rho +0.44 between the run's first and second halves). See `tip_banks.tail_prize`.
     """
     by = {}
     for lvl, rtt, card in samples:
