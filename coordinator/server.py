@@ -352,6 +352,19 @@ _rate_lock = threading.Lock()
 # 120 s, not 10. A rebuild of the full index takes ~25 s at 69k rows (5.8 MB), so a 10 s cache under
 # ordinary board traffic was rebuilding back to back; see vranges_cached. Also the TTL of /api/spine/segments.
 VRANGES_TTL = float(os.environ.get("VRANGES_CACHE_TTL", "120"))
+# ⛔ /api/blockstatus DOES NOT BELONG ON THAT TTL. 120 s is sized for the ~25 s vranges rebuild above,
+# and blockstatus is a different shape entirely: measured on the live DB 2026-09-30, 230,126 rows,
+# SELECT id,lo,hi 239 ms + paint 78 ms + runs 6 ms = **338 ms**, 74x cheaper. Sharing the number meant
+# the map's freshness was governed by the cost of an index it does not use.
+#
+# 📏 WHAT THE 120 COST: the map serves `blockstatus` up to TTL + the client's poll old, so at 120 s TTL
+# and a 60 s poll a block could read OPEN for ~180 s after it was proved — while clicking that same
+# square called /api/block/<n>, which queries vranges live and said "proved". Two views of one block
+# disagreeing on screen, reproduced on 134,097 and 134,098.
+#
+# ⚠ THE POLL IS THE FLOOR, not this. 30 s here with the 30 s poll in board.js gives a ~60 s worst case;
+# lowering this alone could never beat the poll interval, so the two move together or not at all.
+BLOCKSTATUS_TTL = float(os.environ.get("BLOCKSTATUS_CACHE_TTL", "30"))
 _state_lock = threading.Lock()
 # Bound concurrent STARK verifications. submit() runs verify-any OUTSIDE _lock (so it can't stall
 # claims/heartbeats), but without a cap a burst of submits would spawn unlimited concurrent `host
@@ -2140,8 +2153,10 @@ def block_status_cached(prover=None):
         v = json.dumps(block_status(prover)).encode()
         return v, '"' + hashlib.sha256(v).hexdigest()[:32] + '"'
     # #324: background for the same reason as state_cached: the map's visitor must not wait on a rebuild.
-    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover, VRANGES_TTL, build,
-                          background=True)
+    # ⚠ BLOCKSTATUS_TTL, not VRANGES_TTL: see the note where it is defined. This endpoint is 338 ms to
+    # rebuild against ~25 s for the index that set the shared number.
+    return _single_flight("blockstatus" if prover is None else "blockstatus:p:" + prover,
+                          BLOCKSTATUS_TTL, build, background=True)
 
 def _parse_price_bands(raw):
     """SPONSOR_PRICE_BANDS: a JSON list of [lo, hi, usd_per_block], heights inclusive, the price a WHOLE

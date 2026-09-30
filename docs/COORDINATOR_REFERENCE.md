@@ -116,6 +116,7 @@ In the order the file reads them. "—" means no default in the call: the variab
 | `HANDLE_DENY` | `'satoshi,satoshinakamoto,admin,administrator,official,bitcoinghost,bitcoinghostofficial,hazync,moderator,mod,root,system,team,support,staff'` | constant `HANDLE_DENY` | Reserved handles, compared after reducing to lowercase letters and digits. |
 | `MOD_BLOCK_FILE` | `os.path.join(os.path.dirname(__file__), 'mod_block.txt')` | constant `MOD_BLOCK_FILE` | Takedown list of pubkeys hidden from the public board; re-read on every call. |
 | `VRANGES_CACHE_TTL` | `'120'` | constant `VRANGES_TTL` | Cache TTL for `/api/vranges` and `/api/spine/segments`. |
+| `BLOCKSTATUS_CACHE_TTL` | `'30'` | constant `BLOCKSTATUS_TTL` | Cache TTL for `/api/blockstatus`, the block map's colours. Separate from `VRANGES_CACHE_TTL` because that one is sized for the ~25 s index rebuild while this endpoint rebuilds in ~338 ms; served staleness is this plus the map's poll interval. |
 | `VERIFY_CONCURRENCY` | `str(max(1, os.cpu_count() or 2))` | constant `_verify_sem` | Maximum concurrent receipt verifications (`_verify_sem`). |
 | `RATE_EXEMPT` | `''` | constant `RATE_EXEMPT` | IPs exempt from rate limiting, comma-separated. |
 | `DB_BUSY_TIMEOUT` | `'15'` | constant `DB_BUSY_TIMEOUT` | SQLite busy timeout, seconds. |

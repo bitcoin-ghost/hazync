@@ -1129,6 +1129,19 @@ jobs:
         run: cd coordinator && python3 test_state_payload.py
       - name: State-payload POSITIVE CONTROL (vranges by default — the 19.8 MB must come back)
         run: cd coordinator && python3 test_state_payload.py --control
+
+      - name: /api/blockstatus has its own cache TTL, so the map is not 180 s behind the popup
+        # ⛔ The map colours come from /api/blockstatus (cached); clicking a square calls
+        # /api/block/<n> (live). Both read the same vranges table, so the definition never differed --
+        # only the freshness. At VRANGES_TTL=120 plus a 60 s poll a block read OPEN for ~180 s after it
+        # was proved while the popup said "proved". Reproduced on 134,097 and 134,098.
+        # 📏 And the 120 was never about this endpoint: it is sized for the ~25 s vranges index
+        # rebuild, while blockstatus measured 338 ms over 230,126 rows on the live DB -- 74x cheaper.
+        # ⚠ The client poll is the FLOOR: staleness is TTL + poll, so this only reaches 60 s because
+        # board.js polls every 30 s. The control puts it back on the shared TTL and the window returns.
+        run: cd coordinator && python3 test_blockstatus_freshness.py
+      - name: Blockstatus-TTL POSITIVE CONTROL (back on the shared TTL — the 180 s window must return)
+        run: cd coordinator && python3 test_blockstatus_freshness.py --control
       - name: A verified block COUNTS on the dashboard (tools/live)
         # ⛔ `done` was inferred from 5 s of silence. The collector stops when the run ends, BEFORE
         # its own grace period elapses, so the LAST block of every run never counted. Captured
