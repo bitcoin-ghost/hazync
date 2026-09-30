@@ -88,12 +88,16 @@ jobs:
       - name: The container's own id check must have passed
         # ⛔ POSITIVE, not "no error appeared". build-release.sh prints the built binary's id and the
         # canonical one and says they MUST match; assert the binary rather than trusting the log.
+        # ⛔ Values arrive through env:, never interpolated into the script — see
+        # scripts/check-workflow-injection.sh, which refuses ${{ }} in a run: block outright.
+        env:
+          PIN: ${{ steps.pin.outputs.id }}
         run: |
           set -o pipefail
           GOT=$(./dist/hazync-host-x86_64-linux-gnu method-id | grep -oE '[0-9a-f]{64}' | head -1)
           echo "container build id : ${GOT:-<none>}"
-          echo "canonical          : ${{ steps.pin.outputs.id }}"
-          [ "$GOT" = "${{ steps.pin.outputs.id }}" ] || {
+          echo "canonical          : $PIN"
+          [ "$GOT" = "$PIN" ] || {
               echo "⛔ the CONTAINER build is not canonical — everything downstream is moot"; exit 1; }
 
       - name: Locate and fingerprint the guest ELF
@@ -141,10 +145,16 @@ jobs:
       - name: Is this platform in scope for this run?
         id: want
         shell: bash
+        # ⛔⛔ `platforms` IS ATTACKER-SUPPLIED — a workflow_dispatch input any write-access account
+        # can set. Interpolated into this `case` it was shell injection; through env: bash expands
+        # the value AFTER parsing and never re-parses it.
+        env:
+          PLATFORMS: ${{ github.event.inputs.platforms }}
+          NAME: ${{ matrix.name }}
         run: |
-          case ",${{ github.event.inputs.platforms }}," in
-              *,${{ matrix.name }},*) echo "go=1" >> "$GITHUB_OUTPUT" ;;
-              *) echo "go=0" >> "$GITHUB_OUTPUT"; echo "${{ matrix.name }} not requested" ;;
+          case ",$PLATFORMS," in
+              *",$NAME,"*) echo "go=1" >> "$GITHUB_OUTPUT" ;;
+              *) echo "go=0" >> "$GITHUB_OUTPUT"; echo "$NAME not requested" ;;
           esac
 
       - uses: actions/download-artifact@v4
@@ -160,9 +170,11 @@ jobs:
       - name: The guest arrived intact
         if: steps.want.outputs.go == '1'
         shell: bash
+        env:
+          NAME: ${{ matrix.name }}
         run: |
           [ -s hazync-guest.elf ] || { echo "no guest ELF downloaded"; exit 1; }
-          echo "size $(wc -c < hazync-guest.elf) bytes on ${{ matrix.name }}"
+          echo "size $(wc -c < hazync-guest.elf) bytes on $NAME"
 
       - name: ⛔ THE QUESTION — embed the canonical guest on this platform
         if: steps.want.outputs.go == '1'
@@ -191,19 +203,21 @@ jobs:
         if: steps.want.outputs.go == '1'
         shell: bash
         working-directory: prover
+        env:
+          NAME: ${{ matrix.name }}
         run: |
           PIN=$(grep -vE '^\s*#|^\s*$' ../reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
           set +e
           out=$(env -u HAZYNC_GUEST_ELF cargo build -p methods --release 2>&1); rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
-              echo "⚠ INCONCLUSIVE on ${{ matrix.name }}: a native guest build does not complete here"
+              echo "⚠ INCONCLUSIVE on $NAME: a native guest build does not complete here"
               echo "  (rc=$rc — most likely no RISC-V guest toolchain, which is expected off Linux)"
               printf '%s\n' "$out" | tail -15
               exit 0
           fi
           if printf '%s' "$out" | grep -q "$PIN"; then
-              echo "⛔ a NATIVE build on ${{ matrix.name }} produced the canonical id — then the"
+              echo "⛔ a NATIVE build on $NAME produced the canonical id — then the"
               echo "   prebuilt-guest mechanism is not what made the step above pass."
               exit 1
           fi
@@ -212,8 +226,12 @@ jobs:
       - name: What this platform answered
         if: always() && steps.want.outputs.go == '1'
         shell: bash
+        env:
+          NAME: ${{ matrix.name }}
+          OS: ${{ matrix.os }}
+          STATUS: ${{ job.status }}
         run: |
-          echo "${{ matrix.name }} (${{ matrix.os }}): embed step = ${{ job.status }}"
+          echo "$NAME ($OS): embed step = $STATUS"
           echo "⚠ This says the canonical guest can be EMBEDDED here. It does not say the full host"
           echo "  binary builds, and on macOS there is no Metal backend, so proving is Linux+NVIDIA"
           echo "  either way. See hazync#620."
