@@ -1317,6 +1317,19 @@ jobs:
         # nobody knew -- a failed unit is a journal line nobody reads. These are the positive controls
         # for the path that is supposed to tell someone.
         run: ./coordinator/deploy/test-alerting.sh
+      - name: The worker imports without fcntl — the one import that barred Windows (hazync#616)
+        # 📏 11 provers on the board, and the contribute page says "Linux on x86-64". The bottleneck
+        # on participation is not awareness: `coordinator/hazync` did `import contextlib, fcntl` at
+        # module scope, and fcntl does not exist on Windows, so the worker was unimportable there
+        # before it did anything at all.
+        # ⚠ This runs on POSIX, so it blocks the fcntl import to reproduce the Windows condition. It
+        # does NOT exercise msvcrt.locking or taskkill -- there is no Windows machine in this CI, and
+        # those branches are written to be correct, not claimed to be verified.
+        # ⛔ It also checks the POSIX lock still SERIALISES two holders, because a lock that imports
+        # cleanly and serialises nothing would pass every structural check.
+        run: cd coordinator && python3 test_worker_portable.py
+      - name: Worker-portability POSITIVE CONTROL (module-scope fcntl — Windows must break)
+        run: cd coordinator && python3 test_worker_portable.py --control
       - name: Coordinator worker parses (nothing else imports it, so nothing else would notice)
         # coordinator/server.py IS compiled on every push, because seam_fuzz.py and parse_fuzz.py both
         # `import server`. coordinator/hazync is not: it has no .py extension, so it is not importable
