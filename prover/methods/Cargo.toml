@@ -5,6 +5,7 @@ edition = "2021"
 
 [build-dependencies]
 risc0-build = { version = "=3.0.5", features = ["unstable"] }
+risc0-binfmt = "=3.0.5"
 
 [package.metadata.risc0]
 methods = ["guest"]
