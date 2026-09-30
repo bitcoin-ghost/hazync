@@ -228,6 +228,7 @@ ENV = {
     "server:HANDLE_DENY": "Reserved handles, compared after reducing to lowercase letters and digits.",
     "server:MOD_BLOCK_FILE": "Takedown list of pubkeys hidden from the public board; re-read on every call.",
     "server:VRANGES_CACHE_TTL": "Cache TTL for `/api/vranges` and `/api/spine/segments`.",
+    "server:BLOCKSTATUS_CACHE_TTL": "Cache TTL for `/api/blockstatus`, the block map's colours. Separate from `VRANGES_CACHE_TTL` because that one is sized for the ~25 s index rebuild while this endpoint rebuilds in ~338 ms; served staleness is this plus the map's poll interval.",
     "server:VERIFY_CONCURRENCY": "Maximum concurrent receipt verifications (`_verify_sem`).",
     "server:RATE_EXEMPT": "IPs exempt from rate limiting, comma-separated.",
     "server:DB_BUSY_TIMEOUT": "SQLite busy timeout, seconds.",
