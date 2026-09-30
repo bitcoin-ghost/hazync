@@ -52,17 +52,35 @@ check('if os.name != "nt":' in SRC, "and the helper branches on the platform exp
 # ── 2. ⛔ THE ONE THAT MATTERS: it imports with fcntl unavailable ────────────────────────────────
 # A sitecustomize that makes `import fcntl` raise ImportError reproduces the Windows condition
 # exactly, without needing Windows.
+# ⛔ `find_module`/`load_module` WERE REMOVED IN PYTHON 3.12. The first version of this shim used
+# them: it worked on 3.10 here and did NOTHING on the 3.12 in CI, where `import fcntl` therefore
+# succeeded and the test failed for a reason that had nothing to do with the worker. `find_spec` is
+# the API that exists on both, and raising from it propagates to the importer.
 shim = tempfile.mkdtemp(prefix="nofcntl-")
 with open(os.path.join(shim, "sitecustomize.py"), "w") as fh:
     fh.write(
         "import sys\n"
         "class _Block:\n"
-        "    def find_module(self, name, path=None):\n"
-        "        return self if name == 'fcntl' else None\n"
-        "    def load_module(self, name):\n"
-        "        raise ImportError('no module named fcntl (simulated Windows)')\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'fcntl':\n"
+        "            raise ImportError('no module named fcntl (simulated Windows)')\n"
+        "        return None\n"
         "sys.meta_path.insert(0, _Block())\n"
+        "sys.modules.pop('fcntl', None)\n"
     )
+
+# ⛔⛔ VERIFY THE SHIM BEFORE TRUSTING WHAT IT SHOWS. A shim that silently stops working turns this
+# whole file into a test that cannot fail -- which is exactly what happened on 3.12. So prove that
+# `import fcntl` DOES fail under it, on this interpreter, before asking anything about the worker.
+_env = dict(os.environ, PYTHONPATH=shim + os.pathsep + os.environ.get("PYTHONPATH", ""))
+_probe = subprocess.run([sys.executable, "-c", "import fcntl; print('IMPORTED')"],
+                        capture_output=True, text=True, timeout=60, env=_env)
+if _probe.returncode == 0:
+    print(f"  FAIL the fcntl-blocking shim does NOT work on {sys.version.split()[0]} — every result "
+          f"below would be vacuous ({(_probe.stdout or '').strip()})")
+    sys.exit(1)
+print(f"  ok   the shim blocks `import fcntl` on this interpreter ({sys.version.split()[0]}), so the "
+      f"Windows condition is real and not assumed")
 
 probe = (
     "import importlib.util, sys\n"
@@ -80,8 +98,7 @@ probe += (
     "ldr.exec_module(m)\n"
     "print('IMPORTED', 'fcntl' if m.fcntl is not None else 'msvcrt-path')\n"
 )
-env = dict(os.environ, PYTHONPATH=shim + os.pathsep + os.environ.get("PYTHONPATH", ""))
-r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, env=env)
+r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, env=_env)
 
 if CONTROL:
     check(r.returncode != 0 and "fcntl" in (r.stderr or ""),
