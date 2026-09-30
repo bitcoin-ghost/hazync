@@ -959,6 +959,15 @@ def main():
     ap.add_argument("--gate-parallel", type=int, default=4,
                     help="how many recruits to gate at once (default 4). Gating was serial, which "
                          "capped growth at roughly one card every four minutes")
+    # 📏 ON BY DEFAULT, on measured evidence (hazync#598). Staging a tip bundle cost 49-164 s before
+    # a single GPU started, 14 % of tip hour 4. Timed 2026-09-30 over a real 41.7 MB bundle, the push
+    # to the aggregate is 37.3 s against 4.2 s to pull it down -- 8.8x -- and none of it needs to
+    # happen while the fleet waits, because the next bundle exists on the bridge as soon as its block
+    # is mined. ⚠ It cannot make a run wrong: the prefetch decides nothing, `stage_bundle` is
+    # idempotent and hash-checked, and a wrong guess costs bandwidth on an otherwise idle uplink.
+    ap.add_argument("--no-stage-ahead", dest="stage_ahead", action="store_false", default=True,
+                    help="do not fetch and push the NEXT tip bundle while the current block proves. "
+                         "Staging is then back on the clock, where it cost 49-164 s a block")
     ap.add_argument("--tip-max-behind", type=int, default=3,
                     help="how many unproved tip bundles may queue before the session gives up on "
                          "sequence and jumps to the newest, recording the skipped heights "
@@ -1967,6 +1976,40 @@ def main():
                 def _b(progress):
                     hi_l["n"] = tip_board.beat(rng, progress, hi_l["n"], ident=ident)
                     return hi_l["n"]
+
+                # ── stage the NEXT tip bundle while this one proves (hazync#598) ─────────────────
+                # 📏 Staging was 629 s of tip hour 4 and 49-164 s on a tip block BEFORE any GPU
+                # starts. Measured 2026-09-30 over a real 41.7 MB bundle the two legs are:
+                #     bridge -> orchestrator   4.2 s  (9.85 MB/s)
+                #     orchestrator -> aggregate 37.3 s (1.12 MB/s)   <- 8.8x, and it is on the clock
+                # None of that push has to happen while the fleet waits: the next tip bundle exists
+                # on the bridge the moment its block is mined, which is well before this one ends.
+                #
+                # ⚠ IT CAN GUESS WRONG, AND THAT IS FINE. The real choice is made by pick_tip once
+                # this block is proved; if a lower bundle appears meanwhile, or --tip-max-behind
+                # jumps, the work is wasted bandwidth on an idle uplink and nothing else. It never
+                # decides anything: `stage_bundle` is idempotent and hash-checked, so the normal path
+                # re-verifies and re-pushes if this did not land.
+                # ⛔ Failure here must never touch the block being proved, so everything is caught.
+                if from_tip and a.stage_ahead and runner is not None:
+                    def _stage_next():
+                        try:
+                            nxt = tip_board.tip_bundles_above(a.bridge_host, int(rng))
+                            if not nxt:
+                                return
+                            h2, _sk = tip_board.choose_tip(nxt, a.tip_max_behind)
+                            if not h2:
+                                return
+                            bp2 = os.path.join(a.rundir, f"bundle_{h2}.json")
+                            ok2, why2 = tip_board.fetch_bundle_ssh(int(h2), bp2, a.bridge_host)
+                            if not ok2:
+                                log(f"  stage-ahead: {h2} not fetched ({why2})")
+                                return
+                            sok, swhy = runner.stage_bundle(int(h2), bp2)
+                            log(f"  stage-ahead: {h2} {'staged' if sok else 'FAILED'} — {swhy}")
+                        except Exception as exc:          # noqa: BLE001 — never break the live block
+                            log(f"  stage-ahead: gave up ({type(exc).__name__}: {exc})")
+                    threading.Thread(target=_stage_next, name="stage-ahead", daemon=True).start()
 
                 res = tip_run.run_range(height=int(rng), cards=current_assignment(), runner=runner,
                                         bundle_path=bp, now=time.time, sleep=time.sleep, feed=feed,
