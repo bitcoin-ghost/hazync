@@ -88,6 +88,10 @@ restore; trap - EXIT
 out2=$(env -u HAZYNC_GUEST_ELF cargo build -p methods --release -j 4 2>&1); rc2=$?
 check "$([ $rc2 -eq 0 ] && echo 1)" \
       "⚠ with HAZYNC_GUEST_ELF unset the ordinary build still works (exit $rc2) — this changes no default"
+# ⚠ SAY WHY IT FAILED. This check was capturing the build output and throwing it away, so a broken
+# default path reported an exit code and nothing else -- and a guest build failure is never
+# self-evident from a number. (shellcheck SC2034 caught the unused capture; the fix is to use it.)
+[ "$rc2" -eq 0 ] || printf '%s\n' "$out2" | tail -25
 
 echo
 if [ "$CONTROL" = 1 ]; then
