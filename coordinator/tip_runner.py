@@ -38,6 +38,15 @@ echo "LEFT:$LEFT REDIRS:$REDIRS"
 """
 
 
+def _sha256_file(path, chunk=1 << 20):
+    """sha256 of a local file. ⚠ Streamed: a tip bundle is ~42 MB and growing."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for blk in iter(lambda: fh.read(chunk), b""):
+            h.update(blk)
+    return h.hexdigest()
+
 class FleetRunner:
     """Drives one fleet for one block.
 
@@ -483,6 +492,55 @@ while time.time() < end:
         return self.ssh.run(self.agg, body) is not None
 
     # ── mode 6: prove ONE BOARD BLOCK from its bridge bundle (hazync#367) ─────────────────────────
+    def stage_bundle(self, height, bundle_path):
+        """Put a block's bundle on the aggregate, and do nothing if it is already there. (ok, why)
+
+        📏 WHY IT IS SEPARATE, AND IDEMPOTENT (hazync#598). Staging was 629 s of tip hour 4 -- 14 % of
+        the run -- and 49-164 s on a tip block BEFORE a single GPU starts. Measured 2026-09-30 over a
+        real 41.7 MB bundle, the two legs are not remotely equal:
+
+            bridge host -> orchestrator   4.2 s   at 9.85 MB/s
+            orchestrator -> aggregate    37.3 s   at 1.12 MB/s     <- 8.8x, and it is on the clock
+
+        The push is the cost, and none of it needs to happen while the fleet waits: a tip bundle
+        exists on the bridge the moment the block is mined, long before the previous block finishes.
+        So this is written to be callable EARLY and again later -- the second call finds the file
+        already there and returns in well under a second.
+
+        ⛔ IDENTITY IS CHECKED BY HASH, NOT BY SIZE OR BY NAME. A same-sized file is not the same
+        file, and this project has the scar: a piped two-hop transfer once dropped 13 of 18 entries
+        and exited 0. `scp` exiting 0 is not evidence either -- one run staged 21 of 22 chunks and
+        left seg-serve panicking with nothing useful in any log. So the far end is hashed and
+        compared with the local file, and anything short of a match is re-pushed.
+        """
+        remote = posixpath.join(self.workdir, f"bundle_{height}.json")
+        try:
+            nbytes = os.path.getsize(bundle_path)
+            local_sum = _sha256_file(bundle_path)
+        except OSError as e:
+            return False, f"cannot read {bundle_path}: {e}"
+
+        # ⚠ One round trip to ask; it costs ~a second against the ~37 s it can save.
+        have = (self.ssh.run(self.agg, f"sha256sum {remote} 2>/dev/null | cut -d' ' -f1") or "").strip()
+        have = (have.splitlines() or [""])[-1]
+        if have == local_sum:
+            tip_stage.record(self.stage_dir, height, "push", 0.0, nbytes, ok=True,
+                             note=f"already on {self.agg.cid} (staged ahead)")
+            return True, "already staged"
+
+        pushed, push_s = tip_stage.timed(lambda: self.ssh.push(self.agg, bundle_path, remote))
+        tip_stage.record(self.stage_dir, height, "push", push_s, nbytes, ok=bool(pushed),
+                         note=f"-> {self.agg.cid}")
+        if not pushed:
+            return False, f"could not stage {bundle_path} onto {self.agg.cid} (after {push_s:.1f}s)"
+        # ⛔ CONFIRM IT LANDED, BY HASH. Same reasoning as above: the far end is the only witness.
+        got = (self.ssh.run(self.agg, f"sha256sum {remote} 2>/dev/null | cut -d' ' -f1") or "").strip()
+        got = (got.splitlines() or [""])[-1]
+        if got != local_sum:
+            return False, (f"bundle {height} did not land intact on {self.agg.cid} "
+                           f"(local {local_sum[:12]}, remote {got[:12] or 'absent'})")
+        return True, f"staged in {push_s:.1f}s"
+
     def start_range_aggregate(self, *, height, bundle_path):
         """Stage the bundle onto the aggregate and serve it as a range. Returns (ok, why).
 
@@ -501,26 +559,9 @@ while time.time() < end:
         ⚠ NO per-card `prove-chunk` phase here. seg-serve executes the guest once and pushes segments
         to whichever workers have dialled in, so the cards do nothing until they attach.
         """
-        remote = posixpath.join(self.workdir, f"bundle_{height}.json")
-        # 📏 TIME THIS LEG ON ITS OWN (hazync#598). `stage` was 629 s of tip hour 4 and 49-164 s per
-        # tip block, but the run log covers the pull and this push in ONE window, so it cannot say
-        # which of them costs it — and the two have opposite fixes. Timed, never gated: this changes
-        # no route and no default.
-        pushed, push_s = tip_stage.timed(lambda: self.ssh.push(self.agg, bundle_path, remote))
-        try:
-            nbytes = os.path.getsize(bundle_path)
-        except OSError:
-            nbytes = 0
-        tip_stage.record(self.stage_dir, height, "push", push_s, nbytes, ok=bool(pushed),
-                         note=f"-> {self.agg.cid}")
-        if not pushed:
-            return False, f"could not stage {bundle_path} onto {self.agg.cid} (after {push_s:.1f}s)"
-        # ⛔ CONFIRM IT LANDED. `scp` exiting 0 is not evidence -- the same silent-drop that once staged
-        # 21 of 22 chunks and left seg-serve panicking with nothing useful in any log.
-        size = (self.ssh.run(self.agg, f"stat -c%s {remote} 2>/dev/null || echo 0") or "0").strip()
-        size = (size.splitlines() or ["0"])[-1]
-        if not (size.isdigit() and int(size) > 0):
-            return False, f"bundle staged as {size} bytes on {self.agg.cid}"
+        ok, why = self.stage_bundle(height, bundle_path)
+        if not ok:
+            return False, why
 
         env = dict(self.prove_env,
                    HAZYNC_RANGE=str(height),

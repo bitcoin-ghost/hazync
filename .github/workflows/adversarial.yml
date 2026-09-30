@@ -1077,6 +1077,20 @@ jobs:
         run: cd coordinator && python3 test_stage_legs.py
       - name: Stage-legs POSITIVE CONTROL (one combined timing — the verdict must decline)
         run: cd coordinator && python3 test_stage_legs.py --control
+
+      - name: A bundle already on the aggregate is not pushed again, and identity is by HASH
+        # 📏 Staging cost 49-164 s on every tip block of tip hour 4 -- 14 % of the run -- BEFORE a
+        # single GPU started. Measured 2026-09-30 over a real 41.7 MB bundle: pull 4.2 s at
+        # 9.85 MB/s, push 37.3 s at 1.12 MB/s. The push is 8.8x, and it is the part on the clock.
+        # ⛔ The issue originally guessed the opposite ("~30 MB over a 0.4 MB/s uplink, twice"): the
+        # bundles are 41.7 MB and the link is ASYMMETRIC, so only the upload is slow.
+        # ⇒ stage_bundle is idempotent so the push can happen while the PREVIOUS block proves.
+        # ⛔ The control decides identity by SIZE at both ends and must let a same-sized corrupted
+        # bundle through -- the aggregate would then execute it. This project has that scar twice:
+        # a piped two-hop dropped 13 of 18 entries exiting 0, and an scp exiting 0 staged 21 of 22.
+        run: cd coordinator && python3 test_stage_ahead.py
+      - name: Stage-ahead POSITIVE CONTROL (identity by size — a corrupted bundle must slip through)
+        run: cd coordinator && python3 test_stage_ahead.py --control
       - name: The collector does not block on a third party, and its lock asks what the pid IS
         # ⛔ #591: chain_facts() is a 10s synchronous HTTP call and was called inline every tick, so
         # one unreachable request froze the ENTIRE snapshot — cards, blocks, spend. Observed with the
