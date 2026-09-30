@@ -63,6 +63,63 @@ class FakeSSH:
 # ── 1. the probe reads a model, a core count and a score ────────────────────────────────────────
 ssh = FakeSSH({"a": ("AMD EPYC 7452 32-Core Processor", 8, 2.00),
                "b": ("13th Gen Intel(R) Core(TM) i5-13600K", 8, 1.00)})
+# ── 0. ⛔⛔ THE PROBE MUST RUN UNDER `sh`, NOT BASH — the gap that let it ship broken ────────────
+#
+# `ssh.run` wraps every body in `sh -c`, and on the pods /bin/sh is DASH. The first version timed the
+# loop with `TIMEFORMAT=%R; time ( ... )`, both bash-only, and dash answered
+#
+#     sh: 1: Syntax error: word unexpected (expecting ")")
+#
+# so the command exited non-zero, ssh.run returned None, and EVERY card of EVERY run reported
+# `cpu UNMEASURED` — through tip hour 5, where it appeared eight times. The probe never worked once.
+#
+# ⛔ AND THE TESTS BELOW COULD NOT HAVE CAUGHT IT: they hand probe_cpu a fake CPUPROBE line, so they
+# exercise the PARSING and never the COMMAND. A shell bug is invisible to a fake shell. This runs the
+# real body through a real `sh`.
+#
+# ⚠ It LOOKED fine by hand, because the pods' LOGIN shell is bash — the failure only appears through
+# `sh -c`, which is the only way the driver ever calls it.
+import shutil      # noqa: E402
+import subprocess  # noqa: E402
+
+_body = {}
+
+
+class _Capture:
+    def run(self, card, body, **kw):
+        _body["b"] = body
+        return None
+
+
+tip_smoke.probe_cpu(_Capture(), Card("cap"))
+_SH = shutil.which("dash") or shutil.which("sh")
+if CONTROL:
+    # The bash-ism that shipped, put back exactly.
+    _body["b"] = ("MODEL=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//'); "
+                  "CORES=$(nproc 2>/dev/null); "
+                  "S=$( { TIMEFORMAT=%R; time (i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done) ; } 2>&1 ); "
+                  'echo "CPUPROBE|$MODEL|$CORES|$S"')
+_r = subprocess.run([_SH, "-c", _body["b"]], capture_output=True, text=True, timeout=120)
+_line = [l for l in (_r.stdout or "").splitlines() if l.startswith("CPUPROBE|")]
+if CONTROL:
+    check(_r.returncode != 0 or not _line,
+          f"⛔ control: the bash-ism FAILS under {os.path.basename(_SH)} (rc={_r.returncode}) — "
+          f"which is why every card reported UNMEASURED")
+else:
+    check(_r.returncode == 0, f"the probe body runs under {os.path.basename(_SH)} (rc={_r.returncode}) "
+                              f"— this is the shell ssh.run actually uses")
+    check(len(_line) == 1, f"and emits exactly one CPUPROBE line ({len(_line)})")
+    if _line:
+        _f = _line[0].split("|")
+        check(len(_f) == 4, f"with four fields ({len(_f)})")
+        check(_f[2].isdigit() and int(_f[2]) > 0, f"a core count ({_f[2]!r})")
+        try:
+            _sec = float(_f[3]); ok = _sec > 0
+        except ValueError:
+            ok = False
+        check(ok, f"and a positive elapsed time ({_f[3]!r}) — dash has no floats, so it is assembled "
+                  f"from integer seconds and milliseconds")
+
 m, sc, co = tip_smoke.probe_cpu(ssh, Card("a"))
 check(m and "EPYC 7452" in m, f"the CPU model is read ({m})")
 check(co == 8, "and the core count")
