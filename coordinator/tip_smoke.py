@@ -1167,6 +1167,10 @@ def main():
     bundle_path = None
     if a.claim and not a.session:
         os.makedirs(a.rundir, exist_ok=True)
+        # ⛔ ONE LEDGER FOR THE RUN (hazync#598). The fetch leg and the push leg are recorded by
+        # different objects passing different directories, so they landed in two files and the
+        # verdict could never see both. Pinning it here makes that impossible to get wrong again.
+        tip_stage.use_run_dir(a.rundir)
         bundle_path = os.path.join(a.rundir, f"bundle_{a.block}.json")
         if a.claim_source == "ssh":
             ok, why = tip_board.fetch_bundle_ssh(int(a.block), bundle_path, a.bridge_host)
