@@ -83,6 +83,40 @@ else:
     check("2.4x" in v, f"with the ratio ({v[v.find('('):v.find(')')+1] if '(' in v else '?'})")
     check("worst single transfer 82.0s at 969118" in v, "and names the worst single transfer")
 
+# ── 3b. ⛔⛔ ONE RUN, ONE LEDGER — the bug that shipped and cost a live run ──────────────────────
+#
+# The two legs are recorded by DIFFERENT objects that were passing DIFFERENT directories:
+#     fetch  tip_smoke   -> a.rundir           $RUNDIR/stage_ledger.jsonl
+#     push   FleetRunner -> self.stage_dir     $RUNDIR/stage/stage_ledger.jsonl   (stage_dir = rundir/stage)
+# so summary() and verdict() never saw both, and the one question this module exists to answer was
+# structurally unanswerable. Measured on tip hour 5, 2026-09-30: two files, two rows in each.
+#
+# ⚠ The legs below are recorded with the SAME directories the real callers use, so this test fails if
+# anyone reintroduces the split — it does not assert on a helper, it reproduces the call shape.
+RUN2 = tempfile.mkdtemp(prefix="stage2-")
+STAGE2 = os.path.join(RUN2, "stage")
+os.makedirs(STAGE2, exist_ok=True)
+if not CONTROL:
+    tip_stage.use_run_dir(RUN2)          # what tip_smoke does once, where the rundir is made
+tip_stage.record(RUN2, 969305, "fetch", 18.7, 29_800_000)     # the fetch caller passes rundir
+tip_stage.record(STAGE2, 969305, "push", 54.8, 29_800_000)    # the push caller passes stage_dir
+one = tip_stage.summary(os.path.join(RUN2, tip_stage.LEDGER))
+legs2 = sorted(k for k in one if k != "_total")
+if CONTROL:
+    check(legs2 == ["fetch"],
+          f"⛔ control: the run's ledger holds only the fetch leg {legs2} — the push went to "
+          f"{STAGE2}, and the verdict can never compare them")
+    check(os.path.exists(os.path.join(STAGE2, tip_stage.LEDGER)),
+          "control: a SECOND ledger exists under stage/ — the split that shipped")
+else:
+    check(legs2 == ["fetch", "push"],
+          f"⛔ both legs land in ONE ledger even though the callers pass different directories ({legs2})")
+    check(not os.path.exists(os.path.join(STAGE2, tip_stage.LEDGER)),
+          "and nothing is written under stage/ — there is one ledger, not two")
+    check("dominates" in tip_stage.verdict(os.path.join(RUN2, tip_stage.LEDGER)),
+          "so the verdict can finally answer the question the module exists for")
+tip_stage.use_run_dir(None)              # ⚠ leave no global set for the checks below
+
 # ── 4. measurement must never break a run ───────────────────────────────────────────────────────
 r = tip_stage.record("/nonexistent/dir/that/cannot/be/written", 1, "push", 1.0, 1)
 check(isinstance(r, dict), "an unwritable ledger returns a row rather than raising")

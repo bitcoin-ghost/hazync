@@ -30,6 +30,38 @@ import time
 
 LEDGER = "stage_ledger.jsonl"
 
+# ⛔⛔ ONE RUN, ONE LEDGER — AND IT TOOK A LIVE RUN TO FIND OUT IT WAS TWO.
+#
+# The two legs are recorded by different objects, and they were passing different directories:
+#
+#     fetch   tip_smoke        -> a.rundir                  $RUNDIR/stage_ledger.jsonl
+#     push    FleetRunner      -> self.stage_dir            $RUNDIR/stage/stage_ledger.jsonl
+#
+# because `stage_dir` is `rundir/stage`, a scratch directory for receipts. So `summary()` and
+# `verdict()` never saw both legs, and the ONE question this module exists to answer — which leg
+# costs the time — was structurally unanswerable. Measured on tip hour 5, 2026-09-30: two files,
+# two fetch rows in one and two push rows in the other.
+#
+# ⭐ The control written for a different reason caught it: fed one leg, `verdict()` refuses rather
+# than crowning the only leg it has, so the run reported "CANNOT say which leg dominates" instead of
+# confidently declaring the push the winner off half the data.
+#
+# ⚠ Fixed HERE rather than at the call sites. Passing the right directory from two places is exactly
+# what already failed; a third caller would be free to get it wrong again. The run sets its directory
+# once and every leg lands there whatever it passes.
+_run_dir = None
+
+
+def use_run_dir(path):
+    """Pin every subsequent record() to one run's ledger, whatever directory the caller passes."""
+    global _run_dir
+    _run_dir = path or None
+
+
+def ledger_path(rundir=None):
+    """Where this run's ledger is. `use_run_dir` wins; otherwise the caller's directory."""
+    return os.path.join(_run_dir or rundir or ".", LEDGER)
+
 
 def timed(fn):
     """Run `fn`, return (result, elapsed_s). A failure is still timed -- a slow failure is a finding."""
@@ -60,7 +92,7 @@ def record(rundir, height, leg, seconds, size_bytes, ok=True, note=""):
     if note:
         row["note"] = str(note)[:200]
     try:
-        with open(os.path.join(rundir, LEDGER), "a") as fh:
+        with open(ledger_path(rundir), "a") as fh:
             fh.write(json.dumps(row) + "\n")
     except OSError:
         pass
