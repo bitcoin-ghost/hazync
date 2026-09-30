@@ -113,17 +113,28 @@ class SSHRunner:
             return False
         return os.path.isfile(local) and os.path.getsize(local) > 0
 
-    def push(self, card, local, remote, timeout=COPY_TIMEOUT_S):
+    def push(self, card, local, remote, timeout=COPY_TIMEOUT_S, compress=False):
         """Copy a file ONTO the card. Returns True only if the far end confirms it.
 
         ⛔ THE CONFIRMATION IS THE POINT, and it is the caller's job: `scp` exiting 0 says the transfer
         was attempted, not that a file of the right size is sitting there. `FleetRunner.stage_receipt`
         checks `test -s` on the far side before believing this, because a silent drop once staged 21 of
         22 chunks and `seg-serve` panicked with nothing useful in any log.
+
+        📏 `compress` adds scp's -C, and it is worth 2.5x on a tip bundle. Measured 2026-09-30 pushing
+        the same real 41.7 MB bundle to the same pod: **37.3 s plain, 15.2 s with -C** — 22.1 s saved
+        on every tip block, on the leg that sits between a block being mined and a GPU starting.
+        Nothing in this project has ever compressed a transfer; SSH_OPTS has no -C.
+
+        ⚠ OFF BY DEFAULT, AND DELIBERATELY NOT GLOBAL. A tip bundle is JSON and compresses 2.5x. A
+        receipt is a STARK proof — high-entropy bytes that will not compress — so -C there buys
+        nothing and costs CPU on both ends while the fleet is mid-block. The caller knows which it is
+        holding; this layer does not guess.
         """
         if not (os.path.isfile(local) and os.path.getsize(local) > 0):
             return False                      # never push something we have not got
-        cmd = ["scp", *[o for o in SSH_OPTS if o != "-n"], "-i", self.key,
+        cmd = ["scp", *(["-C"] if compress else []),
+               *[o for o in SSH_OPTS if o != "-n"], "-i", self.key,
                "-P", str(card.port), local, f"{self.user}@{card.ip}:{remote}"]
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

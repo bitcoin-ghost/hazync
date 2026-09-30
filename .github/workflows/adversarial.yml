@@ -1091,6 +1091,21 @@ jobs:
         run: cd coordinator && python3 test_stage_ahead.py
       - name: Stage-ahead POSITIVE CONTROL (identity by size — a corrupted bundle must slip through)
         run: cd coordinator && python3 test_stage_ahead.py --control
+
+      - name: The bundle push is compressed, and receipt pushes are not (hazync#598)
+        # 📏 Measured 2026-09-30 pushing the same real 41.7 MB tip bundle to the same pod:
+        #     scp     37.3 s  at 1.12 MB/s
+        #     scp -C  15.2 s  at 2.75 MB/s effective   -> 2.5x, 22.1 s off EVERY tip block
+        # Nothing in this project has ever compressed a transfer; SSH_OPTS has no -C.
+        # ⛔ Not added globally: a bundle is JSON and compresses 2.5x, a receipt is a STARK proof and
+        # will not, so -C there is CPU on both ends for nothing while the fleet is mid-block. The
+        # control applies it everywhere and must give a receipt compression it cannot use.
+        # ⚠ This replaced stage-ahead as the fix: replayed against tip hour 4's own timings,
+        # stage-ahead would have fired 0 of 4 times, because the next block is not mined yet when the
+        # current one starts proving. Compression helps every block, in every regime.
+        run: cd coordinator && python3 test_push_compress.py
+      - name: Push-compression POSITIVE CONTROL (-C everywhere — receipts must get it too)
+        run: cd coordinator && python3 test_push_compress.py --control
       - name: The collector does not block on a third party, and its lock asks what the pid IS
         # ⛔ #591: chain_facts() is a 10s synchronous HTTP call and was called inline every tick, so
         # one unreachable request froze the ENTIRE snapshot — cards, blocks, spend. Observed with the
