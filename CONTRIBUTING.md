@@ -5,14 +5,54 @@ You prove one block of Bitcoin's history on your own machine, sign it, and submi
 ## What you need
 
 - A Linux machine (x86-64), Ubuntu 22.04+ (glibc 2.34+) for the prebuilt binaries. A cloud GPU box works well.
+  **On Windows, WSL2 is the route** — see [Windows, via WSL2](#windows-via-wsl2) below. macOS cannot prove.
 - An NVIDIA GPU and a driver recent enough for it. **No CUDA toolkit or runtime install is needed** — the prebuilt prover links only `libcuda.so.1`, which ships with the driver, so a stock cloud GPU image works as it comes (CUDA 13 included). No GPU still works (the CPU binary proves the early blocks, just slower).
 - **No build.** Grab the prebuilt binary below — proving an early block takes seconds on a GPU.
+
+### Windows, via WSL2
+
+⭐ **You do not need a Linux machine — you need a Linux *userspace*,** and Windows ships one. The
+prebuilt prover links only `libcuda.so.1`, and NVIDIA's WSL2 support provides exactly that file
+inside WSL from the **Windows** driver. So the ordinary Linux binary is the one you run.
+
+1. `wsl --install -d Ubuntu-22.04` in an admin PowerShell, then reboot.
+2. Install the **NVIDIA driver on Windows** — the normal one from nvidia.com. ⛔ Do **not** install
+   a driver *inside* WSL; that breaks the passthrough rather than enabling it.
+3. In the Ubuntu shell, check the one thing that matters:
+
+   ```bash
+   ls -l /usr/lib/wsl/lib/libcuda.so.1 && nvidia-smi
+   ```
+
+   If both answer, follow the rest of this guide unchanged. If `libcuda.so.1` is missing, the
+   passthrough is not set up and the CPU binary is your path until it is.
+
+⚠ **Not tested by us.** This is the documented mechanism — `libcuda.so.1` is the prover's only CUDA
+dependency, and WSL2 supplies it — but nobody has yet proved a Hazync block this way, and the
+development box this guide was written on has neither `nvidia-smi` nor `libcuda.so.1` in WSL. Step 3
+is there because it is the check that tells you *before* you download 400 MB. If you get a block
+proved on WSL2, say so in an issue and this paragraph can come out.
+
+⛔ **Native Windows cannot prove yet, and that is a separate thing from WSL2.** A Windows host can
+now embed the canonical guest (hazync#620), but the CUDA kernels are compiled with GCC-style flags
+that MSVC does not take. Tracked separately; WSL2 does not wait on it.
+
+### macOS
+
+⛔ **macOS cannot prove, and this is not something we have left unwired.** The circuit that proves
+blocks ships CUDA and C++ kernels only — `risc0-circuit-rv32im-sys/kernels/` has `cuda/` and `cxx/`
+and no Metal directory, and its `metal` feature is declared empty. NVIDIA is the only GPU path on
+any operating system.
+
+⭐ A Mac **can** verify, which needs no GPU: use the prebuilt verifier or the browser one. And as of
+hazync#620 a macOS host builds the canonical guest id, so it can build the tooling even though it
+cannot prove with it.
 
 ## Minimum spec, by what you want to do
 
 | You want to | You need |
 |-------------|----------|
-| Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done |
+| Verify a proof someone else made | Any Linux x86-64 box, no GPU, a couple of GB of RAM — download the CPU binary, done. A Mac or a browser works too |
 | Prove early or small blocks | An NVIDIA GPU + its driver (or the CPU binary, slower) |
 | Prove big modern blocks (thousands of inputs) | 64 GB+ RAM and a serious GPU |
 | Run your own party (coordinator + archive bridge) | An always-on box with a full `bitcoind` — ~8-core, 32 GB, 1 TB+ NVMe |
