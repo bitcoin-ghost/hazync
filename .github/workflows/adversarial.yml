@@ -209,6 +209,19 @@ jobs:
       - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
         run: cd coordinator && python3 test_agg_cpu.py --control
 
+      - name: The CUDA kernels' host flags are MSVC-aware, and the path in use is UNCHANGED (#631)
+        # ⛔ `-Xcompiler` forwards verbatim to nvcc's HOST compiler, which on Windows is MSVC
+        # cl.exe -- it does not speak -Wno-unused-function or -O3. Everything else the build passes
+        # (-diag-suppress, -std=c++17, -Xptxas -O3, -arch=native) is nvcc's own and portable.
+        # ⛔⛔ THE REAL RISK IS LINUX, NOT WINDOWS. This vendored crate compiles the CUDA kernels
+        # behind every proof on the board. A "portability fix" that quietly re-flags the path in
+        # use, chasing a platform nobody has yet proved on, is the actual damage -- so the check
+        # that matters is that the ELSE branch passes EXACTLY the shipped flags, in order.
+        # ⚠ Nothing here compiles a kernel under MSVC: windows-latest has no GPU, so CI could at
+        # most compile and never prove. Source-level guard, and #631 says so.
+        run: cd coordinator && python3 test_nvcc_flags.py
+      - name: nvcc-flags POSITIVE CONTROL (the unconditional GCC flags — must read as not MSVC-aware)
+        run: cd coordinator && python3 test_nvcc_flags.py --control
       - name: The guest pin, and the hex to [u32;8] conversion that decides what is embedded (#620)
         # ⛔ build.rs no longer DERIVES the image id on every platform: it verifies the ELF by
         # sha256 and takes METHOD_ID from reproduce/METHOD_ID, converting the hex to the [u32;8]
