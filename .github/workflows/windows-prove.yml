@@ -139,7 +139,26 @@ jobs:
           set -o pipefail
           # ⛔ NO `--features cuda`. That is what keeps build_cuda_kernels() -- and every GCC-style
           # nvcc flag with it -- out of this build entirely.
-          cargo build -p host --release 2>&1 | tail -25
+          #
+          # ⛔⛔ KEEP THE WHOLE LOG. `| tail -25` ate the one thing needed twice: run 36896243277
+          # ended with "error occurred in cc-rs: command did not execute successfully (exit code 2)"
+          # and the cl.exe diagnostic that said WHY had already scrolled past the window. A job whose
+          # failure cannot be read is a job that gets re-run blind.
+          set +e
+          cargo build -p host --release > build.log 2>&1
+          rc=$?
+          set -e
+          echo "cargo exit: $rc  ($(wc -l < build.log) lines captured)"
+          # ⚠ On failure show the LAST 120 lines, which is enough for a cc-rs block plus the cl.exe
+          # errors above it; the full log goes up as an artifact either way.
+          if [ "$rc" -ne 0 ]; then
+              echo "=== last 120 lines ==="
+              tail -120 build.log
+              echo "=== every compiler diagnostic in the whole log ==="
+              grep -aoE "error C[0-9]+: .{0,110}|fatal error [A-Z0-9]+: .{0,90}" build.log | sort -u | head -20
+              exit "$rc"
+          fi
+          tail -5 build.log
 
       - name: ⛔ the binary must carry the CANONICAL id, or a proof from it is worthless
         shell: bash
@@ -187,4 +206,13 @@ jobs:
         with:
           name: hazync-host-windows-x86_64-cpu
           path: prover/target/release/host.exe
+          retention-days: 14
+
+      # ⛔ The build log, ALWAYS. Two runs were spent discovering that the diagnostic had scrolled
+      # out of a tail window; the next failure should be readable without a third.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-build-log
+          path: prover/build.log
           retention-days: 14
