@@ -756,6 +756,47 @@ echo "MID=$(./hazync-host-cuda method-id 2>&1 | grep -oE '[0-9a-f]{64}' | head -
 """
 
 
+# ⛔⛔ TRANSIENT HTTP IS NOT A REASON TO PAGE A HUMAN, AND IT PAGED ONE. 2026-10-01 15:05:46, the bot
+# died three seconds into prepare() on `HTTP Error 500` fetching
+# releases/download/v0.22.1/SHA256SUMS.txt -- GitHub's release CDN having a bad spell, nothing to do
+# with this project. The same assets fetched fine minutes later (721 bytes, though the first took
+# 11.3 s, so the CDN was still unwell). It cost nothing, because prepare() runs before a cent is
+# spent, and it still woke somebody up.
+#
+# ⛔ RETRY 5xx AND TRANSPORT ERRORS, NEVER 4xx. A 404 means the asset is NOT THERE, and this project
+# has published an empty release before (hazync#909: release.sh waited 600 s, published nothing and
+# called it verified). Retrying a 404 would turn "the release is broken" into "the bot is slow",
+# which is the worse of the two failures by far.
+#
+# ⚠ BOUNDED, and bounded well under the timer. The sponsor-bot timer re-fires on
+# OnUnitInactiveSec, so a retry budget must stay small enough that a run cannot overlap the next
+# fire: 4 attempts at 2 s, 8 s, 20 s is ~30 s of waiting at worst.
+HTTP_TRIES = 4
+HTTP_BACKOFF = (2, 8, 20)
+
+
+def http_retry(fn, what):
+    """Run `fn`, retrying transient HTTP and transport failures. 4xx is NOT transient."""
+    last = None
+    for attempt in range(HTTP_TRIES):
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            # ⛔ 4xx is an answer, not a hiccup. Fail now and say which code.
+            if e.code < 500:
+                raise
+            last = e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+        if attempt < HTTP_TRIES - 1:
+            wait = HTTP_BACKOFF[min(attempt, len(HTTP_BACKOFF) - 1)]
+            print(f"sponsor_bot: {what} failed ({type(last).__name__}: {last}); "
+                  f"retry {attempt + 2}/{HTTP_TRIES} in {wait}s", flush=True)
+            time.sleep(wait)
+    raise SystemExit(f"sponsor_bot: {what} failed {HTTP_TRIES} times, last was {last} — "
+                     f"nothing was started and nothing was spent")
+
+
 class SshRunner:
     """Boots a pod against the signed release and runs assigned heights on it with `hazync-worker run <n>`,
     each under its sponsorship's identity."""
@@ -795,8 +836,10 @@ class SshRunner:
             raise SystemExit(f"sponsor_bot: the SSH key {self.key} or its .pub is missing")
         with open(self.key + ".pub") as f:
             self.ssh_pubkey = f.read().strip()
-        with urllib.request.urlopen(self.meta_url, timeout=30) as r:
-            mid = str(json.load(r).get("method_id") or "")
+        def _meta():
+            with urllib.request.urlopen(self.meta_url, timeout=30) as r:
+                return str(json.load(r).get("method_id") or "")
+        mid = http_retry(_meta, f"GET {self.meta_url}")
         if not re.fullmatch(r"[0-9a-f]{64}", mid):
             raise SystemExit(f"sponsor_bot: {self.meta_url} gave no program ID")
         self.method_id = mid
@@ -804,14 +847,17 @@ class SshRunner:
         if not tag:
             req = urllib.request.Request("https://api.github.com/repos/hazync/hazync/releases/latest",
                                          headers={"Accept": "application/vnd.github+json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                tag = json.load(r).get("tag_name", "")
+            def _latest():
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return json.load(r).get("tag_name", "")
+            tag = http_retry(_latest, "GET the latest release tag")
         if not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
             raise SystemExit(f"sponsor_bot: could not resolve a release tag (got {tag!r})")
         self.release = tag
         base = f"https://github.com/hazync/hazync/releases/download/{tag}/"
         for f in ("SHA256SUMS.txt", "SHA256SUMS.txt.asc"):
-            urllib.request.urlretrieve(base + f, os.path.join(self.dir, f))
+            http_retry(lambda f=f: urllib.request.urlretrieve(base + f, os.path.join(self.dir, f)),
+                       f"download {f}")
         if not self.verify_manifest():
             raise SystemExit("sponsor_bot: the release manifest's signature is not good; nothing was started")
         with open(os.path.join(self.dir, "SHA256SUMS.txt")) as f:
