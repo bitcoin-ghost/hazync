@@ -222,6 +222,17 @@ jobs:
         run: cd coordinator && python3 test_nvcc_flags.py
       - name: nvcc-flags POSITIVE CONTROL (the unconditional GCC flags — must read as not MSVC-aware)
         run: cd coordinator && python3 test_nvcc_flags.py --control
+      - name: A pod's own /api/witness fetch is measured, and a non-transfer is not 'fast' (#598)
+        # ⛔ /api/witness already serves the tip bundle BYTE-IDENTICALLY (sha256 0c54f7ef… both
+        # sides, measured 2026-10-01) in 1.38 s against 25.0 s for the two-leg ssh path. ⚠ But that
+        # was to a LAPTOP -- nobody has timed the POD->API leg, and #598 step 2 is gated on it.
+        # ⛔ THE FAILURE GUARDED: a probe that reads a NON-TRANSFER as a fast one. A 200 with zero
+        # bytes, a 404, a refused connection -- each looks like "fetched instantly" to anything that
+        # trusts curl's time_total, and would argue for rewriting the staging path on no evidence.
+        # The control trusts time_total alone and must misread a 0-byte 200 as a 0.004 s fetch.
+        run: cd coordinator && python3 test_pod_api_probe.py
+      - name: Pod-API-probe POSITIVE CONTROL (trust time_total — a 0-byte 200 must read as fast)
+        run: cd coordinator && python3 test_pod_api_probe.py --control
       - name: A transient 500 must not page a human, and a failed run must not re-rent (sponsor bot)
         # 📏 2026-10-01 15:05:46 the sponsor bot died 3 s into prepare() on `HTTP Error 500` fetching
         # releases/download/v0.22.1/SHA256SUMS.txt -- GitHub's CDN, not ours; the same assets
