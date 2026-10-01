@@ -15,19 +15,47 @@ to 0.0 and did not fire in hour 4). #550 proposes using it to GROUP: cards that 
 quickly form a bank, and each bank takes its own block. A bank's wall is set by its slowest member,
 so segregating the tail into one bank leaves the other bank with a far better worst peer.
 
-⛔⛔ BUT A RATIO OF WORST PEERS OVERSTATES THE PRIZE, BY ABOUT THREEFOLD. "5.1x better worst peer"
-is what this tool reported for hour 4, and it invites the reading that a bank would prove 5x faster.
-What the fold actually waits for is the slowest join in each batch that is in flight together, and
-that is measurable from the same logs: summed over hour 4's 619 batches it is 6,416 s, and removing
-the worst card entirely takes off **12.9 %**. The worst five take off 27.8 %, and it then SATURATES
-— 30.2 % for ten. So the tail is concentrated in about five of 37 cards and the ceiling on any
-banking or cutting scheme is roughly a third of the fold's waiting, not a multiple of it.
-`tail_prize` computes this, so the number is measured rather than asserted.
+⛔⛔ BUT A RATIO OF WORST PEERS OVERSTATES THE PRIZE. "5.1x better worst peer" is what this tool
+reported for hour 4, and it invites the reading that a bank would prove 5x faster. What the fold
+actually waits for is the slowest join in each batch that is in flight together, and that is
+measurable from the same logs: summed over hour 4's 619 batches it is 6,416 s, and removing the
+worst card entirely takes off **12.9 %**; the worst five, 27.8 %.
 
-⛔ AND THE DATACENTRE LABEL IS NOT THE SIGNAL. Decomposing the variance of log(rtt) over the same
-13,676 joins: 31.4 % is WHEN the join happened, 21.6 % is WHICH LEVEL of the tree, 17.3 % is WHICH
-CARD, and only **12.7 % is WHICH DATACENTRE**. Grouping by `dc` would capture almost none of it.
-#550's own wording — bank by measured link, not by a datacentre label — is what the data supports.
+⛔ AND THE PRIZE DEPENDS ON THE FLEET SIZE, WHICH IS THE WHOLE POINT OF #550. Replicated on tip
+hour 5 (2026-09-30, 6 rankable cards, 258 batches, the SAME tool and the same two logs):
+
+    fleet    drop the worst card
+    37          12.9 %
+     6          45.2 %
+
+One bad card in six is in nearly every batch and sets the wall nearly every time; one in
+thirty-seven is not. ⇒ **A bank suffers its worst member far more than the whole fleet does**,
+which argues for banking and warns that the slow bank pays for it.
+
+⚠ AND THE CURVE DOES NOT "SATURATE" -- I published that, and it was the shape of the window I
+chose. The default `ks` stops at ten, and inside that window hour 4 does flatten (27.8 % at five,
+30.2 % at ten). Over the full range it climbs again: 49.5 % at twenty-two, 74.9 % at thirty-one.
+Of course it does -- past a point it is measuring a tiny fleet, not a tail. So `tail_prize` now
+reports how many cards are LEFT at each step and refuses a step that leaves fewer than MIN_FLEET.
+
+⛔ AND THE DATACENTRE LABEL IS NOT THE SIGNAL — REPLICATED ON TWO RUNS. Decomposing the variance
+of log(rtt):
+
+                        hour 4            hour 5
+                   (37 cards, 9 dc)   (6 cards, 2 dc)
+    WHEN (batch)        31.4 %            26.1 %
+    WHICH LEVEL         21.6 %            28.6 %
+    WHICH CARD          17.3 %            17.5 %      <- near identical across both
+    WHICH DATACENTRE    12.7 %             7.8 %      <- smallest in both
+
+⭐ The CARD share lands within 0.2 points on two runs whose fleets differ sixfold, which is the
+strongest thing measured here. And `dc` is the smallest term in both, so grouping by it would
+capture almost none of the spread. #550's own wording -- bank by measured link, not by a datacentre
+label -- is what the data supports.
+
+⚠ Hour 5's dc row rests on TWO groups covering four of its six cards, so on its own it is weak; it
+does not contradict hour 4 and is not independent confirmation either. Cited as replication of the
+ORDERING, not of the number.
 
 ⚠ AND THE CARD EFFECT IS SMALLER AND LESS STABLE THAN THE SPREAD SUGGESTS. Measured against the
 cards it joined alongside, rather than against the whole run, the per-card effect is 6.5x
@@ -119,7 +147,10 @@ def cohort_effect(groups, min_samples=MIN_SAMPLES):
     return {c: math.exp(sum(v) / len(v)) for c, v in tot.items() if len(v) >= min_samples}
 
 
-def tail_prize(groups, order, ks=(1, 2, 3, 5, 8, 10)):
+MIN_FLEET = 3
+
+
+def tail_prize(groups, order, ks=(1, 2, 3, 5, 8, 10), min_fleet=MIN_FLEET):
     """What dropping the worst k cards takes off the time the FOLD ACTUALLY WAITS.
 
     ⭐ THE QUANTITY THAT MATTERS. A bank's "worst peer" is one number over a whole run; the fold
@@ -127,23 +158,36 @@ def tail_prize(groups, order, ks=(1, 2, 3, 5, 8, 10)):
     is therefore the measured thing a tail costs — and it is much less than the worst-peer ratio
     implies, because most batches are not the one the worst card ruined.
 
-    Returns (baseline_ms, [(k, remaining_ms, fraction_saved)]).
+    Returns (baseline_ms, [(k, cards_left, remaining_ms, fraction_saved)]).
 
     ⛔ AN UPPER BOUND, NOT A SAVING. The dropped cards' segments still have to be proved by someone,
-    and a second bank pays its own fold. On hour 4 the curve is 12.9 % for one card, 27.8 % for five
-    and 30.2 % for ten: concentrated in a handful of cards, and saturating.
+    and a second bank pays its own fold.
+
+    ⛔⛔ AND IT IS NOT A CURVE THAT SATURATES, WHICH I PUBLISHED AND WAS WRONG ABOUT. Within the
+    default `ks` (which stops at ten) hour 4 does flatten: 27.8 % at five, 30.2 % at ten. Over the
+    full range it climbs again -- 49.5 % at twenty-two, 74.9 % at thirty-one -- because past a
+    point the thing being measured is a tiny fleet rather than a tail. Dropping 36 of 37 cards
+    "saves" 94.1 %, which means nothing at all.
+
+    ⚠ SO EVERY ROW CARRIES HOW MANY CARDS ARE LEFT, and a `k` that would leave fewer than
+    `min_fleet` is not reported at all. The caller should not have to remember that a prize
+    computed on a fleet of two is not a prize.
     """
     usable = [g for g in groups if g]
     base = sum(max(r for _, r, _ in g) for g in usable)
     out = []
     for k in ks:
-        if k > len(order):
-            break
+        # ⛔ BOTH GUARDS, NOT ONE. `k > len(order)` is nonsense; `len(order) - k < min_fleet` is
+        # arithmetic on a fleet too small to mean anything, and it is the one that bit -- hour 5
+        # has six cards and the old code happily reported dropping five of them.
+        # ⚠ `continue`, not `break`: `ks` is not required to be sorted.
+        if k > len(order) or len(order) - k < min_fleet:
+            continue
         drop = set(order[:k])
-        left = [max((r for _, r, c in g if c not in drop), default=None) for g in usable]
-        left = [x for x in left if x is not None]
-        rem = sum(left)
-        out.append((k, rem, 1.0 - rem / base if base else 0.0))
+        maxes = [max((r for _, r, c in g if c not in drop), default=None) for g in usable]
+        maxes = [x for x in maxes if x is not None]
+        rem = sum(maxes)
+        out.append((k, len(order) - k, rem, 1.0 - rem / base if base else 0.0))
     return base, out
 
 
@@ -201,8 +245,15 @@ def report(samples, n_banks, by_name=False, batches=None):
         print(f"  ⛔ WHAT THE FOLD ACTUALLY WAITS FOR — the slowest join in each of "
               f"{len([g for g in batches if g])} batch(es) that were in flight together, summed:"
               f" {base / 1000:.0f} s")
-        for k, rem, frac in curve:
-            print(f"     drop the worst {k:<2}  {rem / 1000:7.0f} s   {frac * 100:5.1f} % off")
+        if not curve:
+            print(f"     ⚠ {len(eff)} rankable card(s): dropping ANY of them leaves fewer than "
+                  f"{MIN_FLEET}, so there is no prize to report — not a prize of zero.")
+        for k, left, rem, frac in curve:
+            print(f"     drop the worst {k:<2} ({left:>2} left)  {rem / 1000:7.0f} s   "
+                  f"{frac * 100:5.1f} % off")
+        print("     ⚠ the prize grows as the fleet SHRINKS — measured 12.9 % for the worst card on"
+              " hour 4's 37 cards and 45.2 % on hour 5's 6. It is not a constant, and past a point"
+              " it stops being a tail and becomes a small fleet.")
         if eff:
             hi = max(eff.values())
             lo = min(eff.values())

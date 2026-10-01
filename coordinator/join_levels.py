@@ -188,9 +188,11 @@ def by_card(samples):
     those blocks contributed 12, 13 and 2 joins against 200-600 per card, so they cannot move a p90.
 
     ⛔ BUT A p90 SPREAD IS NOT THE PRIZE. It compares each card against the whole run, and the run
-    got slower for EVERYONE as blocks grew, and the prize -- what the fold's waiting would actually
-    lose with the tail gone -- is 12.9 % for the worst card and 30.2 % for the worst ten, not a
-    multiple. Measured on the same 13,676 joins, decomposing the
+    got slower for EVERYONE as blocks grew. The prize -- what the fold's waiting would actually
+    lose with the tail gone -- is 12.9 % for the worst card on this 37-card fleet, and 45.2 % for
+    the worst card on tip hour 5's six. ⚠ It scales with the fleet, so it is not a constant and
+    `tail_prize` reports the surviving fleet on every row. Measured on the same 13,676 joins,
+    decomposing the
     variance of log(rtt): 31.4 % is WHEN a join happened, 21.6 % is WHICH LEVEL, 17.3 % is WHICH
     CARD and only 12.7 % is WHICH DATACENTRE. Controlled for the cohort a card joined alongside, the
     card effect is 6.5x (0.46x .. 2.98x), not 12.7x -- and it is only moderately persistent
