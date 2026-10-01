@@ -26,6 +26,20 @@ name: windows-prove
 #
 # ⛔⛔ IF prove-block PASSES HERE, THAT IS #616's BAR: a proof produced on a non-Linux machine whose
 # receipt verifies against the canonical guest id. Not "the barrier is documented as removed".
+#
+# ⛔⛔ DISPATCH THIS ON A BRANCH, NOT ON main, WHILE IT IS STILL AN OPEN QUESTION.
+#
+# A workflow_dispatch run attaches its check to the commit it ran against. Dispatched on main, a
+# failure posts a red `prove` check on main's HEAD -- indistinguishable at a glance from main being
+# broken. That happened once (run 36892040422) and the red outlived the experiment: every attempt
+# after it was on a branch, so nothing was repeating, but the repo looked like it was failing.
+#
+# ⚠ The next person to read a red that does not mean what it looks like either panics or learns to
+# ignore reds. Both are worse than no signal at all. ⇒ The guest and build jobs below are honest
+# tests and SHOULD go red when they break; the point is only where the run is anchored.
+#
+# ⇒ Once prove-block passes, this is worth promoting to a real check on main. Until then it is an
+# experiment and belongs on the branch carrying the experiment.
 
 on:
   workflow_dispatch:
@@ -33,6 +47,9 @@ on:
       seg_po2:
         description: 'HAZYNC_SEG_PO2 (lower = less memory per segment; blank = the default)'
         default: ''
+      ref_note:
+        description: 'DISPATCH A BRANCH, NOT main — see the warning in this file'
+        default: 'dispatch this on a branch; a failure on main posts a red check against main'
 
 permissions:
   contents: read
