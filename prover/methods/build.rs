@@ -158,10 +158,6 @@ fn embed_prebuilt_guest(elf_path: &str) {
     if elf.is_empty() {
         panic!("HAZYNC_GUEST_ELF={elf_path}: the file is empty");
     }
-    let digest = risc0_binfmt::compute_image_id(&elf)
-        .unwrap_or_else(|e| panic!("HAZYNC_GUEST_ELF={elf_path}: not a usable guest ELF: {e}"));
-    let got: String = digest.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
-
     // ⚠ The pin lives at the repo root, two levels above this crate. Read it rather than hardcoding
     // the id here: one place to change, and it is the same file CI asserts against.
     let pin_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reproduce/METHOD_ID");
@@ -174,16 +170,43 @@ fn embed_prebuilt_guest(elf_path: &str) {
         .find(|l| !l.is_empty() && !l.starts_with('#'))
         .unwrap_or_else(|| panic!("{} has no id line", pin_path.display()));
 
-    // ⛔ THE WHOLE POINT. Embedding an unverified guest would let a build ship a program that is not
-    // the one every published proof attests to, and the failure would surface only as rejected
-    // proofs on someone else's machine.
-    if got != want {
+    // ⛔⛔ THE GUEST IS NOW VERIFIED BY ITS SHA256, NOT BY RECOMPUTING ITS IMAGE ID, AND THAT IS
+    // WHAT MAKES WINDOWS POSSIBLE. `risc0-binfmt` -- the crate that computes an image id -- pulls
+    // in `risc0-zkvm-platform`, whose GUEST-side syscall `sys_alloc_aligned` is an unresolved
+    // external when MSVC's link.exe links this build script. Measured on windows-latest,
+    // run 36824751222:
+    //
+    //     librisc0_zkvm_platform.rlib : error LNK2019: unresolved external symbol sys_alloc_aligned
+    //     build_script_build.exe : fatal error LNK1120: 1 unresolved externals
+    //
+    // A sha256 is a STRICTER pin than an image id, not a weaker one: an id is computed over the
+    // loaded image, so two ELFs differing in debug info could share one, while only one byte
+    // sequence has a given sha256.
+    let sha_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reproduce/GUEST_ELF_SHA256");
+    println!("cargo:rerun-if-changed={}", sha_path.display());
+    let sha_src = std::fs::read_to_string(&sha_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", sha_path.display()));
+    let want_sha = sha_src
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or_else(|| panic!("{} has no hash line", sha_path.display()));
+    let got_sha = sha256_hex(&elf);
+    if got_sha != want_sha {
         panic!(
-            "HAZYNC_GUEST_ELF={elf_path} is NOT the canonical guest.\n               its id : {got}\n  canonical: {want}\n               Build the guest with reproduce/Dockerfile and pass that ELF, or unset              HAZYNC_GUEST_ELF to build from source."
+            "HAZYNC_GUEST_ELF={elf_path} is NOT the canonical guest.\n       its sha256 : {got_sha}\n  canonical sha : {want_sha}\n       Build the guest with reproduce/Dockerfile and pass that ELF, or unset\n       HAZYNC_GUEST_ELF to build from source."
         );
     }
 
-    let words = digest.as_words();
+    // ⚠ AND WHERE THE TOOLING LINKS, THE TWO PINS ARE CHECKED AGAINST EACH OTHER. The id below is
+    // taken FROM the pin rather than derived from the ELF, so a METHOD_ID updated without its
+    // GUEST_ELF_SHA256 would otherwise embed an id the bytes do not have. On every non-MSVC host
+    // this recomputes the id and refuses a mismatch, and `reproducible-image-id` runs it on every
+    // push. ⛔ On MSVC that cross-check is absent and the pin PAIR is trusted; it is verified
+    // continuously elsewhere, and this says so rather than implying otherwise.
+    verify_image_id(&elf, want, elf_path);
+
+    let words = id_words_from_hex(want, &pin_path.display().to_string());
     let ids = words.iter().map(|w| w.to_string()).collect::<Vec<_>>().join(", ");
     let abs = std::fs::canonicalize(elf_path)
         .unwrap_or_else(|e| panic!("cannot resolve {elf_path}: {e}"));
@@ -199,5 +222,66 @@ fn embed_prebuilt_guest(elf_path: &str) {
     )
     .unwrap_or_else(|e| panic!("cannot write {}: {e}", out.display()));
 
-    println!("cargo:warning=methods: embedded the prebuilt canonical guest ({got}) from {elf_path}");
+    println!(
+        "cargo:warning=methods: embedded the prebuilt canonical guest from {elf_path} \
+         (sha256 {got_sha}, id {want})"
+    );
+}
+
+/// sha256 as lowercase hex. ⚠ Deliberately `sha2` and not `risc0-binfmt`: it is pure Rust with no
+/// guest-side symbols, so it links on every host including MSVC.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A 64-hex image id as risc0's `[u32; 8]`.
+///
+/// ⚠ LITTLE-ENDIAN, and verified against a real recorded pair rather than assumed: this box's
+/// non-canonical guest reports `fb4d7352f9f0...` and the `methods.rs` generated from it holds
+/// `[1383288315, ...]`, and 1383288315 == 0x52734DFB == the bytes `fb 4d 73 52` read little-endian.
+/// Big-endian gives `52734dfb...`, which is the same bytes in the wrong order.
+fn id_words_from_hex(hex: &str, whence: &str) -> [u32; 8] {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        panic!("{whence}: {hex:?} is not a 64-character hex image id");
+    }
+    let mut out = [0u32; 8];
+    for (i, w) in out.iter_mut().enumerate() {
+        let mut b = [0u8; 4];
+        for (j, byte) in b.iter_mut().enumerate() {
+            let at = (i * 4 + j) * 2;
+            *byte = u8::from_str_radix(&hex[at..at + 2], 16).expect("hex pair");
+        }
+        *w = u32::from_le_bytes(b);
+    }
+    out
+}
+
+/// Recompute the ELF's image id and refuse a mismatch — where `risc0-binfmt` can be linked.
+#[cfg(not(target_env = "msvc"))]
+fn verify_image_id(elf: &[u8], want: &str, elf_path: &str) {
+    let digest = risc0_binfmt::compute_image_id(elf)
+        .unwrap_or_else(|e| panic!("HAZYNC_GUEST_ELF={elf_path}: not a usable guest ELF: {e}"));
+    let got: String = digest.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    if got != want {
+        panic!(
+            "HAZYNC_GUEST_ELF={elf_path}: its sha256 matches the pin but its IMAGE ID does not.\n  \
+             id from the ELF : {got}\n  reproduce/METHOD_ID : {want}\n  \
+             The two pins have drifted — one was updated without the other."
+        );
+    }
+}
+
+/// ⛔ MSVC cannot link `risc0-binfmt` (see embed_prebuilt_guest). The sha256 check still holds the
+/// guest to an exact byte sequence; what is missing is the cross-check that the pinned id belongs
+/// to those bytes, and that runs on every non-MSVC build and in CI.
+#[cfg(target_env = "msvc")]
+fn verify_image_id(_elf: &[u8], want: &str, _elf_path: &str) {
+    println!(
+        "cargo:warning=MSVC host: the guest was verified by sha256 and METHOD_ID {want} was taken \
+         from reproduce/METHOD_ID without being recomputed (risc0-binfmt does not link here). The \
+         pin pair is cross-checked on every non-MSVC build."
+    );
 }

@@ -37,6 +37,11 @@ check() { if [ "$1" = 1 ]; then echo "  ok   $2"; else echo "  FAIL $2"; fails=$
 
 PIN=$(grep -vE '^\s*#|^\s*$' "$HERE/../reproduce/METHOD_ID" | head -1 | tr -d '[:space:]')
 check "$([ ${#PIN} -eq 64 ] && echo 1)" "the canonical pin is a 64-hex id (${PIN:0:12}…)"
+# ⛔ THERE ARE NOW TWO PINS, and the one the build refuses on is the SHA. build.rs verifies the
+# ELF by sha256 on every platform -- because risc0-binfmt does not link under MSVC -- and recomputes
+# the image id only where it can. So the refusal an operator sees names the sha, not the id.
+SHA=$(grep -vE '^\s*#|^\s*$' "$HERE/../reproduce/GUEST_ELF_SHA256" 2>/dev/null | head -1 | tr -d '[:space:]')
+check "$([ ${#SHA} -eq 64 ] && echo 1)" "and a 64-hex guest sha256 pin (${SHA:0:12}…)"
 
 # ── a guest that is NOT the canonical one ───────────────────────────────────────────────────────
 # ⚠ Real bytes, not a fabricated file: the tree's own native build is a genuine, well-formed guest
@@ -59,7 +64,12 @@ if [ "$CONTROL" = 1 ]; then
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf8").read()
-s = s.replace("    if got != want {", "    if false {", 1)
+n0 = s.count("    if got_sha != want_sha {") + s.count("    verify_image_id(&elf, want, elf_path);")
+s = s.replace("    if got_sha != want_sha {", "    if false {", 1)
+s = s.replace("    verify_image_id(&elf, want, elf_path);", "    let _ = (want, elf_path);", 1)
+# ⛔ Assert the patch LANDED: a str.replace that matches nothing succeeds silently, and
+# this project has printed "patched" over an unchanged file more than once.
+assert n0 == 2, f"expected both anchors, found {n0} -- build.rs has changed shape"
 open(p, "w", encoding="utf8").write(s)
 PY
 fi
@@ -78,9 +88,13 @@ would ship a program that is not the one published proofs attest to"
 else
     check "$([ $rc -ne 0 ] && echo 1)" "a non-canonical guest is REFUSED (exit $rc)"
     check "$(printf '%s' "$out" | grep -q 'NOT the canonical guest' && echo 1)" "and says so plainly"
-    check "$(printf '%s' "$out" | grep -q "$PIN" && echo 1)" "printing the canonical id it wanted"
-    check "$(printf '%s' "$out" | grep -qE 'its id *: [0-9a-f]{64}' && echo 1)" \
-          "and the id it was given, so the operator can see which guest they have"
+    check "$(printf '%s' "$out" | grep -q "$SHA" && echo 1)" \
+          "printing the canonical SHA it wanted -- the pin it actually refused on"
+    check "$(printf '%s' "$out" | grep -qE 'its sha256 *: [0-9a-f]{64}' && echo 1)" \
+          "and the sha it was given, so the operator can see which guest they have"
+    # ⚠ The ID is deliberately NOT asserted here. The sha is checked first, so a non-canonical
+    # guest never reaches the id comparison -- asserting the id would fail a CORRECT build, which is
+    # exactly how this test broke when the sha check went in.
 fi
 
 # ── the default path must be untouched ──────────────────────────────────────────────────────────

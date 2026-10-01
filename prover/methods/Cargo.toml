@@ -5,6 +5,15 @@ edition = "2021"
 
 [build-dependencies]
 risc0-build = { version = "=3.0.5", features = ["unstable"] }
+# ⚠ Already in the lock (0.10.9) via risc0, so this pulls nothing new. Pure Rust, links anywhere.
+sha2 = "0.10"
+
+# ⛔ risc0-binfmt pulls risc0-zkvm-platform, whose GUEST-side syscall `sys_alloc_aligned` is an
+# unresolved external when MSVC's link.exe links this build script -- measured on windows-latest,
+# run 36824751222: LNK2019 then LNK1120. Keeping it OUT of the MSVC build graph is what lets a
+# Windows host build the methods crate at all; the guest is verified by sha256 on every platform
+# and the id is additionally recomputed wherever this crate IS present.
+[target.'cfg(not(target_env = "msvc"))'.build-dependencies]
 risc0-binfmt = "=3.0.5"
 
 [package.metadata.risc0]

@@ -209,6 +209,20 @@ jobs:
       - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
         run: cd coordinator && python3 test_agg_cpu.py --control
 
+      - name: The guest pin, and the hex to [u32;8] conversion that decides what is embedded (#620)
+        # ⛔ build.rs no longer DERIVES the image id on every platform: it verifies the ELF by
+        # sha256 and takes METHOD_ID from reproduce/METHOD_ID, converting the hex to the [u32;8]
+        # that lands in methods.rs. Get the byte order wrong and the build embeds a WRONG id while
+        # reporting success, and the only symptom is proofs rejected on someone else's machine.
+        # ⛔ WHY IT MOVED: risc0-binfmt pulls risc0-zkvm-platform, whose GUEST syscall
+        # sys_alloc_aligned is an unresolved external under MSVC link.exe (LNK2019/LNK1120,
+        # measured on windows-latest in run 36824751222). The id check stays where it links.
+        # 📏 The endianness is MEASURED: this box's native guest reports fb4d7352... and the
+        # methods.rs from that same build holds [1383288315, ...]; 1383288315 == 0x52734DFB ==
+        # `fb 4d 73 52` read LITTLE-endian. The control uses big-endian and must NOT reproduce it.
+        run: cd coordinator && python3 test_guest_pin.py
+      - name: Guest-pin POSITIVE CONTROL (big-endian — it must not reproduce the pair)
+        run: cd coordinator && python3 test_guest_pin.py --control
       - name: The aggregate probe's FULL result reaches the run's artefacts (hazync#526/#550)
         # ⛔ `slow_worker_cut` ranks on the probe, and the probe reached the run log as PROSE,
         # truncated to six with "+3 more" -- and tip hour 4's run log was never saved into its run
