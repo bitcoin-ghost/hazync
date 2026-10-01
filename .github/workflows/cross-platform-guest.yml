@@ -161,6 +161,12 @@ jobs:
         if: steps.want.outputs.go == '1'
         with:
           name: hazync-guest-elf
+          # ⛔ INTO THE CRATE DIRECTORY, measured 2026-10-01. A cargo build script runs with its cwd
+          # set to its own package root (prover/methods), NOT the step's working-directory (prover),
+          # so `../hazync-guest.elf` resolved one level too high and build.rs died with
+          # "cannot read it: No such file or directory". Landing the file in the crate dir means the
+          # path needs no translation -- and in particular no MSYS-vs-native path fix on Windows.
+          path: prover/methods
           run-id: ${{ github.event.inputs.guest_from || github.run_id }}
           github-token: ${{ github.token }}
 
@@ -173,8 +179,13 @@ jobs:
         env:
           NAME: ${{ matrix.name }}
         run: |
-          [ -s hazync-guest.elf ] || { echo "no guest ELF downloaded"; exit 1; }
-          echo "size $(wc -c < hazync-guest.elf) bytes on $NAME"
+          ELF=prover/methods/hazync-guest.elf
+          [ -s "$ELF" ] || { echo "no guest ELF at $ELF"; ls -la prover/methods | head; exit 1; }
+          # ⚠ Assert the SIZE, not just non-emptiness: a truncated artifact would otherwise reach
+          # build.rs and fail there as "not a usable guest ELF", which reads like a platform problem.
+          n=$(wc -c < "$ELF")
+          echo "size $n bytes on $NAME"
+          [ "$n" -gt 60000000 ] || { echo "⛔ only $n bytes — the artifact is truncated"; exit 1; }
 
       - name: ⛔ THE QUESTION — embed the canonical guest on this platform
         if: steps.want.outputs.go == '1'
@@ -183,10 +194,11 @@ jobs:
         env:
           # ⭐ build.rs PANICS unless the id computed from this ELF equals reproduce/METHOD_ID, so a
           # successful build IS the assertion. There is nothing to compare afterwards.
-          # ⚠ RELATIVE, not ${{ github.workspace }}: on Windows that expands to `D:\a\r\r` and
-          # joining it with a forward slash makes a mixed-separator path for no reason. The cwd is
-          # `prover` (working-directory below), so the artifact sits one level up.
-          HAZYNC_GUEST_ELF: ../hazync-guest.elf
+          # ⚠ BARE FILENAME, resolved by build.rs against ITS OWN crate directory, which is where
+          # the artifact was downloaded. Measured: `../hazync-guest.elf` failed on all three
+          # platforms because a build script's cwd is the crate root, not the step's
+          # working-directory. A bare name also avoids any Windows path-separator question.
+          HAZYNC_GUEST_ELF: hazync-guest.elf
         run: |
           set -o pipefail
           cargo build -p methods --release 2>&1 | tail -30
@@ -200,7 +212,10 @@ jobs:
         # toolchain, which may simply not exist on Windows or macOS -- in which case the build fails
         # for an unrelated reason and the control is INCONCLUSIVE, which is reported as such and is
         # not a pass. The failure is a native build that comes out canonical.
-        if: steps.want.outputs.go == '1'
+        # ⚠ `always()`: the control is worth knowing even when the step above FAILED -- "is a
+        # native build here canonical?" is an independent question, and skipping it (which is what
+        # happened on the first run) throws away the one answer that was still available.
+        if: always() && steps.want.outputs.go == '1'
         shell: bash
         working-directory: prover
         env:
