@@ -203,41 +203,56 @@ jobs:
           set -o pipefail
           cargo build -p methods --release 2>&1 | tail -30
 
-      - name: ⛔ POSITIVE CONTROL — without the ELF this platform must NOT be canonical
-        # ⛔ WITHOUT THIS THE STEP ABOVE PROVES NOTHING. If a native build on this platform happened
-        # to produce the canonical id anyway, the mechanism would be doing no work and the step would
-        # pass either way. On Linux this is measured: unset gives fb4d7352..., not 37987b85...
+      - name: ⛔ POSITIVE CONTROL — a NON-canonical guest must be REFUSED here
+        # ⛔⛔ THE FIRST VERSION OF THIS CONTROL DID NOT WORK, ON ANY PLATFORM. It built with
+        # HAZYNC_GUEST_ELF unset and required the result not to be canonical -- but a native guest
+        # build needs the risc0 RISC-V toolchain, which only the container has, so it reported
+        # "⚠ INCONCLUSIVE" on linux, macos AND windows alike. Measured on run 36824751222. It was
+        # testing whether the runner could do something it was never equipped to do, and the embed
+        # step above was left resting on build.rs's own check with nothing guarding it.
         #
-        # ⚠ THREE OUTCOMES, AND ONLY ONE IS A FAILURE. A native guest build needs the risc0 RISC-V
-        # toolchain, which may simply not exist on Windows or macOS -- in which case the build fails
-        # for an unrelated reason and the control is INCONCLUSIVE, which is reported as such and is
-        # not a pass. The failure is a native build that comes out canonical.
-        # ⚠ `always()`: the control is worth knowing even when the step above FAILED -- "is a
-        # native build here canonical?" is an independent question, and skipping it (which is what
-        # happened on the first run) throws away the one answer that was still available.
+        # ⭐ THIS ONE TESTS THE MECHANISM INSTEAD. Flip one byte of the canonical ELF and require
+        # the build to FAIL. No toolchain, works on every platform, and it is the exact failure a
+        # contributor must hit if they are handed the wrong guest.
+        #
+        # ⚠ A byte in the MIDDLE, not the header: corrupting the ELF header would be rejected as
+        # "not a usable guest ELF", which is a different refusal from "this is not the canonical
+        # guest". The check must fail on the IDENTITY, not on the parse.
         if: always() && steps.want.outputs.go == '1'
         shell: bash
         working-directory: prover
         env:
           NAME: ${{ matrix.name }}
         run: |
-          PIN=$(grep -vE '^\s*#|^\s*$' ../reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
+          python3 - <<'PY'
+          import shutil
+          shutil.copy("methods/hazync-guest.elf", "methods/tampered-guest.elf")
+          with open("methods/tampered-guest.elf", "r+b") as fh:
+              fh.seek(40_000_000)                 # well past the header, inside the loaded image
+              b = fh.read(1)
+              fh.seek(40_000_000)
+              fh.write(bytes([b[0] ^ 0x01]))
+          PY
           set +e
-          out=$(env -u HAZYNC_GUEST_ELF cargo build -p methods --release 2>&1); rc=$?
+          out=$(HAZYNC_GUEST_ELF=tampered-guest.elf cargo build -p methods --release 2>&1); rc=$?
           set -e
-          if [ "$rc" -ne 0 ]; then
-              echo "⚠ INCONCLUSIVE on $NAME: a native guest build does not complete here"
-              echo "  (rc=$rc — most likely no RISC-V guest toolchain, which is expected off Linux)"
-              printf '%s\n' "$out" | tail -15
-              exit 0
-          fi
-          if printf '%s' "$out" | grep -q "$PIN"; then
-              echo "⛔ a NATIVE build on $NAME produced the canonical id — then the"
-              echo "   prebuilt-guest mechanism is not what made the step above pass."
+          rm -f methods/tampered-guest.elf
+          if [ "$rc" -eq 0 ]; then
+              echo "⛔ control FAILED on $NAME: a guest with one byte flipped was ACCEPTED."
+              echo "   Then the embed step above proves nothing — the check is not checking."
               exit 1
           fi
-          echo "ok — a native build here is NOT canonical, so the step above measured the mechanism"
-
+          # ⛔ And it must refuse for the RIGHT REASON. A refusal because the file was unreadable,
+          # or because cargo could not fetch a crate, would pass a naive "it failed" test.
+          if printf '%s' "$out" | grep -qiE "NOT the canonical guest|not a usable guest ELF"; then
+              echo "ok — a one-byte-different guest is REFUSED on $NAME (rc=$rc), by identity"
+              printf '%s\n' "$out" | grep -iE "NOT the canonical|its id|not a usable" | head -4
+          else
+              echo "⚠ INCONCLUSIVE on $NAME: the build failed (rc=$rc) but not with the guest-id"
+              echo "  refusal, so this says nothing about the mechanism. Last lines:"
+              printf '%s\n' "$out" | tail -12
+              exit 1
+          fi
       - name: What this platform answered
         if: always() && steps.want.outputs.go == '1'
         shell: bash

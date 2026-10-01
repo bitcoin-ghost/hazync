@@ -1,0 +1,36 @@
+# sha256 of the canonical Hazync guest, as the container emits it.
+#
+# WHAT THIS PINS, AND WHY IT IS NOT METHOD_ID. METHOD_ID is the guest's IMAGE id, computed over the
+# loaded program image. This is the sha256 of the FILE the container produces:
+#
+#     prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
+#
+# 69,980,208 bytes, risc0's own R0BF container format (it begins "R0BF", it is NOT an ELF, despite
+# the HAZYNC_GUEST_ELF variable that names it).
+#
+# ⛔ WHY A SECOND PIN EXISTS AT ALL. `prover/methods/build.rs` verifies a prebuilt guest against
+# THIS hash on every platform, because the crate that computes an image id -- risc0-binfmt -- pulls
+# in risc0-zkvm-platform, whose GUEST-side syscall `sys_alloc_aligned` is an unresolved external
+# when MSVC's link.exe links the build script. Measured on windows-latest, run 36824751222:
+#
+#     librisc0_zkvm_platform.rlib : error LNK2019: unresolved external symbol sys_alloc_aligned
+#     build_script_build.exe : fatal error LNK1120: 1 unresolved externals
+#
+# So the id is recomputed wherever risc0-binfmt links -- every non-MSVC host, plus the
+# `reproducible-image-id` job on every push -- and THAT is what keeps this hash and METHOD_ID from
+# drifting apart. A sha256 is the stricter of the two: an image id covers the loaded image, so two
+# files differing only outside it could share one id, while only one byte sequence has this hash.
+#
+# 📏 BYTE-REPRODUCIBILITY MEASURED, NOT ASSUMED, 2026-10-01. Three independent container builds on
+# three separate GitHub runners produced a byte-identical file:
+#
+#     run 36824751222   35e3f55e…
+#     run 36827742278   35e3f55e…
+#     run 36827755977   35e3f55e…
+#
+# ⚠ That is three samples, not a proof. If a toolchain bump ever makes the bytes drift while the id
+# holds, a non-MSVC build fails on THIS hash while its id check passes -- which is the signal, and
+# the answer is to re-observe the hash, not to delete the check.
+#
+# Corresponds to METHOD_ID 37987b85ec665970ac6c5e8031deb8160ac8ed846f09056c3790b5f78c8bb5dd.
+35e3f55ed873de27f3e06b4452fb9ac80940e02f845b671a0e019cf83735c02f
