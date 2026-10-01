@@ -18,3 +18,13 @@ risc0-zkvm = { path = "../vendor/risc0-zkvm" }
 # 0x87FFFFFE >= P, which breaks one NTT butterfly pair and yields a receipt that fails verify().
 # Prover-only: METHOD_ID, circuit and verifier are unchanged. Drop once upstream ships the fix.
 risc0-circuit-rv32im-sys = { path = "../vendor/risc0-circuit-rv32im-sys" }
+# hazync#616: risc0-circuit-keccak 4.0.6 with ONE fix, in build.rs (search
+# HAZYNC_WINDOWS_PATH_ESCAPE). generate_zkr_table() interpolated an ABSOLUTE PATH straight into a
+# Rust string literal; on Windows `canonicalize` returns `\\?\C:\Users\...` and every `\U`, `\r`,
+# `\k` became an invalid character escape -- 40 errors, measured in run 36907036212. Backslashes are
+# now escaped, which is a no-op on Linux.
+# ⚠ WE NEVER EXECUTE THIS CIRCUIT: the Bitcoin guest uses SHA-256 and RIPEMD-160, never Keccak. But
+# risc0-zkvm declares risc0-circuit-keccak UNCONDITIONALLY (no `optional = true` anywhere) and its
+# `prove` feature turns on `risc0-circuit-keccak/prove`, so it must COMPILE regardless.
+# ⛔ Prover-side: METHOD_ID, the circuit and the verifier are unchanged. Drop once upstream fixes it.
+risc0-circuit-keccak = { path = "../vendor/risc0-circuit-keccak" }
