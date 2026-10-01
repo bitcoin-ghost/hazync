@@ -330,6 +330,55 @@ def measured_cost_per_proof(path=ECONOMICS):
 # speed; it is strongly implied by single-threaded witness generation and unverified. So the probe
 # REPORTS by default and only ranks on CPU under --agg-prefer-cpu. That is the same discipline lever 1
 # and lever 2 shipped under, and lever 2's confident prediction measured NEGATIVE.
+def probe_api_fetch(ssh, card, height, url_base="https://api.hazync.org"):
+    """(seconds, bytes, mbit_per_s) for a pod fetching a bundle straight from the API, or Nones.
+
+    ⛔⛔ THE ONE MEASUREMENT #598 STEP 2 IS GATED ON, and it costs nothing to take. Measured
+    2026-10-01: `/api/witness/<h>` already serves the tip bundle, BYTE-IDENTICAL to the one a run
+    proves (sha256 0c54f7ef… both sides), and to a laptop it was 1.38 s against 25.0 s for the
+    two-leg ssh path. ⇒ An aggregate that fetched its own bundle would take the orchestrator's home
+    uplink out of the path entirely.
+
+    ⚠ BUT THAT 1.38 s WAS TO A LAPTOP. Nobody has timed the POD -> API leg, and this project has
+    been wrong before about a transfer it reasoned about instead of timing. The next run can answer
+    it for free, from a card that is already rented and not yet proving.
+
+    ⚠ MEASURES ONLY, CHANGES NOTHING. It does not alter where the bundle actually comes from -- that
+    is step 2, and it should not be built on an untimed assumption.
+
+    ⛔ -o /dev/null: the bundle is ~30 MB and the pod has no reason to keep it. The figure wanted is
+    the TRANSFER, not a staged file.
+    """
+    # ⚠ POSIX sh, not bash: `ssh.run` wraps every body in `sh -c`, which is DASH on these pods. That
+    # cost a whole run once when the CPU probe used `TIMEFORMAT`/`time (…)`, both bash-only.
+    body = (
+        f"curl -s -o /dev/null --max-time 120 "
+        f"-w 'APIFETCH|%{{http_code}}|%{{size_download}}|%{{time_total}}|%{{speed_download}}' "
+        f"'{url_base}/api/witness/{int(height)}' 2>/dev/null")
+    try:
+        out = ssh.run(card, body) or ""
+    except Exception:                                   # noqa: BLE001
+        return None, None, None
+    for ln in str(out).splitlines():
+        if not ln.startswith("APIFETCH|"):
+            continue
+        parts = ln.strip().split("|")
+        if len(parts) != 5:
+            continue
+        code, nbytes, secs, speed = parts[1], parts[2], parts[3], parts[4]
+        # ⛔ A 200 WITH ZERO BYTES IS NOT A MEASUREMENT. Treat anything but a real transfer as
+        # unmeasured rather than as a fast one -- "untested is not fast" is the same rule the
+        # aggregate election and the worker gate already follow.
+        try:
+            nbytes, secs, speed = int(nbytes), float(secs), float(speed)
+        except ValueError:
+            return None, None, None
+        if code != "200" or nbytes <= 0 or secs <= 0:
+            return None, None, None
+        return round(secs, 3), nbytes, round(speed * 8 / 1e6, 2)
+    return None, None, None
+
+
 def probe_cpu(ssh, card):
     """(model, single_core_score, cores) for a card, or (None, None, None).
 
@@ -1941,10 +1990,17 @@ def main():
 
         if a.claim:
             # ── mode 6: one claimed block, proved from its bundle, then submitted ─────────────────
+            # ⚠ Once per run: the answer does not change block to block, and a second probe would
+            # only add a curl to a fleet that is already proving.
+            _api_probe_done = False
+
             def prove_and_submit(rng, *, from_tip=False, abort=None):
                 """Fetch the bundle, prove it as a range, collect the receipt, submit. Returns the
                 run dict. Shared by the single-block path and the session loop so there is exactly
                 ONE definition of what proving a claimed block means."""
+                # ⚠ AFTER the docstring, not before: a `nonlocal` ahead of it makes the string a
+                # plain expression statement and the function loses its __doc__.
+                nonlocal _api_probe_done
                 bp = os.path.join(a.rundir, f"bundle_{rng}.json")
                 if not os.path.exists(bp):
                     # ⛔ BOARD WORK ALWAYS COMES FROM THE API, NEVER FROM THE BRIDGE. This read
@@ -1984,6 +2040,31 @@ def main():
                         f" (leg 1 of 2, from {src})")
                     if not bok:
                         raise RuntimeError(f"no bundle for {rng}: {bwhy}")
+
+                    # ⛔⛔ THE ONE NUMBER #598 STEP 2 IS GATED ON, taken once per run and FREE.
+                    # /api/witness/<h> already serves this exact bundle -- byte-identical, sha256
+                    # 0c54f7ef… on both sides, measured 2026-10-01 -- in 1.38 s to a laptop against
+                    # 25.0 s for the two-leg ssh path. If a POD can fetch it that fast, the
+                    # orchestrator comes out of the path entirely and staging stops costing 25-73 s.
+                    #
+                    # ⚠ ON A WORKER, NEVER THE AGGREGATE, and only on the FIRST block of a run.
+                    # order[0] is the aggregate by construction and is about to receive the bundle;
+                    # a worker is idle until segments arrive, so this is off the critical path.
+                    # ⚠ And it MEASURES ONLY -- the bundle still travels the old route. Building
+                    # step 2 on an untimed assumption is how lever 2 was predicted to save 36 s and
+                    # measured NEGATIVE.
+                    if from_tip and not _api_probe_done and len(order) > 1:
+                        _api_probe_done = True
+                        _ap_s, _ap_b, _ap_mbit = probe_api_fetch(ssh, order[-1], rng)
+                        if _ap_s is None:
+                            log("  stage: pod->API probe UNMEASURED (no 200, or no bytes moved) — "
+                                "that is not the same as 'slow'")
+                        else:
+                            tip_stage.record(a.rundir, rng, "pod_api", _ap_s, _ap_b, ok=True,
+                                             note=f"from {order[-1].cid} direct to /api/witness")
+                            log(f"  stage: a POD fetched the same bundle from /api/witness in "
+                                f"{_ap_s:.2f}s ({_ap_b/1e6:.1f} MB, {_ap_mbit:.0f} Mbit/s) "
+                                f"— compare the two legs above (hazync#598)")
 
                 # ⭐ IS THIS THE NEXT LINK? (hazync#556) Checked AFTER the bundle is on disk and
                 # BEFORE a single GPU touches it, so a gap costs one file read rather than a block
