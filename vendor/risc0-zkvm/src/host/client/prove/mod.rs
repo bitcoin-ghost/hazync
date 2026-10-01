@@ -14,6 +14,19 @@
 
 #[cfg(feature = "bonsai")]
 pub(crate) mod bonsai;
+// HAZYNC_WINDOWS_NO_UNIX_SOCKET -- hazync#616. default.rs talks to a spawned r0vm over a UNIX SOCKET PAIR
+// (`std::os::unix::net::UnixStream`, `std::os::fd::OwnedFd`), which do not exist on Windows:
+//
+//   error[E0432]: unresolved import `std::os::fd`
+//   error[E0433]: cannot find `unix` in `os`
+//    --> vendor/risc0-zkvm/src/host/client/prove/default.rs:17
+//
+// ⚠ It is the ONLY Unix-only source file in this whole vendored crate, and nothing in it was
+// cfg-gated -- upstream simply never built for Windows. ⭐ And it is not on this project's path:
+// main.rs forces RISC0_PROVER=local when unset, so the LOCAL prover is used and this IPC transport
+// is compiled and never called. Same shape as the keccak circuit: code we never run, that must
+// compile. ⇒ Gated rather than ported, because a Windows IPC transport is upstream's design call.
+#[cfg(unix)]
 pub(crate) mod default;
 pub(crate) mod external;
 #[cfg(feature = "prove")]
@@ -28,7 +41,9 @@ use anyhow::{anyhow, Result};
 #[cfg(feature = "bonsai")]
 use self::bonsai::BonsaiProver;
 
-use self::{default::DefaultProver, external::ExternalProver, opts::ProverOpts};
+#[cfg(unix)]
+use self::default::DefaultProver;                   // HAZYNC_WINDOWS_NO_UNIX_SOCKET
+use self::{external::ExternalProver, opts::ProverOpts};
 
 use crate::{
     get_version, host::prove_info::ProveInfo, ExecutorEnv, Receipt, SessionInfo, VerifierContext,
@@ -184,6 +199,10 @@ pub fn default_prover() -> Rc<dyn Prover> {
     let explicit = std::env::var("RISC0_PROVER").unwrap_or_default();
     if !explicit.is_empty() {
         return match explicit.to_lowercase().as_str() {
+            // HAZYNC_WINDOWS_NO_UNIX_SOCKET: on Windows this arm is absent, so RISC0_PROVER=actor
+            // falls to `_ => unimplemented!("Unsupported prover: {explicit}")` -- an accurate
+            // message rather than a silent fallback to a different prover.
+            #[cfg(unix)]
             "actor" => Rc::new(DefaultProver::new(get_r0vm_path().unwrap()).unwrap()),
             #[cfg(feature = "bonsai")]
             "bonsai" => Rc::new(BonsaiProver::new("bonsai")),
