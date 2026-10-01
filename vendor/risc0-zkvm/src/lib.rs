@@ -129,7 +129,6 @@ pub use {
         client::{
             env::{ExecutorEnv, ExecutorEnvBuilder},
             prove::{
-                default::DefaultProver,
                 default_executor, default_prover,
                 external::ExternalProver,
                 opts::{ProverOpts, ReceiptKind},
@@ -139,6 +138,16 @@ pub use {
     },
     risc0_circuit_rv32im::trace::{TraceCallback, TraceEvent},
 };
+
+// HAZYNC_WINDOWS_NO_UNIX_SOCKET -- hazync#616. DefaultProver lives in a module that is
+// `#[cfg(unix)]` because it talks to r0vm over a UNIX SOCKET PAIR, so its re-export has to be
+// gated too. ⚠ Lifted out of the `pub use` group above rather than deleted: dropping it would
+// remove `risc0_zkvm::DefaultProver` from the public API on Linux as well, which is a behaviour
+// change nobody asked for. ⛔ `#[cfg]` cannot be applied to one item inside a `use` group, which
+// is why this is a separate statement.
+#[cfg(unix)]
+#[cfg(not(target_os = "zkvm"))]
+pub use crate::host::client::prove::default::DefaultProver;
 
 /// TODO
 #[cfg(not(target_os = "zkvm"))]

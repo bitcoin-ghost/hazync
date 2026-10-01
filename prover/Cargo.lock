@@ -3687,8 +3687,6 @@ dependencies = [
 [[package]]
 name = "risc0-circuit-keccak"
 version = "4.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c731e12429eb4457e1ddc69c56ee7343a1e10b86e4aa55bc8f4d2b13734abb9"
 dependencies = [
  "anyhow",
  "bytemuck",
