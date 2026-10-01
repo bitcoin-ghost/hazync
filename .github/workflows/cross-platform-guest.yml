@@ -1,0 +1,237 @@
+name: cross-platform-guest
+
+# Can a Windows or macOS build embed the CANONICAL guest? (hazync#620)
+#
+# ⛔ WHY THIS IS THE QUESTION. There are 11 provers on the board and the contribute page says "You
+# need Linux on x86-64 and an NVIDIA GPU". That is not a toolchain limit -- it is METHOD_ID: the
+# guest ELF bakes in build-machine paths, so a native build anywhere else embeds a DIFFERENT id and
+# has every proof rejected (exit 78). Measured 2026-09-30 on an unmodified tree with every flag
+# unset: native gives fb4d7352..., the pinned container gives 37987b85...
+#
+# ⭐ BUT THE GUEST IS PLATFORM-INDEPENDENT -- it is a RISC-V ELF and the host's OS is irrelevant to
+# it. #615/#617 added HAZYNC_GUEST_ELF, which embeds a prebuilt guest and REFUSES it unless the id
+# computed from it equals reproduce/METHOD_ID. So the claim is: build the guest once in the
+# container, and any platform can embed those bytes. Nothing has ever tested that claim.
+#
+# ⛔⛔ MANUAL ONLY, AND DELIBERATELY. windows-latest bills 2x and macos-latest 10x, and the guest job
+# builds in a container for ~15 min at best. Nothing here should fire on a push. Trigger it when the
+# answer is wanted.
+#
+# ⚠ WHAT THIS PROVES AND WHAT IT DOES NOT. It builds the `methods` crate, which is where METHOD_ID
+# is decided -- build.rs PANICS unless the embedded id matches the pin, so a successful build with
+# HAZYNC_GUEST_ELF set IS the assertion. It does NOT build the whole `host` binary on those
+# platforms, so it does not show that a Windows prover would run. One question at a time: this one
+# is "can the canonical id be embedded off Linux", and it is the one that gates everything else.
+#
+# ⚠ AND macOS CANNOT PROVE EITHER WAY. There is no Metal backend. A green run here means "build and
+# verify on any platform, prove on Linux + NVIDIA", which is a much larger door than today's, and
+# it is not "Hazync runs on a Mac".
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Which hosts to try (comma-separated: windows,macos,linux)'
+        default: 'windows,macos,linux'
+      guest_from:
+        description: 'Skip the container build and take the guest from this artifact run id'
+        default: ''
+
+permissions:
+  contents: read
+  # ⚠ download-artifact needs this to reach ANOTHER run's artifact,
+  # which is what `guest_from` does. Without it that path fails on permissions.
+  actions: read
+
+jobs:
+  # ── 1. the canonical guest, built where it is canonical ────────────────────────────────────────
+  guest:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.guest_from == ''
+    outputs:
+      pin: ${{ steps.pin.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ⛔ Full history: this repo's tooling reads git and a shallow clone truncates it silently.
+          fetch-depth: 0
+
+      - name: The pin this run must reproduce
+        id: pin
+        run: |
+          PIN=$(grep -vE '^\s*#|^\s*$' reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
+          case "$PIN" in
+              ????????????????????????????????????????????????????????????????) : ;;
+              *) echo "reproduce/METHOD_ID is not a 64-hex id: '$PIN'"; exit 1 ;;
+          esac
+          echo "id=$PIN" >> "$GITHUB_OUTPUT"
+          echo "canonical METHOD_ID = $PIN"
+
+      - name: Free disk, because the container build needs ~15 GB
+        # ⚠ MEASURED BY THE SCRIPT ITSELF: "~15 GB free is enough for cpu". A GitHub runner starts
+        # with roughly 14 GB free on /, so this is not optional and its absence would look like a
+        # compile failure rather than a full disk.
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - name: Build the guest in the pinned container
+        # ⚠ RUNTIME UNMEASURED HERE. build-release.sh reports ~15 min on a 62 GB coordinator box;
+        # this runner has 4 cores and 16 GB, so budget more and do not read a timeout as a failure.
+        # ⛔ It builds the host too, which this job does not need -- the container has no factored
+        # "guest only" entry point yet. Wasteful and correct; see hazync#620 for splitting it.
+        run: |
+          CARGO_BUILD_JOBS=4 ./prover/build-release.sh cpu 2>&1 | tail -40
+
+      - name: The container's own id check must have passed
+        # ⛔ POSITIVE, not "no error appeared". build-release.sh prints the built binary's id and the
+        # canonical one and says they MUST match; assert the binary rather than trusting the log.
+        # ⛔ Values arrive through env:, never interpolated into the script — see
+        # scripts/check-workflow-injection.sh, which refuses ${{ }} in a run: block outright.
+        env:
+          PIN: ${{ steps.pin.outputs.id }}
+        run: |
+          set -o pipefail
+          GOT=$(./dist/hazync-host-x86_64-linux-gnu method-id | grep -oE '[0-9a-f]{64}' | head -1)
+          echo "container build id : ${GOT:-<none>}"
+          echo "canonical          : $PIN"
+          [ "$GOT" = "$PIN" ] || {
+              echo "⛔ the CONTAINER build is not canonical — everything downstream is moot"; exit 1; }
+
+      - name: Locate and fingerprint the guest ELF
+        id: elf
+        run: |
+          ELF=prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
+          [ -s "$ELF" ] || { echo "no guest ELF at $ELF"; exit 1; }
+          echo "size   $(stat -c%s "$ELF") bytes"
+          echo "sha256 $(sha256sum "$ELF" | cut -d' ' -f1)"
+          cp "$ELF" hazync-guest.elf
+          echo "path=hazync-guest.elf" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hazync-guest-elf
+          path: hazync-guest.elf
+          # ⚠ ~70 MB, and measured: it does not compress (gzip -6 takes 69,937,376 to 68,140,313,
+          # a 2.6% saving). No point paying CPU for it.
+          compression-level: 0
+          retention-days: 5
+
+  # ── 2. every platform embeds THOSE bytes, and must land on the same id ─────────────────────────
+  embed:
+    needs: [guest]
+    # ⚠ `always()` so a `guest_from` run (where `guest` is skipped) still reaches this job.
+    # ⚠ `github.event.inputs.*` rather than the newer `inputs.*`: both are documented for
+    # workflow_dispatch, and this one has always worked. Nothing here can be tested before it runs,
+    # so it uses the form with no version question attached.
+    if: always() && (needs.guest.result == 'success' || github.event.inputs.guest_from != '')
+    strategy:
+      fail-fast: false        # ⛔ one platform failing must not hide another's answer
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Is this platform in scope for this run?
+        id: want
+        shell: bash
+        # ⛔⛔ `platforms` IS ATTACKER-SUPPLIED — a workflow_dispatch input any write-access account
+        # can set. Interpolated into this `case` it was shell injection; through env: bash expands
+        # the value AFTER parsing and never re-parses it.
+        env:
+          PLATFORMS: ${{ github.event.inputs.platforms }}
+          NAME: ${{ matrix.name }}
+        run: |
+          case ",$PLATFORMS," in
+              *",$NAME,"*) echo "go=1" >> "$GITHUB_OUTPUT" ;;
+              *) echo "go=0" >> "$GITHUB_OUTPUT"; echo "$NAME not requested" ;;
+          esac
+
+      - uses: actions/download-artifact@v4
+        if: steps.want.outputs.go == '1'
+        with:
+          name: hazync-guest-elf
+          run-id: ${{ github.event.inputs.guest_from || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.want.outputs.go == '1'
+
+      - name: The guest arrived intact
+        if: steps.want.outputs.go == '1'
+        shell: bash
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          [ -s hazync-guest.elf ] || { echo "no guest ELF downloaded"; exit 1; }
+          echo "size $(wc -c < hazync-guest.elf) bytes on $NAME"
+
+      - name: ⛔ THE QUESTION — embed the canonical guest on this platform
+        if: steps.want.outputs.go == '1'
+        shell: bash
+        working-directory: prover
+        env:
+          # ⭐ build.rs PANICS unless the id computed from this ELF equals reproduce/METHOD_ID, so a
+          # successful build IS the assertion. There is nothing to compare afterwards.
+          # ⚠ RELATIVE, not ${{ github.workspace }}: on Windows that expands to `D:\a\r\r` and
+          # joining it with a forward slash makes a mixed-separator path for no reason. The cwd is
+          # `prover` (working-directory below), so the artifact sits one level up.
+          HAZYNC_GUEST_ELF: ../hazync-guest.elf
+        run: |
+          set -o pipefail
+          cargo build -p methods --release 2>&1 | tail -30
+
+      - name: ⛔ POSITIVE CONTROL — without the ELF this platform must NOT be canonical
+        # ⛔ WITHOUT THIS THE STEP ABOVE PROVES NOTHING. If a native build on this platform happened
+        # to produce the canonical id anyway, the mechanism would be doing no work and the step would
+        # pass either way. On Linux this is measured: unset gives fb4d7352..., not 37987b85...
+        #
+        # ⚠ THREE OUTCOMES, AND ONLY ONE IS A FAILURE. A native guest build needs the risc0 RISC-V
+        # toolchain, which may simply not exist on Windows or macOS -- in which case the build fails
+        # for an unrelated reason and the control is INCONCLUSIVE, which is reported as such and is
+        # not a pass. The failure is a native build that comes out canonical.
+        if: steps.want.outputs.go == '1'
+        shell: bash
+        working-directory: prover
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          PIN=$(grep -vE '^\s*#|^\s*$' ../reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
+          set +e
+          out=$(env -u HAZYNC_GUEST_ELF cargo build -p methods --release 2>&1); rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+              echo "⚠ INCONCLUSIVE on $NAME: a native guest build does not complete here"
+              echo "  (rc=$rc — most likely no RISC-V guest toolchain, which is expected off Linux)"
+              printf '%s\n' "$out" | tail -15
+              exit 0
+          fi
+          if printf '%s' "$out" | grep -q "$PIN"; then
+              echo "⛔ a NATIVE build on $NAME produced the canonical id — then the"
+              echo "   prebuilt-guest mechanism is not what made the step above pass."
+              exit 1
+          fi
+          echo "ok — a native build here is NOT canonical, so the step above measured the mechanism"
+
+      - name: What this platform answered
+        if: always() && steps.want.outputs.go == '1'
+        shell: bash
+        env:
+          NAME: ${{ matrix.name }}
+          OS: ${{ matrix.os }}
+          STATUS: ${{ job.status }}
+        run: |
+          echo "$NAME ($OS): embed step = $STATUS"
+          echo "⚠ This says the canonical guest can be EMBEDDED here. It does not say the full host"
+          echo "  binary builds, and on macOS there is no Metal backend, so proving is Linux+NVIDIA"
+          echo "  either way. See hazync#620."
