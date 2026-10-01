@@ -134,7 +134,20 @@ jobs:
           #
           # ⚠ Only the keccak sys crate failed; our vendored risc0-circuit-rv32im-sys compiled clean.
           # ⚠ And this is a WINDOWS-ONLY job, so nothing about the Linux prover is touched by it.
-          CXXFLAGS: /std:c++20
+          # ⛔⛔ AND /DNOMINMAX, for the classic Windows collision. Measured, run 36901525820:
+          #
+          #   risc0-sys-1.5.0/cxx/vendor/poolstl.hpp(551):
+          #     error C2589: '(': illegal token on right side of '::'
+          #     error C3878: syntax error: unexpected token '(' following 'expression'
+          #
+          # all at ONE line. windows.h defines `min` and `max` as MACROS, so `std::min(a,b)` expands
+          # to `std::(a)<(b)?(a):(b)` -- hence "illegal token on right side of '::'" and the
+          # cascading ')' and ':' errors from the ternary fragments. NOMINMAX suppresses the macros
+          # and the std:: functions resolve normally.
+          #
+          # ⚠ It is risc0-sys, NOT the crate the earlier log seemed to implicate: step_verify_*.cpp
+          # were simply the last SUCCESSFUL compiles scrolling past before the failure.
+          CXXFLAGS: /std:c++20 /DNOMINMAX
         run: |
           set -o pipefail
           # ⛔ NO `--features cuda`. That is what keeps build_cuda_kernels() -- and every GCC-style
@@ -155,7 +168,10 @@ jobs:
               echo "=== last 120 lines ==="
               tail -120 build.log
               echo "=== every compiler diagnostic in the whole log ==="
-              grep -aoE "error C[0-9]+: .{0,110}|fatal error [A-Z0-9]+: .{0,90}" build.log | sort -u | head -20
+              # ⚠ WHOLE LINES, not -o. `grep -oE "error C…"` starts matching AT `error` and
+              # throws the file:line away -- which is how a run with the logging already fixed still
+              # showed me errors with no location. The path is the useful half.
+              grep -aE "error C[0-9]+|fatal error [A-Z0-9]+" build.log | sed 's#.*[\\/]##' | sort -u | head -20
               exit "$rc"
           fi
           tail -5 build.log
