@@ -184,7 +184,7 @@ jobs:
           cd coordinator
           python3 test_donations_record.py --control
 
-      - name: The aggregate is not left feeding a tail (hazync#527)
+      - name: The aggregate is not left feeding a tail (hazync#526)
         # ⛔ The fold waits for the SLOWEST peer at every level, so one bad link sets the wall clock.
         # Block 968,340: join RTTs 0.4 s to 107.4 s, 31.8 minutes, three blocks behind. Renting more
         # cards does not fix a tail — it adds join levels for it to appear at. Gates on the link the
@@ -209,6 +209,22 @@ jobs:
       - name: Aggregate-CPU POSITIVE CONTROL (rank on CPU always — a weak-link card must win)
         run: cd coordinator && python3 test_agg_cpu.py --control
 
+      - name: The aggregate probe's FULL result reaches the run's artefacts (hazync#526/#550)
+        # ⛔ `slow_worker_cut` ranks on the probe, and the probe reached the run log as PROSE,
+        # truncated to six with "+3 more" -- and tip hour 4's run log was never saved into its run
+        # directory at all, so that run's probe data is gone. Nothing could be checked.
+        # ⛔⛔ AND WHAT SURVIVED DISAGREES WITH THE RUN. Hour 5: the probe rated hz-smoke-3/6 at 0
+        # and -5/-10 at 1 Mbit/s, and 24 s later those four each pulled 410,751,944 bytes from the
+        # CDN complete in 65 s (50.6 Mbit/s) and proved the block -- while hz-smoke-4, the one card
+        # the run measured genuinely slow (1,754 KB/s, dropped INCOMPLETE), was NOT among the six.
+        # ⚠ Different link and direction, so not proof the probe is wrong about its own quantity --
+        # but 0 means "nothing measurable moved", and --worker-min-mbit would have released four
+        # working cards while keeping the broken one. That is why the floor still defaults to 0.0.
+        # ⛔ The control writes the OLD shape (winner only, six slowest) and must LOSE the cards the
+        # argument turns on -- otherwise a truncated record would pass for a complete one.
+        run: cd coordinator && python3 test_probe_record.py
+      - name: Probe-record POSITIVE CONTROL (winner-only / top-6 — it must lose data)
+        run: cd coordinator && python3 test_probe_record.py --control
       - name: Banking cards by measured tail concentrates the tail (hazync#550)
         # ⭐ The fold waits for the slowest peer at EVERY level, so one bad link sets the wall for the
         # whole block -- and adding cards does not fix a tail, it adds levels for it to appear at.

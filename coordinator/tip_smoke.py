@@ -444,7 +444,7 @@ def binary_size():
 
 
 def slow_worker_cut(order, per, *, need, floor=0.0):
-    """Which workers to release so the aggregate is not feeding a tail (hazync#527).
+    """Which workers to release so the aggregate is not feeding a tail (hazync#526).
 
     Returns (drop_cids, ranked) where `ranked` is [(cid, mbit_or_None)] worst-first among droppable
     cards, for the log. Pure: it releases nothing and asks nothing of the network.
@@ -1504,6 +1504,9 @@ def main():
             raise SystemExit("no card has a published 9110 — workers could never attach")
         best = (None, -1.0, {}, 0.0)
         cpu_note = {}
+        # ⛔ EVERY candidate's FULL result, kept for the run's artefacts. The log shows six and
+        # says "+3 more"; the cut acts on all of them. See tip_stage.write_probe_record.
+        probes = {}
         if len(cand) > 1 and a.agg_candidates > 1:
             phase(f"PREPARING · measuring the link on {len(cand)} aggregate candidate(s)")
             for c in cand:
@@ -1514,10 +1517,14 @@ def main():
                     mbit, per = probe.measure_egress(order, secs=a.agg_probe_secs)
                 except Exception as exc:                       # noqa: BLE001
                     log(f"  {c.cid}: egress probe failed ({type(exc).__name__}) — not judged on it")
+                    # ⚠ RECORDED, not just logged: "this candidate threw" is a finding about the
+                    # probe, and it is the state that leaves a fleet ranked on nothing.
+                    probes[c.cid] = {"error": type(exc).__name__}
                     continue
                 if mbit is None:
                     # ⚠ "could not test" is not "it failed" — the same rule the reachability gate uses.
                     log(f"  {c.cid}: egress UNTESTED (no streamer, or no worker answered)")
+                    probes[c.cid] = {"untested": True}
                     continue
                 # #567: measure the CPU too. The executor runs HERE, serially, for 54% of a tip
                 # block's wall — and until now the election never looked at it.
@@ -1549,6 +1556,15 @@ def main():
                 # is what #573 cost us. With the flag, CPU comes second and throughput third, because
                 # surplus bandwidth is measurably not the binding constraint (every candidate in hour 4
                 # was 50-200x what a block needs) while the executor demonstrably is.
+                probes[c.cid] = {
+                    "total_mbit": round(float(mbit), 3),
+                    "reached": len(per),
+                    # ⚠ The per-WORKER map is the thing slow_worker_cut ranks on, and it was the
+                    # part being truncated away.
+                    "per_worker": {str(k): (None if v is None else round(float(v), 3))
+                                   for k, v in per.items()},
+                    "cpu_model": cmodel, "cpu_score": cscore, "cpu_cores": ccores,
+                }
                 _sc = cpu_note.get(c.cid, (None, None, None))[1] or 0.0
                 key = (len(per), _sc, mbit) if a.agg_prefer_cpu else (len(per), mbit)
                 bkey = ((len(best[2]), best[3], best[1]) if a.agg_prefer_cpu
@@ -1596,7 +1612,7 @@ def main():
         # head of the list as the aggregate, and a mismatch would arm the wrong card.
         order = [agg] + [c for c in order if c.cid != agg.cid]
 
-        # ── ⛔ and cut the tail the aggregate has to feed (hazync#527) ───────────────────────────
+        # ── ⛔ and cut the tail the aggregate has to feed (hazync#526) ───────────────────────────
         # The same probe that chose the aggregate already measured EVERY worker individually; only
         # the total was being used. `best[2]` is {cid: Mbit/s} from the winning candidate, so this
         # costs nothing extra and happens before the clock starts.
@@ -1616,6 +1632,14 @@ def main():
                                    "the aggregate could not push to it fast enough")
         elif a.worker_min_mbit:
             log(f"worker gate: every worker clears {a.worker_min_mbit:.0f} Mbit/s")
+
+        # ⛔ WRITE THE PROBE DOWN. Until now the only record of what the cut ranked on was six
+        # truncated numbers in a log that hour 4 did not even keep. Costs nothing and is the
+        # difference between checking the probe against the run and arguing about it (#526/#550).
+        _pr = tip_stage.write_probe_record(a.rundir, probes, elected=agg.cid,
+                                          dropped=w_drop, floor=a.worker_min_mbit)
+        log(f"probe: {len(probes)} candidate(s) recorded to {tip_stage.PROBE}"
+            f" (elected {_pr['elected']}, dropped {len(_pr['dropped'])})")
 
         # ── the dashboard feed: started NOW, so the page is not dark through setup ───────────────
         os.makedirs(a.rundir, exist_ok=True)

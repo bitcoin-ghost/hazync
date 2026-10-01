@@ -99,6 +99,64 @@ def record(rundir, height, leg, seconds, size_bytes, ok=True, note=""):
     return row
 
 
+PROBE = "probe.json"
+
+
+def write_probe_record(rundir, probes, *, elected=None, dropped=(), floor=0.0):
+    """Write the aggregate probe's FULL result to `<rundir>/probe.json`. Never raises.
+
+    ⛔ WHY THIS EXISTS, MEASURED. The probe is what `slow_worker_cut` ranks on, and it reached the
+    run log as prose, truncated: `worker links, slowest first: ... +3 more`. So the numbers the cut
+    would act on were partly thrown away, and hour 4's run log was never even saved into its run
+    directory -- that run's probe data is simply gone.
+
+    ⛔⛔ AND THE NUMBERS THAT SURVIVED DISAGREE WITH THE RUN. Tip hour 5, 2026-09-30:
+
+        13:59:58  probe:  hz-smoke-3 0, hz-smoke-6 0, hz-smoke-5 1, hz-smoke-10 1 Mbit/s
+        14:00:22  -> 14:01:27, those same four cards each pulled 410,751,944 bytes from the CDN
+                  complete, in 65 s = 50.6 Mbit/s each, and went on to prove the block.
+
+    ⚠ Not the same link or direction -- the probe measures aggregate->worker egress, the CDN fetch
+    measures worker->CDN ingress -- so this is not proof the probe is wrong about its own quantity.
+    But a reading of 0 means "nothing measurable moved", which is a probe that did not work, and
+    `--worker-min-mbit` would have released four cards that then did the work.
+
+    ⛔ The decisive part is the one card whose slowness was unambiguous: hz-smoke-4 managed only
+    1,754 KB/s on the same CDN fetch and was dropped INCOMPLETE -- and it was NOT among the probe's
+    six slowest. The probe condemned healthy cards and missed the genuinely slow one.
+
+    ⇒ So this writes the whole map, every candidate, including the ones that failed to probe and
+    why, so the next run can be CHECKED against itself instead of reasoned about from prose.
+    """
+    rec = {
+        "t": round(time.time(), 3),
+        "elected": elected,
+        "dropped": sorted(dropped),
+        "worker_min_mbit": float(floor),
+        "candidates": probes,
+    }
+    try:
+        os.makedirs(rundir, exist_ok=True)
+        # ⚠ Atomic: a run that dies mid-write must not leave half a JSON document behind, because
+        # the next thing to read it would report "no probe data" rather than "truncated".
+        tmp = os.path.join(rundir, PROBE + ".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(rec, fh, indent=1, sort_keys=True)
+        os.replace(tmp, os.path.join(rundir, PROBE))
+    except (OSError, TypeError, ValueError):
+        pass
+    return rec
+
+
+def read_probe_record(rundir):
+    """The probe record, or None. ⚠ None means ABSENT, which is not the same as an empty probe."""
+    try:
+        with open(os.path.join(rundir, PROBE)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def read(path):
     """Every row in a stage ledger. Unreadable lines are skipped, not fatal."""
     rows = []
