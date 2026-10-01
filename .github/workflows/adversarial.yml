@@ -222,6 +222,21 @@ jobs:
         run: cd coordinator && python3 test_nvcc_flags.py
       - name: nvcc-flags POSITIVE CONTROL (the unconditional GCC flags — must read as not MSVC-aware)
         run: cd coordinator && python3 test_nvcc_flags.py --control
+      - name: A transient 500 must not page a human, and a failed run must not re-rent (sponsor bot)
+        # 📏 2026-10-01 15:05:46 the sponsor bot died 3 s into prepare() on `HTTP Error 500` fetching
+        # releases/download/v0.22.1/SHA256SUMS.txt -- GitHub's CDN, not ours; the same assets
+        # fetched fine minutes later. It cost nothing (prepare() runs before a cent is spent) and it
+        # still woke somebody up.
+        # ⛔⛔ AND THE TIMER RE-RAN IT EVERY 5 MINUTES: nine starts in one hour, measured on the box.
+        # The unit's own comment says Restart=no means it "waits for a person". It did not --
+        # Restart= governs systemd's restarting, and a timer ignores it. A failure AFTER renting
+        # would have re-rented against a --max-usd each fresh run re-reads as unspent.
+        # ⛔ So: retry 5xx and transport errors, NEVER 4xx (a 404 means the release is broken, and
+        # this project HAS published an empty release), bounded under the timer; plus a failure
+        # latch that makes the next timer fire skip quietly.
+        run: cd coordinator && python3 test_sponsor_resilience.py
+      - name: Sponsor-bot POSITIVE CONTROL (no retry — one 500 must end the run)
+        run: cd coordinator && python3 test_sponsor_resilience.py --control
       - name: The guest pin, and the hex to [u32;8] conversion that decides what is embedded (#620)
         # ⛔ build.rs no longer DERIVES the image id on every platform: it verifies the ELF by
         # sha256 and takes METHOD_ID from reproduce/METHOD_ID, converting the hex to the [u32;8]

@@ -6,6 +6,27 @@ Wants=network-online.target
 Requires=hazync-coordinator.service
 OnFailure=hazync-alert@%n.service
 
+# ⛔⛔ THE FAILURE LATCH. `Restart=no` below says this bot "stops, pages the phone, and waits for a
+# person" -- and it did not wait. The TIMER is a separate mechanism and walks straight past
+# `Restart=`: measured 2026-10-01, the service started NINE times in one hour (14:28, 14:33, 14:39,
+# 14:44, 14:49, 14:55, 15:00, 15:05, 15:11, 15:16) while failing on a transient GitHub 500.
+#
+# That cost nothing because it failed in prepare(), before a cent is spent. ⛔ But the money
+# reasoning in `Restart=no` -- "a bug could spend the cap repeatedly in an hour" -- was defeated the
+# whole time: a failure AFTER renting would have re-rented every five minutes against a cap each run
+# re-reads as fresh. The guard was documented and absent.
+#
+# So a failed run latches, and the timer then finds the condition false and skips QUIETLY -- a failed
+# Condition leaves the unit inactive, not failed, so it does not page anyone again either.
+#
+# ⚠ Clear it deliberately, after looking at why:
+#     journalctl -u hazync-sponsor-bot -n 50
+#     sudo rm /var/lib/hazync/sponsor-bot/.failed
+#
+# ⚠ And it applies to a manual `systemctl start` too, on purpose: "I will just start it again" is
+# the same mistake as the timer making that decision for you.
+ConditionPathExists=!/var/lib/hazync/sponsor-bot/.failed
+
 [Service]
 Type=simple
 User=hazync-sponsor
@@ -40,7 +61,15 @@ ExecStart=/usr/bin/python3 /opt/hazync/coordinator/sponsor_bot.py run --live \
 # ⛔ NOT Restart=always. This bot SPENDS MONEY. A crash loop that restarts it would rent pods again and
 # again against a cap it re-reads as fresh each time, so a bug could spend the cap repeatedly in an hour.
 # It stops, pages the phone through OnFailure=, and waits for a person.
+#
+# ⚠ `Restart=no` ALONE DID NOT ACHIEVE THAT -- it only stops systemd restarting the unit, and the
+# timer restarts it anyway. The ConditionPathExists latch above is what makes the sentence true.
 Restart=no
+
+# Write the latch on any non-success exit. $SERVICE_RESULT is systemd's own verdict, so this catches
+# a signal or a timeout as well as a non-zero exit.
+# ⚠ `-` prefix: if the latch cannot be written, that must not itself fail the unit and page again.
+ExecStopPost=-/bin/sh -c 'test "$SERVICE_RESULT" = success || : > /var/lib/hazync/sponsor-bot/.failed'
 
 # The bot terminates every pod it owns in its `finally`, and that must be allowed to finish: a killed
 # cleanup leaves rented GPUs running and billing with nothing tracking them.
