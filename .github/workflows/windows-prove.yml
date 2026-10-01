@@ -1,0 +1,177 @@
+name: windows-prove
+
+# Can a NATIVE Windows host actually PROVE? (hazync#616, #631)
+#
+# ⭐ WHY THIS IS CLOSER THAN IT LOOKS. The thing that makes Windows hard is CUDA: the kernels are
+# compiled through nvcc with GCC-style host flags (#631/#632). But CPU proving needs NONE of that --
+# `build_cuda_kernels()` runs only `if env::var("CARGO_FEATURE_CUDA").is_ok()`, and the CPU kernels
+# go through `cc::Build` with `.flag_if_supported("/std:c++17")`, so MSVC is anticipated upstream.
+# And `risc0-zkvm` carries the `prove` feature UNCONDITIONALLY, so a build without `--features cuda`
+# is a working CPU prover with the local prover linked in.
+#
+# ⛔ THAT LAST PART IS LOAD-BEARING AND WAS ONCE BROKEN. risc0's default backend shells out to
+# `r0vm`, a separate ~109 MB binary that is not in the release, so a contributor who downloaded only
+# the host got "No such file or directory" on their first prove -- and only on the CPU path, because
+# the CUDA build links its prover in. main.rs forces RISC0_PROVER=local when unset for exactly this.
+#
+# ⇒ So this asks the one question nothing has asked: does `host prove-block` produce a real STARK
+# receipt on Windows? `prove-block` builds block 170's witness IN-PROCESS from fixtures -- no
+# network, no bundle, no input files -- which is what makes it a usable CI test.
+#
+# ⛔⛔ AND IT UPLOADS host.exe. A Windows desktop with an NVIDIA GPU needs no Rust and no CUDA
+# toolkit to try this: download the artifact and run it. That is the whole point of building it here.
+#
+# ⚠ WHAT THIS CANNOT ANSWER: the GPU. A windows-latest runner has no GPU, so this is the CPU path
+# only. The CUDA variant needs the toolkit in CI to build and real hardware to run; #631 tracks it.
+#
+# ⛔⛔ IF prove-block PASSES HERE, THAT IS #616's BAR: a proof produced on a non-Linux machine whose
+# receipt verifies against the canonical guest id. Not "the barrier is documented as removed".
+
+on:
+  workflow_dispatch:
+    inputs:
+      seg_po2:
+        description: 'HAZYNC_SEG_PO2 (lower = less memory per segment; blank = the default)'
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ── the canonical guest, built where it is canonical ───────────────────────────────────────────
+  # ⚠ Same shape as cross-platform-guest.yml, which is measured to work: the container build
+  # succeeds on a runner once ~15 GB is freed, and its own id check passes.
+  guest:
+    runs-on: ubuntu-latest
+    outputs:
+      pin: ${{ steps.pin.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: The pin this run must reproduce
+        id: pin
+        run: |
+          PIN=$(grep -vE '^\s*#|^\s*$' reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
+          case "$PIN" in
+              ????????????????????????????????????????????????????????????????) : ;;
+              *) echo "reproduce/METHOD_ID is not a 64-hex id"; exit 1 ;;
+          esac
+          echo "id=$PIN" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk, because the container build needs ~15 GB
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - name: Build the guest in the pinned container
+        run: CARGO_BUILD_JOBS=4 ./prover/build-release.sh cpu 2>&1 | tail -25
+
+      - name: The container's own id check must have passed
+        env:
+          PIN: ${{ steps.pin.outputs.id }}
+        run: |
+          set -o pipefail
+          GOT=$(./dist/hazync-host-x86_64-linux-gnu method-id | grep -oE '[0-9a-f]{64}' | head -1)
+          [ "$GOT" = "$PIN" ] || { echo "the CONTAINER build is not canonical"; exit 1; }
+          echo "container id $GOT = the pin"
+
+      - name: Stage the guest ELF
+        run: |
+          ELF=prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
+          [ -s "$ELF" ] || { echo "no guest ELF at $ELF"; exit 1; }
+          echo "sha256 $(sha256sum "$ELF" | cut -d' ' -f1)  size $(stat -c%s "$ELF")"
+          cp "$ELF" hazync-guest.elf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hazync-guest-elf
+          path: hazync-guest.elf
+          compression-level: 0        # ⚠ measured: it compresses 2.6%, so this buys nothing
+          retention-days: 5
+
+  # ── ⛔ THE QUESTION: does a native Windows host build and PROVE? ────────────────────────────────
+  prove:
+    needs: [guest]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hazync-guest-elf
+          # ⛔ Into the CRATE directory. A cargo build script's cwd is its own package root, not the
+          # step's working-directory -- measured the hard way in run 36819000458.
+          path: prover/methods
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The guest arrived intact
+        shell: bash
+        run: |
+          n=$(wc -c < prover/methods/hazync-guest.elf)
+          echo "guest ELF: $n bytes"
+          [ "$n" -gt 60000000 ] || { echo "truncated artifact ($n bytes)"; exit 1; }
+
+      - name: Build the host for Windows — CPU, no CUDA
+        shell: bash
+        working-directory: prover
+        env:
+          # ⚠ A bare filename: build.rs resolves it against its own crate dir, where the artifact is.
+          HAZYNC_GUEST_ELF: hazync-guest.elf
+        run: |
+          set -o pipefail
+          # ⛔ NO `--features cuda`. That is what keeps build_cuda_kernels() -- and every GCC-style
+          # nvcc flag with it -- out of this build entirely.
+          cargo build -p host --release 2>&1 | tail -25
+
+      - name: ⛔ the binary must carry the CANONICAL id, or a proof from it is worthless
+        shell: bash
+        working-directory: prover
+        env:
+          PIN: ${{ needs.guest.outputs.pin }}
+        run: |
+          set -o pipefail
+          GOT=$(./target/release/host.exe method-id | grep -oE '[0-9a-f]{64}' | head -1)
+          echo "windows host id : ${GOT:-<none>}"
+          echo "canonical       : $PIN"
+          [ "$GOT" = "$PIN" ] || { echo "the Windows build is NOT canonical"; exit 1; }
+
+      - name: ⭐ PROVE A BLOCK ON WINDOWS — a real STARK receipt
+        shell: bash
+        working-directory: prover
+        env:
+          # ⚠ Lowering the segment po2 cuts peak memory per segment. windows-latest has 16 GB, and a
+          # prover OOM surfaces as a raw allocation panic, so the knob is exposed on the dispatch.
+          HAZYNC_SEG_PO2: ${{ github.event.inputs.seg_po2 }}
+          RUST_BACKTRACE: '1'
+        run: |
+          set -o pipefail
+          [ -n "$HAZYNC_SEG_PO2" ] && echo "HAZYNC_SEG_PO2=$HAZYNC_SEG_PO2" || unset HAZYNC_SEG_PO2
+          # ⚠ prove-block builds block 170's witness IN-PROCESS from fixtures: no network, no bundle,
+          # no input file. That is what makes it runnable here at all.
+          ./target/release/host.exe prove-block 2>&1 | tail -40
+
+      - name: What Windows answered
+        if: always()
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          echo "native Windows CPU prove: $STATUS"
+          echo "⛔ This is the CPU path. A windows-latest runner has no GPU, so it says nothing about"
+          echo "   CUDA on Windows -- hazync#631 tracks that, and it needs real hardware to run."
+          echo "⭐ If the prove step passed, a non-Linux machine produced a receipt against the"
+          echo "   canonical guest id, which is the bar hazync#616 asks for."
+
+      # ⛔⛔ THE ARTIFACT IS THE DELIVERABLE. A Windows desktop with an NVIDIA GPU needs neither Rust
+      # nor a CUDA toolkit to try this -- download and run.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hazync-host-windows-x86_64-cpu
+          path: prover/target/release/host.exe
+          retention-days: 14
