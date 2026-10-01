@@ -69,11 +69,43 @@ fn build_cuda_kernels() {
         .flag("-diag-suppress=177")
         .flag("-diag-suppress=550")
         .flag("-diag-suppress=2922")
-        .flag("-std=c++17")
-        .flag("-Xcompiler")
-        .flag("-Wno-unused-function,-Wno-unused-parameter")
-        .flag("-Xcompiler")
-        .flag("-O3")
+        .flag("-std=c++17");
+
+    // HAZYNC_631_MSVC_FLAGS — hazync#631. `-Xcompiler` forwards its argument VERBATIM to the host
+    // compiler, and on Windows that host compiler is MSVC `cl.exe`, which does not speak
+    // `-Wno-unused-function` or `-O3`. Everything else above is nvcc's own and portable.
+    //
+    // ⛔ THE NON-MSVC BRANCH IS BYTE-IDENTICAL TO WHAT SHIPPED. Linux and macOS CUDA builds get
+    // exactly the flags, in exactly the order, they got before — this adds a branch, it does not
+    // change the one that is in use. test_nvcc_flags.py asserts that, because a "portability fix"
+    // that quietly re-flags the prover everyone actually runs would be the real damage.
+    //
+    // ⚠ UNVERIFIED ON WINDOWS. Neither CI nor the development box has a Windows machine with an
+    // NVIDIA GPU, so nothing here has compiled a CUDA kernel under MSVC. The flags are the
+    // documented equivalents (/wd4505 unreferenced local function, /wd4100 unreferenced formal
+    // parameter, /O2 for -O3) and they are the first obstacle, not the only one — sppark comes
+    // through DEP_SPPARK_ROOT below and its Windows support is also untested.
+    //
+    // ⚠ And MSVC may not have needed this: it usually downgrades an unknown option to warning
+    // D9002 rather than erroring. If a Windows CUDA build ever succeeds, check whether reverting
+    // this branch still works before assuming it was load-bearing.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build
+            .flag("-Xcompiler")
+            .flag("/wd4505")
+            .flag("-Xcompiler")
+            .flag("/wd4100")
+            .flag("-Xcompiler")
+            .flag("/O2");
+    } else {
+        build
+            .flag("-Xcompiler")
+            .flag("-Wno-unused-function,-Wno-unused-parameter")
+            .flag("-Xcompiler")
+            .flag("-O3");
+    }
+
+    build
         .flag("-Xptxas")
         .flag("-O3")
         .include(env::var("DEP_RISC0_SYS_CUDA_ROOT").unwrap())
