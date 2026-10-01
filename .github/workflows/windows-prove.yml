@@ -122,6 +122,19 @@ jobs:
         env:
           # ⚠ A bare filename: build.rs resolves it against its own crate dir, where the artifact is.
           HAZYNC_GUEST_ELF: hazync-guest.elf
+          # ⛔⛔ MSVC NEEDS C++20 FOR THESE KERNELS. Measured, run 36892040422: over 100 instances of
+          #
+          #   risc0-circuit-keccak-sys-4.0.3/kernels/cxx/layout.cpp.inc(91):
+          #     error C7555: use of designated initializers requires at least '/std:c++20'
+          #
+          # GCC and clang accept designated initializers in C++17 as an extension; MSVC does not.
+          # `risc0-build-kernel`'s compile_cpp passes `.flag_if_supported("/std:c++17")`, and that
+          # crate is NOT vendored here -- so rather than take a third local patch, this sets CXXFLAGS,
+          # which the `cc` crate appends AFTER its own flags, and MSVC honours the last /std it sees.
+          #
+          # ⚠ Only the keccak sys crate failed; our vendored risc0-circuit-rv32im-sys compiled clean.
+          # ⚠ And this is a WINDOWS-ONLY job, so nothing about the Linux prover is touched by it.
+          CXXFLAGS: /std:c++20
         run: |
           set -o pipefail
           # ⛔ NO `--features cuda`. That is what keeps build_cuda_kernels() -- and every GCC-style
