@@ -616,6 +616,26 @@ jobs:
           FLAGS="-gencode=arch=compute_61,code=sm_61"
           FLAGS="$FLAGS -gencode=arch=compute_61,code=compute_61"
           FLAGS="$FLAGS -Wno-deprecated-gpu-targets"
+          # ⛔⛔ C++17, AND BOTH PASSES NEED IT. Run 37021158229, after /std:c++20 came off:
+          #
+          #   poseidon254.cuh(30): error: expected ...
+          #       static_assert(sizeof(fr_t) == 32);
+          #
+          # A SINGLE-ARGUMENT static_assert is C++17. MSVC defaults to C++14, so removing
+          # /std:c++20 did not just stop cudafe++ crashing — it dropped the host pass below the
+          # standard sppark's headers require. ⇒ The answer was never "no standard flag", it was
+          # C++17 rather than C++20: high enough to parse, and not whatever C++20 construct killed
+          # cudafe++ with 0xC0000409.
+          #
+          # ⚠ `-std=c++17` is nvcc's own (DEVICE pass); `-Xcompiler -std:c++17` is the HOST pass.
+          # Both, because the error above came from the host pass and the device pass needs it too.
+          # ⛔ A `-` prefix, not `/`: a lone `/std:...` is what MSYS rewrote into
+          # `C:/Program Files/Git/...` in run 37020607504. cl.exe accepts `-` for any option.
+          FLAGS="$FLAGS -std=c++17 -Xcompiler -std:c++17"
+          # ⛔ `uint` IS A POSIX TYPEDEF MSVC DOES NOT HAVE. 13 errors across risc0-sys's own
+          # combos.cu, eltwise.cu and kernels.cu — `uint gid = blockIdx.x * ...`. ⚠ `unsigned`
+          # alone IS `unsigned int` in C++, so this needs no space and cannot be re-quoted wrongly.
+          FLAGS="$FLAGS -Duint=unsigned"
           if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then
               echo "host compiler: a CUDA-supported MSVC toolset was selected — NO override needed"
           else
