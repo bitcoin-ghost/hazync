@@ -98,16 +98,34 @@ jobs:
           esac
           echo "id=$PIN" >> "$GITHUB_OUTPUT"
 
+      # ⭐ CACHE THE GUEST ELF. It is BYTE-reproducible — five container builds produced
+      # 69,980,208 bytes, sha256 35e3f55e…, identical every time (#620) — so a cache hit cannot
+      # smuggle in a different guest. 📏 The container build costs ~20 min, which was being paid
+      # again on every iteration of a Windows-side bug that has nothing to do with the guest.
+      #
+      # ⛔ THE CACHE IS NOT TRUSTED, IT IS CHECKED. The key is the guest tree plus the pin, and both
+      # Windows jobs independently assert `host method-id` == reproduce/METHOD_ID afterwards. A
+      # wrong or corrupted ELF fails there, which is the same gate a fresh build passes through.
+      - name: Restore the guest ELF if this exact guest was built before
+        id: elfcache
+        uses: actions/cache@v4
+        with:
+          path: hazync-guest.elf
+          key: guest-elf-${{ hashFiles('prover/methods/guest/**', 'reproduce/METHOD_ID', 'reproduce/GUEST_ELF_SHA256') }}
+
       - name: Free disk, because the container build needs ~15 GB
+        if: steps.elfcache.outputs.cache-hit != 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup || true
           sudo docker image prune -af || true
           df -h / | tail -1
 
       - name: Build the guest in the pinned container
+        if: steps.elfcache.outputs.cache-hit != 'true'
         run: CARGO_BUILD_JOBS=4 ./prover/build-release.sh cpu 2>&1 | tail -25
 
       - name: The container's own id check must have passed
+        if: steps.elfcache.outputs.cache-hit != 'true'
         env:
           PIN: ${{ steps.pin.outputs.id }}
         run: |
@@ -116,12 +134,29 @@ jobs:
           [ "$GOT" = "$PIN" ] || { echo "the CONTAINER build is not canonical"; exit 1; }
           echo "container id $GOT = the pin"
 
-      - name: Stage the guest ELF
+      - name: Stage the guest ELF, and check it against the recorded sha whether built or cached
         run: |
-          ELF=prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
-          [ -s "$ELF" ] || { echo "no guest ELF at $ELF"; exit 1; }
-          echo "sha256 $(sha256sum "$ELF" | cut -d' ' -f1)  size $(stat -c%s "$ELF")"
-          cp "$ELF" hazync-guest.elf
+          set -o pipefail
+          if [ "${{ steps.elfcache.outputs.cache-hit }}" = "true" ]; then
+              echo "cache hit — no container build ran"
+          else
+              ELF=prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
+              [ -s "$ELF" ] || { echo "no guest ELF at $ELF"; exit 1; }
+              cp "$ELF" hazync-guest.elf
+          fi
+          # ⛔ ONE CHECK ON BOTH PATHS. A cached artefact that is never verified is a cached
+          # artefact nobody can trust; reproduce/GUEST_ELF_SHA256 is the pin build.rs already
+          # enforces, so assert it here too rather than only downstream.
+          GOT=$(sha256sum < hazync-guest.elf | cut -d' ' -f1)
+          # ⛔⛔ PARSE IT THE WAY build.rs DOES: the FIRST non-empty, non-comment line.
+          # `grep -oE '[0-9a-f]{64}' | head -1` returns 37987b85… — the METHOD_ID, which appears in
+          # that file's PROSE explaining why the two pins differ. The check would then demand the
+          # image id as the file's sha256 and fail on every correct build. Caught before dispatch.
+          WANT=$(grep -vE '^\s*#|^\s*$' reproduce/GUEST_ELF_SHA256 | head -1 | tr -d '[:space:]')
+          echo "guest ELF: $(stat -c%s hazync-guest.elf) bytes  sha256 $GOT"
+          [ -n "$WANT" ] || { echo "⛔ no sha in reproduce/GUEST_ELF_SHA256"; exit 1; }
+          [ "$GOT" = "$WANT" ] || { echo "⛔ guest ELF sha MISMATCH; want $WANT"; exit 1; }
+          echo "✅ matches reproduce/GUEST_ELF_SHA256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -416,12 +451,26 @@ jobs:
             "cuda_cccl|cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip|17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5"
             "cuda_profiler_api|cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip|b05519f8ce4f02167bfc859358f62eb771d89ac2af3a6952a82317f2af4bc5bd"
           )
-          ROOT="$RUNNER_TEMP/cuda"
+          # ⛔⛔ CONVERT $RUNNER_TEMP TO A POSIX PATH ONCE, HERE. It arrives as a Windows path
+          # (D:\a\_temp on this runner), and inside Git Bash that breaks POSIX tools in ways that
+          # look unrelated to each other. Two separate failures in two runs, one root cause:
+          #
+          #   run 37004243510  sha256sum escaped its whole output line with `\` because the
+          #                    FILENAME held backslashes -> a correct hash read as a mismatch
+          #   run 37009999983  `tar: Cannot connect to D: resolve failed` -- Git Bash ships GNU
+          #                    tar, which reads `D:\...` as host:path and tries to rsh to host "D"
+          #
+          # ⚠ `--force-local` would silence the second one while leaving the cause in place. Fixing
+          # the path form fixes both, and anything else this would have broken later.
+          RT=$(cygpath -u "$RUNNER_TEMP")
+          case "$RT" in /*) : ;; *) echo "⛔ cygpath did not yield a POSIX path: $RT"; exit 1 ;; esac
+          echo "RUNNER_TEMP: $RUNNER_TEMP  ->  $RT"
+          ROOT="$RT/cuda"
           mkdir -p "$ROOT"
           for entry in "${COMPONENTS[@]}"; do
             IFS='|' read -r name rel want <<< "$entry"
             [ -n "$name" ] || continue
-            zip="$RUNNER_TEMP/$(basename "$rel")"
+            zip="$RT/$(basename "$rel")"
             echo "── $name"
             curl -fsSL --retry 3 -o "$zip" "$base/$rel"
             # ⛔⛔ READ FROM STDIN. `sha256sum "$zip"` prints the FILENAME, and coreutils escapes
@@ -443,7 +492,7 @@ jobs:
             # bsdtar, which reads zip. Measured the hard way locally: `unzip` was absent, the
             # extraction silently produced nothing, and the loop below went on to misread an empty
             # directory as a different archive layout.
-            ex="$RUNNER_TEMP/x-$name"
+            ex="$RT/x-$name"
             mkdir -p "$ex"
             tar -xf "$zip" -C "$ex" || { echo "  ⛔ extraction FAILED for $name"; exit 1; }
             # ⛔ AND ASSERT IT PRODUCED SOMETHING. An extractor that fails quietly turns the
@@ -462,14 +511,20 @@ jobs:
                 echo "  (flat archive — merging $d directly)"
             fi
             case "$d" in
-                "$RUNNER_TEMP"/*) : ;;
-                *) echo "  ⛔ REFUSING: resolved source '$d' is outside RUNNER_TEMP"; exit 1 ;;
+                "$RT"/*) : ;;
+                *) echo "  ⛔ REFUSING: resolved source '$d' is outside $RT"; exit 1 ;;
             esac
             [ -d "$d" ] || { echo "  ⛔ REFUSING: '$d' is not a directory"; exit 1; }
             cp -r "$d"/. "$ROOT"/
           done
+          # ⛔ TWO FORMS, DELIBERATELY, BECAUSE TWO CONSUMERS WANT DIFFERENT THINGS.
+          # CUDA_PATH and GITHUB_PATH are read by the RUNNER and by nvcc/cargo, which want the
+          # Windows form. CUDA_POSIX is for the bash steps below, where a `D:\...` glob never
+          # matches — that would have made the DLL-packaging step report "no cudart64 found" and
+          # fail on a toolchain that was installed correctly.
           echo "CUDA_PATH=$(cygpath -w "$ROOT")" >> "$GITHUB_ENV"
-          echo "$ROOT/bin" >> "$GITHUB_PATH"
+          echo "CUDA_POSIX=$ROOT" >> "$GITHUB_ENV"
+          cygpath -w "$ROOT/bin" >> "$GITHUB_PATH"
           # ⛔ POSITIVE CONTROL: nvcc must actually run and report 12.9, not merely exist.
           "$ROOT/bin/nvcc.exe" --version | tail -3
           "$ROOT/bin/nvcc.exe" --version | /usr/bin/grep -q "release 12.9" \
@@ -555,15 +610,19 @@ jobs:
           # add and must not invent a second failure. It DOES fail when an exe exists but its
           # runtime does not — that is the case worth guarding.
           [ -f "$OUT/host.exe" ] || { echo "no host.exe — the build failed; nothing to package"; exit 0; }
+          # ⚠ $CUDA_POSIX, not $CUDA_PATH: the latter is `D:\...` and a backslash path does not
+          # glob in bash, so this loop would silently match nothing.
+          CU="${CUDA_POSIX:-$(cygpath -u "$CUDA_PATH")}"
+          echo "looking for the CUDA runtime under $CU/bin"
           n=0
-          for dll in "$CUDA_PATH"/bin/cudart64_*.dll; do
+          for dll in "$CU"/bin/cudart64_*.dll; do
               [ -f "$dll" ] || continue
               cp -v "$dll" "$OUT"/ && n=$((n+1))
           done
           if [ "$n" -eq 0 ]; then
-              echo "⛔ no cudart64_*.dll found under $CUDA_PATH/bin — the exe would not load on a"
+              echo "⛔ no cudart64_*.dll found under $CU/bin — the exe would not load on a"
               echo "   machine that has only a driver. Listing what IS there:"
-              ls "$CUDA_PATH"/bin 2>/dev/null | head -20
+              ls "$CU"/bin 2>/dev/null | head -20
               exit 1
           fi
           echo "✅ packaged $n CUDA runtime DLL(s) next to host.exe"
