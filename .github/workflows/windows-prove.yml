@@ -24,8 +24,26 @@ name: windows-prove
 # ⚠ WHAT THIS CANNOT ANSWER: the GPU. A windows-latest runner has no GPU, so this is the CPU path
 # only. The CUDA variant needs the toolkit in CI to build and real hardware to run; #631 tracks it.
 #
-# ⛔⛔ IF prove-block PASSES HERE, THAT IS #616's BAR: a proof produced on a non-Linux machine whose
-# receipt verifies against the canonical guest id. Not "the barrier is documented as removed".
+# ✅✅📏 IT PASSED, AND THAT CLEARS #616's BAR. Measured on windows-latest, run 36933650193
+# (507c3e8, branch test/windows-prove-combined), 2026-10-01:
+#
+#     === PROVING block 170 chain_step (real STARK receipt) ===
+#     PROVED in 2875.1s — receipt VERIFIED against METHOD_ID.
+#       chain tip: height 170  cum_work 4295032833   UTXO root leaves: 9
+#       receipt ~1408226 bytes (STARK)
+#
+# ⇒ A proof produced on a non-Linux machine whose receipt verifies against the canonical guest id
+# 37987b85…. Not "the barrier is documented as removed" -- a receipt.
+#
+# ⛔ READ prove.log, NOT THE STEP'S COLOUR. The number above comes from the uploaded artifact. The
+# step had NO continue-on-error on that run, so the green was genuine -- but it has carried one
+# before, and a green then meant nothing. The claim is "prove.log says VERIFIED"; the step going
+# green is corroboration, never the evidence. ⇒ If continue-on-error is ever added back here while
+# something is being debugged, DELETE IT the moment the prove passes again.
+#
+# ⚠📏 AND THIS DOES NOT MAKE CPU PROVING USEFUL FOR REAL BLOCKS. 2875 s for block 170 -- a single
+# spend, 9 UTXO leaves -- on 4 runner cores. A tip block is thousands of segments. The value here is
+# that the PLATFORM works (and small/early board blocks); anything at the tip still needs a GPU.
 #
 # ⛔⛔ DISPATCH THIS ON A BRANCH, NOT ON main, WHILE IT IS STILL AN OPEN QUESTION.
 #
@@ -165,6 +183,20 @@ jobs:
           # ⚠ It is risc0-sys, NOT the crate the earlier log seemed to implicate: step_verify_*.cpp
           # were simply the last SUCCESSFUL compiles scrolling past before the failure.
           CXXFLAGS: /std:c++20 /DNOMINMAX
+          # ⛔⛔ 32 MB MAIN-THREAD STACK. Windows reserves 1 MB per thread by default; Linux gives
+          # 8 MB. The risc0 prover recurses deep in its NTT/FRI code, and run 36927996077 showed
+          # FIVE threads overflowing -- including `thread 'main'`:
+          #
+          #   === PROVING block 170 chain_step (real STARK receipt) ===
+          #   thread '<unknown>' (920) has overflowed its stack      (x4 more)
+          #   thread 'main' (5376) has overflowed its stack
+          #   panicked at host/src/main.rs:611: prove: Generic exception
+          #
+          # ⚠ The "Generic exception" is the C++ FFI reporting the wreckage; the overflow is the
+          # cause. ⛔ RUST_MIN_STACK CANNOT FIX THE MAIN THREAD -- its stack is RESERVED IN THE PE
+          # HEADER at link time, so it takes a linker flag and nothing else will do.
+          # ⚠ A link flag is host-side and cannot move METHOD_ID; the id check downstream says so.
+          RUSTFLAGS: -C link-arg=/STACK:33554432
         run: |
           set -o pipefail
           # ⛔ NO `--features cuda`. That is what keeps build_cuda_kernels() -- and every GCC-style
@@ -213,12 +245,37 @@ jobs:
           # prover OOM surfaces as a raw allocation panic, so the knob is exposed on the dispatch.
           HAZYNC_SEG_PO2: ${{ github.event.inputs.seg_po2 }}
           RUST_BACKTRACE: '1'
+          # ⚠ And 32 MB for SPAWNED threads (the rayon pool). This covers the four `<unknown>`
+          # overflows; the linker flag above covers `main`. Both are needed -- neither alone is
+          # enough, which is exactly what the five-thread list in run 36927996077 shows.
+          RUST_MIN_STACK: '33554432'
         run: |
           set -o pipefail
           [ -n "$HAZYNC_SEG_PO2" ] && echo "HAZYNC_SEG_PO2=$HAZYNC_SEG_PO2" || unset HAZYNC_SEG_PO2
           # ⚠ prove-block builds block 170's witness IN-PROCESS from fixtures: no network, no bundle,
           # no input file. That is what makes it runnable here at all.
-          ./target/release/host.exe prove-block 2>&1 | tail -40
+          #
+          # ⛔⛔ CAPTURE, DO NOT TAIL. The build step above learnt this and THIS step did not: run
+          # 36922591612 piped the prove through `tail -40`, which kept the BOTTOM of a backtrace and
+          # threw away the panic message at the top. The same trap, in the adjacent block, one run
+          # after a commit message was written about it.
+          set +e
+          ./target/release/host.exe prove-block > prove.log 2>&1
+          rc=$?
+          set -e
+          echo "prove exit: $rc  ($(wc -l < prove.log) lines captured)"
+          # ⚠ The FIRST lines matter as much as the last: a panic message precedes its backtrace,
+          # and a prover OOM names neither the knob nor a value, so both ends go in the job log.
+          echo "=== first 40 lines ==="
+          head -40 prove.log
+          echo "=== last 40 lines ==="
+          tail -40 prove.log
+          if [ "$rc" -ne 0 ]; then
+              echo "=== every panic / error line in the whole log ==="
+              grep -aiE "panicked at|^error|unwrap|out of memory|allocation|HAZYNC_SEG_PO2" prove.log \
+                  | sort -u | head -20
+          fi
+          exit "$rc"
 
       - name: What Windows answered
         if: always()
@@ -227,10 +284,22 @@ jobs:
           STATUS: ${{ job.status }}
         run: |
           echo "native Windows CPU prove: $STATUS"
+          # ⛔ QUOTE prove.log, DO NOT INFER FROM $STATUS. The receipt line is the evidence; a job
+          # status is a summary of steps and has been made to lie here before by continue-on-error.
+          # ⇒ Print the prover's own words, and say plainly when there are none.
+          if [ -f prove.log ] && /usr/bin/grep -qa "receipt VERIFIED against METHOD_ID" prove.log; then
+              /usr/bin/grep -a "PROVED in\|receipt VERIFIED against METHOD_ID" prove.log | sed 's/^/  /'
+              echo "⭐ A non-Linux machine produced a receipt against the canonical guest id."
+              echo "   That is the bar hazync#616 asks for -- measured, not documented."
+          elif [ -f prove.log ]; then
+              echo "⛔ prove.log exists but does NOT say the receipt verified. The prove did not pass,"
+              echo "   whatever this job's status says. Read the windows-build-log artifact."
+          else
+              echo "⚠ no prove.log -- the run did not reach the prove step. Nothing is claimed."
+          fi
           echo "⛔ This is the CPU path. A windows-latest runner has no GPU, so it says nothing about"
           echo "   CUDA on Windows -- hazync#631 tracks that, and it needs real hardware to run."
-          echo "⭐ If the prove step passed, a non-Linux machine produced a receipt against the"
-          echo "   canonical guest id, which is the bar hazync#616 asks for."
+          echo "⚠ And 2875s for block 170 (one spend) means CPU proving is for small/early blocks."
 
       # ⛔⛔ THE ARTIFACT IS THE DELIVERABLE. A Windows desktop with an NVIDIA GPU needs neither Rust
       # nor a CUDA toolkit to try this -- download and run.
@@ -247,5 +316,7 @@ jobs:
         if: always()
         with:
           name: windows-build-log
-          path: prover/build.log
+          path: |
+            prover/build.log
+            prover/prove.log
           retention-days: 14
