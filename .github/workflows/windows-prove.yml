@@ -424,7 +424,16 @@ jobs:
             zip="$RUNNER_TEMP/$(basename "$rel")"
             echo "── $name"
             curl -fsSL --retry 3 -o "$zip" "$base/$rel"
-            got=$(sha256sum "$zip" | cut -d' ' -f1)
+            # ⛔⛔ READ FROM STDIN. `sha256sum "$zip"` prints the FILENAME, and coreutils escapes
+            # the whole line with a leading backslash when that filename contains one -- which on
+            # Windows it always does, because $RUNNER_TEMP is C:\Users\runneradmin\AppData\...
+            # So run 37004243510 failed with a hash that was CORRECT:
+            #     want  227b109663b5e57d…
+            #     got  \227b109663b5e57d…
+            # ⚠ And a local dry run cannot catch this: Linux paths have no backslashes, so the
+            # verifier passed here and failed only on the platform it was written for.
+            # ⇒ `< "$zip"` makes the filename `-`, so there is nothing to escape.
+            got=$(sha256sum < "$zip" | cut -d' ' -f1)
             if [ "$got" != "$want" ]; then
               echo "  ⛔ SHA256 MISMATCH for $name"; echo "     want $want"; echo "     got  $got"
               exit 1
@@ -536,13 +545,16 @@ jobs:
       # a missing-DLL box and no useful message. ⇒ Ship the runtime beside it.
       # ⚠ Asserted, not hoped: if no cudart DLL is found the step fails rather than uploading an exe
       # that cannot run. Nothing here is static-linked, so its absence would be a real problem.
-      - name: Ship the CUDA runtime beside the exe, or fail
+      - name: Ship the CUDA runtime beside the exe (when one was built)
         if: always()
         shell: bash
         run: |
           set -o pipefail
           OUT=prover/target/release
-          [ -f "$OUT/host.exe" ] || { echo "no host.exe — nothing to package"; exit 0; }
+          # ⚠ No exe means the build above already failed and said so; this step has nothing to
+          # add and must not invent a second failure. It DOES fail when an exe exists but its
+          # runtime does not — that is the case worth guarding.
+          [ -f "$OUT/host.exe" ] || { echo "no host.exe — the build failed; nothing to package"; exit 0; }
           n=0
           for dll in "$CUDA_PATH"/bin/cudart64_*.dll; do
               [ -f "$dll" ] || continue
