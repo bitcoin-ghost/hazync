@@ -68,6 +68,9 @@ on:
       ref_note:
         description: 'DISPATCH A BRANCH, NOT main — see the warning in this file'
         default: 'dispatch this on a branch; a failure on main posts a red check against main'
+      skip_cpu_prove:
+        description: "'true' skips the 48-minute CPU prove and runs only the CUDA build (#631)"
+        default: 'false'
 
 permissions:
   contents: read
@@ -131,6 +134,10 @@ jobs:
   prove:
     needs: [guest]
     runs-on: windows-latest
+    # ⚠ The CPU prove takes ~48 min and is ALREADY ANSWERED (run 36933650193). When iterating on
+    # the CUDA build there is no reason to pay for it again, so it can be skipped deliberately.
+    # ⛔ Default is to RUN it: a regression test you have to remember to switch on is not one.
+    if: inputs.skip_cpu_prove != 'true'
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -319,4 +326,249 @@ jobs:
           path: |
             prover/build.log
             prover/prove.log
+          retention-days: 14
+
+  # ── ⛔ #631: does the CUDA path COMPILE under MSVC? (it cannot be proved here) ──────────────────
+  #
+  # ⭐ WHY THIS IS NOW POSSIBLE AT ALL. #631 has sat on "neither CI nor the dev box has a Windows
+  # machine with an NVIDIA GPU", and `test_nvcc_flags.py` is only a SOURCE-level guard whose own
+  # comment says "nothing here compiles a kernel under MSVC". But COMPILING needs no GPU -- only
+  # proving does. The one thing that did need a GPU was this, in risc0-circuit-rv32im-sys/build.rs:
+  #
+  #     if env::var_os("NVCC_PREPEND_FLAGS").is_none() && env::var_os("NVCC_APPEND_FLAGS").is_none() {
+  #         build.flag("-arch=native");          // <- queries the LOCAL GPU, fails without one
+  #     }
+  #
+  # ⇒ Setting NVCC_APPEND_FLAGS skips it. Upstream left the escape hatch; no patch is needed, and
+  # the Linux path is untouched because that branch only runs when neither var is set.
+  #
+  # ⛔⛔ CUDA 12.x, NOT 13.x, AND THAT IS A HARD CONSTRAINT. CUDA 13 DROPPED Pascal (sm_61). The
+  # card available to test the result is a GTX 1050 Ti, so 13.x would build something it cannot run.
+  # Pinned to 12.9.1 (2025-06-05), the newest 12.x.
+  #
+  # ⚠ ONLY FOUR COMPONENTS, ~126 MB, instead of a ~3 GB installer. Taken from NVIDIA's own
+  # redistrib manifest and VERIFIED BY SHA256 -- so no third-party action is trusted to put a
+  # compiler on the machine. The kernels need exactly: nvcc, cudart, and cccl (which supplies
+  # <cuda/std/array>, <cuda/atomic>, <thrust/scan.h>, <thrust/execution_policy.h> -- measured by
+  # grepping the includes, not guessed) plus the profiler_api headers CUDA headers pull in.
+  #
+  # ⛔ WHAT THIS JOB CANNOT TELL YOU: whether it PROVES. windows-latest has no GPU. A green run here
+  # means the kernels compiled under MSVC and the binary carries the canonical id -- nothing more.
+  # The uploaded exe is what answers the rest, on real hardware.
+  build-cuda:
+    needs: [guest]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hazync-guest-elf
+          path: prover/methods        # ⛔ the crate dir; a build script's cwd is its own package root
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The guest arrived intact
+        shell: bash
+        run: |
+          n=$(wc -c < prover/methods/hazync-guest.elf)
+          echo "guest ELF: $n bytes"
+          [ "$n" -gt 60000000 ] || { echo "truncated artifact ($n bytes)"; exit 1; }
+
+      # ⛔ nvcc needs cl.exe, and windows-latest does NOT put it on PATH. Export only the four
+      # variables the toolchain needs rather than dumping all of `set` into GITHUB_ENV, where a
+      # multiline value would corrupt the file.
+      - name: Put MSVC on PATH (vcvars64, no third-party action)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
+          $vs = & $vswhere -latest -products * `
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                  -property installationPath
+          if (-not $vs) { throw "no VC x86/x64 toolset found" }
+          $bat = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $bat)) { throw "no vcvars64.bat at $bat" }
+          Write-Host "vcvars: $bat"
+          $want = @("PATH","INCLUDE","LIB","LIBPATH")
+          cmd /c "`"$bat`" >nul 2>&1 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $want -contains $matches[1].ToUpper()) {
+              "$($matches[1].ToUpper())=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            }
+          }
+          # ⛔ POSITIVE: assert cl.exe is reachable now, rather than discovering it at link time.
+          $env:PATH = (Get-Content $env:GITHUB_ENV | Select-String '^PATH=' | Select-Object -Last 1) -replace '^PATH=',''
+          & cl.exe 2>&1 | Select-Object -First 1
+
+      - name: Install CUDA 12.9.1 nvcc + cudart + cccl, each verified by sha256
+        shell: bash
+        run: |
+          set -o pipefail
+          base=https://developer.download.nvidia.com/compute/cuda/redist
+          # ⛔ AN ARRAY, NOT A HEREDOC. A heredoc body has to start at column 0, which breaks out
+          # of this YAML block scalar and makes the whole workflow unparseable -- it did, on the
+          # first attempt. Indented array entries are safe inside `run: |`.
+          # name|relative path|sha256   (NVIDIA's own redistrib_12.9.1.json manifest)
+          COMPONENTS=(
+            "cuda_nvcc|cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip|227b109663b5e57d2718bcabb24a4ba0d9d4e52d958e327dc476f7c28691be85"
+            "cuda_cudart|cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip|179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8"
+            "cuda_cccl|cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip|17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5"
+            "cuda_profiler_api|cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip|b05519f8ce4f02167bfc859358f62eb771d89ac2af3a6952a82317f2af4bc5bd"
+          )
+          ROOT="$RUNNER_TEMP/cuda"
+          mkdir -p "$ROOT"
+          for entry in "${COMPONENTS[@]}"; do
+            IFS='|' read -r name rel want <<< "$entry"
+            [ -n "$name" ] || continue
+            zip="$RUNNER_TEMP/$(basename "$rel")"
+            echo "── $name"
+            curl -fsSL --retry 3 -o "$zip" "$base/$rel"
+            got=$(sha256sum "$zip" | cut -d' ' -f1)
+            if [ "$got" != "$want" ]; then
+              echo "  ⛔ SHA256 MISMATCH for $name"; echo "     want $want"; echo "     got  $got"
+              exit 1
+            fi
+            echo "  sha256 ok ($(( $(wc -c < "$zip") / 1048576 )) MB)"
+            # ⛔ `tar -xf`, NOT `unzip`. Git Bash on windows-latest has no `unzip`; Windows ships
+            # bsdtar, which reads zip. Measured the hard way locally: `unzip` was absent, the
+            # extraction silently produced nothing, and the loop below went on to misread an empty
+            # directory as a different archive layout.
+            ex="$RUNNER_TEMP/x-$name"
+            mkdir -p "$ex"
+            tar -xf "$zip" -C "$ex" || { echo "  ⛔ extraction FAILED for $name"; exit 1; }
+            # ⛔ AND ASSERT IT PRODUCED SOMETHING. An extractor that fails quietly turns the
+            # layout check below into a guess; this is the line that makes that impossible.
+            [ -n "$(ls -A "$ex" 2>/dev/null)" ] || { echo "  ⛔ $name extracted to NOTHING"; exit 1; }
+            # Each archive unpacks to ONE versioned top dir; merge them into a single CUDA root.
+            # ⛔⛔ AN EMPTY `find` RESULT HERE WOULD COPY THE WHOLE FILESYSTEM. `cp -r "$d"/.` with
+            # $d unset expands to `cp -r /.` — which is not a theoretical risk: the first local run
+            # of this exact loop started copying / into the destination and had to be killed after
+            # 4.7 GB. An archive whose layout differs by one level is all it takes.
+            # ⇒ Refuse on empty, and handle the flat-archive case explicitly instead of guessing.
+            d=$(find "$ex" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -z "$d" ]; then
+                # Genuinely flat (now that extraction is proven non-empty, this means what it says)
+                d="$ex"
+                echo "  (flat archive — merging $d directly)"
+            fi
+            case "$d" in
+                "$RUNNER_TEMP"/*) : ;;
+                *) echo "  ⛔ REFUSING: resolved source '$d' is outside RUNNER_TEMP"; exit 1 ;;
+            esac
+            [ -d "$d" ] || { echo "  ⛔ REFUSING: '$d' is not a directory"; exit 1; }
+            cp -r "$d"/. "$ROOT"/
+          done
+          echo "CUDA_PATH=$(cygpath -w "$ROOT")" >> "$GITHUB_ENV"
+          echo "$ROOT/bin" >> "$GITHUB_PATH"
+          # ⛔ POSITIVE CONTROL: nvcc must actually run and report 12.9, not merely exist.
+          "$ROOT/bin/nvcc.exe" --version | tail -3
+          "$ROOT/bin/nvcc.exe" --version | /usr/bin/grep -q "release 12.9" \
+            || { echo "⛔ nvcc is not 12.9 — Pascal (sm_61) support depends on 12.x"; exit 1; }
+          test -f "$ROOT/include/thrust/scan.h"  || { echo "⛔ no thrust headers (cccl missing)"; exit 1; }
+          test -f "$ROOT/include/cuda/atomic"    || { echo "⛔ no libcu++ headers (cccl missing)"; exit 1; }
+          echo "✅ nvcc 12.9 present, thrust + libcu++ headers present"
+
+      - name: ⭐ Build the host for Windows WITH CUDA (#631)
+        shell: bash
+        working-directory: prover
+        env:
+          HAZYNC_GUEST_ELF: hazync-guest.elf
+          CXXFLAGS: /std:c++20 /DNOMINMAX
+          RUSTFLAGS: -C link-arg=/STACK:33554432
+          # ⛔⛔ THIS VARIABLE DOES TWO JOBS. nvcc reads it as extra flags, AND its mere presence
+          # makes the vendored build.rs skip `-arch=native`, which would query a GPU this runner
+          # does not have. Both halves are required; dropping it fails the build on a GPU-less box.
+          #
+          # sm_61 = Pascal, the GTX 1050 Ti this will be tested on. The second -gencode embeds PTX
+          # for compute_61, so the same exe JITs forward onto any newer card -- which matters
+          # because the fleet is 4090/L40S/PRO 6000 and this binary should not be Pascal-only.
+          # ⚠ CUDA 12.9 deprecates sm_61 and WILL warn. A deprecation warning is not an error here.
+          NVCC_APPEND_FLAGS: >-
+            -gencode=arch=compute_61,code=sm_61
+            -gencode=arch=compute_61,code=compute_61
+            -Wno-deprecated-gpu-targets
+        run: |
+          set -o pipefail
+          echo "CUDA_PATH=$CUDA_PATH"
+          # ⛔ CAPTURE, DO NOT TAIL. Two runs were spent on this file discovering that a tail window
+          # had eaten the diagnostic; the fix belongs here from the first run, not the third.
+          set +e
+          cargo build --release -p host --features cuda > cuda-build.log 2>&1
+          rc=$?
+          set -e
+          echo "build exit: $rc  ($(wc -l < cuda-build.log) lines captured)"
+          echo "=== first 30 ==="; head -30 cuda-build.log
+          echo "=== last 60 ==="; tail -60 cuda-build.log
+          if [ "$rc" -ne 0 ]; then
+              echo "=== every error line, WHOLE lines (a -oE pattern throws file:line away) ==="
+              /usr/bin/grep -nE "error|LNK[0-9]+|fatal|nvcc" cuda-build.log | head -40
+          fi
+          exit "$rc"
+
+      - name: ⛔ the CUDA binary must carry the CANONICAL id
+        shell: bash
+        working-directory: prover
+        run: |
+          PIN=$(/usr/bin/grep -vE '^\s*#|^\s*$' ../reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
+          GOT=$(./target/release/host.exe method-id | tr -d '[:space:]')
+          echo "pin $PIN"; echo "got $GOT"
+          [ "$PIN" = "$GOT" ] || { echo "⛔ NOT CANONICAL — a proof from this binary is worthless"; exit 1; }
+          echo "✅ canonical"
+
+      - name: What this did and did not establish
+        if: always()
+        shell: bash
+        working-directory: prover
+        run: |
+          if [ -f target/release/host.exe ]; then
+              echo "✅ The CUDA kernels COMPILED under MSVC and the binary is canonical (#631's build half)."
+          else
+              echo "⛔ No host.exe — the CUDA build did not complete. Read the cuda-build.log artifact."
+          fi
+          echo "⛔ THIS RUNNER HAS NO GPU, so nothing here shows that it PROVES. That needs hardware."
+          echo "⚠ Built for sm_61 (Pascal) + PTX. The smallest card measured to prove has 24 GB;"
+          echo "  a 1050 Ti has 4 GB, so 'out of memory' is a likely and still-useful result."
+
+      # ⛔⛔ host.exe ALONE WOULD NOT START ON THE TEST MACHINE. The NVIDIA driver supplies
+      # `nvcuda.dll` (the driver API) but NOT `cudart64_*.dll` (the CUDA runtime) — that ships with
+      # the toolkit. A CUDA-linked binary handed to someone who has only a driver dies at load with
+      # a missing-DLL box and no useful message. ⇒ Ship the runtime beside it.
+      # ⚠ Asserted, not hoped: if no cudart DLL is found the step fails rather than uploading an exe
+      # that cannot run. Nothing here is static-linked, so its absence would be a real problem.
+      - name: Ship the CUDA runtime beside the exe, or fail
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          OUT=prover/target/release
+          [ -f "$OUT/host.exe" ] || { echo "no host.exe — nothing to package"; exit 0; }
+          n=0
+          for dll in "$CUDA_PATH"/bin/cudart64_*.dll; do
+              [ -f "$dll" ] || continue
+              cp -v "$dll" "$OUT"/ && n=$((n+1))
+          done
+          if [ "$n" -eq 0 ]; then
+              echo "⛔ no cudart64_*.dll found under $CUDA_PATH/bin — the exe would not load on a"
+              echo "   machine that has only a driver. Listing what IS there:"
+              ls "$CUDA_PATH"/bin 2>/dev/null | head -20
+              exit 1
+          fi
+          echo "✅ packaged $n CUDA runtime DLL(s) next to host.exe"
+          ls -la "$OUT"/host.exe "$OUT"/*.dll
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hazync-host-windows-x86_64-cuda
+          path: |
+            prover/target/release/host.exe
+            prover/target/release/*.dll
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-cuda-build-log
+          path: prover/cuda-build.log
           retention-days: 14
