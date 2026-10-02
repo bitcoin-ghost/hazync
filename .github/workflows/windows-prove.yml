@@ -414,9 +414,28 @@ jobs:
       # ⛔ nvcc needs cl.exe, and windows-latest does NOT put it on PATH. Export only the four
       # variables the toolchain needs rather than dumping all of `set` into GITHUB_ENV, where a
       # multiline value would corrupt the file.
-      - name: Put MSVC on PATH (vcvars64, no third-party action)
+      # ⛔⛔ CUDA 12.9 SUPPORTS VS 2017-2022 AND THE RUNNER SHIPS NEWER. Measured, run 37016080210:
+      #
+      #   crt/host_config.h(170): fatal error C1189: #error: -- unsupported Microsoft Visual Studio
+      #   version! Only the versions between 2017 and 2022 (inclusive) are supported!
+      #
+      # windows-latest now carries Visual Studio 18 with MSVC 14.51, which CUDA 12.9 (June 2025)
+      # refuses. ⛔ And 13.x is not the way out: it dropped Pascal, which is the card this binary
+      # exists to be tested on.
+      #
+      # ⭐ SO PREFER A SUPPORTED TOOLSET OVER AN OVERRIDE. A VS install usually carries several
+      # MSVC toolsets side by side, and `vcvars64.bat -vcvars_ver=` selects one. VS 2017-2022 are
+      # 14.1x-14.4x; 14.5x and later are what CUDA rejects. If a supported toolset is present this
+      # builds in a combination a real user could have.
+      #
+      # ⚠ `-allow-unsupported-compiler` is the fallback, NOT the plan. nvcc's own words: "using an
+      # unsupported host compiler may cause compilation failure or incorrect run time execution."
+      # A compile that only works with that flag is a weaker answer to #631 than one that does not,
+      # so the step reports loudly which of the two happened rather than hiding it.
+      - name: Put MSVC on PATH, preferring a toolset CUDA 12.9 supports
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
           $vs = & $vswhere -latest -products * `
@@ -425,33 +444,49 @@ jobs:
           if (-not $vs) { throw "no VC x86/x64 toolset found" }
           $bat = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
           if (-not (Test-Path $bat)) { throw "no vcvars64.bat at $bat" }
-          Write-Host "vcvars: $bat"
+
+          # Which toolsets are actually installed?
+          $tsRoot = Join-Path $vs 'VC\Tools\MSVC'
+          $all = @()
+          if (Test-Path $tsRoot) {
+            $all = Get-ChildItem $tsRoot -Directory | ForEach-Object { $_.Name } | Sort-Object
+          }
+          Write-Host "installed MSVC toolsets: $($all -join ', ')"
+
+          # CUDA 12.9 accepts VS 2017-2022 == MSVC 14.1x-14.4x. Take the NEWEST such toolset.
+          $supported = $all | Where-Object {
+            $p = $_.Split('.'); [int]$p[0] -eq 14 -and [int]$p[1] -lt 50
+          } | Sort-Object { [version]$_ } | Select-Object -Last 1
+
+          $vcvarsArgs = @()
+          if ($supported) {
+            # -vcvars_ver takes major.minor, e.g. 14.44
+            $mm = ($supported.Split('.')[0..1]) -join '.'
+            $vcvarsArgs += "-vcvars_ver=$mm"
+            Write-Host "SELECTED toolset $supported (CUDA 12.9 supports this)"
+            "CUDA_HOST_SUPPORTED=1" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          } else {
+            Write-Host "NO SUPPORTED TOOLSET: every installed toolset is 14.50+, which CUDA 12.9"
+            Write-Host "refuses. Falling back to -allow-unsupported-compiler, which nvcc warns may"
+            Write-Host "produce incorrect runtime behaviour. The receipt check is what would catch that."
+            "CUDA_HOST_SUPPORTED=0" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          }
+
           $want = @("PATH","INCLUDE","LIB","LIBPATH")
-          cmd /c "`"$bat`" >nul 2>&1 && set" | ForEach-Object {
+          $argline = if ($vcvarsArgs) { " " + ($vcvarsArgs -join " ") } else { "" }
+          cmd /c "`"$bat`"$argline >nul 2>&1 && set" | ForEach-Object {
             if ($_ -match '^([^=]+)=(.*)$' -and $want -contains $matches[1].ToUpper()) {
               "$($matches[1].ToUpper())=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
             }
           }
-          # ⛔ POSITIVE: assert cl.exe is reachable now, rather than discovering it at link time.
-          $env:PATH = (Get-Content $env:GITHUB_ENV | Select-String '^PATH=' | Select-Object -Last 1) -replace '^PATH=',''
-          & cl.exe 2>&1 | Select-Object -First 1
-
-      # ⛔⛔ THIS STEP IS POWERSHELL ON PURPOSE, AFTER THREE FAILED RUNS IN BASH.
-      #
-      # Every one of those failures was the same thing wearing a different mask: a Windows path or
-      # a Windows archive handed to a POSIX tool inside Git Bash.
-      #
-      #   37004243510  sha256sum escaped its output line with `\` because the FILENAME held
-      #                backslashes, so a CORRECT hash read as a mismatch
-      #   37009999983  `tar: Cannot connect to D: resolve failed` — GNU tar read `D:\a\...` as
-      #                host:path and tried to rsh to a host called "D"
-      #   37012675244  `tar: This does not look like a tar archive` — Git Bash ships GNU tar, which
-      #                does not read zip at all. bsdtar is Windows' tar.exe, not the one on PATH.
-      #
-      # ⇒ Each fix exposed the next instance. PowerShell has native hashing and zip extraction and
-      # one path convention, so the whole class disappears instead of being patched one run at a
-      # time. ⚠ The lesson is not "PowerShell is better" — it is that a tool chosen for familiarity
-      # over fitness cost three 20-minute runs before the real question was even reached.
+          # ⛔ POSITIVE: assert cl.exe is reachable AND report the version actually selected, rather
+          # than trusting that -vcvars_ver did what was asked.
+          $newPath = (Get-Content $env:GITHUB_ENV | Select-String '^PATH=' | Select-Object -Last 1) -replace '^PATH=',''
+          if (-not $newPath) { throw "vcvars exported no PATH" }
+          $env:PATH = $newPath
+          $clv = (& cl.exe 2>&1 | Select-Object -First 1 | Out-String).Trim()
+          Write-Host "cl.exe reports: $clv"
+          if ($clv -notmatch '19\.\d+') { throw "cl.exe did not report a version: $clv" }
       - name: Install CUDA 12.9.1 nvcc + cudart + cccl, each verified by sha256
         shell: pwsh
         run: |
@@ -531,13 +566,32 @@ jobs:
           # for compute_61, so the same exe JITs forward onto any newer card -- which matters
           # because the fleet is 4090/L40S/PRO 6000 and this binary should not be Pascal-only.
           # ⚠ CUDA 12.9 deprecates sm_61 and WILL warn. A deprecation warning is not an error here.
-          NVCC_APPEND_FLAGS: >-
-            -gencode=arch=compute_61,code=sm_61
-            -gencode=arch=compute_61,code=compute_61
-            -Wno-deprecated-gpu-targets
         run: |
           set -o pipefail
           echo "CUDA_PATH=$CUDA_PATH"
+          # ⛔⛔ NVCC_APPEND_FLAGS IS BUILT HERE, NOT IN `env:`, BECAUSE ONE OF ITS FLAGS IS
+          # CONDITIONAL. Its mere PRESENCE also makes the vendored builder skip `-arch=native`,
+          # which queries a GPU this runner does not have — so it must be exported either way.
+          #
+          # sm_61 = Pascal, the GTX 1050 Ti this is built to be tested on. The second -gencode
+          # embeds PTX for compute_61 so the same exe JITs forward onto newer cards, because the
+          # fleet is 4090/L40S/PRO 6000 and this binary should not be Pascal-only.
+          # ⚠ CUDA 12.9 deprecates sm_61 and will warn; a deprecation warning is not an error.
+          FLAGS="-gencode=arch=compute_61,code=sm_61"
+          FLAGS="$FLAGS -gencode=arch=compute_61,code=compute_61"
+          FLAGS="$FLAGS -Wno-deprecated-gpu-targets"
+          if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then
+              echo "host compiler: a CUDA-supported MSVC toolset was selected — NO override needed"
+          else
+              # ⚠ nvcc's own warning: an unsupported host compiler "may cause compilation failure
+              # or incorrect run time execution". ⛔ So a build that needs this is a WEAKER answer
+              # to #631 than one that does not, and the summary step says so. The receipt check on
+              # real hardware is what would actually catch a miscompile.
+              echo "⚠ host compiler: NO supported toolset available — adding -allow-unsupported-compiler"
+              FLAGS="$FLAGS -allow-unsupported-compiler"
+          fi
+          export NVCC_APPEND_FLAGS="$FLAGS"
+          echo "NVCC_APPEND_FLAGS=$NVCC_APPEND_FLAGS"
           # ⛔ CAPTURE, DO NOT TAIL. Two runs were spent on this file discovering that a tail window
           # had eaten the diagnostic; the fix belongs here from the first run, not the third.
           set +e
@@ -572,6 +626,14 @@ jobs:
               echo "✅ The CUDA kernels COMPILED under MSVC and the binary is canonical (#631's build half)."
           else
               echo "⛔ No host.exe — the CUDA build did not complete. Read the cuda-build.log artifact."
+          fi
+          if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then
+              echo "✅ host compiler was a CUDA-SUPPORTED MSVC toolset — no override was used."
+          else
+              echo "⚠ BUILT WITH -allow-unsupported-compiler: every installed MSVC toolset is"
+              echo "  14.50+, which CUDA 12.9 refuses (it supports VS 2017-2022). nvcc warns this"
+              echo "  may produce incorrect runtime behaviour, so a receipt from this binary is the"
+              echo "  only thing that would settle it. Treat a compile alone as the weaker claim."
           fi
           echo "⛔ THIS RUNNER HAS NO GPU, so nothing here shows that it PROVES. That needs hardware."
           echo "⚠ Built for sm_61 (Pascal) + PTX. The smallest card measured to prove has 24 GB;"
