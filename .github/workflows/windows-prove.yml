@@ -576,7 +576,14 @@ jobs:
         working-directory: prover
         env:
           HAZYNC_GUEST_ELF: hazync-guest.elf
-          CXXFLAGS: /std:c++20 /DNOMINMAX
+          # ⛔⛔ NO /std:c++20 HERE, AND THAT IS THE POINT. `cc` injects CXXFLAGS into EVERY C++
+          # compilation, and a `.cuda(true)` build is one — so this variable reached nvcc as
+          # `-Xcompiler /std:c++20` and `cudafe++` died with 0xC0000409 on all seven .cu files
+          # (run 37017347238). The CXX kernels DO need C++20 for keccak's designated initializers,
+          # so the flag now lives on the builder's CXX path (HAZYNC_631_MSVC_CXX20) where it can
+          # apply to C++ kernels without reaching the CUDA ones.
+          # ⚠ /DNOMINMAX stays: it is a define, harmless to nvcc, and poolstl needs it.
+          CXXFLAGS: /DNOMINMAX
           RUSTFLAGS: -C link-arg=/STACK:33554432
           # ⛔⛔ THIS VARIABLE DOES TWO JOBS. nvcc reads it as extra flags, AND its mere presence
           # makes the vendored build.rs skip `-arch=native`, which would query a GPU this runner

@@ -116,6 +116,26 @@ def main():
     for f in ("-diag-suppress=177", "-diag-suppress=2922", "-Xcudafe", "--display_error_number"):
         check(f in src, f"nvcc's own flag {f} is still passed on every target")
 
+    print("── ⛔ the CXX path gets C++20 and the CUDA path gets NO -std at all ──")
+    # Split the file at compile_cuda so each path can be asserted separately.
+    cpp_part, _, cuda_part = src.partition("fn compile_cuda")
+    # ⛔ ASSERT ON THE CALL, NOT THE BARE STRING. The first version of these checks matched the
+    # explanatory COMMENT, which quotes /std:c++17 while saying it was replaced — a check that
+    # tests prose passes whatever the code does.
+    calls = lambda part, flag: f'.flag_if_supported("{flag}")' in part
+    check(calls(cpp_part, "/std:c++20"),
+          'the CXX path CALLS flag_if_supported("/std:c++20") for MSVC (keccak C7555)')
+    check(calls(cpp_part, "-std=c++17"),
+          'the CXX path still CALLS flag_if_supported("-std=c++17") — Linux byte-identical')
+    check(not calls(cpp_part, "/std:c++17"),
+          "the old MSVC /std:c++17 CALL is gone, not sitting alongside the new one")
+    # ⛔⛔ THE ONE THAT MATTERS: CXXFLAGS=/std:c++20 reaching nvcc killed cudafe++ with
+    # 0xC0000409 on all seven .cu files (run 37017347238). The CUDA path must pass no -std.
+    check("/std:" not in cuda_part and "-std=" not in cuda_part,
+          "compile_cuda passes NO C++ standard flag — a /std: there crashes cudafe++")
+    check("0xC0000409" in src or "cudafe" in src,
+          "the comment records the measured crash, so the next person does not re-add the flag")
+
     print("── the escape hatch the GPU-less CI build depends on is intact ──")
     check(
         'env::var_os("NVCC_PREPEND_FLAGS").is_none()' in src

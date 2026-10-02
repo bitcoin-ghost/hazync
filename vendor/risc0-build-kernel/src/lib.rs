@@ -138,12 +138,30 @@ impl KernelBuild {
 
         // It's *highly* recommended to install `sccache` and use this combined with
         // `RUSTC_WRAPPER=/path/to/sccache` to speed up rebuilds of C++ kernels
+        //
+        // HAZYNC_631_MSVC_CXX20 — hazync#631. MSVC gets `/std:c++20`, not `/std:c++17`, because
+        // `risc0-circuit-keccak-sys` uses designated initializers:
+        //
+        //     error C7555: use of designated initializers requires at least '/std:c++20'
+        //
+        // ⛔⛔ AND THIS IS WHY THE FLAG LIVES HERE INSTEAD OF IN CXXFLAGS. The Windows CI job used
+        // to pass `CXXFLAGS=/std:c++20`, which the `cc` crate injects into EVERY C++ compilation —
+        // and a `.cuda(true)` build is a C++ compilation, so nvcc received
+        // `-Xcompiler /std:c++20` and `cudafe++` died with 0xC0000409 (STATUS_FAIL_FAST) on all
+        // seven .cu files. Measured, run 37017347238.
+        //
+        // ⇒ A global CXXFLAGS cannot distinguish the CXX kernels (which need C++20) from the CUDA
+        // kernels (which must not get it). Putting it on the CXX path does.
+        //
+        // ⛔ LINUX IS UNTOUCHED: `/std:c++20` is MSVC-only syntax that `flag_if_supported` skips on
+        // GCC/clang, and the `-std=c++17` line below is unchanged — so every non-MSVC target gets
+        // exactly the flags it got before. test_kernel_host_flags.py asserts that.
         cc::Build::new()
             .cpp(true)
             .debug(false)
             .files(&self.files)
             .includes(&self.inc_dirs)
-            .flag_if_supported("/std:c++17")
+            .flag_if_supported("/std:c++20")
             .flag_if_supported("-std=c++17")
             .flag_if_supported("-fno-var-tracking")
             .flag_if_supported("-fno-var-tracking-assignments")
