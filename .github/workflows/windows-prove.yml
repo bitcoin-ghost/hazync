@@ -582,8 +582,17 @@ jobs:
           # (run 37017347238). The CXX kernels DO need C++20 for keccak's designated initializers,
           # so the flag now lives on the builder's CXX path (HAZYNC_631_MSVC_CXX20) where it can
           # apply to C++ kernels without reaching the CUDA ones.
-          # ⚠ /DNOMINMAX stays: it is a define, harmless to nvcc, and poolstl needs it.
-          CXXFLAGS: /DNOMINMAX
+          # ⚠ NOMINMAX stays (poolstl needs it; windows.h makes min/max MACROS), but as `-D`, NOT
+          # `/D`. ⛔⛔ MSYS PATH-MANGLED THE `/` FORM. Measured, run 37020607504: with CXXFLAGS
+          # narrowed to the single token `/DNOMINMAX`, Git Bash rewrote it as a path and cl.exe
+          # received two source FILENAMES:
+          #     c1xx: fatal error C1083: Cannot open source file: 'C:/Program'
+          #     c1xx: fatal error C1083: Cannot open source file: 'Files/Git/DNOMINMAX'
+          # ⚠ It survived in the CPU job because CXXFLAGS there is TWO tokens (`/std:c++20
+          # /DNOMINMAX`) and was not converted — so narrowing this value is what exposed it. That
+          # is measured, not a claim about MSYS's exact rule.
+          # ⇒ MSVC accepts `-D` as readily as `/D`, and `-D` cannot be taken for a path.
+          CXXFLAGS: -DNOMINMAX
           RUSTFLAGS: -C link-arg=/STACK:33554432
           # ⛔⛔ THIS VARIABLE DOES TWO JOBS. nvcc reads it as extra flags, AND its mere presence
           # makes the vendored build.rs skip `-arch=native`, which would query a GPU this runner
