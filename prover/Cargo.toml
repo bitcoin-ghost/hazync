@@ -28,3 +28,16 @@ risc0-circuit-rv32im-sys = { path = "../vendor/risc0-circuit-rv32im-sys" }
 # `prove` feature turns on `risc0-circuit-keccak/prove`, so it must COMPILE regardless.
 # ⛔ Prover-side: METHOD_ID, the circuit and the verifier are unchanged. Drop once upstream fixes it.
 risc0-circuit-keccak = { path = "../vendor/risc0-circuit-keccak" }
+# hazync#631: risc0-build-kernel 2.0.1 with ONE branch, in src/lib.rs (search
+# HAZYNC_631_MSVC_HOST_FLAGS). compile_cuda() forwards `-Wno-missing-braces,-Wno-unused-function`
+# through `-Xcompiler` straight to nvcc's host compiler, which on Windows is cl.exe:
+#     cl : Command line error D8021 : invalid numeric argument '/Wno-missing-braces'
+# measured on windows-latest, run 37015079476, compiling risc0-sys's supra/{api,ntt}.cu.
+# ⭐ THIS IS THE SHARED LAYER. Five crates compile their CUDA kernels through that one function
+# (risc0-sys, risc0-circuit-rv32im-sys, risc0-circuit-keccak-sys, risc0-circuit-recursion-sys,
+# risc0-groth16-sys), which is why #632's per-crate flag branch in risc0-circuit-rv32im-sys did not
+# help: this line re-added the GCC flags for all five, including a crate nobody had vendored.
+# ⛔ The non-MSVC branch is BYTE-IDENTICAL to what shipped; test_kernel_host_flags.py asserts it.
+# ⛔ Prover-side only: METHOD_ID, the circuit and the verifier are unchanged. Drop once upstream
+# builds for MSVC.
+risc0-build-kernel = { path = "../vendor/risc0-build-kernel" }
