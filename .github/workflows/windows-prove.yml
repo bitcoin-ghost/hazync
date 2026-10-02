@@ -465,6 +465,26 @@ jobs:
             $vcvarsArgs += "-vcvars_ver=$mm"
             Write-Host "SELECTED toolset $supported (CUDA 12.9 supports this)"
             "CUDA_HOST_SUPPORTED=1" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            # ⛔⛔ PUTTING cl.exe ON PATH IS NOT ENOUGH, AND RUN 37016761710 PROVES IT. vcvars
+            # selected 14.44 and `cl.exe` reported 19.44 — yet nvcc was still invoked as
+            #     -ccbin=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\...
+            # i.e. the 14.51 toolset, and host_config.h rejected it exactly as before.
+            #
+            # WHY: the vendored builder does `.ccbin(env::var("NVCC_CCBIN").is_err())`, so with
+            # NVCC_CCBIN unset the `cc` crate computes -ccbin from ITS OWN Visual Studio detection,
+            # which takes the NEWEST toolset and never looks at PATH.
+            #
+            # ⇒ Setting NVCC_CCBIN does both halves of the job: it makes `.ccbin(false)` so cc adds
+            # no -ccbin of its own, and nvcc reads NVCC_CCBIN as its host-compiler default. The
+            # builder left this hook deliberately; it just has to be used.
+            $hostBin = Join-Path $tsRoot (Join-Path $supported 'bin\HostX64\x64')
+            if (-not (Test-Path (Join-Path $hostBin 'cl.exe'))) {
+              throw "no cl.exe under $hostBin — cannot point nvcc at the supported toolset"
+            }
+            "NVCC_CCBIN=$hostBin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            Write-Host "NVCC_CCBIN=$hostBin"
+            $sel = (& (Join-Path $hostBin 'cl.exe') 2>&1 | Select-Object -First 1 | Out-String).Trim()
+            Write-Host "that toolset's cl.exe reports: $sel"
           } else {
             Write-Host "NO SUPPORTED TOOLSET: every installed toolset is 14.50+, which CUDA 12.9"
             Write-Host "refuses. Falling back to -allow-unsupported-compiler, which nvcc warns may"
@@ -629,6 +649,7 @@ jobs:
           fi
           if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then
               echo "✅ host compiler was a CUDA-SUPPORTED MSVC toolset — no override was used."
+              echo "   nvcc was pointed at it via NVCC_CCBIN=${NVCC_CCBIN:-<unset!>}"
           else
               echo "⚠ BUILT WITH -allow-unsupported-compiler: every installed MSVC toolset is"
               echo "  14.50+, which CUDA 12.9 refuses (it supports VS 2017-2022). nvcc warns this"
