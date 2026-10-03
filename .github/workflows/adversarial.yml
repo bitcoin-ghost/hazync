@@ -222,6 +222,20 @@ jobs:
         run: cd coordinator && python3 test_nvcc_flags.py
       - name: nvcc-flags POSITIVE CONTROL (the unconditional GCC flags — must read as not MSVC-aware)
         run: cd coordinator && python3 test_nvcc_flags.py --control
+
+      - name: The SHARED kernel builder's host flags are MSVC-aware, Linux UNCHANGED (#631)
+        # ⛔⛔ THE LAYER THE PER-CRATE FIX MISSED. risc0_build_kernel::compile_cuda() is the one
+        # function FIVE crates build their CUDA kernels through, and it appended
+        # `-Xcompiler -Wno-missing-braces,-Wno-unused-function` unconditionally. #632 branched
+        # risc0-circuit-rv32im-sys's OWN flags and the Windows build still died here —
+        #     cl : Command line error D8021 : invalid numeric argument '/Wno-missing-braces'
+        # measured in run 37015079476, compiling risc0-sys's supra/{api,ntt}.cu, a crate nobody
+        # had vendored. A flag added by the shared builder cannot be fixed per crate.
+        # ⛔ And the check that matters most is the LINUX one: every proof on the board is compiled
+        # through this function, so the else arm must pass exactly the old flags in the old order.
+        run: cd coordinator && python3 test_kernel_host_flags.py
+      - name: kernel-host-flags POSITIVE CONTROL (upstream's unconditional flag must FAIL the checks)
+        run: cd coordinator && python3 test_kernel_host_flags.py --control
       - name: A pod's own /api/witness fetch is measured, and a non-transfer is not 'fast' (#598)
         # ⛔ /api/witness already serves the tip bundle BYTE-IDENTICALLY (sha256 0c54f7ef… both
         # sides, measured 2026-10-01) in 1.38 s against 25.0 s for the two-leg ssh path. ⚠ But that

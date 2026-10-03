@@ -196,6 +196,75 @@ def worst_peer(bank, stats):
     return max(stats[c]["p90"] for c in bank) if bank else None
 
 
+# ── ⛔ THE LIVE SIDE: the measured tail has to reach the RUN, not just a report (hazync#550) ──────
+#
+# ⛔⛔ EVERYTHING ABOVE THIS LINE WAS UNUSED. `cohort_effect` and `MIN_FLEET` had ZERO callers
+# outside this file and its tests, and there was no bank or cohort path anywhere in tip_smoke,
+# tip_runner or tip_recruit. #550 argues that WHICH cards go together is the variable that matters
+# most, the analysis to decide that was written, and the live run never saw it — the exact shape of
+# "rules written but never called".
+#
+# ⚠ WHAT THESE DO AND DO NOT DO. They RANK and REPORT. They do not cut anything. The live cut stays
+# `slow_worker_cut`, which ranks on measured BANDWIDTH, and this says what a TAIL-based cut would
+# have chosen instead so one run can show whether the two disagree and which was right. Lever 2 was
+# predicted confidently and measured NEGATIVE; a tail cut gets the same treatment.
+
+
+def tail_ranking(order, samples, min_samples=MIN_SAMPLES):
+    """([(cid, p90_ms|None)] worst-tail FIRST among droppable workers, [cids too thin to judge]).
+
+    Deliberately mirrors `slow_worker_cut`'s contract so the two orderings are directly comparable:
+
+    ⛔ order[0] IS THE AGGREGATE AND IS NEVER RANKED. It is not droppable, it does not appear in the
+    join samples as a peer of itself, and a fleet-relative check that forgot this once dropped the
+    aggregate and killed a 30-card run 34 seconds in.
+
+    ⚠ A card with fewer than `min_samples` joins is UNMEASURED, not fast. It is returned separately
+    and sorted last, because "we could not tell" must never read as "it is fine" — the same rule the
+    aggregate election and the worker gate already follow.
+    """
+    if not order:
+        return [], []
+    workers = [getattr(c, "cid", c) for c in order[1:]]
+    stats = join_levels.by_card(samples)
+    stats.pop("?", None)
+    ranked, thin = [], []
+    for cid in workers:
+        s = stats.get(cid)
+        if s is None or s["n"] < min_samples:
+            thin.append(cid)
+        else:
+            ranked.append((cid, s["p90"]))
+    ranked.sort(key=lambda kv: (-kv[1], kv[0]))      # worst p90 first, name as a stable tiebreak
+    return ranked + [(c, None) for c in sorted(thin)], thin
+
+
+def tail_cut(order, samples, *, need, min_samples=MIN_SAMPLES):
+    """The worker cids a TAIL-based cut would drop to reach `need`. Reporting only.
+
+    ⛔ Same trimming semantics as `slow_worker_cut`: it reduces the fleet DOWN TO `need`, so with a
+    surplus of k it names the k worst-tailed MEASURED workers. ⚠ An unmeasured card is never cut
+    here — there is nothing to cut it on.
+    """
+    if not order or len(order) <= need:
+        return []
+    ranked, _ = tail_ranking(order, samples, min_samples=min_samples)
+    measured = [cid for cid, p90 in ranked if p90 is not None]
+    surplus = len(order) - need
+    return measured[:max(0, surplus)]
+
+
+def cut_agreement(bw_drop, tail_drop):
+    """(both, bandwidth_only, tail_only) — how far the two criteria disagree, as sorted lists.
+
+    ⭐ This is the measurement #550 actually needs. If they always agree, banking by tail buys
+    nothing over the cut already shipped and the issue can close. If they disagree, the next run
+    shows which fleet finished faster.
+    """
+    a, c = {str(x) for x in bw_drop}, {str(x) for x in tail_drop}
+    return sorted(a & c), sorted(a - c), sorted(c - a)
+
+
 def report(samples, n_banks, by_name=False, batches=None):
     ranked, thin, unlabelled = rank_cards(samples)
     if not ranked:

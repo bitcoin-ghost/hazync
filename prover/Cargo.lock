@@ -3673,8 +3673,6 @@ dependencies = [
 [[package]]
 name = "risc0-build-kernel"
 version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaaa3e04c71e4244354dd9e3f8b89378cfecfbb03f9c72de4e2e7e0482b30c9a"
 dependencies = [
  "cc",
  "directories",
