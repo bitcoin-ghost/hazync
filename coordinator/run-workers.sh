@@ -272,5 +272,39 @@ for i in $(seq 1 "$N"); do
 done
 
 sleep 3
-echo "started $(pgrep -fc "hazync-worker-loop" 2>/dev/null || true) proving + $(pgrep -fc "hazync-fold-loop" 2>/dev/null || true) folding + $(pgrep -fc "hazync-spine-loop" 2>/dev/null || true) spine worker(s); logs in $LOG_DIR"
+# ⛔⛔ COUNT BY argv[0], NOT WITH `pgrep -f` — AND THIS LINE COST THREE DAYS OF A STALLED SPINE.
+#
+# `--stop` was fixed for exactly this trap (hazync#491, see the block above) and this line was
+# missed. `pgrep -f` matches the whole command LINE, so it counts any process whose arguments
+# merely MENTION the tag — the invoking shell, its children, a wrapper, this script itself.
+#
+# 📏 Measured on hz-spine-1, 2026-09-29 22:35. The start report printed:
+#
+#     started 2 proving + 0 folding + 1 spine worker(s); logs in /root/hazync-workers
+#
+# There was NO spine worker. No spine process, no spine log, ever. The operator had no reason to
+# look, and the spine did not advance for 71.95 h — until check-spine's 72 h ceiling fired. The
+# same wrong line printed "3 proving + 2 spine" on 2026-10-02 while the truth was 2 and 1.
+#
+# ⭐ The loops are started with `exec -a "$tag"`, so the tag IS argv[0]. Matching on argv[0] alone
+# cannot see a shell that merely names the tag, which is the whole failure. ⚠ `ps` is captured to a
+# file first and the patterns are compared with awk, so this counting code's own argv never enters
+# the data it is counting.
+_snap="$(mktemp)"
+ps -eo pid,args > "$_snap" 2>/dev/null || true
+_count_tag() {  # $1 = tag prefix; counts processes whose argv[0] starts with it
+    awk -v p="$1" '$2 ~ ("^" p) {c++} END {print c+0}' "$_snap"
+}
+_n_prove=$(_count_tag "hazync-worker-loop")
+_n_fold=$(_count_tag "hazync-fold-loop")
+_n_spine=$(_count_tag "hazync-spine-loop")
+rm -f "$_snap"
+echo "started $_n_prove proving + $_n_fold folding + $_n_spine spine worker(s); logs in $LOG_DIR"
+# ⛔ AND SAY SO WHEN THE MODE ASKED FOR A SPINE WORKER AND DID NOT GET ONE. A count that is merely
+# correct still reads as fine at a glance; the point of this unit is that a missing spine worker is
+# INVISIBLE until a 72 h ceiling trips, so it has to be loud at the moment it happens.
+if { [ "$MODE" = spine ] || [ "$MODE" = mixed ]; } && [ "$_n_spine" -eq 0 ]; then
+    echo "WARNING: MODE=$MODE asked for a spine worker and NONE is running." >&2
+    echo "         The spine will not advance, and nothing else will tell you." >&2
+fi
 echo "stop with: $0 $N --stop"
