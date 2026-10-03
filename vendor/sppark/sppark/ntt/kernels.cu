@@ -5,6 +5,8 @@
 #ifndef __NTT_KERNELS_CU__
 #define __NTT_KERNELS_CU__
 
+#include "../util/hazync_msvc_device_assert.cuh"   // HAZYNC_631_DEVICE_ASSERT
+
 #if defined(__NVCC__)
 # include <cooperative_groups.h>
 #elif defined(__HIPCC__)
