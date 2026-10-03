@@ -615,6 +615,47 @@ jobs:
       # ⚠ ~/.cargo is cached separately from target/ on purpose: the registry is large, stable and
       # shared, while target/ is volatile. One key for both would throw away the registry every
       # time a vendored kernel changes.
+      - name: Install protoc, pinned and sha256-verified (#631)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ⛔⛔ THIS IS WHAT ACTUALLY FAILED TWO 2-HOUR RUNS, AND IT IS NOT A CUDA PROBLEM AT ALL.
+          #
+          # `circom-witnesscalc v0.2.1` runs a prost-build build script that shells out to `protoc`,
+          # which is not on a windows runner. The build spent ~2 h happily compiling sppark,
+          # risc0-sys and risc0-circuit-keccak-sys's CUDA kernels and then died here:
+          #
+          #     error: failed to run custom build command for `circom-witnesscalc v0.2.1`
+          #       Error: Could not find `protoc`. ... Try installing `protobuf-compiler`
+          #
+          # ⛔ AND IT WAS IN THE LOG THE WHOLE TIME, AT LINE 895 OF 962. I read the TAIL and
+          # concluded "no error message, so the build was killed" -- twice, and once in writing. Cargo
+          # flushes buffered build-script WARNINGS after the error, so the tail of a failed cargo log
+          # is warnings and the error sits above them. ⇒ grep the whole file; never read the tail of
+          # a cargo log and conclude anything about whether it failed.
+          #
+          # ⚠ Memory was never the constraint: 13.8 GB of 16 GB free at the moment of failure, 83 GB
+          # of disk. `CARGO_BUILD_JOBS=2` was added on that wrong hypothesis and made the run SLOWER
+          # (2 h 17 m vs 1 h 53 m); it is gone again.
+          URL="https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-win64.zip"
+          SHA="f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3"
+          curl -sSL --retry 3 -o protoc.zip "$URL"
+          # ⛔ sha256sum ESCAPES its output with a leading backslash when the name contains one, and
+          # on MSYS it can. Feed the file on STDIN so there is no name in the output to mangle.
+          got=$(sha256sum < protoc.zip | cut -d' ' -f1)
+          [ "$got" = "$SHA" ] || { echo "protoc sha256 MISMATCH: got $got want $SHA" >&2; exit 1; }
+          echo "protoc archive verified: $got"
+          mkdir -p "$RUNNER_TEMP/protoc"
+          unzip -q -o protoc.zip -d "$RUNNER_TEMP/protoc"
+          PROTOC_EXE="$RUNNER_TEMP/protoc/bin/protoc.exe"
+          [ -x "$PROTOC_EXE" ] || { echo "protoc.exe absent after unzip" >&2; exit 1; }
+          # ⚠ prost-build reads PROTOC as a native path; cygpath it or it gets an MSYS path it
+          # cannot exec. This project has the scar: a lone /DNOMINMAX became C:/Program Files/Git/...
+          echo "PROTOC=$(cygpath -w "$PROTOC_EXE")" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          # ⭐ POSITIVE check: it must RUN and print a version, not merely exist on disk.
+          "$PROTOC_EXE" --version
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -740,12 +781,9 @@ jobs:
               FLAGS="$FLAGS -allow-unsupported-compiler"
           fi
           export NVCC_APPEND_FLAGS="$FLAGS"
-          # ⛔ TWO JOBS, NOT FOUR. Cargo defaults to one per core and the runner has four; each
-          # nvcc on these kernels is memory-hungry, and the guest job already uses
-          # CARGO_BUILD_JOBS=4 on a LINUX runner for the same reason. If the kills are memory, this
-          # is the cheapest thing that changes them; if they are not, the numbers printed above say
-          # so and this costs only wall-clock.
-          export CARGO_BUILD_JOBS=2
+          # ⚠ NO CARGO_BUILD_JOBS CAP. One was added here on an OOM hypothesis that the
+          # instrumentation then DISPROVED -- 13.8 GB of 16 GB free at the failure -- and it cost
+          # 24 minutes of extra wall-clock for nothing. Measure before constraining.
           echo "NVCC_APPEND_FLAGS=$NVCC_APPEND_FLAGS"
           # ⛔ CAPTURE, DO NOT TAIL. Two runs were spent on this file discovering that a tail window
           # had eaten the diagnostic; the fix belongs here from the first run, not the third.
@@ -762,9 +800,20 @@ jobs:
               powershell -NoProfile -Command "Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Format-List" 2>/dev/null || true
               # ⛔ A KILLED BUILD PRINTS NO DIAGNOSTIC. Say which case this is, because "no error
               # line" was read three times as "the log is unhelpful" when it was itself the signal.
-              if ! /usr/bin/grep -qaE "could not compile|^error\[|^error: " cuda-build.log; then
-                  echo "⚠ cargo exited $rc but printed NO error — the build was KILLED (OOM/disk),"
-                  echo "  not failed. Compare the resource figures above with the ones before."
+              # ⛔⛔ STRIP ANSI BEFORE MATCHING, AND THE FIRST VERSION OF THIS CHECK DID NOT.
+              # cargo writes `\033[1m\033[91merror\033[0m:`, so an anchored `^error: ` matched
+              # NOTHING and this printed "the build was KILLED" over a perfectly ordinary compile
+              # error that was sitting at line 895. A check whose green means "I did not find the
+              # words I expected" is the exact shape that has misread this repo's CI three times.
+              sed -E 's/\x1b\[[0-9;]*m//g' cuda-build.log > cuda-build.plain
+              ERRN=$(/usr/bin/grep -acE "^error(\[|:)|could not compile|failed to run custom build" cuda-build.plain || true)
+              echo "cargo-style error lines found: $ERRN"
+              if [ "$ERRN" -eq 0 ]; then
+                  echo "⚠ cargo exited $rc and NO error line was found even after stripping ANSI —"
+                  echo "  only then is a kill (OOM/disk) the likely story. Check the figures above."
+              else
+                  echo "⇒ this is an ordinary build FAILURE, not a kill. The error:"
+                  /usr/bin/grep -aE -m3 -A 8 "^error(\[|:)|failed to run custom build" cuda-build.plain | head -24
               fi
               echo "=== every error line, WHOLE lines (⛔ excluding 'thiserror', which the previous"
               echo "    pattern matched and reported as if it were the failure) ==="
