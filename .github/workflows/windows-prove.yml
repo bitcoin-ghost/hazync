@@ -905,6 +905,9 @@ jobs:
           fi
           echo "✅ packaged $n CUDA runtime DLL(s) next to host.exe"
           ls -la "$OUT"/host.exe "$OUT"/*.dll
+          # ⚠ cudart is shipped for a machine that will actually RUN this, but note it is NOT in
+          # the import table — the exe does not load it at startup. The import that matters is
+          # nvcuda.dll, the DRIVER api, which no redist supplies. See scripts/embedded_guest_sha.py.
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -922,53 +925,34 @@ jobs:
           path: prover/cuda-build.log
           retention-days: 14
 
-      - name: ⛔ the CUDA binary must carry the CANONICAL id
+      - name: ⛔ the CUDA binary must carry the CANONICAL guest
         id: canonical
         shell: bash
         working-directory: prover
         run: |
           set -o pipefail
-          # ⛔⛔ THIS STEP ONCE FAILED WITH EXIT 127 AND IT MEANT NOTHING ABOUT CANONICALITY.
+          # ⛔⛔ THIS USED TO RUN `host.exe method-id` AND IT CANNOT WORK HERE. Three runs died on
+          # exit 127 against a binary the same run uploaded. The import table says why:
           #
-          # 127 is "command not found", and the exe was right there — a 177 MB host.exe that this
-          # same run uploaded. A CUDA-linked Windows binary cannot LOAD without cudart64_*.dll
-          # beside it, and the step that ships those DLLs used to run AFTER this one. So the check
-          # that guards the most important property in the project was reporting a missing DLL.
+          #     nvcuda.dll   ← the CUDA DRIVER API, shipped with the NVIDIA driver, not the redist
           #
-          # ⇒ The DLL step now runs first, and this distinguishes the three outcomes by NAME
-          # instead of collapsing them into "non-zero".
-          PIN=$(/usr/bin/grep -vE '^\s*#|^\s*$' ../reproduce/METHOD_ID | head -1 | tr -d '[:space:]')
-          [ -n "$PIN" ] || { echo "⛔ reproduce/METHOD_ID gave no pin — refusing to compare"; exit 1; }
-          if [ ! -f target/release/host.exe ]; then
-              echo "verdict=absent" >> "$GITHUB_OUTPUT"
-              echo "⛔ no host.exe — the build did not produce a binary; nothing to check"
+          # A GPU-less runner has no driver, so Windows cannot load the image, and nothing copied
+          # beside the exe changes it. ⚠ I shipped cudart twice on that theory; cudart is not even
+          # imported.
+          #
+          # ⇒ Verify the property from the FILE instead: the guest is embedded verbatim, so its
+          # sha256 can be compared with reproduce/GUEST_ELF_SHA256 with no GPU at all. Measured on
+          # run 37155135563's artifact: R0BF at offset 12,281,328, 69,980,208 B, sha 35e3f55e… .
+          #
+          # ⛔ AND IT REPORTS THE TWO THINGS SEPARATELY. A step here once printed "the binary is
+          # canonical" having checked only that a file EXISTED, in a run where the id check had
+          # just failed. The guest is verified; the image id is NOT read, and it says so.
+          if python3 ../scripts/embedded_guest_sha.py target/release/host.exe --root .. ; then
+              echo "verdict=guest-canonical" >> "$GITHUB_OUTPUT"
+          else
+              echo "verdict=guest-mismatch" >> "$GITHUB_OUTPUT"
               exit 1
           fi
-          # ⚠ Capture the code: a binary that will not START is a different finding from one whose
-          # id is wrong, and only one of them is about the guest.
-          set +e
-          RAW=$(./target/release/host.exe method-id 2>&1); rc=$?
-          set -e
-          GOT=$(printf '%s' "$RAW" | tr -d '[:space:]')
-          echo "pin $PIN"
-          echo "got ${GOT:-<nothing>}  (exit $rc)"
-          if [ "$rc" -ne 0 ] || [ -z "$GOT" ]; then
-              echo "verdict=unlaunchable" >> "$GITHUB_OUTPUT"
-              echo "⛔ host.exe did not RUN (exit $rc). This says NOTHING about the METHOD_ID."
-              echo "   127 means Windows could not load the image — almost always a DLL that is"
-              echo "   not beside the exe. Its output was:"
-              printf '%s\n' "$RAW" | head -5
-              echo "   DLLs actually present next to it:"
-              ls -1 target/release/*.dll 2>/dev/null | head -10 || echo "   (none)"
-              exit 1
-          fi
-          if [ "$PIN" != "$GOT" ]; then
-              echo "verdict=mismatch" >> "$GITHUB_OUTPUT"
-              echo "⛔ NOT CANONICAL — a proof from this binary is worthless"
-              exit 1
-          fi
-          echo "verdict=canonical" >> "$GITHUB_OUTPUT"
-          echo "✅ canonical"
 
       - name: What this did and did not establish
         if: always()
@@ -989,11 +973,14 @@ jobs:
           else
               echo "✅ The CUDA kernels COMPILED under MSVC and a host.exe was produced."
               case "$V" in
-                canonical)    echo "✅ and it carries the CANONICAL METHOD_ID (#631's build half)." ;;
-                mismatch)     echo "⛔ but its METHOD_ID is NOT canonical — proofs from it are worthless." ;;
-                unlaunchable) echo "⛔ but it would not RUN, so its METHOD_ID is UNVERIFIED — not 'fine'." ;;
-                absent)       echo "⛔ the id check found no binary to interrogate." ;;
-                *)            echo "⚠ the METHOD_ID check did not report a verdict, so canonicality is UNKNOWN." ;;
+                guest-canonical)
+                  echo "✅ and it embeds the CANONICAL guest, verified against reproduce/GUEST_ELF_SHA256."
+                  echo "⚠ its own METHOD_ID was NOT read: a CUDA-linked exe imports nvcuda.dll and"
+                  echo "  cannot start without an NVIDIA driver. On a GPU box: host.exe method-id" ;;
+                guest-mismatch)
+                  echo "⛔ but it does NOT embed the canonical guest — proofs from it are worthless." ;;
+                *)
+                  echo "⚠ the guest check reported no verdict, so canonicality is UNKNOWN." ;;
               esac
           fi
           if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then

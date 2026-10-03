@@ -248,6 +248,19 @@ jobs:
       - name: rotation POSITIVE CONTROL (CPU-first, zero-filled, never-refusing — must fail)
         run: cd coordinator && python3 test_cpu_rotation.py --control
 
+      - name: The embedded guest is found by R0BF, not by ELF magic or the first hit (#631)
+        # ⛔⛔ `host.exe method-id` CANNOT be the gate on a GPU-less runner: a CUDA-linked exe
+        # imports nvcuda.dll, the DRIVER api, so Windows will not load the image and it exits 127.
+        # Three #631 runs died there, and twice I shipped cudart on a theory the import table then
+        # disproved — cudart is not even imported.
+        # ⇒ The guest is embedded VERBATIM, so the property is checkable from the file with no GPU.
+        run: python3 scripts/embedded_guest_sha.py --control
+      - name: guest-search POSITIVE CONTROL (ELF magic, first R0BF hit, greedy 64-hex pin — must fail)
+        # ⚠ The same invocation: --control IS the adversarial case and reports which naive search
+        # would have been fooled. ⛔ Note the fourth one — a greedy 64-hex grep of
+        # reproduce/GUEST_ELF_SHA256 returns METHOD_ID out of the prose, not the pin.
+        run: python3 scripts/embedded_guest_sha.py --control
+
       - name: A tail-based worker cut is ranked and reported, never cutting the aggregate (#550)
         run: cd coordinator && python3 test_tail_cut.py
       - name: tail-cut POSITIVE CONTROL (naive ranking incl. the aggregate — must fail)
