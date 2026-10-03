@@ -601,6 +601,36 @@ jobs:
             if (-not (Test-Path (Join-Path $root $h))) { Write-Host "missing header: $h (cccl incomplete)"; exit 1 }
           }
           Write-Host "nvcc 12.9 runs, and thrust + libcu++ headers are present"
+      # ⭐ CACHE THE RUST BUILD. 📏 The CUDA build step now takes ~2 HOURS (run 37118023595:
+      # 1h59m50s) because it compiles keccak-sys's 38 MB of kernels, rv32im's, sppark and the whole
+      # risc0 stack from scratch every time. Almost none of that changes between iterations — the
+      # fixes touch one vendored file at a time — so re-paying it per dispatch is pure waste.
+      #
+      # ⛔ CORRECTNESS IS CARGO'S, NOT THE KEY'S. A stale `target/` cannot produce a wrong binary
+      # here: cargo fingerprints source content and rebuilds what actually changed, and the
+      # METHOD_ID assertion downstream still runs on whatever comes out. The key is keyed on the
+      # lockfile so a dependency change starts clean; restore-keys let an edit to a vendored .cuh
+      # reuse the untouched 90% and let cargo invalidate the rest.
+      #
+      # ⚠ ~/.cargo is cached separately from target/ on purpose: the registry is large, stable and
+      # shared, while target/ is volatile. One key for both would throw away the registry every
+      # time a vendored kernel changes.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-reg-${{ runner.os }}-${{ hashFiles('prover/Cargo.lock') }}
+          restore-keys: cargo-reg-${{ runner.os }}-
+
+      - name: Cache the CUDA build tree
+        uses: actions/cache@v4
+        with:
+          path: prover/target
+          key: cuda-target-${{ runner.os }}-${{ hashFiles('prover/Cargo.lock') }}
+          restore-keys: cuda-target-${{ runner.os }}-
+
       - name: ⭐ Build the host for Windows WITH CUDA (#631)
         shell: bash
         working-directory: prover
