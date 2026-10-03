@@ -41,3 +41,15 @@ risc0-circuit-keccak = { path = "../vendor/risc0-circuit-keccak" }
 # ⛔ Prover-side only: METHOD_ID, the circuit and the verifier are unchanged. Drop once upstream
 # builds for MSVC.
 risc0-build-kernel = { path = "../vendor/risc0-build-kernel" }
+# hazync#631: risc0-groth16-sys 0.1.0 with ONE gate, in kernels/cuda/groth16_coeffs.cuh (search
+# HAZYNC_631_WIN_NO_MMAP). It includes <sys/mman.h>, <unistd.h> and <fcntl.h> to mmap a coefficient
+# blob, and Windows has none of them:
+#     groth16_coeffs.cuh(4): fatal error C1083: Cannot open include file: 'sys/mman.h'
+# ⚠ WE NEVER EXECUTE IT. The crate exports risc0_groth16_cuda_prove/_setup — SNARK WRAPPING. Hazync
+# proves STARK receipts (`host prove-block`), and the wrap is a separate step; but risc0-zkvm's
+# `cuda` feature pulls this crate in unconditionally, so it must COMPILE. Same shape as the vendored
+# keccak circuit and the cfg(unix) IPC prover.
+# ⛔ GATED, NOT PORTED. A Windows mmap port means CreateFileMapping/MapViewOfFile and is upstream's
+# design call. On MSVC the two file paths throw a clear error naming why, so SNARK wrapping on
+# native Windows fails loudly rather than silently. Non-MSVC targets are byte-identical.
+risc0-groth16-sys = { path = "../vendor/risc0-groth16-sys" }

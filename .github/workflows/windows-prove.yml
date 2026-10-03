@@ -661,7 +661,17 @@ jobs:
           # Both, because the error above came from the host pass and the device pass needs it too.
           # ⛔ A `-` prefix, not `/`: a lone `/std:...` is what MSYS rewrote into
           # `C:/Program Files/Git/...` in run 37020607504. cl.exe accepts `-` for any option.
-          FLAGS="$FLAGS -std=c++17 -Xcompiler -std:c++17"
+          # ⛔⛔ C++20, AND THE EARLIER RETREAT TO 17 WAS A MISREADING OF THE SAME VS 2026 BUG.
+          # The vendored rv32im kernels use DESIGNATED INITIALIZERS —
+          #     NondetRegLayout{._super = /*offset=*/12}
+          # which MSVC accepts only at /std:c++20 (error C7555). That is blocker #3 of this chain.
+          # I had set c++20, hit `cudafe++ died with status 0xC0000409`, concluded C++20 was the
+          # cause and dropped to 17 — and run 37115534389 then produced 200 `expected an
+          # expression` errors, every one of them on layout.cu.inc's designated initializers.
+          # ⭐ The 0xC0000409 was the SAME VS 2026 front-end fault that windows-2022 has now fixed,
+          # not a C++20 incompatibility. Two symptoms, one cause, and retreating from 17 to 20
+          # traded a crash for a parse failure.
+          FLAGS="$FLAGS -std=c++20 -Xcompiler -std:c++20"
           # ⛔⛔ `uint` COMES FROM A FORCED-INCLUDE TYPEDEF, NOT `-Duint=unsigned`.
           # risc0-sys's kernels use the POSIX `uint`, which MSVC lacks — 13 errors. The obvious fix,
           # a -D, cleared those and created 200+ new ones: the CUDA and libcu++ headers build the
