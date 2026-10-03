@@ -53,3 +53,13 @@ risc0-build-kernel = { path = "../vendor/risc0-build-kernel" }
 # design call. On MSVC the two file paths throw a clear error naming why, so SNARK wrapping on
 # native Windows fails loudly rather than silently. Non-MSVC targets are byte-identical.
 risc0-groth16-sys = { path = "../vendor/risc0-groth16-sys" }
+# hazync#631: sppark 0.1.15 with FOUR CHARACTERS changed, in sppark/ff/mont_t.cuh (search
+# HAZYNC_631_QUALIFY_N). MSVC/EDG rejects `size_t n=n` as a default argument —
+#     mont_t.cuh(49): error: a parameter is not allowed
+# because it resolves the unqualified `n` to the parameter being declared. The intent is the class
+# member `static const size_t n = (N+31)/32;` above it, which is what GCC's lookup finds, so
+# `mont_t::n` names the same value explicitly and is identical on every compiler.
+# ⚠ #632's own comment predicted this crate would be next: "sppark comes through DEP_SPPARK_ROOT
+# below and its Windows support is also untested."
+# ⛔ Prover-side only: METHOD_ID, the circuit and the verifier are unchanged.
+sppark = { path = "../vendor/sppark" }
