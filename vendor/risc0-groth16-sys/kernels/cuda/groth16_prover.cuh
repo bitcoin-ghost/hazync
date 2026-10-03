@@ -10,12 +10,25 @@
 // from https://github.com/iden3/rapidsnark/blob/main/src/random_generator.hpp
 static inline void randombytes_buf(void* buf, size_t size) {
   static std::random_device engine;
-  static std::uniform_int_distribution<uint8_t> distr;
+  // HAZYNC_631_UNIFORM_INT_TYPE — hazync#631. `uniform_int_distribution<uint8_t>` is ILL-FORMED:
+  // [rand.req.genl] permits only short, int, long, long long and their unsigned forms. libstdc++
+  // accepts uint8_t as an extension, so this has always compiled on Linux; MSVC enforces the
+  // standard and fails, measured on windows-2022 (run 37118023595):
+  //
+  //     include\random(2345): error: static assertion failed with "invalid template argument for
+  //     uniform_int_distribution", instantiating std::uniform_int_distribution<_Ty> [_Ty=uint8_t]
+  //
+  // ⛔ THIS IS NOT A BEHAVIOUR CHANGE. A default-constructed uniform_int_distribution<uint8_t>
+  // spans [0, numeric_limits<uint8_t>::max()] == [0, 255]. Spelling that range explicitly over
+  // `unsigned short` draws from exactly the same distribution; the cast back to uint8_t is lossless
+  // because every value is <= 255 by construction.
+  // ⚠ We never execute this — it is Groth16 SNARK randomness — but it must compile.
+  static std::uniform_int_distribution<unsigned short> distr(0, 255);
 
   uint8_t* buffer = static_cast<uint8_t*>(buf);
 
   for (size_t i = 0; i < size; i++) {
-    buffer[i] = distr(engine);
+    buffer[i] = static_cast<uint8_t>(distr(engine));
   }
 }
 
