@@ -27,6 +27,7 @@ sys.path.insert(0, HERE)
 
 import concurrent.futures as _cf        # noqa: E402
 import sponsor_bot                      # noqa: E402  (the RunPod client only)
+import tip_cpu
 import tip_board                        # noqa: E402
 import tip_controller                   # noqa: E402
 import tip_dashboard                    # noqa: E402
@@ -1070,6 +1071,18 @@ def main():
     # ⚠ Default 0 = REPORT, do not refuse. A block needs roughly segments x ~1.3 MB x 8 / target_s
     # (1.1-1.3 MB/segment measured over two runs), so 9,600 segments under 600 s wants ~166 Mbit/s --
     # but the right floor depends on the block and the target, so the operator sets it.
+    # ⛔⛔ #567 CANNOT BE ANSWERED WITHOUT THIS, AND NOT FOR THE REASON THE ISSUE ASSUMES. The
+    # aggregate is elected ONCE, above the per-block loop, so every block of a run executes on the
+    # SAME card and a run yields exactly ONE (cpu, execution) point. No single run could ever have
+    # fitted a relationship; the issue sat labelled "needs a fleet run" the whole time.
+    # ⚠ Rotation is per RUN, not per block. Per-block would mean rebuilding FleetRunner — its
+    # aggregate, ports, egress server and workdir are bound at construction — on the one card a run
+    # cannot swap, and a fleet-relative check that got that wrong once killed a 30-card run 34
+    # seconds in. Points accumulate across runs in cpu_exec.jsonl and tip_cpu.verdict() refuses to
+    # answer until there are enough of them on enough distinct CPUs.
+    ap.add_argument("--rotate-aggregate", action="store_true",
+                    help="pick a DIFFERENT eligible aggregate each run so #567 accumulates "
+                         "(cpu, execution) points; reachability is still the first gate")
     ap.add_argument("--agg-prefer-cpu", action="store_true",
                     help="rank aggregate candidates on single-core CPU speed (after "
                          "reachability, before link speed). The executor runs on the "
@@ -1621,6 +1634,24 @@ def main():
                 if key > bkey:
                     best = (c, mbit, per, _sc)
         agg = best[0] or cand[0]
+        # ── #567: rotate across runs so the (cpu, execution) pairs cover more than one CPU ───────
+        # ⛔ REACHABILITY IS STILL THE GATE. rotation_order only yields candidates that reached at
+        # least as many workers as the elected one, so this reorders among acceptable cards — it
+        # never promotes a fast core the fleet cannot talk to (#573 cost a fleet 30 -> 21 that way).
+        if getattr(a, "rotate_aggregate", False):
+            try:
+                _hist = tip_cpu.read_pairs(a.rundir)
+                _ord = tip_cpu.rotation_order(probes, min_reached=len(best[2]))
+                _pick = tip_cpu.aggregate_for_block(_ord, len(_hist), fallback=agg.cid)
+                _byid = {c.cid: c for c in cand}
+                if _pick in _byid and _pick != agg.cid:
+                    log(f"--rotate-aggregate: run #{len(_hist) + 1} takes {_pick} instead of "
+                        f"{agg.cid} (both reached >= {len(best[2])} worker(s); #567)")
+                    agg = _byid[_pick]
+            except Exception as _e:                              # noqa: BLE001
+                # ⚠ A measurement must never kill a run. Fall back to the elected aggregate and say so.
+                log(f"--rotate-aggregate: could not rotate ({type(_e).__name__}); "
+                    f"keeping the elected aggregate {agg.cid}")
         if best[0] is not None:
             _m, _sc, _co = cpu_note.get(agg.cid, (None, None, None))
             _how = ("most REACHABLE first, then CPU, then fastest link" if a.agg_prefer_cpu
@@ -2656,6 +2687,32 @@ def main():
         # ⚠ Only a run that actually produced a proof is recorded; a failed run says nothing about
         # cost per proof and would drag every mean toward whatever went wrong.
         if result.get("ok"):
+            # ── #567: one (cpu, execution) row per block, so rotation has something to index on ──
+            # ⛔ WITHOUT THIS THE ROTATION NEVER MOVES. --rotate-aggregate picks by len(read_pairs),
+            # so a run that records nothing picks index 0 for ever and every run uses the same card.
+            # ⚠ exec_window_s is left None unless the executor's window is actually derivable:
+            # `tip_cost` documents that the reported `execution` column STARTS BEFORE THE BIND and
+            # so includes the prologue, which is not the CPU's doing. Recording the reported column
+            # as if it were the window is the exact error that file exists to correct, so the raw
+            # column and the wall are stored for later derivation and the verdict refuses until a
+            # real window exists. "Dropped as unusable" is the honest answer; a fabricated one is not.
+            try:
+                _ex = None
+                _agglog = os.path.join(a.rundir, "logs", str(order[0].cid), "agg.log")
+                if os.path.exists(_agglog):
+                    _ex = tip_harvest.parse_execution(open(_agglog, encoding="utf-8",
+                                                           errors="replace").read())
+                _p = (probes or {}).get(order[0].cid, {})
+                tip_cpu.record_pair(
+                    a.rundir, height=a.block, cid=order[0].cid,
+                    cpu_score=_p.get("cpu_score"), cpu_model=_p.get("cpu_model"),
+                    cpu_cores=_p.get("cpu_cores"),
+                    exec_window_s=None,
+                    segments=(_ex or {}).get("segments"),
+                    reported_exec_s=(_ex or {}).get("exec_s"),
+                    prologue_s=None)
+            except Exception:                                    # noqa: BLE001
+                pass            # ⚠ bookkeeping never fails a finished run
             try:
                 row = tip_economics.record(
                     block=a.block,
