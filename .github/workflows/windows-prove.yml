@@ -630,9 +630,23 @@ jobs:
           # crashing cudafe++ means the front end is failing before it sees meaningful input, so the
           # question is what this install is missing or has broken. These cost seconds and name it.
           echo
-          echo "=== -v: the EXACT cudafe++ command line nvcc builds ==="
+          echo "=== -v --keep: the EXACT cudafe++ invocation, and the files it is handed ==="
+          # ⛔ FILTER ON 'cudafe', NOT ON '#$ '. nvcc -v prefixes EVERY environment variable with
+          # '#$ ', so the previous pattern returned twenty lines of ANDROID_NDK_HOME and never
+          # showed the command. ⚠ --keep preserves the intermediates so the crashing step can be
+          # re-run by hand against the exact input it was given.
           set +e
-          nvcc -v -c /tmp/hello.cu -o /tmp/hello3.o 2>&1 | /usr/bin/grep -aiE "cudafe|#\\$ |CUDAFE|_SPACE_|TOP=|INCLUDES=" | head -20
+          cd /tmp && rm -rf keepdir && mkdir keepdir && cd keepdir
+          nvcc -v --keep -c /tmp/hello.cu -o hello3.o > /tmp/nvccv.txt 2>&1
+          echo "   nvcc rc=$?"
+          /usr/bin/grep -a "cudafe" /tmp/nvccv.txt | head -6
+          echo "--- the intermediates nvcc kept ---"
+          ls -la /tmp/keepdir 2>/dev/null | head -14
+          echo "--- the preprocessed file cudafe++ consumes (first 12 lines, and its size) ---"
+          for f in /tmp/keepdir/*.cpp1.ii /tmp/keepdir/*.cpp4.ii; do
+              [ -f "$f" ] && { echo "  $f: $(wc -c < "$f") bytes"; head -6 "$f"; break; }
+          done
+          cd /tmp
           echo
           echo "=== what is actually in the CUDA bin dir? ==="
           ls -la "$CUDA_POSIX/bin" 2>/dev/null | head -30
@@ -647,7 +661,16 @@ jobs:
           echo "   cudafe++ --version rc=$?"
           echo
           echo "=== does it have the DLLs it links? (a missing one is a load failure, not a crash) ==="
-          command -v dumpbin >/dev/null 2>&1 && dumpbin /dependents "$(cygpath -w "$CUDA_POSIX/bin/cudafe++.exe")" 2>&1 | head -18 || echo "  (dumpbin not on PATH)"
+          # ⛔ `-dependents`, NOT `/dependents` — MSYS rewrote the slash form into
+          # `C:\Program Files\Git\dependents` and dumpbin tried to open it as an input file.
+          # The same path-mangling that broke CXXFLAGS, now in a diagnostic. dumpbin takes `-`.
+          command -v dumpbin >/dev/null 2>&1 \
+            && dumpbin -dependents "$(cygpath -w "$CUDA_POSIX/bin/cudafe++.exe")" 2>&1 | head -18 \
+            || echo "  (dumpbin not on PATH)"
+          echo "=== do the dirs nvcc.profile points at actually exist? ==="
+          for d in include nvvm nvvm/bin nvvm/libdevice lib lib/x64; do
+              printf '  %-18s %s\n' "$d" "$([ -e "$CUDA_POSIX/$d" ] && echo present || echo '⛔ ABSENT')"
+          done
           set -e
 
       - name: ⭐ Build the host for Windows WITH CUDA (#631)
