@@ -135,9 +135,19 @@ jobs:
           echo "container id $GOT = the pin"
 
       - name: Stage the guest ELF, and check it against the recorded sha whether built or cached
+        # ⛔ THE CACHE-HIT FLAG COMES THROUGH env:, NOT SPLICED INTO THE SCRIPT. GitHub substitutes
+        # ${{ }} before bash parses the block, so a value carrying shell metacharacters executes as
+        # code. `release-sign.yml` once did exactly that with a release tag while holding
+        # GPG_PRIVATE_KEY and contents: write, and workflow_dispatch let any write-access account
+        # choose the tag (external review, 2026-08-01). check-workflow-injection.sh gates it
+        # categorically — and caught this step, which is the gate working, not a false positive.
+        # ⚠ This particular value is actions/cache's own output and not attacker-controlled; the
+        # rule is absolute anyway, because the next one might be.
+        env:
+          CACHE_HIT: ${{ steps.elfcache.outputs.cache-hit }}
         run: |
           set -o pipefail
-          if [ "${{ steps.elfcache.outputs.cache-hit }}" = "true" ]; then
+          if [ "$CACHE_HIT" = "true" ]; then
               echo "cache hit — no container build ran"
           else
               ELF=prover/target/riscv-guest/methods/method/riscv32im-risc0-zkvm-elf/release/method.bin
