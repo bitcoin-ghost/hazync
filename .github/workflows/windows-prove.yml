@@ -662,10 +662,18 @@ jobs:
           # ⛔ A `-` prefix, not `/`: a lone `/std:...` is what MSYS rewrote into
           # `C:/Program Files/Git/...` in run 37020607504. cl.exe accepts `-` for any option.
           FLAGS="$FLAGS -std=c++17 -Xcompiler -std:c++17"
-          # ⛔ `uint` IS A POSIX TYPEDEF MSVC DOES NOT HAVE. 13 errors across risc0-sys's own
-          # combos.cu, eltwise.cu and kernels.cu — `uint gid = blockIdx.x * ...`. ⚠ `unsigned`
-          # alone IS `unsigned int` in C++, so this needs no space and cannot be re-quoted wrongly.
-          FLAGS="$FLAGS -Duint=unsigned"
+          # ⛔⛔ `uint` COMES FROM A FORCED-INCLUDE TYPEDEF, NOT `-Duint=unsigned`.
+          # risc0-sys's kernels use the POSIX `uint`, which MSVC lacks — 13 errors. The obvious fix,
+          # a -D, cleared those and created 200+ new ones: the CUDA and libcu++ headers build the
+          # vector types uint1..uint4 by TOKEN PASTING `uint` with a digit, a macro participates in
+          # that paste, and run 37113822741 shows `unsigned1`..`unsigned4` ninety-six times each
+          # with every tuple trait over them failing to parse. A typedef cannot be pasted.
+          # ⚠ Both passes: `-include` is nvcc's own (device) and `/FI` is MSVC's (host), and the
+          # `uint` uses are in device code. ⛔ An ABSOLUTE Windows path, because a build script's
+          # cwd is its own crate directory, not this one.
+          UINTH=$(cygpath -w "$(pwd)/hazync_win_uint.h")
+          [ -f "$(pwd)/hazync_win_uint.h" ] || { echo "missing hazync_win_uint.h"; exit 1; }
+          FLAGS="$FLAGS -include $UINTH -Xcompiler /FI$UINTH"
           if [ "${CUDA_HOST_SUPPORTED:-0}" = "1" ]; then
               echo "host compiler: a CUDA-supported MSVC toolset was selected — NO override needed"
           else
