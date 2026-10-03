@@ -626,6 +626,29 @@ jobs:
           set -e
           echo "⇒ If BOTH crash, the toolchain install is the fault and risc0 is not involved."
           echo "⇒ If both succeed, cudafe++ survives a trivial unit and the fault is in the source."
+          # ⛔⛔ AND IF IT CRASHED, SAY WHY — do not spend another run guessing. A hello-world unit
+          # crashing cudafe++ means the front end is failing before it sees meaningful input, so the
+          # question is what this install is missing or has broken. These cost seconds and name it.
+          echo
+          echo "=== -v: the EXACT cudafe++ command line nvcc builds ==="
+          set +e
+          nvcc -v -c /tmp/hello.cu -o /tmp/hello3.o 2>&1 | /usr/bin/grep -aiE "cudafe|#\\$ |CUDAFE|_SPACE_|TOP=|INCLUDES=" | head -20
+          echo
+          echo "=== what is actually in the CUDA bin dir? ==="
+          ls -la "$CUDA_POSIX/bin" 2>/dev/null | head -30
+          echo
+          echo "=== nvcc.profile — nvcc's own path config; a wrong one misdirects every sub-tool ==="
+          for p in "$CUDA_POSIX/bin/nvcc.profile" "$CUDA_POSIX/nvcc.profile"; do
+              [ -f "$p" ] && { echo "--- $p ---"; cat "$p"; }
+          done
+          echo
+          echo "=== can cudafe++ run AT ALL, outside nvcc? ==="
+          "$CUDA_POSIX/bin/cudafe++.exe" --version 2>&1 | head -5
+          echo "   cudafe++ --version rc=$?"
+          echo
+          echo "=== does it have the DLLs it links? (a missing one is a load failure, not a crash) ==="
+          command -v dumpbin >/dev/null 2>&1 && dumpbin /dependents "$(cygpath -w "$CUDA_POSIX/bin/cudafe++.exe")" 2>&1 | head -18 || echo "  (dumpbin not on PATH)"
+          set -e
 
       - name: ⭐ Build the host for Windows WITH CUDA (#631)
         shell: bash
