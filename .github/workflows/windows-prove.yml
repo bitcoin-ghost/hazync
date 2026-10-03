@@ -581,6 +581,52 @@ jobs:
             if (-not (Test-Path (Join-Path $root $h))) { Write-Host "missing header: $h (cccl incomplete)"; exit 1 }
           }
           Write-Host "nvcc 12.9 runs, and thrust + libcu++ headers are present"
+      # ⛔⛔ ISOLATE THE VARIABLE BEFORE SPENDING ANOTHER BUILD ON IT.
+      #
+      # Three combinations have now died identically — CUDA 12.9.1 on MSVC 14.44, 12.9.1 on 14.29,
+      # and 12.6.3 on 14.44 — each with ZERO compilation errors and
+      #
+      #     nvcc error : 'cudafe++' died with status 0xC0000005 (ACCESS_VIOLATION)
+      #
+      # on ALL SEVEN .cu files. ⚠ That uniformity is the clue, and it argues against the obvious
+      # explanation. `ntt.cu` is 152 lines with two includes; if deep template instantiation were
+      # exhausting cudafe++'s 1 MB PE stack, the heavy translation units would fail and the light
+      # ones would pass. Everything failing equally says the front end is not getting as far as the
+      # source.
+      #
+      # ⇒ So compile a HELLO-WORLD KERNEL with the same nvcc, flags and host compiler. If that
+      # crashes too, nothing about risc0 or sppark is involved and the fault is in this toolchain
+      # install — most likely that four hand-picked redist components are not a complete nvcc.
+      # If it SUCCEEDS, the fault really is in the project's source and the next step is bisecting
+      # which header does it. Either answer costs two minutes and redirects everything after it.
+      #
+      # ⚠ continue-on-error, because this step is a DIAGNOSTIC: its failure is the measurement, and
+      # it must not mask the real build's result below. ⛔ It is the only step here allowed one.
+      - name: ⛔ MINIMAL REPRO — does nvcc compile a trivial .cu at all?
+        continue-on-error: true
+        shell: bash
+        working-directory: prover
+        run: |
+          set -o pipefail
+          cat > /tmp/hello.cu <<'CU'
+          #include <cstdio>
+          __global__ void k(int *o) { o[threadIdx.x] = threadIdx.x; }
+          int main() { printf("ok\n"); return 0; }
+          CU
+          echo "=== nvcc --version ==="
+          nvcc --version | tail -2
+          echo "=== 1. plainest possible invocation ==="
+          set +e
+          nvcc -c /tmp/hello.cu -o /tmp/hello.o 2>&1 | tail -12
+          echo "   rc=$?"
+          echo "=== 2. with the exact flags the real build uses ==="
+          nvcc $NVCC_APPEND_FLAGS -Xcompiler -nologo -Xcompiler -MD -Xcompiler -O2 \
+               -c --device-c /tmp/hello.cu -o /tmp/hello2.o 2>&1 | tail -12
+          echo "   rc=$?"
+          set -e
+          echo "⇒ If BOTH crash, the toolchain install is the fault and risc0 is not involved."
+          echo "⇒ If both succeed, cudafe++ survives a trivial unit and the fault is in the source."
+
       - name: ⭐ Build the host for Windows WITH CUDA (#631)
         shell: bash
         working-directory: prover
