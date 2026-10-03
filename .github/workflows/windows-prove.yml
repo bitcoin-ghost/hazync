@@ -402,7 +402,27 @@ jobs:
   # The uploaded exe is what answers the rest, on real hardware.
   build-cuda:
     needs: [guest]
-    runs-on: windows-latest
+    # ⛔⛔ windows-2022, NOT windows-latest — AND THE TOOLSET PIN COULD NEVER HAVE FIXED THIS.
+    #
+    # `windows-latest` now images Visual Studio 18 (VS 2026). Four runs died identically with
+    # `cudafe++ died with status 0xC0000005 (ACCESS_VIOLATION)`, including on a THREE-LINE
+    # hello-world kernel, which proved risc0 was never involved. The `nvcc -v` line says why
+    # selecting an older toolset inside that image cannot help:
+    #
+    #   cudafe++ --microsoft_version=1944 --compiler_bindir
+    #     "C:/.../MSVC/14.44.35207/bin/HostX64/x64/../../../../../../.."
+    #
+    # That path resolves to the VISUAL STUDIO INSTALL ROOT — `.../Visual Studio/18/Enterprise` —
+    # so cudafe++ is pointed at VS 2026 whichever toolset is selected. 14.44 and 14.29 failed the
+    # same way for that reason, and I spent two runs concluding "upstream" from it.
+    #
+    # ⭐ NVIDIA's forums report this exact break against the VS 2026 update (14.50.x works, 14.51
+    # fails), and name toolchain/header mixing as the usual cause of this crash. windows-2022 is a
+    # genuine VS 2022 image rather than a 2022 toolset inside a 2026 install.
+    #
+    # ⚠ The CPU `prove` job stays on windows-latest: it is PROVEN there (run 36933650193,
+    # `PROVED in 2875.1s — receipt VERIFIED`) and nothing about it touches nvcc.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
