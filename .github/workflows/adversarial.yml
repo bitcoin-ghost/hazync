@@ -236,6 +236,22 @@ jobs:
         run: cd coordinator && python3 test_kernel_host_flags.py
       - name: kernel-host-flags POSITIVE CONTROL (upstream's unconditional flag must FAIL the checks)
         run: cd coordinator && python3 test_kernel_host_flags.py --control
+
+      - name: Aggregate rotation samples CPUs without trading reachability (#567)
+        # ⛔⛔ #567 could not be answered by "one fleet run" and never could have been: the aggregate
+        # is elected ONCE, above the per-block loop, so every block of a run executes on the SAME
+        # card and a run yields exactly ONE (cpu, execution) point. Rotation is what makes the
+        # question answerable at all.
+        # ⛔ The gate that matters is that reachability is never traded for CPU — #573 elected a
+        # card nine of its own /24 could not reach and the fleet went 30 -> 21.
+        run: cd coordinator && python3 test_cpu_rotation.py
+      - name: rotation POSITIVE CONTROL (CPU-first, zero-filled, never-refusing — must fail)
+        run: cd coordinator && python3 test_cpu_rotation.py --control
+
+      - name: A tail-based worker cut is ranked and reported, never cutting the aggregate (#550)
+        run: cd coordinator && python3 test_tail_cut.py
+      - name: tail-cut POSITIVE CONTROL (naive ranking incl. the aggregate — must fail)
+        run: cd coordinator && python3 test_tail_cut.py --control
       - name: A pod's own /api/witness fetch is measured, and a non-transfer is not 'fast' (#598)
         # ⛔ /api/witness already serves the tip bundle BYTE-IDENTICALLY (sha256 0c54f7ef… both
         # sides, measured 2026-10-01) in 1.38 s against 25.0 s for the two-leg ssh path. ⚠ But that

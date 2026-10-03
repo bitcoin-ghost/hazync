@@ -77,6 +77,12 @@ on:
       skip_cpu_prove:
         description: "'true' skips the 48-minute CPU prove and runs only the CUDA build (#631)"
         default: 'false'
+      toolset:
+        description: "MSVC toolset: 'newest-supported' (default) or an exact prefix like 14.29 (#631)"
+        default: 'newest-supported'
+      cuda:
+        description: "CUDA redist set: 12.9.1 (default) or 12.6.3 — both pinned by sha256 (#631)"
+        default: '12.9.1'
 
 permissions:
   contents: read
