@@ -71,6 +71,9 @@ on:
       skip_cpu_prove:
         description: "'true' skips the 48-minute CPU prove and runs only the CUDA build (#631)"
         default: 'false'
+      toolset:
+        description: "MSVC toolset: 'newest-supported' (default) or an exact prefix like 14.29 (#631)"
+        default: 'newest-supported'
 
 permissions:
   contents: read
@@ -444,6 +447,15 @@ jobs:
       # so the step reports loudly which of the two happened rather than hiding it.
       - name: Put MSVC on PATH, preferring a toolset CUDA 12.9 supports
         shell: pwsh
+        # ⛔⛔ THE DISPATCH INPUT COMES THROUGH env:, NOT SPLICED INTO THE SCRIPT — and this is the
+        # vector for real, not the benign case. `inputs.toolset` is operator-supplied, so anyone
+        # with write access chooses the string; GitHub substitutes ${{ }} BEFORE pwsh parses the
+        # block, so a value with shell metacharacters would execute as code. That is exactly how
+        # release-sign.yml once took a release tag while holding GPG_PRIVATE_KEY.
+        # ⚠ I wrote the interpolated form here one commit after fixing the same thing in #640, and
+        # check-workflow-injection.sh caught it locally before it was pushed. The gate is load-bearing.
+        env:
+          TOOLSET: ${{ inputs.toolset }}
         run: |
           $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -464,9 +476,29 @@ jobs:
           Write-Host "installed MSVC toolsets: $($all -join ', ')"
 
           # CUDA 12.9 accepts VS 2017-2022 == MSVC 14.1x-14.4x. Take the NEWEST such toolset.
-          $supported = $all | Where-Object {
+          # CUDA 12.9 accepts VS 2017-2022 == MSVC 14.1x-14.4x. Default: the NEWEST such toolset.
+          $eligible = $all | Where-Object {
             $p = $_.Split('.'); [int]$p[0] -eq 14 -and [int]$p[1] -lt 50
-          } | Sort-Object { [version]$_ } | Select-Object -Last 1
+          } | Sort-Object { [version]$_ }
+          # ⛔⛔ AN EXACT PREFIX IS SELECTABLE, BECAUSE "newest supported" IS A GUESS ABOUT WHICH
+          # ONE WORKS. Run 37021932694 reached ZERO compilation errors on 14.44 and still died with
+          # `cudafe++ died with status 0xC0000005 (ACCESS_VIOLATION)` on all seven .cu files — a
+          # crash inside NVIDIA's closed-source front end, on a toolset CUDA DECLARES supported.
+          # 14.29 (VS 2019) is also installed here and is a different front-end/host pairing, so it
+          # is worth one run. ⚠ This is an experiment, not a fix: if it also crashes, the blocker is
+          # upstream and no toolset on this runner will move it.
+          $want = $env:TOOLSET
+          if ($want -and $want -ne 'newest-supported') {
+            $pick = $eligible | Where-Object { $_.StartsWith($want) } | Select-Object -Last 1
+            if (-not $pick) {
+              Write-Host "requested toolset '$want' is not installed; have: $($all -join ', ')"
+              exit 1
+            }
+            $supported = $pick
+            Write-Host "toolset pinned by dispatch input: $want -> $supported"
+          } else {
+            $supported = $eligible | Select-Object -Last 1
+          }
 
           $vcvarsArgs = @()
           if ($supported) {
