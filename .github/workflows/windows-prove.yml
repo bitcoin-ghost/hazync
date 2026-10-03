@@ -665,6 +665,21 @@ jobs:
         run: |
           set -o pipefail
           echo "CUDA_PATH=$CUDA_PATH"
+          # ⛔⛔ THE LAST THREE RUNS WERE KILLED, NOT FAILED. Each ran ~1h50m-2h and ended with
+          # cargo exit 101, NO error message, and cuda-build.log truncated mid-warning. A compile
+          # error prints a diagnostic; a killed process does not.
+          #
+          # ⚠ The suspects are memory and disk, and this project has both scars: the release
+          # profile is fat LTO + codegen-units=1, so the LINK peaks huge, and a CMake build here
+          # needs -j2 max to survive. A windows runner has 4 cores and 16 GB, and nvcc on sppark's
+          # and risc0's template-heavy kernels is not cheap per process.
+          #
+          # ⇒ REPORT IT RATHER THAN GUESS AGAIN. Free disk and memory are printed before the build
+          # and after a failure, so the next diagnosis reads a number instead of a hypothesis.
+          echo "=== resources BEFORE ==="
+          df -h / 2>/dev/null | tail -2
+          wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value 2>/dev/null | tr -d '\r' | grep -E '=[0-9]' \
+            || powershell -NoProfile -Command "Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Format-List" 2>/dev/null
           # ⛔⛔ NVCC_APPEND_FLAGS IS BUILT HERE, NOT IN `env:`, BECAUSE ONE OF ITS FLAGS IS
           # CONDITIONAL. Its mere PRESENCE also makes the vendored builder skip `-arch=native`,
           # which queries a GPU this runner does not have — so it must be exported either way.
@@ -725,6 +740,12 @@ jobs:
               FLAGS="$FLAGS -allow-unsupported-compiler"
           fi
           export NVCC_APPEND_FLAGS="$FLAGS"
+          # ⛔ TWO JOBS, NOT FOUR. Cargo defaults to one per core and the runner has four; each
+          # nvcc on these kernels is memory-hungry, and the guest job already uses
+          # CARGO_BUILD_JOBS=4 on a LINUX runner for the same reason. If the kills are memory, this
+          # is the cheapest thing that changes them; if they are not, the numbers printed above say
+          # so and this costs only wall-clock.
+          export CARGO_BUILD_JOBS=2
           echo "NVCC_APPEND_FLAGS=$NVCC_APPEND_FLAGS"
           # ⛔ CAPTURE, DO NOT TAIL. Two runs were spent on this file discovering that a tail window
           # had eaten the diagnostic; the fix belongs here from the first run, not the third.
@@ -736,8 +757,19 @@ jobs:
           echo "=== first 30 ==="; head -30 cuda-build.log
           echo "=== last 60 ==="; tail -60 cuda-build.log
           if [ "$rc" -ne 0 ]; then
-              echo "=== every error line, WHOLE lines (a -oE pattern throws file:line away) ==="
-              /usr/bin/grep -nE "error|LNK[0-9]+|fatal|nvcc" cuda-build.log | head -40
+              echo "=== resources AFTER the failure ==="
+              df -h / 2>/dev/null | tail -2
+              powershell -NoProfile -Command "Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Format-List" 2>/dev/null || true
+              # ⛔ A KILLED BUILD PRINTS NO DIAGNOSTIC. Say which case this is, because "no error
+              # line" was read three times as "the log is unhelpful" when it was itself the signal.
+              if ! /usr/bin/grep -qaE "could not compile|^error\[|^error: " cuda-build.log; then
+                  echo "⚠ cargo exited $rc but printed NO error — the build was KILLED (OOM/disk),"
+                  echo "  not failed. Compare the resource figures above with the ones before."
+              fi
+              echo "=== every error line, WHOLE lines (⛔ excluding 'thiserror', which the previous"
+              echo "    pattern matched and reported as if it were the failure) ==="
+              /usr/bin/grep -nE "error|LNK[0-9]+|fatal|nvcc" cuda-build.log \
+                | /usr/bin/grep -vE "thiserror|ToolFamilyMacroNotFound" | head -40
           fi
           exit "$rc"
 
