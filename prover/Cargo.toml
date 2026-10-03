@@ -63,3 +63,13 @@ risc0-groth16-sys = { path = "../vendor/risc0-groth16-sys" }
 # below and its Windows support is also untested."
 # ⛔ Prover-side only: METHOD_ID, the circuit and the verifier are unchanged.
 sppark = { path = "../vendor/sppark" }
+# hazync#631: risc0-circuit-keccak-sys 4.0.3 with its flag block branched, in build.rs (search
+# HAZYNC_631_MSVC_FLAGS). It carries its OWN `-Xcompiler -Wno-unused-function,...`, so neither
+# #632's fix in risc0-circuit-rv32im-sys nor the one in the SHARED risc0-build-kernel reached it:
+#     cl : Command line error D8021 : invalid numeric argument '/Wno-unused-function'
+# ⚠ 43 MB, of which 38 MB is kernels/cxx — nothing trimmable, and the cheaper route was checked
+# first: dropping `risc0-circuit-keccak-sys/cuda` from the vendored circuit's `cuda` feature would
+# have avoided this entirely, but src/prove/hal/cuda.rs imports keccak-sys under that same feature,
+# so it trades a compile error for a LINK error.
+# ⛔ The non-MSVC arm is byte-identical. Prover-side only; the circuit and METHOD_ID are unchanged.
+risc0-circuit-keccak-sys = { path = "../vendor/risc0-circuit-keccak-sys" }

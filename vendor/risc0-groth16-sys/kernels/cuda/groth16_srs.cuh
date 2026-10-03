@@ -1,9 +1,17 @@
 #pragma once
 
+// HAZYNC_631_WIN_NO_MMAP — hazync#631, the SECOND file in this crate with POSIX mmap.
+// ⚠ I gated groth16_coeffs.cuh and assumed it was the only one; run 37116535496 then failed
+// on THIS file at line 4 with the identical C1083. Grep the whole crate, not the file the
+// first error happens to name.
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <stdexcept>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #pragma pack(push, 1)
 struct coeff_file_t {
@@ -136,6 +144,15 @@ private:
 
 public:
   SRS(size_t gpu_id, const char* srs_path) : gpu(select_gpu(gpu_id)), srs_path(srs_path) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    // HAZYNC_631_WIN_NO_MMAP — the SRS loader mmaps too. Same gate, same reason as
+    // groth16_coeffs.cuh: Groth16 is SNARK wrapping, which Hazync's STARK proving never reaches,
+    // but the crate must compile because risc0-zkvm's `cuda` feature pulls it in unconditionally.
+    (void)srs_path;
+    throw std::runtime_error(
+        "risc0-groth16-sys: loading an SRS needs mmap, which this vendored copy does not implement "
+        "for MSVC (hazync#631). STARK proving is unaffected; only Groth16 SNARK wrapping gets here.");
+#else
     struct {
       struct {
         uint32_t size;
@@ -299,6 +316,7 @@ public:
 
       throw;
     }
+#endif  // HAZYNC_631_WIN_NO_MMAP
   }
 
 #ifdef SRS_READ_COEFFS
