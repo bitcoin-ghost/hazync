@@ -74,6 +74,9 @@ on:
       toolset:
         description: "MSVC toolset: 'newest-supported' (default) or an exact prefix like 14.29 (#631)"
         default: 'newest-supported'
+      cuda:
+        description: "CUDA redist set: 12.9.1 (default) or 12.6.3 — both pinned by sha256 (#631)"
+        default: '12.9.1'
 
 permissions:
   contents: read
@@ -549,20 +552,49 @@ jobs:
           $clv = (& cl.exe 2>&1 | Select-Object -First 1 | Out-String).Trim()
           Write-Host "cl.exe reports: $clv"
           if ($clv -notmatch '19\.\d+') { throw "cl.exe did not report a version: $clv" }
-      - name: Install CUDA 12.9.1 nvcc + cudart + cccl, each verified by sha256
+      - name: Install CUDA nvcc + cudart + cccl, each verified by sha256
         shell: pwsh
+        # ⛔ The set name comes through env:, never spliced — inputs are operator-supplied.
+        env:
+          CUDA_SET: ${{ inputs.cuda }}
         run: |
           $ErrorActionPreference = 'Stop'
           # name, path under the redist root, and the sha256 from NVIDIA's redistrib_12.9.1.json.
           # ⛔ CUDA 12.x, NOT 13.x: CUDA 13 dropped Pascal (sm_61) and the card this is for is a
-          # GTX 1050 Ti. All four hashes were verified against the real downloads before committing.
+          # GTX 1050 Ti.
           $base = 'https://developer.download.nvidia.com/compute/cuda/redist'
-          $components = @(
-            @{ n='cuda_nvcc';          p='cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip';                   s='227b109663b5e57d2718bcabb24a4ba0d9d4e52d958e327dc476f7c28691be85' },
-            @{ n='cuda_cudart';        p='cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip';               s='179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8' },
-            @{ n='cuda_cccl';          p='cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip';                   s='17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5' },
-            @{ n='cuda_profiler_api';  p='cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip';   s='b05519f8ce4f02167bfc859358f62eb771d89ac2af3a6952a82317f2af4bc5bd' }
-          )
+          # ⛔⛔ TWO FULLY PINNED SETS, SELECTED BY INPUT — NOT A MANIFEST FETCHED AT RUNTIME.
+          # Resolving hashes from NVIDIA's manifest at build time would make the manifest the trust
+          # anchor instead of this file, which is a weaker property than the one this step was
+          # written to have.
+          # ⚠ 12.9.1's four archives were downloaded and hash-checked locally before committing.
+          # 12.6.3's hashes come from the same NVIDIA manifest and have NOT been downloaded here —
+          # the step's own sha256 check is what verifies them, loudly, on first use. Claiming both
+          # were pre-verified would be a claim I did not earn.
+          # ⚠ 12.6.3 exists here as the LAST untried #631 experiment: 12.9.1 reached zero
+          # compilation errors on toolsets 14.44 AND 14.29 and died identically in cudafe++ both
+          # times, which rules the host-compiler pairing out and leaves the CUDA version itself.
+          $sets = @{
+            '12.9.1' = @(
+              @{ n='cuda_nvcc';         p='cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip';                 s='227b109663b5e57d2718bcabb24a4ba0d9d4e52d958e327dc476f7c28691be85' },
+              @{ n='cuda_cudart';       p='cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip';             s='179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8' },
+              @{ n='cuda_cccl';         p='cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip';                 s='17aaa7c6b8f94a417d8f3261780b7e34b9cbdfab7513bce86768623b06aa28b5' },
+              @{ n='cuda_profiler_api'; p='cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip'; s='b05519f8ce4f02167bfc859358f62eb771d89ac2af3a6952a82317f2af4bc5bd' }
+            )
+            '12.6.3' = @(
+              @{ n='cuda_nvcc';         p='cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.6.85-archive.zip';                 s='3fb9f76b87c37d02f947354be89b718ad5f2c76b6ab47995265bfa3a068a5e14' },
+              @{ n='cuda_cudart';       p='cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.6.77-archive.zip';             s='7a313bc0c93b1a50bb03aa9783a199ae70c3b66e2d8084da65e8254a8577b925' },
+              @{ n='cuda_cccl';         p='cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.6.77-archive.zip';                 s='469b783b6731964170b3d27ae214e97e2a63ec93c57ace3ed4052e6d01261f2e' },
+              @{ n='cuda_profiler_api'; p='cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.6.77-archive.zip'; s='d0ed383bac1a84d5c1e1d6a3076b80bc581e488093fef5655d55c39a198aea29' }
+            )
+          }
+          $cudaVer = $env:CUDA_SET
+          if (-not $cudaVer) { $cudaVer = '12.9.1' }
+          if (-not $sets.ContainsKey($cudaVer)) {
+            Write-Host "unknown CUDA set '$cudaVer'; have: $($sets.Keys -join ', ')"; exit 1
+          }
+          Write-Host "CUDA redist set: $cudaVer"
+          $components = $sets[$cudaVer]
           $root = Join-Path $env:RUNNER_TEMP 'cuda'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           foreach ($c in $components) {
@@ -606,8 +638,14 @@ jobs:
           if (-not (Test-Path $nvcc)) { Write-Host "no nvcc.exe at $nvcc"; exit 1 }
           $ver = & $nvcc --version 2>&1 | Out-String
           Write-Host $ver
-          if ($ver -notmatch 'release 12\.9') {
-            Write-Host "nvcc is not 12.9 -- Pascal (sm_61) support depends on 12.x"; exit 1
+          # ⛔ ASSERT THE SELECTED SET, NOT A HARDCODED 12.9 — otherwise choosing 12.6 fails on
+          # this check rather than on the experiment, and the run would say nothing about #631.
+          $mm = ($cudaVer.Split('.')[0..1]) -join '.'
+          if ($ver -notmatch [regex]::Escape("release $mm")) {
+            Write-Host "nvcc does not report release $mm (asked for $cudaVer)"; exit 1
+          }
+          if ($mm -notmatch '^12\.') {
+            Write-Host "CUDA $mm is not 12.x -- Pascal (sm_61) support requires 12.x"; exit 1
           }
           foreach ($h in @('include\thrust\scan.h','include\thrust\execution_policy.h','include\cuda\atomic','include\cuda\std\array')) {
             if (-not (Test-Path (Join-Path $root $h))) { Write-Host "missing header: $h (cccl incomplete)"; exit 1 }
